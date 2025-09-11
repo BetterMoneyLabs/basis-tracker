@@ -7,3 +7,7 @@ license = "CC0-1.0"
 [dependencies]
 nostr = "0.43.1"
 serde_json = "1.0.108"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1.37"
+fjall = "2"
