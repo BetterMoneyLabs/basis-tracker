@@ -12,3 +12,4 @@ ergo_client = { git = "https://github.com/SethDusek/ergo_client.git" }
 ergo-lib = { version = "0.28.0", features = [
     "compiler",
 ] }
+ergo_avltree_rust = "0.1.1"

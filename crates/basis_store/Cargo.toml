@@ -7,3 +7,6 @@ license = "CC0-1.0"
 [lib]
 name = "basis_store"
 path = "src/lib.rs"
+
+[dependencies]
+ergo_avltree_rust = { workspace = true }

@@ -1,5 +1,6 @@
 //! Core data structures for Basis tracker
 
+pub mod avl_tree;
 pub mod tests;
 
 /// Public key type (Secp256k1)
@@ -26,8 +27,8 @@ pub struct IouNote {
 /// Tracker state commitment
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackerState {
-    /// Merkle root hash of all notes
-    pub merkle_root: [u8; 32],
+    /// AVL+ tree root digest of all notes
+    pub avl_root_digest: [u8; 32],
     /// Block height of last on-chain commitment
     pub last_commit_height: u64,
     /// Timestamp of last state update
@@ -50,10 +51,10 @@ pub struct ReserveInfo {
 pub struct NoteProof {
     /// The IOU note being proven
     pub note: IouNote,
-    /// Merkle proof path
-    pub merkle_proof: Vec<[u8; 32]>,
-    /// Index in the Merkle tree
-    pub index: u64,
+    /// AVL tree proof bytes
+    pub avl_proof: Vec<u8>,
+    /// Operations performed to generate the proof
+    pub operations: Vec<u8>,
 }
 
 /// Key for note lookup (hash of issuer + recipient)
@@ -90,6 +91,118 @@ pub enum NoteError {
     InsufficientCollateral,
     DuplicateNonce,
     StorageError(String),
+}
+
+/// Tracker state manager with AVL tree
+pub struct TrackerStateManager {
+    avl_state: avl_tree::AvlTreeState,
+    current_state: TrackerState,
+}
+
+impl TrackerStateManager {
+    /// Create a new tracker state manager
+    pub fn new() -> Self {
+        let avl_state = avl_tree::AvlTreeState::new();
+        
+        Self {
+            avl_state,
+            current_state: TrackerState {
+                avl_root_digest: [0u8; 32],
+                last_commit_height: 0,
+                last_update_timestamp: 0,
+            },
+        }
+    }
+
+    /// Add a new note to the tracker state
+    pub fn add_note(&mut self, note: &IouNote) -> Result<(), NoteError> {
+        // Extract issuer public key from signature (placeholder implementation)
+        // In real implementation, we'd recover the public key from signature
+        let issuer_pubkey = [0u8; 33]; // Placeholder
+        let key = NoteKey::from_keys(&issuer_pubkey, &note.recipient_pubkey);
+        let value_bytes = [
+            &note.amount.to_be_bytes()[..],
+            &note.timestamp.to_be_bytes()[..],
+            &note.nonce.to_be_bytes()[..],
+        ].concat();
+
+        self.avl_state.insert(key.to_bytes(), value_bytes)
+            .map_err(|e| NoteError::StorageError(e))?;
+        
+        self.update_state();
+        Ok(())
+    }
+
+    /// Update an existing note
+    pub fn update_note(&mut self, note: &IouNote) -> Result<(), NoteError> {
+        // Extract issuer public key from signature (placeholder implementation)
+        let issuer_pubkey = [0u8; 33]; // Placeholder
+        let key = NoteKey::from_keys(&issuer_pubkey, &note.recipient_pubkey);
+        let value_bytes = [
+            &note.amount.to_be_bytes()[..],
+            &note.timestamp.to_be_bytes()[..],
+            &note.nonce.to_be_bytes()[..],
+        ].concat();
+
+        self.avl_state.update(key.to_bytes(), value_bytes)
+            .map_err(|e| NoteError::StorageError(e))?;
+        
+        self.update_state();
+        Ok(())
+    }
+
+    /// Remove a note from the tracker state
+    pub fn remove_note(&mut self, issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Result<(), NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        self.avl_state.remove(key.to_bytes())
+            .map_err(|e| NoteError::StorageError(e))?;
+        
+        self.update_state();
+        Ok(())
+    }
+
+    /// Generate proof for a specific note
+    pub fn generate_proof(&mut self, issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Result<NoteProof, NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let _key_bytes = key.to_bytes();
+
+        // For AVL trees, the proof is generated during lookup operations
+        // In a real implementation, we'd need to track operations for proof generation
+        let proof = self.avl_state.generate_proof();
+        
+        // Placeholder for operations - in real implementation, this would track
+        // the specific operations that led to the current state
+        let operations = Vec::new();
+
+        // Lookup the note to include in proof
+        let note = self.lookup_note(issuer_pubkey, recipient_pubkey)?;
+
+        Ok(NoteProof {
+            note,
+            avl_proof: proof,
+            operations,
+        })
+    }
+
+    /// Lookup a note by issuer and recipient
+    pub fn lookup_note(&self, issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Result<IouNote, NoteError> {
+        let _key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+
+        // This would need actual storage implementation
+        // For now, return a placeholder error
+        Err(NoteError::StorageError("Note storage not implemented".to_string()))
+    }
+
+    /// Update the current state with latest AVL tree root
+    fn update_state(&mut self) {
+        self.current_state.avl_root_digest = self.avl_state.root_digest();
+        // Update timestamp would be set to current time in real implementation
+    }
+
+    /// Get the current tracker state
+    pub fn get_state(&self) -> &TrackerState {
+        &self.current_state
+    }
 }
 
 impl IouNote {
@@ -142,6 +255,11 @@ impl NoteKey {
             issuer_hash,
             recipient_hash,
         }
+    }
+
+    /// Convert note key to bytes for AVL tree
+    pub fn to_bytes(&self) -> Vec<u8> {
+        [&self.issuer_hash[..], &self.recipient_hash[..]].concat()
     }
 }
 
