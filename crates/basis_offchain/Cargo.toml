@@ -1,5 +1,9 @@
 [package]
 name = "basis_offchain"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "CC0-1.0"
+
+[lib]
+name = "basis_offchain"
+path = "src/lib.rs"
