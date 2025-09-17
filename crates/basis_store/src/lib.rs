@@ -20,8 +20,6 @@ pub struct IouNote {
     pub timestamp: u64,
     /// Signature from issuer (A)
     pub signature: Signature,
-    /// Nonce to prevent replay attacks
-    pub nonce: u64,
 }
 
 /// Tracker state commitment
@@ -89,7 +87,6 @@ pub enum NoteError {
     FutureTimestamp,
     RedemptionTooEarly,
     InsufficientCollateral,
-    DuplicateNonce,
     StorageError(String),
 }
 
@@ -123,7 +120,6 @@ impl TrackerStateManager {
         let value_bytes = [
             &note.amount.to_be_bytes()[..],
             &note.timestamp.to_be_bytes()[..],
-            &note.nonce.to_be_bytes()[..],
         ].concat();
 
         self.avl_state.insert(key.to_bytes(), value_bytes)
@@ -141,7 +137,6 @@ impl TrackerStateManager {
         let value_bytes = [
             &note.amount.to_be_bytes()[..],
             &note.timestamp.to_be_bytes()[..],
-            &note.nonce.to_be_bytes()[..],
         ].concat();
 
         self.avl_state.update(key.to_bytes(), value_bytes)
@@ -212,14 +207,12 @@ impl IouNote {
         amount: u64,
         timestamp: u64,
         signature: Signature,
-        nonce: u64,
     ) -> Self {
         Self {
             recipient_pubkey,
             amount,
             timestamp,
             signature,
-            nonce,
         }
     }
 
@@ -229,7 +222,6 @@ impl IouNote {
         message.extend_from_slice(&self.recipient_pubkey);
         message.extend_from_slice(&self.amount.to_be_bytes());
         message.extend_from_slice(&self.timestamp.to_be_bytes());
-        message.extend_from_slice(&self.nonce.to_be_bytes());
         message
     }
 

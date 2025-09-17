@@ -24,7 +24,6 @@ fn test_iou_note_creation() -> Result<(), String> {
         1000,
         1234567890,
         signature,
-        42,
     );
 
     if note.recipient_pubkey != recipient_pubkey {
@@ -39,9 +38,7 @@ fn test_iou_note_creation() -> Result<(), String> {
     if note.signature != signature {
         return Err("signature mismatch".to_string());
     }
-    if note.nonce != 42 {
-        return Err("nonce mismatch".to_string());
-    }
+
     
     println!("✓ test_iou_note_creation passed");
     Ok(())
@@ -53,7 +50,6 @@ fn test_signing_message() -> Result<(), String> {
         1000,
         1234567890,
         [2u8; 64],
-        42,
     );
 
     let message = note.signing_message();
@@ -61,7 +57,7 @@ fn test_signing_message() -> Result<(), String> {
         return Err("signing message is empty".to_string());
     }
     
-    if message.len() < 33 + 8 + 8 + 8 {
+    if message.len() < 33 + 8 + 8 {
         return Err("signing message too short".to_string());
     }
     
@@ -71,16 +67,11 @@ fn test_signing_message() -> Result<(), String> {
     
     let amount_bytes = 1000u64.to_be_bytes();
     let timestamp_bytes = 1234567890u64.to_be_bytes();
-    let nonce_bytes = 42u64.to_be_bytes();
-    
     if !message.windows(8).any(|window| window == amount_bytes) {
         return Err("amount bytes not found in message".to_string());
     }
     if !message.windows(8).any(|window| window == timestamp_bytes) {
         return Err("timestamp bytes not found in message".to_string());
-    }
-    if !message.windows(8).any(|window| window == nonce_bytes) {
-        return Err("nonce bytes not found in message".to_string());
     }
     
     println!("✓ test_signing_message passed");
@@ -115,7 +106,6 @@ fn test_signature_verification() -> Result<(), String> {
         1000,
         1234567890,
         [0u8; 64], // Invalid signature (all zeros)
-        42,
     );
 
     let issuer_pubkey = [1u8; 33];
