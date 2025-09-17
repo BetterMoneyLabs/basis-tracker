@@ -72,13 +72,13 @@ impl AvlTreeState {
     }
 
     /// Get the root digest of the AVL tree
-    pub fn root_digest(&self) -> [u8; 32] {
+    pub fn root_digest(&self) -> [u8; 33] {
         if let Some(digest) = self.prover.digest() {
-            let mut result = [0u8; 32];
-            result.copy_from_slice(&digest[..32]);
+            let mut result = [0u8; 33];
+            result.copy_from_slice(&digest);
             result
         } else {
-            [0u8; 32] // Empty tree digest
+            [0u8; 33] // Empty tree digest
         }
     }
 }

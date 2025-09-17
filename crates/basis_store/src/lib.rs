@@ -27,8 +27,8 @@ pub struct IouNote {
 /// Tracker state commitment
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackerState {
-    /// AVL+ tree root digest of all notes
-    pub avl_root_digest: [u8; 32],
+    /// AVL+ tree root digest of all notes (32 bytes label + 1 byte height)
+    pub avl_root_digest: [u8; 33],
     /// Block height of last on-chain commitment
     pub last_commit_height: u64,
     /// Timestamp of last state update
@@ -107,7 +107,7 @@ impl TrackerStateManager {
         Self {
             avl_state,
             current_state: TrackerState {
-                avl_root_digest: [0u8; 32],
+                avl_root_digest: [0u8; 33],
                 last_commit_height: 0,
                 last_update_timestamp: 0,
             },
