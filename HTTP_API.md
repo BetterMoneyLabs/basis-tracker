@@ -57,6 +57,39 @@ cargo build -p basis_server
   curl http://localhost:3000/
   ```
 
+### POST /notes
+- **Description**: Create a new IOU note
+- **Request Body**:
+  ```json
+  {
+    "recipient_pubkey": [byte array (33 bytes)],
+    "amount": 1000,
+    "timestamp": 1234567890,
+    "signature": [byte array (64 bytes)],
+    "issuer_pubkey": [byte array (33 bytes)]
+  }
+  ```
+- **Response**: 
+  ```json
+  {
+    "success": true,
+    "data": null,
+    "error": null
+  }
+  ```
+- **Example**:
+  ```bash
+  curl -X POST http://localhost:3000/notes \
+    -H "Content-Type: application/json" \
+    -d '{
+      "recipient_pubkey": [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+      "amount": 1000,
+      "timestamp": 1234567890,
+      "signature": [3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],
+      "issuer_pubkey": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+    }'
+  ```
+
 ## Environment Variables
 
 - `RUST_LOG`: Set logging level (default: `basis_server=debug,tower_http=debug`)
