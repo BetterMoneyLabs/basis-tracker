@@ -49,6 +49,12 @@ echo "To test manually, run:"
 echo "curl -X POST http://localhost:3000/notes \\"
 echo "  -H \"Content-Type: application/json\" \\"
 echo "  -d '$(cat /tmp/test_note.json)'"
+echo ""
+echo ""
+
+echo "Testing get notes by issuer endpoint:"
+echo "To test manually, run:"
+echo "curl http://localhost:3000/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101"
 
 echo ""
 echo ""

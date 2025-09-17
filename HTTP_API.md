@@ -90,6 +90,29 @@ cargo build -p basis_server
     }'
   ```
 
+### GET /notes/issuer/{pubkey}
+- **Description**: Get all notes for a specific issuer
+- **Path Parameter**: `pubkey` - Hex-encoded issuer public key (66 characters)
+- **Response**: 
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "recipient_pubkey": "hex-encoded public key",
+        "amount": 1000,
+        "timestamp": 1234567890,
+        "signature": "hex-encoded signature"
+      }
+    ],
+    "error": null
+  }
+  ```
+- **Example**:
+  ```bash
+  curl http://localhost:3000/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101
+  ```
+
 ## Environment Variables
 
 - `RUST_LOG`: Set logging level (default: `basis_server=debug,tower_http=debug`)

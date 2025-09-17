@@ -5,7 +5,7 @@ edition = "2021"
 license = "CC0-1.0"
 
 [dependencies]
-axum = { workspace = true }
+axum = { workspace = true, features = ["macros"] }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
