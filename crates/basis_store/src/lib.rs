@@ -1,7 +1,10 @@
 //! Core data structures for Basis tracker
 
 pub mod avl_tree;
+pub mod persistence;
 pub mod tests;
+
+
 
 /// Public key type (Secp256k1)
 pub type PubKey = [u8; 33];
@@ -94,12 +97,20 @@ pub enum NoteError {
 pub struct TrackerStateManager {
     avl_state: avl_tree::AvlTreeState,
     current_state: TrackerState,
+    storage: persistence::NoteStorage,
 }
 
 impl TrackerStateManager {
     /// Create a new tracker state manager
     pub fn new() -> Self {
         let avl_state = avl_tree::AvlTreeState::new();
+        
+        // Use a temporary directory for storage (in real implementation, this would be configurable)
+        let storage = persistence::NoteStorage::open("./data/notes").unwrap_or_else(|_| {
+            // Fallback to in-memory storage if file storage fails
+            // In production, this should handle errors properly
+            panic!("Failed to initialize note storage");
+        });
         
         Self {
             avl_state,
@@ -108,15 +119,17 @@ impl TrackerStateManager {
                 last_commit_height: 0,
                 last_update_timestamp: 0,
             },
+            storage,
         }
     }
 
     /// Add a new note to the tracker state
-    pub fn add_note(&mut self, note: &IouNote) -> Result<(), NoteError> {
-        // Extract issuer public key from signature (placeholder implementation)
-        // In real implementation, we'd recover the public key from signature
-        let issuer_pubkey = [0u8; 33]; // Placeholder
-        let key = NoteKey::from_keys(&issuer_pubkey, &note.recipient_pubkey);
+    pub fn add_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+        // Store note in persistent storage
+        self.storage.store_note(issuer_pubkey, note)?;
+        
+        // Update AVL tree state
+        let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let value_bytes = [
             &note.amount.to_be_bytes()[..],
             &note.timestamp.to_be_bytes()[..],
@@ -130,10 +143,12 @@ impl TrackerStateManager {
     }
 
     /// Update an existing note
-    pub fn update_note(&mut self, note: &IouNote) -> Result<(), NoteError> {
-        // Extract issuer public key from signature (placeholder implementation)
-        let issuer_pubkey = [0u8; 33]; // Placeholder
-        let key = NoteKey::from_keys(&issuer_pubkey, &note.recipient_pubkey);
+    pub fn update_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+        // Update note in persistent storage
+        self.storage.store_note(issuer_pubkey, note)?;
+        
+        // Update AVL tree state
+        let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let value_bytes = [
             &note.amount.to_be_bytes()[..],
             &note.timestamp.to_be_bytes()[..],
@@ -148,6 +163,10 @@ impl TrackerStateManager {
 
     /// Remove a note from the tracker state
     pub fn remove_note(&mut self, issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Result<(), NoteError> {
+        // Remove note from persistent storage
+        self.storage.remove_note(issuer_pubkey, recipient_pubkey)?;
+        
+        // Update AVL tree state
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         self.avl_state.remove(key.to_bytes())
             .map_err(|e| NoteError::StorageError(e))?;
@@ -181,11 +200,23 @@ impl TrackerStateManager {
 
     /// Lookup a note by issuer and recipient
     pub fn lookup_note(&self, issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Result<IouNote, NoteError> {
-        let _key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        self.storage.get_note(issuer_pubkey, recipient_pubkey)?
+            .ok_or_else(|| NoteError::StorageError("Note not found".to_string()))
+    }
 
-        // This would need actual storage implementation
-        // For now, return a placeholder error
-        Err(NoteError::StorageError("Note storage not implemented".to_string()))
+    /// Get all notes for a specific issuer
+    pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
+        self.storage.get_issuer_notes(issuer_pubkey)
+    }
+
+    /// Get all notes for a specific recipient
+    pub fn get_recipient_notes(&self, recipient_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
+        self.storage.get_recipient_notes(recipient_pubkey)
+    }
+
+    /// Get all notes in the tracker
+    pub fn get_all_notes(&self) -> Result<Vec<IouNote>, NoteError> {
+        self.storage.get_all_notes()
     }
 
     /// Update the current state with latest AVL tree root

@@ -142,6 +142,97 @@ fn test_simple_hash_consistency() -> Result<(), String> {
     Ok(())
 }
 
+fn test_note_persistence() -> Result<(), String> {
+    use crate::persistence::NoteStorage;
+    use tempfile::tempdir;
+    
+    // Create a temporary directory for testing
+    let temp_dir = tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let db_path = temp_dir.path().join("test_db");
+    
+    // Create storage
+    let storage = NoteStorage::open(&db_path)
+        .map_err(|e| format!("Failed to open storage: {:?}", e))?;
+    
+    // Create test note
+    let issuer_pubkey = [1u8; 33];
+    let recipient_pubkey = [2u8; 33];
+    let signature = [3u8; 64];
+    
+    let note = IouNote::new(
+        recipient_pubkey,
+        1000,
+        1234567890,
+        signature,
+    );
+    
+    // Store note
+    storage.store_note(&issuer_pubkey, &note)
+        .map_err(|e| format!("Failed to store note: {:?}", e))?;
+    
+    // Retrieve note
+    let retrieved_note = storage.get_note(&issuer_pubkey, &recipient_pubkey)
+        .map_err(|e| format!("Failed to get note: {:?}", e))?
+        .ok_or("Note should exist".to_string())?;
+    
+    if retrieved_note.recipient_pubkey != recipient_pubkey {
+        return Err("recipient_pubkey mismatch".to_string());
+    }
+    if retrieved_note.amount != 1000 {
+        return Err("amount mismatch".to_string());
+    }
+    if retrieved_note.timestamp != 1234567890 {
+        return Err("timestamp mismatch".to_string());
+    }
+    if retrieved_note.signature != signature {
+        return Err("signature mismatch".to_string());
+    }
+    
+    // Test getting issuer notes
+    let issuer_notes = storage.get_issuer_notes(&issuer_pubkey)
+        .map_err(|e| format!("Failed to get issuer notes: {:?}", e))?;
+    if issuer_notes.len() != 1 {
+        return Err(format!("Expected 1 note, got {}", issuer_notes.len()));
+    }
+    if issuer_notes[0].amount != 1000 {
+        return Err("issuer note amount mismatch".to_string());
+    }
+    
+    // Test getting recipient notes
+    let recipient_notes = storage.get_recipient_notes(&recipient_pubkey)
+        .map_err(|e| format!("Failed to get recipient notes: {:?}", e))?;
+    if recipient_notes.len() != 1 {
+        return Err(format!("Expected 1 note, got {}", recipient_notes.len()));
+    }
+    if recipient_notes[0].amount != 1000 {
+        return Err("recipient note amount mismatch".to_string());
+    }
+    
+    // Test getting all notes
+    let all_notes = storage.get_all_notes()
+        .map_err(|e| format!("Failed to get all notes: {:?}", e))?;
+    if all_notes.len() != 1 {
+        return Err(format!("Expected 1 note, got {}", all_notes.len()));
+    }
+    if all_notes[0].amount != 1000 {
+        return Err("all notes amount mismatch".to_string());
+    }
+    
+    // Remove note
+    storage.remove_note(&issuer_pubkey, &recipient_pubkey)
+        .map_err(|e| format!("Failed to remove note: {:?}", e))?;
+    
+    // Verify note is gone
+    let should_be_none = storage.get_note(&issuer_pubkey, &recipient_pubkey)
+        .map_err(|e| format!("Failed to get note after removal: {:?}", e))?;
+    if should_be_none.is_some() {
+        return Err("Note should have been removed".to_string());
+    }
+    
+    println!("✓ test_note_persistence passed");
+    Ok(())
+}
+
 #[cfg(test)]
 mod test_module {
 
@@ -169,5 +260,10 @@ mod test_module {
     #[test]
     fn test_simple_hash_consistency() {
         super::test_simple_hash_consistency().unwrap();
+    }
+    
+    #[test]
+    fn test_note_persistence() {
+        super::test_note_persistence().unwrap();
     }
 }

@@ -10,3 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 ergo_avltree_rust = { workspace = true }
+fjall = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = "3.10.0"
