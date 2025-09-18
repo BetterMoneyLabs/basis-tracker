@@ -1,7 +1,9 @@
 //! Core data structures for Basis tracker
 
 pub mod avl_tree;
+pub mod ergo_scanner;
 pub mod persistence;
+pub mod reserve_tracker;
 pub mod tests;
 
 
@@ -37,7 +39,7 @@ pub struct TrackerState {
 }
 
 /// Reserve information for a public key
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReserveInfo {
     /// On-chain collateral amount
     pub collateral_amount: u64,
@@ -294,3 +296,8 @@ pub fn simple_hash(data: &[u8]) -> [u8; 32] {
     }
     result
 }
+// Re-export reserve tracker types
+pub use reserve_tracker::{ExtendedReserveInfo, ReserveTracker, ReserveTrackerError};
+
+// Re-export ergo scanner types
+pub use ergo_scanner::{ErgoScanner, ErgoScannerError, NodeConfig, ReserveEvent};
