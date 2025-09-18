@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod reserve_api;
+
 // Application state that holds a channel to communicate with the tracker thread
 #[derive(Clone)]
 struct AppState {
@@ -135,8 +137,16 @@ async fn main() {
         .route("/notes", post(create_note))
         .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
         .route("/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}", get(get_note_by_issuer_and_recipient))
+        .route("/reserves/issuer/{pubkey}", get(reserve_api::get_reserves_by_issuer))
         .with_state(app_state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
+    
+    tracing::debug!("Registered routes:");
+    tracing::debug!("  GET /");
+    tracing::debug!("  POST /notes");
+    tracing::debug!("  GET /notes/issuer/{{pubkey}}");
+    tracing::debug!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
+    tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
 
     // Run our app with hyper
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));

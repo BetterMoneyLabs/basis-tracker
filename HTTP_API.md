@@ -136,6 +136,33 @@ cargo build -p basis_server
   curl http://localhost:3000/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101/recipient/020202020202020202020202020202020202020202020202020202020202020202
   ```
 
+### GET /reserves/issuer/{pubkey}
+- **Description**: Get all reserves for a specific issuer
+- **Path Parameter**: `pubkey` - Hex-encoded issuer public key (66 characters)
+- **Response**: 
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "box_id": "hex-encoded reserve box id",
+        "owner_pubkey": "hex-encoded public key",
+        "collateral_amount": 1000000000,
+        "total_debt": 500000000,
+        "tracker_nft_id": "hex-encoded tracker nft id",
+        "last_updated_height": 1000,
+        "last_updated_timestamp": 1234567890,
+        "collateralization_ratio": 2.0
+      }
+    ],
+    "error": null
+  }
+  ```
+- **Example**:
+  ```bash
+  curl http://localhost:3000/reserves/issuer/010101010101010101010101010101010101010101010101010101010101010101
+  ```
+
 ## Environment Variables
 
 - `RUST_LOG`: Set logging level (default: `basis_server=debug,tower_http=debug`)
