@@ -1,0 +1,81 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Run All Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libssl-dev
+
+    - name: Run cargo build
+      run: cargo build --all --verbose
+
+    - name: Run cargo test
+      run: cargo test --all --verbose
+
+    - name: Run cargo clippy
+      run: cargo clippy --all -- -D warnings
+
+    - name: Run cargo fmt
+      run: cargo fmt --all -- --check
+
+    - name: Run specific crate tests
+      run: |
+        cargo test -p basis_store -- --nocapture
+        cargo test -p basis_server -- --nocapture
+        cargo test -p basis_offchain -- --nocapture
+        cargo test -p basis_app -- --nocapture
+
+    - name: Run specific module tests
+      run: |
+        cargo test -p basis_store reserve_tracker::tests -- --nocapture
+        cargo test -p basis_store ergo_scanner::tests -- --nocapture
+        cargo test -p basis_store tests::test_module -- --nocapture
+
+    - name: Run examples
+      run: |
+        cargo run --example reserve_tracker_demo --package basis_store
+        cargo run --example full_integration_demo --package basis_store
+
+    - name: Check build for all crates
+      run: |
+        cargo build -p basis_store
+        cargo build -p basis_server  
+        cargo build -p basis_offchain
+        cargo build -p basis_app
+        cargo build -p basis_cli
+
+    - name: Check for warnings
+      run: |
+        # Fail if there are any warnings
+        cargo check --all --quiet 2>&1 | grep -v "unused import" | grep -v "never used" | grep -i "warning" && exit 1 || exit 0

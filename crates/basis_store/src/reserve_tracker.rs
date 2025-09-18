@@ -93,7 +93,10 @@ impl ReserveTracker {
     }
 
     /// Get reserve information by owner public key
-    pub fn get_reserve_by_owner(&self, owner_pubkey: &str) -> Result<ExtendedReserveInfo, ReserveTrackerError> {
+    pub fn get_reserve_by_owner(
+        &self,
+        owner_pubkey: &str,
+    ) -> Result<ExtendedReserveInfo, ReserveTrackerError> {
         let reserves = self.reserves.read().unwrap();
         reserves
             .values()
@@ -152,7 +155,11 @@ impl ReserveTracker {
     }
 
     /// Update collateral amount for a reserve
-    pub fn update_collateral(&self, box_id: &str, new_collateral: u64) -> Result<(), ReserveTrackerError> {
+    pub fn update_collateral(
+        &self,
+        box_id: &str,
+        new_collateral: u64,
+    ) -> Result<(), ReserveTrackerError> {
         let mut reserves = self.reserves.write().unwrap();
         let reserve = reserves
             .get_mut(box_id)
@@ -195,7 +202,10 @@ impl ReserveTracker {
     /// Get total system collateral and debt
     pub fn get_system_totals(&self) -> (u64, u64) {
         let reserves = self.reserves.read().unwrap();
-        let total_collateral = reserves.values().map(|r| r.base_info.collateral_amount).sum();
+        let total_collateral = reserves
+            .values()
+            .map(|r| r.base_info.collateral_amount)
+            .sum();
         let total_debt = reserves.values().map(|r| r.total_debt).sum();
         (total_collateral, total_debt)
     }
@@ -236,7 +246,7 @@ mod tests {
     #[test]
     fn test_reserve_operations() {
         let tracker = ReserveTracker::new();
-        
+
         // Create a test reserve
         let reserve_info = ExtendedReserveInfo::new(
             b"test_box_id_1234567890",
@@ -265,12 +275,16 @@ mod tests {
         assert!(result.is_err());
 
         // Remove debt
-        tracker.remove_debt(&reserve_info.box_id, 300000000).unwrap(); // Remove 0.3 ERG
+        tracker
+            .remove_debt(&reserve_info.box_id, 300000000)
+            .unwrap(); // Remove 0.3 ERG
         let after_removal = tracker.get_reserve(&reserve_info.box_id).unwrap();
         assert_eq!(after_removal.total_debt, 200000000);
 
         // Update collateral
-        tracker.update_collateral(&reserve_info.box_id, 2000000000).unwrap(); // Increase to 2 ERG
+        tracker
+            .update_collateral(&reserve_info.box_id, 2000000000)
+            .unwrap(); // Increase to 2 ERG
         let after_collateral = tracker.get_reserve(&reserve_info.box_id).unwrap();
         assert_eq!(after_collateral.base_info.collateral_amount, 2000000000);
 

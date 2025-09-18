@@ -97,32 +97,46 @@ async fn main() {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "basis_server=debug,tower_http=debug".into()),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "basis_server=debug,tower_http=debug".into()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     // Create channel for communicating with tracker thread
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
-    
+
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
     tokio::task::spawn_blocking(move || {
         use basis_store::TrackerStateManager;
-        
+
         let mut tracker = TrackerStateManager::new();
-        
+
         while let Some(cmd) = rx.blocking_recv() {
             match cmd {
-                TrackerCommand::AddNote { issuer_pubkey, note, response_tx } => {
+                TrackerCommand::AddNote {
+                    issuer_pubkey,
+                    note,
+                    response_tx,
+                } => {
                     let result = tracker.add_note(&issuer_pubkey, &note);
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::GetNotesByIssuer { issuer_pubkey, response_tx } => {
+                TrackerCommand::GetNotesByIssuer {
+                    issuer_pubkey,
+                    response_tx,
+                } => {
                     let result = tracker.get_issuer_notes(&issuer_pubkey);
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::GetNoteByIssuerAndRecipient { issuer_pubkey, recipient_pubkey, response_tx } => {
-                    let result = tracker.lookup_note(&issuer_pubkey, &recipient_pubkey).map(Some);
+                TrackerCommand::GetNoteByIssuerAndRecipient {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = tracker
+                        .lookup_note(&issuer_pubkey, &recipient_pubkey)
+                        .map(Some);
                     let _ = response_tx.send(result);
                 }
             }
@@ -136,11 +150,17 @@ async fn main() {
         .route("/", get(root))
         .route("/notes", post(create_note))
         .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
-        .route("/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}", get(get_note_by_issuer_and_recipient))
-        .route("/reserves/issuer/{pubkey}", get(reserve_api::get_reserves_by_issuer))
+        .route(
+            "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",
+            get(get_note_by_issuer_and_recipient),
+        )
+        .route(
+            "/reserves/issuer/{pubkey}",
+            get(reserve_api::get_reserves_by_issuer),
+        )
         .with_state(app_state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
-    
+
     tracing::debug!("Registered routes:");
     tracing::debug!("  GET /");
     tracing::debug!("  POST /notes");
@@ -151,7 +171,7 @@ async fn main() {
     // Run our app with hyper
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     tracing::debug!("listening on {}", addr);
-    
+
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
@@ -168,18 +188,20 @@ async fn create_note(
     Json(payload): Json<CreateNoteRequest>,
 ) -> (StatusCode, Json<ApiResponse<()>>) {
     tracing::debug!("Creating new note: {:?}", payload);
-    
+
     // Validate and convert Vec<u8> to fixed-size arrays
     let recipient_pubkey: PubKey = match payload.recipient_pubkey.try_into() {
         Ok(arr) => arr,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(error_response("recipient_pubkey must be 33 bytes".to_string())),
+                Json(error_response(
+                    "recipient_pubkey must be 33 bytes".to_string(),
+                )),
             )
         }
     };
-    
+
     let signature: Signature = match payload.signature.try_into() {
         Ok(arr) => arr,
         Err(_) => {
@@ -189,7 +211,7 @@ async fn create_note(
             )
         }
     };
-    
+
     let issuer_pubkey: PubKey = match payload.issuer_pubkey.try_into() {
         Ok(arr) => arr,
         Err(_) => {
@@ -199,7 +221,7 @@ async fn create_note(
             )
         }
     };
-    
+
     // Create the IOU note
     let note = IouNote::new(
         recipient_pubkey,
@@ -207,32 +229,34 @@ async fn create_note(
         payload.timestamp,
         signature,
     );
-    
+
     // Send command to tracker thread
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    
-    if let Err(_) = state.tx.send(TrackerCommand::AddNote {
-        issuer_pubkey,
-        note,
-        response_tx,
-    }).await {
+
+    if let Err(_) = state
+        .tx
+        .send(TrackerCommand::AddNote {
+            issuer_pubkey,
+            note,
+            response_tx,
+        })
+        .await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(error_response("Tracker thread unavailable".to_string())),
         );
     }
-    
+
     // Wait for response from tracker thread
     match response_rx.await {
         Ok(Ok(())) => {
-            tracing::info!("Successfully created note from {} to {}", 
+            tracing::info!(
+                "Successfully created note from {} to {}",
                 hex::encode(&issuer_pubkey),
                 hex::encode(&recipient_pubkey)
             );
-            (
-                StatusCode::CREATED,
-                Json(success_response(())),
-            )
+            (StatusCode::CREATED, Json(success_response(())))
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to create note: {:?}", e);
@@ -244,10 +268,7 @@ async fn create_note(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
             };
-            (
-                StatusCode::BAD_REQUEST,
-                Json(error_response(error_message)),
-            )
+            (StatusCode::BAD_REQUEST, Json(error_response(error_message)))
         }
         Err(_) => {
             tracing::error!("Tracker thread response channel closed");
@@ -266,7 +287,7 @@ async fn get_notes_by_issuer(
     axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
 ) -> (StatusCode, Json<ApiResponse<Vec<SerializableIouNote>>>) {
     tracing::debug!("Getting notes for issuer: {}", pubkey_hex);
-    
+
     // Decode hex string to bytes
     let issuer_pubkey_bytes = match hex::decode(&pubkey_hex) {
         Ok(bytes) => bytes,
@@ -277,7 +298,7 @@ async fn get_notes_by_issuer(
             )
         }
     };
-    
+
     // Convert to fixed-size array
     let issuer_pubkey: PubKey = match issuer_pubkey_bytes.try_into() {
         Ok(arr) => arr,
@@ -288,34 +309,36 @@ async fn get_notes_by_issuer(
             )
         }
     };
-    
+
     // Send command to tracker thread
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    
-    if let Err(_) = state.tx.send(TrackerCommand::GetNotesByIssuer {
-        issuer_pubkey,
-        response_tx,
-    }).await {
+
+    if let Err(_) = state
+        .tx
+        .send(TrackerCommand::GetNotesByIssuer {
+            issuer_pubkey,
+            response_tx,
+        })
+        .await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(error_response("Tracker thread unavailable".to_string())),
         );
     }
-    
+
     // Wait for response from tracker thread
     match response_rx.await {
         Ok(Ok(notes)) => {
-            tracing::info!("Successfully retrieved {} notes for issuer {}", 
+            tracing::info!(
+                "Successfully retrieved {} notes for issuer {}",
                 notes.len(),
                 pubkey_hex
             );
             // Convert to serializable format
-            let serializable_notes: Vec<SerializableIouNote> = 
+            let serializable_notes: Vec<SerializableIouNote> =
                 notes.into_iter().map(SerializableIouNote::from).collect();
-            (
-                StatusCode::OK,
-                Json(success_response(serializable_notes)),
-            )
+            (StatusCode::OK, Json(success_response(serializable_notes)))
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to get notes: {:?}", e);
@@ -327,10 +350,7 @@ async fn get_notes_by_issuer(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
             };
-            (
-                StatusCode::BAD_REQUEST,
-                Json(error_response(error_message)),
-            )
+            (StatusCode::BAD_REQUEST, Json(error_response(error_message)))
         }
         Err(_) => {
             tracing::error!("Tracker thread response channel closed");
@@ -345,31 +365,42 @@ async fn get_notes_by_issuer(
 #[axum::debug_handler]
 async fn get_note_by_issuer_and_recipient(
     State(state): State<AppState>,
-    axum::extract::Path((issuer_pubkey_hex, recipient_pubkey_hex)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((issuer_pubkey_hex, recipient_pubkey_hex)): axum::extract::Path<(
+        String,
+        String,
+    )>,
 ) -> (StatusCode, Json<ApiResponse<Option<SerializableIouNote>>>) {
-    tracing::debug!("Getting note for issuer: {} and recipient: {}", issuer_pubkey_hex, recipient_pubkey_hex);
-    
+    tracing::debug!(
+        "Getting note for issuer: {} and recipient: {}",
+        issuer_pubkey_hex,
+        recipient_pubkey_hex
+    );
+
     // Decode hex strings to bytes
     let issuer_pubkey_bytes = match hex::decode(&issuer_pubkey_hex) {
         Ok(bytes) => bytes,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(error_response("Invalid hex encoding for issuer public key".to_string())),
+                Json(error_response(
+                    "Invalid hex encoding for issuer public key".to_string(),
+                )),
             )
         }
     };
-    
+
     let recipient_pubkey_bytes = match hex::decode(&recipient_pubkey_hex) {
         Ok(bytes) => bytes,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(error_response("Invalid hex encoding for recipient public key".to_string())),
+                Json(error_response(
+                    "Invalid hex encoding for recipient public key".to_string(),
+                )),
             )
         }
     };
-    
+
     // Convert to fixed-size arrays
     let issuer_pubkey: PubKey = match issuer_pubkey_bytes.try_into() {
         Ok(arr) => arr,
@@ -380,35 +411,42 @@ async fn get_note_by_issuer_and_recipient(
             )
         }
     };
-    
+
     let recipient_pubkey: PubKey = match recipient_pubkey_bytes.try_into() {
         Ok(arr) => arr,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(error_response("recipient_pubkey must be 33 bytes".to_string())),
+                Json(error_response(
+                    "recipient_pubkey must be 33 bytes".to_string(),
+                )),
             )
         }
     };
-    
+
     // Send command to tracker thread
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    
-    if let Err(_) = state.tx.send(TrackerCommand::GetNoteByIssuerAndRecipient {
-        issuer_pubkey,
-        recipient_pubkey,
-        response_tx,
-    }).await {
+
+    if let Err(_) = state
+        .tx
+        .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+            issuer_pubkey,
+            recipient_pubkey,
+            response_tx,
+        })
+        .await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(error_response("Tracker thread unavailable".to_string())),
         );
     }
-    
+
     // Wait for response from tracker thread
     match response_rx.await {
         Ok(Ok(Some(note))) => {
-            tracing::info!("Successfully retrieved note from {} to {}", 
+            tracing::info!(
+                "Successfully retrieved note from {} to {}",
                 issuer_pubkey_hex,
                 recipient_pubkey_hex
             );
@@ -420,14 +458,12 @@ async fn get_note_by_issuer_and_recipient(
             )
         }
         Ok(Ok(None)) => {
-            tracing::info!("No note found from {} to {}", 
+            tracing::info!(
+                "No note found from {} to {}",
                 issuer_pubkey_hex,
                 recipient_pubkey_hex
             );
-            (
-                StatusCode::NOT_FOUND,
-                Json(success_response(None)),
-            )
+            (StatusCode::NOT_FOUND, Json(success_response(None)))
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to get note: {:?}", e);
@@ -439,10 +475,7 @@ async fn get_note_by_issuer_and_recipient(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
             };
-            (
-                StatusCode::BAD_REQUEST,
-                Json(error_response(error_message)),
-            )
+            (StatusCode::BAD_REQUEST, Json(error_response(error_message)))
         }
         Err(_) => {
             tracing::error!("Tracker thread response channel closed");

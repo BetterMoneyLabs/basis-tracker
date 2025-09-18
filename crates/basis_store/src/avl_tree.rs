@@ -25,44 +25,50 @@ impl AvlTreeState {
         // Create an AVL tree with appropriate parameters
         let tree = AVLTree::new(simple_resolver, 64, Some(24));
         let prover = BatchAVLProver::new(tree, true);
-        
+
         Self { prover }
     }
 
     /// Insert a key-value pair into the AVL tree
     pub fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String> {
-        let operation = Operation::Insert(KeyValue { 
-            key: key.into(), 
-            value: value.into() 
+        let operation = Operation::Insert(KeyValue {
+            key: key.into(),
+            value: value.into(),
         });
-        
+
         // We ignore the return value since we just care about the operation success
-        let _ = self.prover.perform_one_operation(&operation)
+        let _ = self
+            .prover
+            .perform_one_operation(&operation)
             .map_err(|e| format!("AVL tree insert failed: {:?}", e))?;
-        
+
         Ok(())
     }
 
     /// Update an existing key-value pair
     pub fn update(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String> {
-        let operation = Operation::Update(KeyValue { 
-            key: key.into(), 
-            value: value.into() 
+        let operation = Operation::Update(KeyValue {
+            key: key.into(),
+            value: value.into(),
         });
-        
-        let _ = self.prover.perform_one_operation(&operation)
+
+        let _ = self
+            .prover
+            .perform_one_operation(&operation)
             .map_err(|e| format!("AVL tree update failed: {:?}", e))?;
-        
+
         Ok(())
     }
 
     /// Remove a key from the AVL tree
     pub fn remove(&mut self, key: Vec<u8>) -> Result<(), String> {
         let operation = Operation::Remove(key.into());
-        
-        let _ = self.prover.perform_one_operation(&operation)
+
+        let _ = self
+            .prover
+            .perform_one_operation(&operation)
             .map_err(|e| format!("AVL tree remove failed: {:?}", e))?;
-        
+
         Ok(())
     }
 

@@ -68,15 +68,18 @@ impl ErgoScanner {
         // 1. Connect to Ergo node using ergo_client
         // 2. Register a scan with TrackingRule for Basis contracts
         // 3. Store the scan ID for later use
-        
+
         // Placeholder implementation
         println!("Starting Ergo scanner for Basis reserves...");
         println!("Node URL: {}", self.config.url);
-        println!("Contract template size: {} bytes", self.basis_contract_template.len());
-        
+        println!(
+            "Contract template size: {} bytes",
+            self.basis_contract_template.len()
+        );
+
         // Simulate successful scan registration
         self.scan_id = Some("basis_reserve_scan_123".to_string());
-        
+
         Ok(())
     }
 
@@ -95,27 +98,30 @@ impl ErgoScanner {
         // 1. Connect to Ergo node
         // 2. Query scan boxes using scan_id
         // 3. Parse and return box data
-        
+
         println!("Fetching scanned boxes from Ergo node...");
-        
+
         // Simulate some mock box data
         let mock_boxes = vec![
             vec![1, 2, 3, 4, 5],  // Mock box data
             vec![6, 7, 8, 9, 10], // Mock box data
         ];
-        
+
         Ok(mock_boxes)
     }
 
     /// Process new blocks for reserve-related transactions
-    pub async fn process_new_blocks(&self, from_height: u64) -> Result<Vec<ReserveEvent>, ErgoScannerError> {
+    pub async fn process_new_blocks(
+        &self,
+        from_height: u64,
+    ) -> Result<Vec<ReserveEvent>, ErgoScannerError> {
         // Placeholder - in real implementation, this would:
         // 1. Get new blocks from current height
         // 2. Scan transactions for reserve-related activity
         // 3. Return relevant events
-        
+
         println!("Processing blocks from height: {}", from_height);
-        
+
         // Simulate some mock events
         let mock_events = vec![
             ReserveEvent::ReserveCreated {
@@ -130,7 +136,7 @@ impl ErgoScanner {
                 height: from_height + 2,
             },
         ];
-        
+
         Ok(mock_events)
     }
 
@@ -164,10 +170,7 @@ pub enum ReserveEvent {
         height: u64,
     },
     /// A reserve was spent/closed
-    ReserveSpent {
-        box_id: String,
-        height: u64,
-    },
+    ReserveSpent { box_id: String, height: u64 },
 }
 
 /// Default node configuration
@@ -189,9 +192,9 @@ mod tests {
     async fn test_scanner_creation() {
         let config = NodeConfig::default();
         let contract_template = vec![1, 2, 3, 4, 5];
-        
+
         let scanner = ErgoScanner::new(config, contract_template);
-        
+
         assert!(!scanner.is_active());
         assert_eq!(scanner.config().url, "http://localhost:9053");
         assert_eq!(scanner.basis_contract_template().len(), 5);
@@ -200,11 +203,11 @@ mod tests {
     #[tokio::test]
     async fn test_scan_lifecycle() {
         let mut scanner = ErgoScanner::new(NodeConfig::default(), vec![1, 2, 3]);
-        
+
         // Start scanning
         scanner.start_scanning().await.unwrap();
         assert!(scanner.is_active());
-        
+
         // Stop scanning
         scanner.stop_scanning().await.unwrap();
         assert!(!scanner.is_active());
@@ -213,7 +216,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_scanned_boxes() {
         let scanner = ErgoScanner::new(NodeConfig::default(), vec![1, 2, 3]);
-        
+
         let boxes = scanner.get_scanned_boxes().await.unwrap();
         assert_eq!(boxes.len(), 2); // Mock data returns 2 boxes
     }
@@ -221,12 +224,14 @@ mod tests {
     #[tokio::test]
     async fn test_process_blocks() {
         let scanner = ErgoScanner::new(NodeConfig::default(), vec![1, 2, 3]);
-        
+
         let events = scanner.process_new_blocks(1000).await.unwrap();
         assert_eq!(events.len(), 2); // Mock data returns 2 events
-        
+
         match &events[0] {
-            ReserveEvent::ReserveCreated { collateral_amount, .. } => {
+            ReserveEvent::ReserveCreated {
+                collateral_amount, ..
+            } => {
                 assert_eq!(*collateral_amount, 1000000000);
             }
             _ => panic!("Expected ReserveCreated event"),

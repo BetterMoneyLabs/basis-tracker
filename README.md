@@ -131,6 +131,19 @@ Not hard to do redemptions to stealth addresses.
 
 ## Economy
 
+## Continuous Integration
+
+This project uses GitHub Actions for continuous integration. On every commit to main/master branches and on every pull request, the following checks are run:
+
+- ✅ **Cargo build** - Compiles all crates
+- ✅ **Cargo test** - Runs all test suites  
+- ✅ **Cargo clippy** - Lints code for best practices
+- ✅ **Cargo fmt** - Checks code formatting
+- ✅ **Example execution** - Runs all demonstration examples
+- ✅ **Module-specific tests** - Runs tests for specific modules
+
+See [.github/workflows/test.yml](.github/workflows/test.yml) for the complete workflow.
+
 ## Implementation Roadmap
 
 The following implementation plan is targeting catching micropayments in P2P networks, agentic networks, etc ASAP and then
