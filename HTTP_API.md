@@ -174,7 +174,8 @@ cargo build -p basis_server
     "success": true,
     "data": [
       {
-        "type": "NoteCreated",
+        "id": 1,
+        "type": "NoteUpdated",
         "timestamp": 1234567890,
         "issuer_pubkey": "hex-encoded public key",
         "recipient_pubkey": "hex-encoded public key",

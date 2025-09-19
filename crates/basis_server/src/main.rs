@@ -7,6 +7,8 @@ use axum::{
 use basis_store::{IouNote, NoteError, PubKey, Signature};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU64;
+use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod reserve_api;
@@ -15,6 +17,43 @@ mod reserve_api;
 #[derive(Clone)]
 struct AppState {
     tx: tokio::sync::mpsc::Sender<TrackerCommand>,
+    event_store: std::sync::Arc<EventStore>,
+}
+
+// Simple file-based event store with sequential IDs
+struct EventStore {
+    events: Mutex<Vec<TrackerEvent>>,
+    next_id: AtomicU64,
+}
+
+impl EventStore {
+    async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        // In a real implementation, this would load from disk
+        // For now, we'll use in-memory but structured for easy disk persistence
+        Ok(Self {
+            events: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+        })
+    }
+    
+    async fn add_event(&self, mut event: TrackerEvent) -> Result<u64, Box<dyn std::error::Error>> {
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        event.id = id;
+        
+        // In a real implementation, this would append to a disk file
+        // For now, we'll use a mutex-protected vector
+        let mut events = self.events.lock().await;
+        events.push(event);
+        
+        Ok(id)
+    }
+    
+    async fn get_events_paginated(&self, page: usize, page_size: usize) -> Result<Vec<TrackerEvent>, Box<dyn std::error::Error>> {
+        let events = self.events.lock().await;
+        let start = page * page_size;
+        let end = std::cmp::min(start + page_size, events.len());
+        Ok(events[start..end].to_vec())
+    }
 }
 
 // Commands that can be sent to the tracker thread
@@ -33,11 +72,7 @@ enum TrackerCommand {
         recipient_pubkey: PubKey,
         response_tx: tokio::sync::oneshot::Sender<Result<Option<IouNote>, NoteError>>,
     },
-    GetAllEventsPaginated {
-        page: usize,
-        page_size: usize,
-        response_tx: tokio::sync::oneshot::Sender<Result<Vec<TrackerEvent>, NoteError>>,
-    },
+
 }
 
 // Request structure for creating a new IOU note
@@ -75,6 +110,7 @@ pub enum EventType {
 // Unified event structure for paginated events
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackerEvent {
+    pub id: u64,
     pub event_type: EventType,
     pub timestamp: u64,
     pub issuer_pubkey: Option<String>,
@@ -152,6 +188,13 @@ async fn main() {
                     response_tx,
                 } => {
                     let result = tracker.add_note(&issuer_pubkey, &note);
+                    
+                    // Create event if successful
+                    if result.is_ok() {
+                        // Note: In a real implementation, we'd send this back to the async context to store
+                        // For now, we'll handle event storage in the async handler
+                    }
+                    
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNotesByIssuer {
@@ -171,119 +214,114 @@ async fn main() {
                         .map(Some);
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::GetAllEventsPaginated {
-                    page,
-                    page_size,
-                    response_tx,
-                } => {
-                    let result = tracker.get_all_notes()
-                        .map(|notes| {
-                            // Convert notes to events and add other event types
-                            let mut events = Vec::new();
-                            
-                            // Add note events
-                            for note in &notes {
-                                events.push(TrackerEvent {
-                                    event_type: EventType::NoteUpdated,
-                                    timestamp: note.timestamp,
-                                    issuer_pubkey: None, // Will be filled from context
-                                    recipient_pubkey: Some(hex::encode(note.recipient_pubkey)),
-                                    amount: Some(note.amount),
-                                    reserve_box_id: None,
-                                    collateral_amount: None,
-                                    redeemed_amount: None,
-                                    height: None,
-                                });
-                            }
-                            
-                            // Add mock reserve events for demonstration
-                            events.push(TrackerEvent {
-                                event_type: EventType::ReserveCreated,
-                                timestamp: 1234567890,
-                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
-                                recipient_pubkey: None,
-                                amount: None,
-                                reserve_box_id: Some("box1234567890abcdef".to_string()),
-                                collateral_amount: Some(1000000000),
-                                redeemed_amount: None,
-                                height: Some(1000),
-                            });
-                            
-                            events.push(TrackerEvent {
-                                event_type: EventType::ReserveToppedUp,
-                                timestamp: 1234567891,
-                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
-                                recipient_pubkey: None,
-                                amount: None,
-                                reserve_box_id: Some("box1234567890abcdef".to_string()),
-                                collateral_amount: Some(500000000),
-                                redeemed_amount: None,
-                                height: Some(1001),
-                            });
-                            
-                            events.push(TrackerEvent {
-                                event_type: EventType::CollateralAlert { ratio: 0.8 },
-                                timestamp: 1234567892,
-                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
-                                recipient_pubkey: None,
-                                amount: None,
-                                reserve_box_id: None,
-                                collateral_amount: None,
-                                redeemed_amount: None,
-                                height: None,
-                            });
-                            
-                            // Add NoteUpdated event
-                            events.push(TrackerEvent {
-                                event_type: EventType::NoteUpdated,
-                                timestamp: 1234567893,
-                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
-                                recipient_pubkey: Some("020202020202020202020202020202020202020202020202020202020202020202".to_string()),
-                                amount: Some(1500), // Updated amount
-                                reserve_box_id: None,
-                                collateral_amount: None,
-                                redeemed_amount: None,
-                                height: None,
-                            });
-                            
-                            // Add ReserveRedeemed event
-                            events.push(TrackerEvent {
-                                event_type: EventType::ReserveRedeemed,
-                                timestamp: 1234567894,
-                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
-                                recipient_pubkey: None,
-                                amount: None,
-                                reserve_box_id: Some("box1234567890abcdef".to_string()),
-                                collateral_amount: None,
-                                redeemed_amount: Some(250000000),
-                                height: Some(1002),
-                            });
-                            
-                            // Add Commitment event
-                            events.push(TrackerEvent {
-                                event_type: EventType::Commitment,
-                                timestamp: 1234567895,
-                                issuer_pubkey: None,
-                                recipient_pubkey: None,
-                                amount: None,
-                                reserve_box_id: None,
-                                collateral_amount: None,
-                                redeemed_amount: None,
-                                height: Some(1003),
-                            });
-                            
-                            // Apply pagination
-                            let start = page * page_size;
-                            let end = std::cmp::min(start + page_size, events.len());
-                            events[start..end].to_vec()
-                        });
-                    let _ = response_tx.send(result);
-                }
+
             }
         }
     });
 
-    let app_state = AppState { tx };
+    let event_store = match EventStore::new().await {
+        Ok(store) => std::sync::Arc::new(store),
+        Err(e) => {
+            tracing::error!("Failed to initialize event store: {:?}", e);
+            std::process::exit(1);
+        }
+    };
+    
+    // Add demo events
+    let demo_events = vec![
+        TrackerEvent {
+            id: 0,
+            event_type: EventType::NoteUpdated,
+            timestamp: 1234567890,
+            issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+            recipient_pubkey: Some("020202020202020202020202020202020202020202020202020202020202020202".to_string()),
+            amount: Some(1000),
+            reserve_box_id: None,
+            collateral_amount: None,
+            redeemed_amount: None,
+            height: None,
+        },
+        TrackerEvent {
+            id: 0,
+            event_type: EventType::NoteUpdated,
+            timestamp: 1234567891,
+            issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+            recipient_pubkey: Some("030303030303030303030303030303030303030303030303030303030303030303".to_string()),
+            amount: Some(2000),
+            reserve_box_id: None,
+            collateral_amount: None,
+            redeemed_amount: None,
+            height: None,
+        },
+        TrackerEvent {
+            id: 0,
+            event_type: EventType::ReserveCreated,
+            timestamp: 1234567892,
+            issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+            recipient_pubkey: None,
+            amount: None,
+            reserve_box_id: Some("box1234567890abcdef".to_string()),
+            collateral_amount: Some(1000000000),
+            redeemed_amount: None,
+            height: Some(1000),
+        },
+        TrackerEvent {
+            id: 0,
+            event_type: EventType::ReserveToppedUp,
+            timestamp: 1234567893,
+            issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+            recipient_pubkey: None,
+            amount: None,
+            reserve_box_id: Some("box1234567890abcdef".to_string()),
+            collateral_amount: Some(500000000),
+            redeemed_amount: None,
+            height: Some(1001),
+        },
+        TrackerEvent {
+            id: 0,
+            event_type: EventType::ReserveRedeemed,
+            timestamp: 1234567894,
+            issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+            recipient_pubkey: None,
+            amount: None,
+            reserve_box_id: Some("box1234567890abcdef".to_string()),
+            collateral_amount: None,
+            redeemed_amount: Some(250000000),
+            height: Some(1002),
+        },
+        TrackerEvent {
+            id: 0,
+            event_type: EventType::Commitment,
+            timestamp: 1234567895,
+            issuer_pubkey: None,
+            recipient_pubkey: None,
+            amount: None,
+            reserve_box_id: None,
+            collateral_amount: None,
+            redeemed_amount: None,
+            height: Some(1003),
+        },
+        TrackerEvent {
+            id: 0,
+            event_type: EventType::CollateralAlert { ratio: 0.8 },
+            timestamp: 1234567896,
+            issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+            recipient_pubkey: None,
+            amount: None,
+            reserve_box_id: None,
+            collateral_amount: None,
+            redeemed_amount: None,
+            height: None,
+        },
+    ];
+    
+    for event in demo_events {
+        if let Err(e) = event_store.add_event(event).await {
+            tracing::warn!("Failed to add demo event: {:?}", e);
+        }
+    }
+    
+    let app_state = AppState { tx, event_store };
 
     // Build our application with routes
     let app = Router::new()
@@ -398,6 +436,30 @@ async fn create_note(
                 hex::encode(&issuer_pubkey),
                 hex::encode(&recipient_pubkey)
             );
+            
+            // Store event in event store
+            let event = TrackerEvent {
+                id: 0, // Will be set by event store
+                event_type: EventType::NoteUpdated,
+                timestamp: payload.timestamp,
+                issuer_pubkey: Some(hex::encode(&issuer_pubkey)),
+                recipient_pubkey: Some(hex::encode(&recipient_pubkey)),
+                amount: Some(payload.amount),
+                reserve_box_id: None,
+                collateral_amount: None,
+                redeemed_amount: None,
+                height: None,
+            };
+            
+            match state.event_store.add_event(event).await {
+                Ok(event_id) => {
+                    tracing::debug!("Stored note creation event with ID: {}", event_id);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to store event: {:?}", e);
+                }
+            }
+            
             (StatusCode::CREATED, Json(success_response(())))
         }
         Ok(Err(e)) => {
@@ -629,7 +691,7 @@ async fn get_note_by_issuer_and_recipient(
     }
 }
 
-// Get paginated tracker events (notes)
+// Get paginated tracker events from event store
 #[axum::debug_handler]
 async fn get_events_paginated(
     State(state): State<AppState>,
@@ -641,53 +703,24 @@ async fn get_events_paginated(
     let page = params.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
     let page_size = params.get("page_size").and_then(|ps| ps.parse().ok()).unwrap_or(20);
 
-    // Send command to tracker thread
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    if let Err(_) = state
-        .tx
-        .send(TrackerCommand::GetAllEventsPaginated {
-            page,
-            page_size,
-            response_tx,
-        })
-        .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(error_response("Tracker thread unavailable".to_string())),
-        );
-    }
-
-    // Wait for response from tracker thread
-    match response_rx.await {
-        Ok(Ok(events)) => {
-            tracing::info!(
-                "Successfully retrieved {} events for page {} (size: {})",
-                events.len(),
-                page,
-                page_size
-            );
-            (StatusCode::OK, Json(success_response(events)))
-        }
-        Ok(Err(e)) => {
-            tracing::error!("Failed to get paginated events: {:?}", e);
-            let error_message = match e {
-                NoteError::InvalidSignature => "Invalid signature".to_string(),
-                NoteError::AmountOverflow => "Amount overflow".to_string(),
-                NoteError::FutureTimestamp => "Future timestamp".to_string(),
-                NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
-                NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
-                NoteError::StorageError(msg) => format!("Storage error: {}", msg),
-            };
-            (StatusCode::BAD_REQUEST, Json(error_response(error_message)))
-        }
-        Err(_) => {
-            tracing::error!("Tracker thread response channel closed");
-            (
+    // Get events from event store
+    let events = match state.event_store.get_events_paginated(page, page_size).await {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::error!("Failed to retrieve events: {:?}", e);
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(error_response("Internal server error".to_string())),
-            )
+                Json(error_response("Failed to retrieve events".to_string())),
+            );
         }
-    }
+    };
+    
+    tracing::info!(
+        "Successfully retrieved {} events for page {} (size: {})",
+        events.len(),
+        page,
+        page_size
+    );
+    
+    (StatusCode::OK, Json(success_response(events)))
 }
