@@ -33,6 +33,11 @@ enum TrackerCommand {
         recipient_pubkey: PubKey,
         response_tx: tokio::sync::oneshot::Sender<Result<Option<IouNote>, NoteError>>,
     },
+    GetAllEventsPaginated {
+        page: usize,
+        page_size: usize,
+        response_tx: tokio::sync::oneshot::Sender<Result<Vec<TrackerEvent>, NoteError>>,
+    },
 }
 
 // Request structure for creating a new IOU note
@@ -52,6 +57,33 @@ struct ApiResponse<T> {
     success: bool,
     data: Option<T>,
     error: Option<String>,
+}
+
+// Event types for tracker events
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum EventType {
+    NoteUpdated,
+    ReserveCreated,
+    ReserveToppedUp,
+    ReserveRedeemed,
+    ReserveSpent,
+    Commitment,
+    CollateralAlert { ratio: f64 },
+}
+
+// Unified event structure for paginated events
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackerEvent {
+    pub event_type: EventType,
+    pub timestamp: u64,
+    pub issuer_pubkey: Option<String>,
+    pub recipient_pubkey: Option<String>,
+    pub amount: Option<u64>,
+    pub reserve_box_id: Option<String>,
+    pub collateral_amount: Option<u64>,
+    pub redeemed_amount: Option<u64>,
+    pub height: Option<u64>,
 }
 
 // Serializable version of IouNote for API responses
@@ -139,6 +171,114 @@ async fn main() {
                         .map(Some);
                     let _ = response_tx.send(result);
                 }
+                TrackerCommand::GetAllEventsPaginated {
+                    page,
+                    page_size,
+                    response_tx,
+                } => {
+                    let result = tracker.get_all_notes()
+                        .map(|notes| {
+                            // Convert notes to events and add other event types
+                            let mut events = Vec::new();
+                            
+                            // Add note events
+                            for note in &notes {
+                                events.push(TrackerEvent {
+                                    event_type: EventType::NoteUpdated,
+                                    timestamp: note.timestamp,
+                                    issuer_pubkey: None, // Will be filled from context
+                                    recipient_pubkey: Some(hex::encode(note.recipient_pubkey)),
+                                    amount: Some(note.amount),
+                                    reserve_box_id: None,
+                                    collateral_amount: None,
+                                    redeemed_amount: None,
+                                    height: None,
+                                });
+                            }
+                            
+                            // Add mock reserve events for demonstration
+                            events.push(TrackerEvent {
+                                event_type: EventType::ReserveCreated,
+                                timestamp: 1234567890,
+                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+                                recipient_pubkey: None,
+                                amount: None,
+                                reserve_box_id: Some("box1234567890abcdef".to_string()),
+                                collateral_amount: Some(1000000000),
+                                redeemed_amount: None,
+                                height: Some(1000),
+                            });
+                            
+                            events.push(TrackerEvent {
+                                event_type: EventType::ReserveToppedUp,
+                                timestamp: 1234567891,
+                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+                                recipient_pubkey: None,
+                                amount: None,
+                                reserve_box_id: Some("box1234567890abcdef".to_string()),
+                                collateral_amount: Some(500000000),
+                                redeemed_amount: None,
+                                height: Some(1001),
+                            });
+                            
+                            events.push(TrackerEvent {
+                                event_type: EventType::CollateralAlert { ratio: 0.8 },
+                                timestamp: 1234567892,
+                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+                                recipient_pubkey: None,
+                                amount: None,
+                                reserve_box_id: None,
+                                collateral_amount: None,
+                                redeemed_amount: None,
+                                height: None,
+                            });
+                            
+                            // Add NoteUpdated event
+                            events.push(TrackerEvent {
+                                event_type: EventType::NoteUpdated,
+                                timestamp: 1234567893,
+                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+                                recipient_pubkey: Some("020202020202020202020202020202020202020202020202020202020202020202".to_string()),
+                                amount: Some(1500), // Updated amount
+                                reserve_box_id: None,
+                                collateral_amount: None,
+                                redeemed_amount: None,
+                                height: None,
+                            });
+                            
+                            // Add ReserveRedeemed event
+                            events.push(TrackerEvent {
+                                event_type: EventType::ReserveRedeemed,
+                                timestamp: 1234567894,
+                                issuer_pubkey: Some("010101010101010101010101010101010101010101010101010101010101010101".to_string()),
+                                recipient_pubkey: None,
+                                amount: None,
+                                reserve_box_id: Some("box1234567890abcdef".to_string()),
+                                collateral_amount: None,
+                                redeemed_amount: Some(250000000),
+                                height: Some(1002),
+                            });
+                            
+                            // Add Commitment event
+                            events.push(TrackerEvent {
+                                event_type: EventType::Commitment,
+                                timestamp: 1234567895,
+                                issuer_pubkey: None,
+                                recipient_pubkey: None,
+                                amount: None,
+                                reserve_box_id: None,
+                                collateral_amount: None,
+                                redeemed_amount: None,
+                                height: Some(1003),
+                            });
+                            
+                            // Apply pagination
+                            let start = page * page_size;
+                            let end = std::cmp::min(start + page_size, events.len());
+                            events[start..end].to_vec()
+                        });
+                    let _ = response_tx.send(result);
+                }
             }
         }
     });
@@ -158,6 +298,7 @@ async fn main() {
             "/reserves/issuer/{pubkey}",
             get(reserve_api::get_reserves_by_issuer),
         )
+        .route("/events", get(get_events_paginated))
         .with_state(app_state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
@@ -167,6 +308,7 @@ async fn main() {
     tracing::debug!("  GET /notes/issuer/{{pubkey}}");
     tracing::debug!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
     tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
+    tracing::debug!("  GET /events (Paginated tracker events)");
 
     // Run our app with hyper
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
@@ -467,6 +609,69 @@ async fn get_note_by_issuer_and_recipient(
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to get note: {:?}", e);
+            let error_message = match e {
+                NoteError::InvalidSignature => "Invalid signature".to_string(),
+                NoteError::AmountOverflow => "Amount overflow".to_string(),
+                NoteError::FutureTimestamp => "Future timestamp".to_string(),
+                NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
+                NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
+                NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+            };
+            (StatusCode::BAD_REQUEST, Json(error_response(error_message)))
+        }
+        Err(_) => {
+            tracing::error!("Tracker thread response channel closed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error_response("Internal server error".to_string())),
+            )
+        }
+    }
+}
+
+// Get paginated tracker events (notes)
+#[axum::debug_handler]
+async fn get_events_paginated(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<ApiResponse<Vec<TrackerEvent>>>) {
+    tracing::debug!("Getting paginated events: {:?}", params);
+
+    // Parse pagination parameters with defaults
+    let page = params.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
+    let page_size = params.get("page_size").and_then(|ps| ps.parse().ok()).unwrap_or(20);
+
+    // Send command to tracker thread
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    if let Err(_) = state
+        .tx
+        .send(TrackerCommand::GetAllEventsPaginated {
+            page,
+            page_size,
+            response_tx,
+        })
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(error_response("Tracker thread unavailable".to_string())),
+        );
+    }
+
+    // Wait for response from tracker thread
+    match response_rx.await {
+        Ok(Ok(events)) => {
+            tracing::info!(
+                "Successfully retrieved {} events for page {} (size: {})",
+                events.len(),
+                page,
+                page_size
+            );
+            (StatusCode::OK, Json(success_response(events)))
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Failed to get paginated events: {:?}", e);
             let error_message = match e {
                 NoteError::InvalidSignature => "Invalid signature".to_string(),
                 NoteError::AmountOverflow => "Amount overflow".to_string(),

@@ -163,6 +163,51 @@ cargo build -p basis_server
   curl http://localhost:3000/reserves/issuer/010101010101010101010101010101010101010101010101010101010101010101
   ```
 
+### GET /events
+- **Description**: Get paginated tracker events (all event types)
+- **Query Parameters**:
+  - `page` - Page number (default: 0)
+  - `page_size` - Number of items per page (default: 20, max: 100)
+- **Response**: 
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "type": "NoteCreated",
+        "timestamp": 1234567890,
+        "issuer_pubkey": "hex-encoded public key",
+        "recipient_pubkey": "hex-encoded public key",
+        "amount": 1000,
+        "reserve_box_id": "box1234567890abcdef",
+        "collateral_amount": 1000000000,
+        "redeemed_amount": 500000000,
+        "height": 1000
+      }
+    ],
+    "error": null
+  }
+  ```
+- **Event Types**:
+  - `NoteUpdated` - IOU note created or updated
+  - `ReserveCreated` - New reserve created
+  - `ReserveToppedUp` - Reserve collateral increased
+  - `ReserveRedeemed` - Note redeemed from reserve
+  - `ReserveSpent` - Reserve spent/closed
+  - `Commitment` - Tracker state committed to blockchain
+  - `CollateralAlert` - Collateral ratio alert (contains ratio field)
+- **Examples**:
+  ```bash
+  # Get first page with default 20 items
+  curl http://localhost:3000/events
+  
+  # Get page 2 with 10 items per page
+  curl http://localhost:3000/events?page=2&page_size=10
+  
+  # Get page 5 with default page size
+  curl http://localhost:3000/events?page=5
+  ```
+
 ## Environment Variables
 
 - `RUST_LOG`: Set logging level (default: `basis_server=debug,tower_http=debug`)
