@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Test script for the create note endpoint
-# This demonstrates how to use the REST API
+# This demonstrates how to use the REST API with hex-encoded public keys and signatures
 
 echo "Testing Basis Tracker API create note endpoint"
 echo "============================================="
@@ -30,29 +30,29 @@ echo ""
 
 cat > /tmp/test_note.json << 'EOF'
 {
-  "recipient_pubkey": [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+  "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
   "amount": 1000,
   "timestamp": 1234567890,
-  "signature": [3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],
-  "issuer_pubkey": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+  "signature": "03030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303",
+  "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101"
 }
 EOF
 
 echo "Testing create note endpoint:"
-echo "Request payload:"
+echo "Request payload (hex-encoded):"
 cat /tmp/test_note.json
 echo ""
 echo ""
 
 echo "Response:"
-curl -X POST http://localhost:3000/notes \
-  -H "Content-Type: application/json" \
-  -d "$(cat /tmp/test_note.json)"
+echo "curl -X POST http://localhost:3000/notes \\\"
+echo "  -H \\\"Content-Type: application/json\\\" \\\"
+echo "  -d '$(cat /tmp/test_note.json)'"
 echo ""
 echo ""
 
 echo "Testing get notes by issuer endpoint:"
-curl http://localhost:3000/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101
+echo "curl http://localhost:3000/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101"
 
 echo ""
 echo ""

@@ -24,8 +24,20 @@ pub async fn create_note(
 ) -> (StatusCode, Json<ApiResponse<()>>) {
     tracing::debug!("Creating new note: {:?}", payload);
 
-    // Validate and convert Vec<u8> to fixed-size arrays
-    let recipient_pubkey: PubKey = match payload.recipient_pubkey.try_into() {
+    // Validate and convert hex-encoded strings to fixed-size arrays
+    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be hex-encoded".to_string(),
+                )),
+            )
+        }
+    };
+
+    let recipient_pubkey: PubKey = match recipient_pubkey_bytes.try_into() {
         Ok(arr) => arr,
         Err(_) => {
             return (
@@ -37,7 +49,17 @@ pub async fn create_note(
         }
     };
 
-    let signature: Signature = match payload.signature.try_into() {
+    let signature_bytes = match hex::decode(&payload.signature) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("signature must be hex-encoded".to_string())),
+            )
+        }
+    };
+
+    let signature: Signature = match signature_bytes.try_into() {
         Ok(arr) => arr,
         Err(_) => {
             return (
@@ -47,7 +69,17 @@ pub async fn create_note(
         }
     };
 
-    let issuer_pubkey: PubKey = match payload.issuer_pubkey.try_into() {
+    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("issuer_pubkey must be hex-encoded".to_string())),
+            )
+        }
+    };
+
+    let issuer_pubkey: PubKey = match issuer_pubkey_bytes.try_into() {
         Ok(arr) => arr,
         Err(_) => {
             return (

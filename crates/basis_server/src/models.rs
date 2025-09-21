@@ -2,14 +2,14 @@ use basis_store::IouNote;
 use serde::{Deserialize, Serialize};
 
 // Request structure for creating a new IOU note
-// Using Vec<u8> for arrays since fixed-size arrays don't implement Deserialize
+// Using hex-encoded strings for public keys and signature
 #[derive(Debug, Deserialize)]
 pub struct CreateNoteRequest {
-    pub recipient_pubkey: Vec<u8>,
+    pub recipient_pubkey: String,
     pub amount: u64,
     pub timestamp: u64,
-    pub signature: Vec<u8>,
-    pub issuer_pubkey: Vec<u8>,
+    pub signature: String,
+    pub issuer_pubkey: String,
 }
 
 // Response structure for API responses
