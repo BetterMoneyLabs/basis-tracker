@@ -1,19 +1,21 @@
 mod api;
+mod config;
 mod models;
 mod reserve_api;
 mod store;
 
 use axum::{routing::{get, post}, Router};
-use std::net::SocketAddr;
+use basis_store::ergo_scanner::NodeConfig;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{api::*, models::*, store::EventStore};
+use crate::{api::*, config::*, models::*, store::EventStore};
 
 // Application state that holds a channel to communicate with the tracker thread
 #[derive(Clone)]
 struct AppState {
     tx: tokio::sync::mpsc::Sender<TrackerCommand>,
     event_store: std::sync::Arc<EventStore>,
+    ergo_scanner: std::sync::Arc<basis_store::ergo_scanner::ErgoScanner>,
 }
 
 // Commands that can be sent to the tracker thread
@@ -36,6 +38,34 @@ enum TrackerCommand {
 
 #[tokio::main]
 async fn main() {
+    // Load configuration
+    let config = match AppConfig::load() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {}", e);
+            eprintln!("Using default configuration...");
+            AppConfig::load().unwrap_or_else(|_| {
+                // Fallback to hardcoded defaults if config loading fails completely
+                AppConfig {
+                    server: ServerConfig {
+                        host: "127.0.0.1".to_string(),
+                        port: 3000,
+                        database_url: Some("sqlite:data/basis.db".to_string()),
+                    },
+                    ergo: ErgoConfig {
+                        node: NodeConfig {
+                            url: "http://localhost:9053".to_string(),
+                            api_key: "".to_string(),
+                            timeout_secs: 30,
+                        },
+                        basis_contract_template: "".to_string(),
+                        start_height: 0,
+                    },
+                }
+            })
+        }
+    };
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
@@ -194,7 +224,9 @@ async fn main() {
         }
     }
     
-    let app_state = AppState { tx, event_store };
+    let basis_contract_bytes = config.basis_contract_bytes().unwrap_or_default();
+    let ergo_scanner = std::sync::Arc::new(basis_store::ergo_scanner::ErgoScanner::new(config.ergo_node_config(), basis_contract_bytes));
+    let app_state = AppState { tx, event_store, ergo_scanner };
 
     // Build our application with routes
     let app = Router::new()
@@ -222,7 +254,7 @@ async fn main() {
     tracing::debug!("  GET /events (Event polling)");
 
     // Run our app with hyper
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = config.socket_addr();
     tracing::debug!("listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

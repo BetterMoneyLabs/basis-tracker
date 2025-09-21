@@ -1,0 +1,13 @@
+[server]
+host = "127.0.0.1"
+port = 3000
+database_url = "sqlite:data/basis.db"
+
+[ergo]
+basis_contract_template = ""
+start_height = 0
+
+[ergo.node]
+url = "http://localhost:9053"
+api_key = ""
+timeout_secs = 30

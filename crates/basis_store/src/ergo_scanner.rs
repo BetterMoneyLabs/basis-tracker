@@ -1,7 +1,6 @@
 //! Ergo blockchain scanner for monitoring Basis reserve contracts
 //! Similar to ChainCash's approach but adapted for Basis
 
-use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

@@ -17,6 +17,10 @@ hex = "0.4"
 [dependencies.basis_store]
 path = "../basis_store"
 
+[dependencies.config]
+version = "0.13"
+features = ["toml"]
+
 [[bin]]
 name = "basis_server"
 path = "src/main.rs"
