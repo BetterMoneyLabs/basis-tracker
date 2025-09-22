@@ -19,6 +19,7 @@ struct AppState {
 }
 
 // Commands that can be sent to the tracker thread
+#[derive(Debug)]
 enum TrackerCommand {
     AddNote {
         issuer_pubkey: basis_store::PubKey,
@@ -38,7 +39,9 @@ enum TrackerCommand {
 
 #[tokio::main]
 async fn main() {
+    eprintln!("Starting basis server...");
     // Load configuration
+    eprintln!("Loading configuration...");
     let config = match AppConfig::load() {
         Ok(config) => config,
         Err(e) => {
@@ -66,11 +69,12 @@ async fn main() {
         }
     };
 
+    eprintln!("Configuration loaded successfully");
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
             std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "basis_server=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "basis_server=debug,tower_http=debug,axum=debug".into()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -82,9 +86,11 @@ async fn main() {
     tokio::task::spawn_blocking(move || {
         use basis_store::TrackerStateManager;
 
+        tracing::debug!("Tracker thread started");
         let mut tracker = TrackerStateManager::new();
 
         while let Some(cmd) = rx.blocking_recv() {
+            tracing::debug!("Tracker thread received command: {:?}", cmd);
             match cmd {
                 TrackerCommand::AddNote {
                     issuer_pubkey,
@@ -122,8 +128,12 @@ async fn main() {
         }
     });
 
+    eprintln!("Creating event store...");
     let event_store = match EventStore::new().await {
-        Ok(store) => std::sync::Arc::new(store),
+        Ok(store) => {
+            eprintln!("Event store created successfully");
+            std::sync::Arc::new(store)
+        },
         Err(e) => {
             tracing::error!("Failed to initialize event store: {:?}", e);
             std::process::exit(1);
@@ -218,34 +228,36 @@ async fn main() {
         },
     ];
     
+    eprintln!("Adding demo events...");
     for event in demo_events {
         if let Err(e) = event_store.add_event(event).await {
             tracing::warn!("Failed to add demo event: {:?}", e);
         }
     }
+    eprintln!("Demo events added successfully");
     
+    eprintln!("Creating ergo scanner...");
     let basis_contract_bytes = config.basis_contract_bytes().unwrap_or_default();
     let ergo_scanner = std::sync::Arc::new(basis_store::ergo_scanner::ErgoScanner::new(config.ergo_node_config(), basis_contract_bytes));
+    eprintln!("Ergo scanner created successfully");
     let app_state = AppState { tx, event_store, ergo_scanner };
+    eprintln!("App state created successfully");
 
     // Build our application with routes
+    eprintln!("Building router...");
     let app = Router::new()
         .route("/", get(root))
         .route("/notes", post(create_note))
         .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
-        .route(
-            "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",
-            get(get_note_by_issuer_and_recipient),
-        )
-        .route(
-            "/reserves/issuer/{pubkey}",
-            get(reserve_api::get_reserves_by_issuer),
-        )
-        .route("/events", get(get_events_paginated))
         .with_state(app_state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
+    eprintln!("Router built successfully");
     tracing::debug!("Registered routes:");
+    eprintln!("Registered routes:");
+    eprintln!("  GET /");
+    eprintln!("  POST /notes");
+    eprintln!("  GET /notes/issuer/{{pubkey}}");
     tracing::debug!("  GET /");
     tracing::debug!("  POST /notes");
     tracing::debug!("  GET /notes/issuer/{{pubkey}}");
@@ -256,7 +268,22 @@ async fn main() {
     // Run our app with hyper
     let addr = config.socket_addr();
     tracing::debug!("listening on {}", addr);
+    eprintln!("Starting server on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => {
+            eprintln!("Server listening on {}", addr);
+            listener
+        },
+        Err(e) => {
+            eprintln!("Failed to bind to {}: {}", addr, e);
+            std::process::exit(1);
+        }
+    };
+    
+    eprintln!("Starting axum server...");
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("Server error: {}", e);
+        std::process::exit(1);
+    };
 }

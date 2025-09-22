@@ -103,15 +103,25 @@ pub struct TrackerStateManager {
 impl TrackerStateManager {
     /// Create a new tracker state manager
     pub fn new() -> Self {
+        eprintln!("Creating TrackerStateManager...");
         let avl_state = avl_tree::AvlTreeState::new();
 
         // Use a temporary directory for storage (in real implementation, this would be configurable)
-        let storage = persistence::NoteStorage::open("./data/notes").unwrap_or_else(|_| {
-            // Fallback to in-memory storage if file storage fails
-            // In production, this should handle errors properly
-            panic!("Failed to initialize note storage");
-        });
+        eprintln!("Opening note storage...");
+        let storage = match persistence::NoteStorage::open("crates/basis_server/data/notes") {
+            Ok(storage) => {
+                eprintln!("Note storage opened successfully");
+                storage
+            },
+            Err(e) => {
+                eprintln!("Failed to initialize note storage: {:?}", e);
+                // Fallback to in-memory storage if file storage fails
+                // In production, this should handle errors properly
+                panic!("Failed to initialize note storage: {:?}", e);
+            }
+        };
 
+        eprintln!("TrackerStateManager created successfully");
         Self {
             avl_state,
             current_state: TrackerState {
@@ -130,15 +140,22 @@ impl TrackerStateManager {
 
         // Update AVL tree state
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
-        let value_bytes = [
-            &note.amount.to_be_bytes()[..],
-            &note.timestamp.to_be_bytes()[..],
-        ]
-        .concat();
+        
+        // Create value bytes matching persistence format
+        let mut value_bytes = Vec::new();
+        value_bytes.extend_from_slice(issuer_pubkey);
+        value_bytes.extend_from_slice(&note.amount.to_be_bytes());
+        value_bytes.extend_from_slice(&note.timestamp.to_be_bytes());
+        value_bytes.extend_from_slice(&note.signature);
+        value_bytes.extend_from_slice(&note.recipient_pubkey);
 
-        self.avl_state
-            .insert(key.to_bytes(), value_bytes)
-            .map_err(|e| NoteError::StorageError(e))?;
+        // Try to insert, if key already exists then update
+        if let Err(_e) = self.avl_state.insert(key.to_bytes(), value_bytes.clone()) {
+            // For any error, try to update instead (assuming key already exists)
+            self.avl_state
+                .update(key.to_bytes(), value_bytes)
+                .map_err(|e| NoteError::StorageError(e))?;
+        }
 
         self.update_state();
         Ok(())
