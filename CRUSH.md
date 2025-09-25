@@ -91,3 +91,4 @@
 - **Algorithm**: Replaced ECDSA-style with proper Schnorr signatures
 - **Compatibility**: Matches chaincash-rs and ErgoScript contract requirements
 - **Security**: Strong Fiat-Shamir transform with proper challenge computation
+- **Module structure**: Schnorr operations extracted to dedicated `schnorr.rs` module
