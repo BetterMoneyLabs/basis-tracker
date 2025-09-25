@@ -197,6 +197,7 @@ dependencies = [
  "fjall",
  "hex",
  "num-bigint",
+ "rand",
  "secp256k1",
  "serde",
  "serde_json",

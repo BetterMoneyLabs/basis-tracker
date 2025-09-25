@@ -3,16 +3,7 @@
 //! This module provides tools to verify that the Rust implementation matches
 //! the ErgoScript contract implementation exactly.
 
-use crate::{schnorr_verification_vectors, IouNote};
-use std::fs;
-use std::path::Path;
-
-/// Export test vectors to a file for cross-language testing
-pub fn export_test_vectors_to_file<P: AsRef<Path>>(path: P) -> Result<(), String> {
-    let json = schnorr_verification_vectors::export_test_vectors_json();
-    fs::write(path, json).map_err(|e| format!("Failed to write test vectors: {}", e))?;
-    Ok(())
-}
+use crate::IouNote;
 
 /// Run comprehensive cross-verification tests
 pub fn run_cross_verification_tests() -> Result<(), String> {

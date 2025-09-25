@@ -92,3 +92,50 @@
 - **Compatibility**: Matches chaincash-rs and ErgoScript contract requirements
 - **Security**: Strong Fiat-Shamir transform with proper challenge computation
 - **Module structure**: Schnorr operations extracted to dedicated `schnorr.rs` module
+
+## Ergo Blockchain Scanner
+
+### Scanner Implementation
+- **Mock-based scanner** that simulates blockchain scanning for testing
+- **ChainCash-rs inspired** architecture for real Ergo node integration
+- **Event-driven design** for processing reserve-related blockchain events
+- **Extensible framework** that can be upgraded to real HTTP-based scanning
+
+### Scanner Features
+- **Node configuration** for connecting to Ergo nodes
+- **Block height tracking** to monitor blockchain progress
+- **Event processing** for reserve creation, top-up, redemption, and spending
+- **Mock data generation** for testing without real blockchain connection
+
+### Usage Example
+```rust
+use basis_store::ergo_scanner::{ErgoScanner, NodeConfig};
+
+// Create scanner configuration
+let config = NodeConfig::default();
+let mut scanner = ErgoScanner::new(config);
+
+// Start scanning
+scanner.start_scanning().await.unwrap();
+
+// Process new blocks
+let events = scanner.process_new_blocks(900).await.unwrap();
+
+// Wait for next block
+scanner.wait_for_next_block().unwrap();
+
+// Stop scanning
+scanner.stop_scanning().await.unwrap();
+```
+
+### Event Types
+- **ReserveCreated**: New reserve box created on-chain
+- **ReserveToppedUp**: Existing reserve receives additional collateral
+- **ReserveRedeemed**: Debt redemption from reserve
+- **ReserveSpent**: Reserve box spent/closed
+
+### Future Enhancements
+- **Real HTTP integration** with Ergo node APIs
+- **Scan registration** for tracking specific contract templates
+- **Box parsing** for extracting reserve information from Ergo boxes
+- **Transaction analysis** for detecting reserve-related activity

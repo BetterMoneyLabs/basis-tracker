@@ -182,12 +182,7 @@ pub fn get_comprehensive_test_vectors() -> Vec<SchnorrVerificationVector> {
     ]
 }
 
-/// Export all test vectors as JSON for cross-language testing
-pub fn export_test_vectors_json() -> String {
-    let vectors = get_comprehensive_test_vectors();
-    let json_vectors: Vec<String> = vectors.iter().map(|v| v.to_json()).collect();
-    format!("[\n{}\n]", json_vectors.join(",\n"))
-}
+
 
 /// Run verification against all test vectors
 pub fn verify_all_test_vectors() -> Result<(), String> {
@@ -228,13 +223,5 @@ mod tests {
         // verify_all_test_vectors().unwrap();
     }
     
-    #[test]
-    fn test_json_export() {
-        let json = export_test_vectors_json();
-        assert!(json.contains("TV001"));
-        assert!(json.contains("TV002"));
-        assert!(json.contains("TV003"));
-        assert!(json.contains("TV004"));
-        assert!(json.contains("TV005"));
-    }
+
 }

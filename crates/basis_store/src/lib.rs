@@ -384,4 +384,4 @@ pub fn simple_hash(data: &[u8]) -> [u8; 32] {
 pub use reserve_tracker::{ExtendedReserveInfo, ReserveTracker, ReserveTrackerError};
 
 // Re-export ergo scanner types
-pub use ergo_scanner::{ErgoScanner, ErgoScannerError, NodeConfig, ReserveEvent};
+pub use ergo_scanner::{ErgoScanner, ErgoScannerError, NodeConfig, ReserveEvent, ErgoBox};

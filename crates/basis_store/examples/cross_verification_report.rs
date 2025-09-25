@@ -16,10 +16,5 @@ fn main() {
         Err(e) => println!("❌ Cross-verification failed: {}", e),
     }
     
-    // Export test vectors
-    println!("\nExporting test vectors for cross-language testing...");
-    match cross_verification::export_test_vectors_to_file("basis_schnorr_test_vectors.json") {
-        Ok(()) => println!("✅ Test vectors exported to basis_schnorr_test_vectors.json"),
-        Err(e) => println!("❌ Failed to export test vectors: {}", e),
-    }
+    println!("\nCross-verification complete. Test vectors are generated programmatically in the code.");
 }

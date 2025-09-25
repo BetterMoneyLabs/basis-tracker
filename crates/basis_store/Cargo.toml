@@ -17,9 +17,10 @@ tracing = { workspace = true }
 tempfile = "3.10.0"
 hex = "0.4"
 thiserror = "1.0"
-tokio = { version = "1.0", features = ["rt", "macros", "rt-multi-thread"] }
+tokio = { version = "1.0", features = ["rt", "macros", "rt-multi-thread", "time"] }
 secp256k1 = { version = "0.27", features = ["rand-std"] }
 blake2 = { workspace = true }
 # ergo-lib = { workspace = true, features = ["compiler"] }
+# ergo_client = { workspace = true }
 num-bigint = "0.4.6"
-# rand = "0.8"
+rand = "0.8"
