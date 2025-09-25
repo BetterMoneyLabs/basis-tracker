@@ -23,8 +23,8 @@ impl AvlTreeState {
     /// Create a new AVL tree state
     pub fn new() -> Self {
         // Create an AVL tree with appropriate parameters
-        // Value length: issuer_pubkey(33) + amount(8) + timestamp(8) + signature(64) + recipient_pubkey(33) = 146 bytes
-        let tree = AVLTree::new(simple_resolver, 64, Some(146));
+        // Value length: issuer_pubkey(33) + amount(8) + timestamp(8) + signature(65) + recipient_pubkey(33) = 147 bytes
+        let tree = AVLTree::new(simple_resolver, 64, Some(147));
         let prover = BatchAVLProver::new(tree, true);
 
         Self { prover }

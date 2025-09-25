@@ -55,7 +55,7 @@ impl NoteStorage {
         match self.partition.get(&key_bytes) {
             Ok(Some(value_bytes)) => {
                 // Manual deserialization
-                if value_bytes.len() != 33 + 8 + 8 + 64 + 33 {
+                if value_bytes.len() != 33 + 8 + 8 + 65 + 33 {
                     return Err(NoteError::StorageError(
                         "Invalid stored note format".to_string(),
                     ));
@@ -74,8 +74,8 @@ impl NoteStorage {
                     u64::from_be_bytes(value_bytes[offset..offset + 8].try_into().unwrap());
                 offset += 8;
 
-                let signature: [u8; 64] = value_bytes[offset..offset + 64].try_into().unwrap();
-                offset += 64;
+                let signature: [u8; 65] = value_bytes[offset..offset + 65].try_into().unwrap();
+                offset += 65;
 
                 let recipient_pubkey: PubKey = value_bytes[offset..offset + 33].try_into().unwrap();
 
@@ -128,7 +128,7 @@ impl NoteStorage {
             })?;
 
             // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 64 + 33 {
+            if value_bytes.len() != 33 + 8 + 8 + 65 + 33 {
                 continue; // Skip invalid entries
             }
 
@@ -137,8 +137,8 @@ impl NoteStorage {
             if stored_issuer_pubkey == *issuer_pubkey {
                 let amount = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
                 let timestamp = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-                let signature: [u8; 64] = value_bytes[49..113].try_into().unwrap();
-                let recipient_pubkey: PubKey = value_bytes[113..146].try_into().unwrap();
+                let signature: [u8; 65] = value_bytes[49..114].try_into().unwrap();
+                let recipient_pubkey: PubKey = value_bytes[114..147].try_into().unwrap();
 
                 let note = IouNote {
                     recipient_pubkey,
@@ -167,16 +167,16 @@ impl NoteStorage {
             })?;
 
             // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 64 + 33 {
+            if value_bytes.len() != 33 + 8 + 8 + 65 + 33 {
                 continue; // Skip invalid entries
             }
 
-            let note_recipient_pubkey: PubKey = value_bytes[113..146].try_into().unwrap();
+            let note_recipient_pubkey: PubKey = value_bytes[114..147].try_into().unwrap();
 
             if note_recipient_pubkey == *recipient_pubkey {
                 let amount = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
                 let timestamp = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-                let signature: [u8; 64] = value_bytes[49..113].try_into().unwrap();
+                let signature: [u8; 65] = value_bytes[49..114].try_into().unwrap();
 
                 let note = IouNote {
                     recipient_pubkey: note_recipient_pubkey,
@@ -202,14 +202,14 @@ impl NoteStorage {
             })?;
 
             // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 64 + 33 {
+            if value_bytes.len() != 33 + 8 + 8 + 65 + 33 {
                 continue; // Skip invalid entries
             }
 
             let amount = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
             let timestamp = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-            let signature: [u8; 64] = value_bytes[49..113].try_into().unwrap();
-            let recipient_pubkey: PubKey = value_bytes[113..146].try_into().unwrap();
+            let signature: [u8; 65] = value_bytes[49..114].try_into().unwrap();
+            let recipient_pubkey: PubKey = value_bytes[114..147].try_into().unwrap();
 
             let note = IouNote {
                 recipient_pubkey,
