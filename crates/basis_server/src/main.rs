@@ -15,7 +15,6 @@ use crate::{api::*, config::*, models::*, store::EventStore};
 struct AppState {
     tx: tokio::sync::mpsc::Sender<TrackerCommand>,
     event_store: std::sync::Arc<EventStore>,
-    ergo_scanner: std::sync::Arc<basis_store::ergo_scanner::ErgoScanner>,
 }
 
 // Commands that can be sent to the tracker thread
@@ -60,6 +59,8 @@ async fn main() {
                             url: "http://localhost:9053".to_string(),
                             api_key: "".to_string(),
                             timeout_secs: 30,
+                            start_height: None,
+                            contract_template: None,
                         },
                         basis_contract_template: "".to_string(),
                         start_height: 0,
@@ -236,11 +237,7 @@ async fn main() {
     }
     eprintln!("Demo events added successfully");
     
-    eprintln!("Creating ergo scanner...");
-    let basis_contract_bytes = config.basis_contract_bytes().unwrap_or_default();
-    let ergo_scanner = std::sync::Arc::new(basis_store::ergo_scanner::ErgoScanner::new(config.ergo_node_config(), basis_contract_bytes));
-    eprintln!("Ergo scanner created successfully");
-    let app_state = AppState { tx, event_store, ergo_scanner };
+    let app_state = AppState { tx, event_store };
     eprintln!("App state created successfully");
 
     // Build our application with routes
