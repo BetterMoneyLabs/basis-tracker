@@ -1,0 +1,499 @@
+openapi: 3.0.3
+info:
+  title: Basis Tracker API
+  description: HTTP API for Basis Tracker - a decentralized debt issuance and tracking system
+  version: 1.0.0
+  contact:
+    name: Basis Tracker Team
+    url: https://github.com/bml/basis-tracker
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+
+paths:
+  /:
+    get:
+      summary: Health check endpoint
+      description: Returns a simple message to verify the API is running
+      operationId: root
+      responses:
+        '200':
+          description: Successful response
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Hello, Basis Tracker API!"
+
+  /notes:
+    post:
+      summary: Create a new IOU note
+      description: Creates a new IOU note with the specified parameters. The note must be signed by the issuer.
+      operationId: createNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNoteRequest'
+      responses:
+        '201':
+          description: Note created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseEmpty'
+        '400':
+          description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /notes/issuer/{pubkey}:
+    get:
+      summary: Get notes by issuer
+      description: Retrieve all IOU notes issued by a specific public key
+      operationId: getNotesByIssuer
+      parameters:
+        - name: pubkey
+          in: path
+          required: true
+          description: Hex-encoded issuer public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "010101010101010101010101010101010101010101010101010101010101010101"
+      responses:
+        '200':
+          description: Successfully retrieved notes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseNotes'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}:
+    get:
+      summary: Get specific note by issuer and recipient
+      description: Retrieve a specific IOU note between an issuer and recipient
+      operationId: getNoteByIssuerAndRecipient
+      parameters:
+        - name: issuer_pubkey
+          in: path
+          required: true
+          description: Hex-encoded issuer public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "010101010101010101010101010101010101010101010101010101010101010101"
+        - name: recipient_pubkey
+          in: path
+          required: true
+          description: Hex-encoded recipient public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "020202020202020202020202020202020202020202020202020202020202020202"
+      responses:
+        '200':
+          description: Successfully retrieved note
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseNote'
+        '404':
+          description: Note not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseEmpty'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /reserves/issuer/{pubkey}:
+    get:
+      summary: Get reserves by issuer
+      description: Retrieve all reserves managed by a specific issuer
+      operationId: getReservesByIssuer
+      parameters:
+        - name: pubkey
+          in: path
+          required: true
+          description: Hex-encoded issuer public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "010101010101010101010101010101010101010101010101010101010101010101"
+      responses:
+        '200':
+          description: Successfully retrieved reserves
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserves'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /events:
+    get:
+      summary: Get paginated tracker events
+      description: Retrieve paginated tracker events including note updates, reserve changes, and system events
+      operationId: getEventsPaginated
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: Page number (0-indexed)
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: page_size
+          in: query
+          required: false
+          description: Number of items per page (max 100)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Successfully retrieved events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseEvents'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+components:
+  schemas:
+    # Request/Response Structures
+    CreateNoteRequest:
+      type: object
+      required:
+        - recipient_pubkey
+        - amount
+        - timestamp
+        - signature
+        - issuer_pubkey
+      properties:
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        amount:
+          type: integer
+          format: uint64
+          description: Amount of debt in the note
+          minimum: 0
+          example: 1000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Unix timestamp when the note was created
+          minimum: 0
+          example: 1234567890
+        signature:
+          type: string
+          description: Hex-encoded Schnorr signature (130 characters)
+          pattern: '^[0-9a-fA-F]{130}$'
+          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+
+    SerializableIouNote:
+      type: object
+      description: Serializable IOU note for API responses
+      properties:
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        amount:
+          type: integer
+          format: uint64
+          description: Amount of debt
+          example: 1000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Creation timestamp
+          example: 1234567890
+        signature:
+          type: string
+          description: Hex-encoded Schnorr signature
+          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+
+    SerializableReserveInfo:
+      type: object
+      description: Serializable reserve information
+      properties:
+        box_id:
+          type: string
+          description: Hex-encoded reserve box ID
+          example: "f1e2d3c4b5a697887766554433221100ffeeddccbbaa99887766554433221100"
+        owner_pubkey:
+          type: string
+          description: Hex-encoded owner public key
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        collateral_amount:
+          type: integer
+          format: uint64
+          description: Amount of collateral in nanoERG
+          example: 2500000000
+        total_debt:
+          type: integer
+          format: uint64
+          description: Total debt issued against this reserve
+          example: 1200000000
+        tracker_nft_id:
+          type: string
+          nullable: true
+          description: Optional tracker NFT ID
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+        last_updated_height:
+          type: integer
+          format: uint64
+          description: Last blockchain height when reserve was updated
+          example: 1250
+        last_updated_timestamp:
+          type: integer
+          format: uint64
+          description: Last update timestamp
+          example: 1672531200
+        collateralization_ratio:
+          type: number
+          format: float
+          description: Current collateralization ratio
+          example: 2.08
+
+    EventType:
+      type: string
+      description: Type of tracker event
+      enum:
+        - NoteUpdated
+        - ReserveCreated
+        - ReserveToppedUp
+        - ReserveRedeemed
+        - ReserveSpent
+        - Commitment
+        - CollateralAlert
+
+    TrackerEvent:
+      type: object
+      description: Unified tracker event structure
+      properties:
+        id:
+          type: integer
+          format: uint64
+          description: Event ID
+          example: 1
+        type:
+          $ref: '#/components/schemas/EventType'
+        timestamp:
+          type: integer
+          format: uint64
+          description: Event timestamp
+          example: 1234567890
+        issuer_pubkey:
+          type: string
+          nullable: true
+          description: Hex-encoded issuer public key
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          nullable: true
+          description: Hex-encoded recipient public key
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        amount:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Amount involved in the event
+          example: 1000
+        reserve_box_id:
+          type: string
+          nullable: true
+          description: Reserve box ID for reserve events
+          example: "box1234567890abcdef"
+        collateral_amount:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Collateral amount for reserve events
+          example: 1000000000
+        redeemed_amount:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Redeemed amount for redemption events
+          example: 500000000
+        height:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Blockchain height when event occurred
+          example: 1000
+
+    # API Response Wrappers
+    ApiResponse:
+      type: object
+      description: Standard API response format
+      properties:
+        success:
+          type: boolean
+          description: Whether the request was successful
+        data:
+          type: object
+          nullable: true
+          description: Response data (null for error responses)
+        error:
+          type: string
+          nullable: true
+          description: Error message (null for successful responses)
+
+    ApiResponseEmpty:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: object
+              nullable: true
+              example: null
+
+    ApiResponseError:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            success:
+              type: boolean
+              example: false
+            data:
+              type: object
+              nullable: true
+              example: null
+            error:
+              type: string
+              example: "Invalid signature"
+
+    ApiResponseNotes:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/SerializableIouNote'
+
+    ApiResponseNote:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/SerializableIouNote'
+
+    ApiResponseReserves:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/SerializableReserveInfo'
+
+    ApiResponseEvents:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/TrackerEvent'
+
+  responses:
+    BadRequest:
+      description: Bad request - invalid input parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponseError'
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponseError'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponseEmpty'
+
+tags:
+  - name: Health
+    description: Health check endpoints
+  - name: Notes
+    description: IOU note management
+  - name: Reserves
+    description: Reserve tracking and management
+  - name: Events
+    description: Tracker event monitoring
