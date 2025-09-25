@@ -322,7 +322,7 @@ impl IouNote {
         let message = schnorr::signing_message(&recipient_pubkey, amount, timestamp);
         
         // Use the chaincash-rs approach for Schnorr signing
-        let signature = schnorr::schnorr_sign(&message, &secret_key, &issuer_pubkey);
+        let signature = schnorr::schnorr_sign(&message, &secret_key, &issuer_pubkey)?;
         
         Ok(Self {
             recipient_pubkey,
@@ -344,6 +344,12 @@ impl IouNote {
     /// Verify the signature against an issuer public key using Schnorr signature verification
     /// This follows the chaincash-rs approach for Schnorr signature verification
     pub fn verify_signature(&self, issuer_pubkey: &PubKey) -> Result<(), NoteError> {
+        // Validate the issuer public key first
+        schnorr::validate_public_key(issuer_pubkey)?;
+        
+        // Validate the signature format
+        schnorr::validate_signature_format(&self.signature)?;
+        
         // Generate the signing message
         let message = self.signing_message();
         
