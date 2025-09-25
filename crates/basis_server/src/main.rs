@@ -246,6 +246,11 @@ async fn main() {
         .route("/", get(root))
         .route("/notes", post(create_note))
         .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
+        .route("/events", get(get_events))
+        .route("/events/paginated", get(get_events_paginated))
+        .route("/key-status/{pubkey}", get(get_key_status))
+        .route("/redeem", post(initiate_redemption))
+        .route("/proof", get(get_proof))
         .with_state(app_state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
@@ -255,9 +260,19 @@ async fn main() {
     eprintln!("  GET /");
     eprintln!("  POST /notes");
     eprintln!("  GET /notes/issuer/{{pubkey}}");
+    eprintln!("  GET /events");
+    eprintln!("  GET /events/paginated");
+    eprintln!("  GET /key-status/{{pubkey}}");
+    eprintln!("  POST /redeem");
+    eprintln!("  GET /proof");
     tracing::debug!("  GET /");
     tracing::debug!("  POST /notes");
     tracing::debug!("  GET /notes/issuer/{{pubkey}}");
+    tracing::debug!("  GET /events");
+    tracing::debug!("  GET /events/paginated");
+    tracing::debug!("  GET /key-status/{{pubkey}}");
+    tracing::debug!("  POST /redeem");
+    tracing::debug!("  GET /proof");
     tracing::debug!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
     tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
     tracing::debug!("  GET /events (Event polling)");

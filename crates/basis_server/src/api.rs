@@ -6,7 +6,7 @@ use axum::{
 use std::collections::HashMap;
 
 use crate::{
-    models::{ApiResponse, CreateNoteRequest, SerializableIouNote, TrackerEvent},
+    models::{ApiResponse, CreateNoteRequest, SerializableIouNote, TrackerEvent, KeyStatusResponse, RedeemRequest, RedeemResponse, ProofResponse},
     AppState,
 };
 use basis_store::{IouNote, NoteError, PubKey, Signature};
@@ -497,4 +497,195 @@ pub async fn get_events_paginated(
     );
     
     (StatusCode::OK, Json(crate::models::success_response(events)))
+}
+
+// Get recent tracker events (simple events endpoint)
+#[axum::debug_handler]
+pub async fn get_events(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<Vec<TrackerEvent>>>) {
+    tracing::debug!("Getting recent events");
+
+    // Get recent events (last 50 events by default)
+    let events = match state.event_store.get_events_paginated(0, 50).await {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::error!("Failed to retrieve events: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response("Failed to retrieve events".to_string())),
+            );
+        }
+    };
+    
+    tracing::info!("Successfully retrieved {} recent events", events.len());
+    
+    (StatusCode::OK, Json(crate::models::success_response(events)))
+}
+
+// Get key status information
+#[axum::debug_handler]
+pub async fn get_key_status(
+    State(state): State<AppState>,
+    axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
+) -> (StatusCode, Json<ApiResponse<KeyStatusResponse>>) {
+    tracing::debug!("Getting key status for: {}", pubkey_hex);
+
+    // Decode hex string to bytes
+    let pubkey_bytes = match hex::decode(&pubkey_hex) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("Invalid hex encoding".to_string())),
+            )
+        }
+    };
+
+    // Convert to fixed-size array
+    let pubkey: basis_store::PubKey = match pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("Public key must be 33 bytes".to_string())),
+            )
+        }
+    };
+
+    // In a real implementation, this would:
+    // 1. Get total debt from note storage
+    // 2. Get collateral from reserve tracker
+    // 3. Calculate collateralization ratio
+    // 4. Return comprehensive status
+
+    // Mock implementation for now
+    let status = KeyStatusResponse {
+        total_debt: 1500000000, // 1.5 ERG
+        collateral: 3000000000, // 3.0 ERG
+        collateralization_ratio: 2.0,
+        note_count: 5,
+        last_updated: 1672531200, // Jan 1, 2023
+        issuer_pubkey: pubkey_hex.clone(),
+    };
+
+    tracing::info!("Returning key status for {}", pubkey_hex);
+    
+    (StatusCode::OK, Json(crate::models::success_response(status)))
+}
+
+// Initiate redemption process
+#[axum::debug_handler]
+pub async fn initiate_redemption(
+    State(_state): State<AppState>,
+    Json(payload): Json<RedeemRequest>,
+) -> (StatusCode, Json<ApiResponse<RedeemResponse>>) {
+    tracing::debug!("Initiating redemption: {:?}", payload);
+
+    // Validate input parameters
+    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("Invalid issuer_pubkey hex encoding".to_string())),
+            )
+        }
+    };
+
+    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("Invalid recipient_pubkey hex encoding".to_string())),
+            )
+        }
+    };
+
+    let _issuer_pubkey: basis_store::PubKey = match issuer_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("issuer_pubkey must be 33 bytes".to_string())),
+            )
+        }
+    };
+
+    let _recipient_pubkey: basis_store::PubKey = match recipient_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("recipient_pubkey must be 33 bytes".to_string())),
+            )
+        }
+    };
+
+    // In a real implementation, this would:
+    // 1. Verify the note exists and is valid
+    // 2. Generate redemption proof
+    // 3. Create redemption transaction
+    // 4. Return redemption information
+
+    // Mock implementation for now
+    let response = RedeemResponse {
+        redemption_id: format!("redeem_{}_{}", &payload.issuer_pubkey[..16], &payload.recipient_pubkey[..16]),
+        amount: payload.amount,
+        timestamp: payload.timestamp,
+        proof_available: true,
+        transaction_pending: false,
+    };
+
+    tracing::info!("Redemption initiated for {} -> {}", payload.issuer_pubkey, payload.recipient_pubkey);
+    
+    (StatusCode::OK, Json(crate::models::success_response(response)))
+}
+
+// Get proof for a specific note
+#[axum::debug_handler]
+pub async fn get_proof(
+    State(_state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<ApiResponse<ProofResponse>>) {
+    tracing::debug!("Getting proof with params: {:?}", params);
+
+    let empty_string = "".to_string();
+    let issuer_pubkey = params.get("issuer_pubkey").unwrap_or(&empty_string);
+    let recipient_pubkey = params.get("recipient_pubkey").unwrap_or(&empty_string);
+
+    if issuer_pubkey.is_empty() || recipient_pubkey.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response("issuer_pubkey and recipient_pubkey parameters are required".to_string())),
+        );
+    }
+
+    // Validate hex encoding
+    if hex::decode(issuer_pubkey).is_err() || hex::decode(recipient_pubkey).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response("Invalid hex encoding for public keys".to_string())),
+        );
+    }
+
+    // In a real implementation, this would:
+    // 1. Generate AVL tree proof for the note
+    // 2. Include tracker state commitment
+    // 3. Return the complete proof
+
+    // Mock implementation for now
+    let proof = ProofResponse {
+        issuer_pubkey: issuer_pubkey.clone(),
+        recipient_pubkey: recipient_pubkey.clone(),
+        proof_data: format!("proof_{}_{}", &issuer_pubkey[..16], &recipient_pubkey[..16]),
+        tracker_state_digest: "mock_digest_1234567890abcdef".to_string(),
+        block_height: 1500,
+        timestamp: 1672531200,
+    };
+
+    tracing::info!("Proof generated for {} -> {}", issuer_pubkey, recipient_pubkey);
+    
+    (StatusCode::OK, Json(crate::models::success_response(proof)))
 }

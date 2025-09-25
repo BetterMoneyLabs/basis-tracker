@@ -25,8 +25,7 @@ struct SchnorrTestVector {
 
 /// Generate test vectors that use Schnorr signature format
 fn get_test_vectors() -> Vec<SchnorrTestVector> {
-    use secp256k1::{PublicKey, Secp256k1, SecretKey};
-    use blake2::{Blake2b512, Digest};
+    use secp256k1::{Secp256k1, SecretKey};
 
     let secp = Secp256k1::new();
     

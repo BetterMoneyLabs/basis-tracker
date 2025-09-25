@@ -1,7 +1,9 @@
 //! Core data structures for Basis tracker
 
 pub mod avl_tree;
+pub mod contract_compiler;
 pub mod ergo_scanner;
+pub mod ergo_scanner_test;
 pub mod persistence;
 pub mod reserve_tracker;
 pub mod tests;

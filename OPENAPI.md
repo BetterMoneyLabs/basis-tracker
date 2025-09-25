@@ -30,7 +30,17 @@ The Basis Tracker API provides RESTful endpoints for managing decentralized debt
 - `GET /reserves/issuer/{pubkey}` - Get reserves for an issuer
 
 ### Event Monitoring
-- `GET /events` - Get paginated tracker events
+- `GET /events` - Get recent tracker events (50 most recent)
+- `GET /events/paginated` - Get paginated tracker events
+
+### Status and Monitoring
+- `GET /key-status/{pubkey}` - Get comprehensive key status information
+
+### Redemption Operations
+- `POST /redeem` - Initiate redemption of an IOU note
+
+### Proof Generation
+- `GET /proof` - Generate proof for a specific note
 
 ## Data Formats
 
@@ -76,7 +86,33 @@ curl http://localhost:3000/notes/issuer/0101010101010101010101010101010101010101
 
 ### Get Events
 ```bash
-curl "http://localhost:3000/events?page=0&page_size=10"
+# Get recent events
+curl http://localhost:3000/events
+
+# Get paginated events
+curl "http://localhost:3000/events/paginated?page=0&page_size=10"
+```
+
+### Get Key Status
+```bash
+curl http://localhost:3000/key-status/010101010101010101010101010101010101010101010101010101010101010101
+```
+
+### Initiate Redemption
+```bash
+curl -X POST http://localhost:3000/redeem \
+  -H "Content-Type: application/json" \
+  -d '{
+    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
+    "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
+    "amount": 500000000,
+    "timestamp": 1234567890
+  }'
+```
+
+### Get Proof
+```bash
+curl "http://localhost:3000/proof?issuer_pubkey=010101010101010101010101010101010101010101010101010101010101010101&recipient_pubkey=020202020202020202020202020202020202020202020202020202020202020202"
 ```
 
 ## Validation

@@ -68,6 +68,47 @@ impl From<IouNote> for SerializableIouNote {
     }
 }
 
+// Key status response
+#[derive(Debug, Serialize)]
+pub struct KeyStatusResponse {
+    pub total_debt: u64,
+    pub collateral: u64,
+    pub collateralization_ratio: f64,
+    pub note_count: usize,
+    pub last_updated: u64,
+    pub issuer_pubkey: String,
+}
+
+// Redemption request
+#[derive(Debug, Deserialize)]
+pub struct RedeemRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub amount: u64,
+    pub timestamp: u64,
+}
+
+// Redemption response
+#[derive(Debug, Serialize)]
+pub struct RedeemResponse {
+    pub redemption_id: String,
+    pub amount: u64,
+    pub timestamp: u64,
+    pub proof_available: bool,
+    pub transaction_pending: bool,
+}
+
+// Proof response
+#[derive(Debug, Serialize)]
+pub struct ProofResponse {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub proof_data: String,
+    pub tracker_state_digest: String,
+    pub block_height: u64,
+    pub timestamp: u64,
+}
+
 // Success response helper
 pub fn success_response<T>(data: T) -> ApiResponse<T> {
     ApiResponse {

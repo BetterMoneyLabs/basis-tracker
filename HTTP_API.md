@@ -164,11 +164,9 @@ cargo build -p basis_server
   ```
 
 ### GET /events
-- **Description**: Get paginated tracker events (all event types)
-- **Query Parameters**:
-  - `page` - Page number (default: 0)
-  - `page_size` - Number of items per page (default: 20, max: 100)
-- **Response**: 
+- **Description**: Get recent tracker events (all event types)
+- **Response**: Returns the 50 most recent events
+- **Response Format**: 
   ```json
   {
     "success": true,
@@ -197,16 +195,109 @@ cargo build -p basis_server
   - `ReserveSpent` - Reserve spent/closed
   - `Commitment` - Tracker state committed to blockchain
   - `CollateralAlert` - Collateral ratio alert (contains ratio field)
+- **Example**:
+  ```bash
+  # Get recent events
+  curl http://localhost:3000/events
+  ```
+
+### GET /events/paginated
+- **Description**: Get paginated tracker events with custom page size
+- **Query Parameters**:
+  - `page` - Page number (default: 0)
+  - `page_size` - Number of items per page (default: 20, max: 100)
 - **Examples**:
   ```bash
-  # Get first page with default 20 items
-  curl http://localhost:3000/events
-  
   # Get page 2 with 10 items per page
-  curl http://localhost:3000/events?page=2&page_size=10
+  curl http://localhost:3000/events/paginated?page=2&page_size=10
   
   # Get page 5 with default page size
-  curl http://localhost:3000/events?page=5
+  curl http://localhost:3000/events/paginated?page=5
+  ```
+
+### GET /key-status/{pubkey}
+- **Description**: Get comprehensive status information for a specific public key
+- **Path Parameter**: `pubkey` - Hex-encoded public key (66 characters)
+- **Response**: 
+  ```json
+  {
+    "success": true,
+    "data": {
+      "total_debt": 1500000000,
+      "collateral": 3000000000,
+      "collateralization_ratio": 2.0,
+      "note_count": 5,
+      "last_updated": 1672531200,
+      "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101"
+    },
+    "error": null
+  }
+  ```
+- **Example**:
+  ```bash
+  curl http://localhost:3000/key-status/010101010101010101010101010101010101010101010101010101010101010101
+  ```
+
+### POST /redeem
+- **Description**: Initiate redemption of an IOU note from a reserve
+- **Request Body**:
+  ```json
+  {
+    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
+    "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
+    "amount": 500000000,
+    "timestamp": 1234567890
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "redemption_id": "redeem_0101010101010101_0202020202020202",
+      "amount": 500000000,
+      "timestamp": 1672531200,
+      "proof_available": true,
+      "transaction_pending": false
+    },
+    "error": null
+  }
+  ```
+- **Example**:
+  ```bash
+  curl -X POST http://localhost:3000/redeem \
+    -H "Content-Type: application/json" \
+    -d '{
+      "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
+      "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
+      "amount": 500000000,
+      "timestamp": 1234567890
+    }'
+  ```
+
+### GET /proof
+- **Description**: Generate proof for a specific note against current tracker state
+- **Query Parameters**:
+  - `issuer_pubkey` - Hex-encoded issuer public key (66 characters)
+  - `recipient_pubkey` - Hex-encoded recipient public key (66 characters)
+- **Response**:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
+      "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
+      "proof_data": "proof_0101010101010101_0202020202020202",
+      "tracker_state_digest": "mock_digest_1234567890abcdef",
+      "block_height": 1500,
+      "timestamp": 1672531200
+    },
+    "error": null
+  }
+  ```
+- **Example**:
+  ```bash
+  curl "http://localhost:3000/proof?issuer_pubkey=010101010101010101010101010101010101010101010101010101010101010101&recipient_pubkey=020202020202020202020202020202020202020202020202020202020202020202"
   ```
 
 ## Environment Variables

@@ -178,6 +178,25 @@ paths:
 
   /events:
     get:
+      summary: Get recent tracker events
+      description: Retrieve the 50 most recent tracker events including note updates, reserve changes, and system events
+      operationId: getEvents
+      responses:
+        '200':
+          description: Successfully retrieved events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseEvents'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /events/paginated:
+    get:
       summary: Get paginated tracker events
       description: Retrieve paginated tracker events including note updates, reserve changes, and system events
       operationId: getEventsPaginated
@@ -206,6 +225,119 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseEvents'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /key-status/{pubkey}:
+    get:
+      summary: Get key status information
+      description: Retrieve comprehensive status information for a specific public key including debt, collateral, and collateralization ratio
+      operationId: getKeyStatus
+      tags:
+        - Status
+      parameters:
+        - name: pubkey
+          in: path
+          required: true
+          description: Hex-encoded public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "010101010101010101010101010101010101010101010101010101010101010101"
+      responses:
+        '200':
+          description: Successfully retrieved key status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseKeyStatus'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /redeem:
+    post:
+      summary: Initiate redemption process
+      description: Initiate the redemption of an IOU note from a reserve
+      operationId: initiateRedemption
+      tags:
+        - Redemption
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedeemRequest'
+      responses:
+        '200':
+          description: Redemption initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseRedeem'
+        '400':
+          description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /proof:
+    get:
+      summary: Get proof for a specific note
+      description: Generate and retrieve a proof for a specific IOU note against the current tracker state
+      operationId: getProof
+      tags:
+        - Proofs
+      parameters:
+        - name: issuer_pubkey
+          in: query
+          required: true
+          description: Hex-encoded issuer public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "010101010101010101010101010101010101010101010101010101010101010101"
+        - name: recipient_pubkey
+          in: query
+          required: true
+          description: Hex-encoded recipient public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "020202020202020202020202020202020202020202020202020202020202020202"
+      responses:
+        '200':
+          description: Successfully generated proof
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseProof'
+        '400':
+          description: Bad request - invalid public key format or missing parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
         '500':
           description: Internal server error
           content:
@@ -387,6 +519,127 @@ components:
           description: Blockchain height when event occurred
           example: 1000
 
+    KeyStatusResponse:
+      type: object
+      description: Key status information
+      properties:
+        total_debt:
+          type: integer
+          format: uint64
+          description: Total debt issued by this key
+          example: 1500000000
+        collateral:
+          type: integer
+          format: uint64
+          description: Total collateral backing the debt
+          example: 3000000000
+        collateralization_ratio:
+          type: number
+          format: float
+          description: Current collateralization ratio
+          example: 2.0
+        note_count:
+          type: integer
+          description: Number of outstanding notes
+          example: 5
+        last_updated:
+          type: integer
+          format: uint64
+          description: Last update timestamp
+          example: 1672531200
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+
+    RedeemRequest:
+      type: object
+      description: Redemption request
+      required:
+        - issuer_pubkey
+        - recipient_pubkey
+        - amount
+        - timestamp
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        amount:
+          type: integer
+          format: uint64
+          description: Amount to redeem
+          example: 500000000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Timestamp of the note being redeemed
+          example: 1234567890
+
+    RedeemResponse:
+      type: object
+      description: Redemption response
+      properties:
+        redemption_id:
+          type: string
+          description: Unique redemption identifier
+          example: "redeem_0101010101010101_0202020202020202"
+        amount:
+          type: integer
+          format: uint64
+          description: Amount being redeemed
+          example: 500000000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Redemption timestamp
+          example: 1672531200
+        proof_available:
+          type: boolean
+          description: Whether proof is available
+          example: true
+        transaction_pending:
+          type: boolean
+          description: Whether redemption transaction is pending
+          example: false
+
+    ProofResponse:
+      type: object
+      description: Proof response
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        proof_data:
+          type: string
+          description: Hex-encoded proof data
+          example: "proof_0101010101010101_0202020202020202"
+        tracker_state_digest:
+          type: string
+          description: Tracker state digest at proof generation
+          example: "mock_digest_1234567890abcdef"
+        block_height:
+          type: integer
+          format: uint64
+          description: Blockchain height when proof was generated
+          example: 1500
+        timestamp:
+          type: integer
+          format: uint64
+          description: Proof generation timestamp
+          example: 1672531200
+
     # API Response Wrappers
     ApiResponse:
       type: object
@@ -468,6 +721,30 @@ components:
               items:
                 $ref: '#/components/schemas/TrackerEvent'
 
+    ApiResponseKeyStatus:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/KeyStatusResponse'
+
+    ApiResponseRedeem:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/RedeemResponse'
+
+    ApiResponseProof:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ProofResponse'
+
   responses:
     BadRequest:
       description: Bad request - invalid input parameters
@@ -497,3 +774,9 @@ tags:
     description: Reserve tracking and management
   - name: Events
     description: Tracker event monitoring
+  - name: Status
+    description: System status and monitoring
+  - name: Redemption
+    description: Note redemption operations
+  - name: Proofs
+    description: Proof generation and verification

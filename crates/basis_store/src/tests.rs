@@ -94,8 +94,7 @@ fn test_note_key_generation() -> Result<(), String> {
 }
 
 fn test_signature_verification() -> Result<(), String> {
-    use secp256k1::{PublicKey, Secp256k1, SecretKey};
-    use blake2::{Blake2b512, Digest};
+    use secp256k1::{Secp256k1, SecretKey};
 
     let secp = Secp256k1::new();
     
