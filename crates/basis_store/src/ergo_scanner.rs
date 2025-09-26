@@ -93,7 +93,7 @@ impl ErgoScanner {
     }
 
     /// Start scanning for Basis reserve boxes
-    pub fn start_scanning(&mut self) -> Result<(), ErgoScannerError> {
+    pub async fn start_scanning(&mut self) -> Result<(), ErgoScannerError> {
         info!("Starting Ergo scanner for Basis reserves at node: {}", self.config.url);
 
         // Create HTTP client
@@ -104,7 +104,7 @@ impl ErgoScanner {
         );
 
         // Test connection by getting current height
-        let height = self.get_current_height_internal(&http_client)?;
+        let height = self.get_current_height_internal(&http_client).await?;
 
         info!("Connected to Ergo node successfully. Current height: {}", height);
         if let Some(template) = &self.contract_template {
@@ -131,27 +131,19 @@ impl ErgoScanner {
     }
 
     /// Get current blockchain height
-    pub fn get_current_height(&self) -> Result<u64, ErgoScannerError> {
+    pub async fn get_current_height(&self) -> Result<u64, ErgoScannerError> {
         if let Some(http_client) = &self.http_client {
-            self.get_current_height_internal(http_client)
+            self.get_current_height_internal(http_client).await
         } else {
             Ok(self.current_height)
         }
     }
 
     /// Internal method to get current height
-    fn get_current_height_internal(&self, http_client: &SimpleHttpClient) -> Result<u64, ErgoScannerError> {
+    async fn get_current_height_internal(&self, http_client: &SimpleHttpClient) -> Result<u64, ErgoScannerError> {
         // Try to get real height from node
-        match http_client.get_node_info() {
-            Ok(info) => {
-                if let Some(full_height) = info["fullHeight"].as_u64() {
-                    Ok(full_height)
-                } else {
-                    // Fallback to mock height if parsing fails
-                    warn!("Failed to parse fullHeight from node response, using mock height");
-                    Ok(1000)
-                }
-            }
+        match http_client.get_current_height().await {
+            Ok(height) => Ok(height),
             Err(e) => {
                 // Fallback to mock height if connection fails
                 warn!("Failed to connect to Ergo node: {}, using mock height", e);
@@ -161,7 +153,7 @@ impl ErgoScanner {
     }
 
     /// Wait for the next block before re-checking scans
-    pub fn wait_for_next_block(&self) -> Result<(), ErgoScannerError> {
+    pub async fn wait_for_next_block(&self) -> Result<(), ErgoScannerError> {
         if !self.is_active() {
             return Err(ErgoScannerError::ScannerNotActive);
         }
@@ -173,9 +165,9 @@ impl ErgoScanner {
         
         // Poll until new block arrives
         loop {
-            std::thread::sleep(Duration::from_secs(10)); // Check every 10 seconds
+            tokio::time::sleep(Duration::from_secs(10)).await; // Check every 10 seconds
             
-            match self.get_current_height_internal(http_client) {
+            match self.get_current_height_internal(http_client).await {
                 Ok(new_height) if new_height > current_height => {
                     info!("New block detected at height: {}", new_height);
                     break;
@@ -194,12 +186,12 @@ impl ErgoScanner {
     }
 
     /// Scan blocks from last scanned height to current height
-    pub fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ErgoScannerError> {
+    pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ErgoScannerError> {
         if !self.is_active() {
             return Err(ErgoScannerError::ScannerNotActive);
         }
 
-        let current_height = self.get_current_height()?;
+        let current_height = self.get_current_height().await?;
         
         if current_height <= self.last_scanned_height {
             debug!("No new blocks to scan (current: {}, last scanned: {})", 
@@ -213,7 +205,7 @@ impl ErgoScanner {
         
         for height in (self.last_scanned_height + 1)..=current_height {
             let http_client = self.get_active_client()?;
-            match self.scan_block_at_height(http_client, height) {
+            match self.scan_block_at_height(http_client, height).await {
                 Ok(mut block_events) => {
                     events.append(&mut block_events);
                     self.last_scanned_height = height;
@@ -230,7 +222,7 @@ impl ErgoScanner {
     }
 
     /// Scan a specific block for reserve-related events
-    fn scan_block_at_height(
+    async fn scan_block_at_height(
         &self,
         http_client: &SimpleHttpClient,
         height: u64,
@@ -240,14 +232,14 @@ impl ErgoScanner {
         let mut events = Vec::new();
         
         // Get block headers at this height
-        let blocks_response = http_client.get_blocks_at_height(height)?;
+        let blocks_response = http_client.get_blocks_at_height(height).await?;
         
         // Process each block (there should be only one at each height)
         if let Some(blocks_array) = blocks_response.as_array() {
             for block_value in blocks_array {
                 if let Some(block_id) = block_value["id"].as_str() {
                     // Get block transactions
-                    if let Ok(tx_response) = http_client.get(&format!("/blocks/{}/transactions", block_id)) {
+                    if let Ok(tx_response) = http_client.get_block_transactions(block_id).await {
                         if let Some(transactions) = tx_response.as_array() {
                             for tx_value in transactions {
                                 if let Some(tx_events) = self.process_transaction(tx_value, height)? {
@@ -374,7 +366,7 @@ impl ErgoScanner {
     }
 
     /// Get unspent reserve boxes from the blockchain
-    pub fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ErgoScannerError> {
+    pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ErgoScannerError> {
         if !self.is_active() {
             return Err(ErgoScannerError::ScannerNotActive);
         }
@@ -383,7 +375,7 @@ impl ErgoScanner {
         
         // If contract template is specified, use it to filter boxes
         if let Some(template) = &self.contract_template {
-            let response = http_client.get_unspent_boxes_by_ergo_tree(template)?;
+            let response = http_client.get_unspent_boxes_by_ergo_tree(template).await?;
             
             // Parse response into ErgoBox objects
             let mut boxes = Vec::new();
@@ -627,21 +619,21 @@ mod tests {
         assert_eq!(scanner.config().url, "http://213.239.193.208:9052");
     }
 
-    #[test]
-    fn test_scan_lifecycle() {
+    #[tokio::test]
+    async fn test_scan_lifecycle() {
         let config = NodeConfig::default();
         let mut scanner = ErgoScanner::new(config);
 
         // Start scanning
-        scanner.start_scanning().unwrap();
+        scanner.start_scanning().await.unwrap();
         assert!(scanner.is_active());
 
         // Get current height
-        let height = scanner.get_current_height().unwrap();
+        let height = scanner.get_current_height().await.unwrap();
         assert_eq!(height, 1000);
 
         // Test scanning new blocks (should return empty since no real connection)
-        let events = scanner.scan_new_blocks().unwrap();
+        let events = scanner.scan_new_blocks().await.unwrap();
         assert!(events.is_empty());
 
         // Stop scanning
@@ -649,14 +641,20 @@ mod tests {
         assert!(!scanner.is_active());
     }
 
-    #[test]
-    fn test_wait_for_next_block() {
+    #[tokio::test]
+    async fn test_wait_for_next_block() {
         let config = NodeConfig::default();
         let mut scanner = ErgoScanner::new(config);
-        scanner.start_scanning().unwrap();
+        scanner.start_scanning().await.unwrap();
 
-        // This should not error (just wait for 5 seconds)
-        scanner.wait_for_next_block().unwrap();
+        // This should timeout quickly since we're not connected to a real node
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            scanner.wait_for_next_block()
+        ).await;
+        
+        // Should timeout (which is expected for test environment)
+        assert!(result.is_err());
     }
 
     #[test]

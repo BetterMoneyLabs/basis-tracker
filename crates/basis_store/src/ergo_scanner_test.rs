@@ -158,8 +158,8 @@ pub fn create_test_reserve_spending_tx() -> serde_json::Value {
 mod tests {
     use super::*;
     
-    #[test]
-    fn test_reserve_creation_detection() {
+    #[tokio::test]
+    async fn test_reserve_creation_detection() {
         let config = NodeConfig::default();
         let scanner = ErgoScanner::new(config);
         
@@ -177,8 +177,8 @@ mod tests {
         }
     }
     
-    #[test]
-    fn test_reserve_topup_detection() {
+    #[tokio::test]
+    async fn test_reserve_topup_detection() {
         let config = NodeConfig::default();
         let scanner = ErgoScanner::new(config);
         
@@ -197,8 +197,8 @@ mod tests {
         }
     }
     
-    #[test]
-    fn test_reserve_redemption_detection() {
+    #[tokio::test]
+    async fn test_reserve_redemption_detection() {
         let config = NodeConfig::default();
         let scanner = ErgoScanner::new(config);
         
@@ -217,8 +217,8 @@ mod tests {
         }
     }
     
-    #[test]
-    fn test_reserve_spending_detection() {
+    #[tokio::test]
+    async fn test_reserve_spending_detection() {
         let config = NodeConfig::default();
         let scanner = ErgoScanner::new(config);
         

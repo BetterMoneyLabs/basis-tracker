@@ -1,4 +1,4 @@
-//! HTTP client for Ergo node communication using ergo_client
+//! HTTP client for Ergo node communication using std::net::TcpStream
 
 use std::time::Duration;
 
@@ -34,10 +34,7 @@ impl SimpleHttpClient {
     }
 
     /// Make a GET request to the Ergo node
-    pub fn get(&self, endpoint: &str) -> Result<Value, HttpClientError> {
-        // Simple HTTP implementation using std::net::TcpStream
-        // This is a basic implementation that works without external dependencies
-        
+    pub async fn get(&self, endpoint: &str) -> Result<Value, HttpClientError> {
         let url = format!("{}{}", self.base_url, endpoint);
         
         // Parse URL components
@@ -102,9 +99,7 @@ impl SimpleHttpClient {
     }
 
     /// Make a POST request to the Ergo node
-    pub fn post(&self, endpoint: &str, body: Value) -> Result<Value, HttpClientError> {
-        // Simple HTTP POST implementation
-        
+    pub async fn post(&self, endpoint: &str, body: Value) -> Result<Value, HttpClientError> {
         let url = format!("{}{}", self.base_url, endpoint);
         
         // Parse URL components
@@ -174,40 +169,85 @@ impl SimpleHttpClient {
     }
 
     /// Get node info
-    pub fn get_node_info(&self) -> Result<Value, HttpClientError> {
-        self.get("/info")
+    pub async fn get_node_info(&self) -> Result<Value, HttpClientError> {
+        self.get("/info").await
     }
 
     /// Get block headers at specific height
-    pub fn get_blocks_at_height(&self, height: u64) -> Result<Value, HttpClientError> {
-        self.get(&format!("/blocks/at/{}", height))
+    pub async fn get_blocks_at_height(&self, height: u64) -> Result<Value, HttpClientError> {
+        self.get(&format!("/blocks/at/{}", height)).await
+    }
+
+    /// Get block by ID
+    pub async fn get_block_by_id(&self, block_id: &str) -> Result<Value, HttpClientError> {
+        self.get(&format!("/blocks/{}", block_id)).await
+    }
+
+    /// Get block transactions by block ID
+    pub async fn get_block_transactions(&self, block_id: &str) -> Result<Value, HttpClientError> {
+        self.get(&format!("/blocks/{}/transactions", block_id)).await
     }
 
     /// Get unspent boxes by ErgoTree template
-    pub fn get_unspent_boxes_by_ergo_tree(&self, ergo_tree: &str) -> Result<Value, HttpClientError> {
+    pub async fn get_unspent_boxes_by_ergo_tree(&self, ergo_tree: &str) -> Result<Value, HttpClientError> {
         let body = serde_json::json!({
             "ergoTree": ergo_tree
         });
-        self.post("/blockchain/box/unspent/byErgoTree", body)
+        self.post("/blockchain/box/unspent/byErgoTree", body).await
     }
 
     /// Get box by ID
-    pub fn get_box_by_id(&self, box_id: &str) -> Result<Value, HttpClientError> {
-        self.get(&format!("/blockchain/box/byId/{}", box_id))
+    pub async fn get_box_by_id(&self, box_id: &str) -> Result<Value, HttpClientError> {
+        self.get(&format!("/blockchain/box/byId/{}", box_id)).await
     }
 
     /// Get transaction by ID
-    pub fn get_transaction_by_id(&self, tx_id: &str) -> Result<Value, HttpClientError> {
-        self.get(&format!("/blockchain/transaction/byId/{}", tx_id))
+    pub async fn get_transaction_by_id(&self, tx_id: &str) -> Result<Value, HttpClientError> {
+        self.get(&format!("/blockchain/transaction/byId/{}", tx_id)).await
     }
 
     /// Get unconfirmed transactions
-    pub fn get_unconfirmed_transactions(&self) -> Result<Value, HttpClientError> {
-        self.get("/blockchain/transactions/unconfirmed")
+    pub async fn get_unconfirmed_transactions(&self) -> Result<Value, HttpClientError> {
+        self.get("/blockchain/transactions/unconfirmed").await
     }
 
     /// Get UTXO set size
-    pub fn get_utxo_size(&self) -> Result<Value, HttpClientError> {
-        self.get("/blockchain/utxo/size")
+    pub async fn get_utxo_size(&self) -> Result<Value, HttpClientError> {
+        self.get("/blockchain/utxo/size").await
+    }
+
+    /// Get current blockchain height
+    pub async fn get_current_height(&self) -> Result<u64, HttpClientError> {
+        let info = self.get_node_info().await?;
+        
+        if let Some(full_height) = info["fullHeight"].as_u64() {
+            Ok(full_height)
+        } else {
+            Err(HttpClientError::NodeApiError(
+                "Failed to parse fullHeight from node info".to_string()
+            ))
+        }
+    }
+
+    /// Get block headers for a range of heights
+    pub async fn get_block_headers_range(&self, from: u64, to: u64) -> Result<Vec<Value>, HttpClientError> {
+        let mut headers = Vec::new();
+        
+        for height in from..=to {
+            if let Ok(blocks) = self.get_blocks_at_height(height).await {
+                if let Some(blocks_array) = blocks.as_array() {
+                    for block in blocks_array {
+                        headers.push(block.clone());
+                    }
+                }
+            }
+        }
+        
+        Ok(headers)
+    }
+
+    /// Search for boxes with specific criteria
+    pub async fn search_boxes(&self, criteria: Value) -> Result<Value, HttpClientError> {
+        self.post("/blockchain/box/search", criteria).await
     }
 }

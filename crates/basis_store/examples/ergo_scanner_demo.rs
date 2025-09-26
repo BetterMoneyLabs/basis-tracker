@@ -2,7 +2,8 @@
 
 use basis_store::ergo_scanner::{ErgoScanner, NodeConfig};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("=== Basis Ergo Scanner Demo ===\n");
 
     // Create node configuration
@@ -19,16 +20,22 @@ fn main() {
 
     // Start scanning
     println!("Starting scanner...");
-    scanner.start_scanning().unwrap();
+    scanner.start_scanning().await.unwrap();
     
     println!("Scanner is active: {}", scanner.is_active());
-    println!("Current blockchain height: {}", scanner.get_current_height().unwrap());
+    println!("Current blockchain height: {}", scanner.get_current_height().await.unwrap());
     println!();
 
-    // Demonstrate waiting for next block
-    println!("Waiting for next block (simulated)...");
-    scanner.wait_for_next_block().unwrap();
-    println!("New block detected!");
+    // Demonstrate waiting for next block (with timeout)
+    println!("Waiting for next block (with 5s timeout)...");
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        scanner.wait_for_next_block()
+    ).await {
+        Ok(Ok(_)) => println!("New block detected!"),
+        Ok(Err(e)) => println!("Error waiting for block: {}", e),
+        Err(_) => println!("Timeout waiting for block (this is expected)"),
+    }
     println!();
 
     // Stop scanning

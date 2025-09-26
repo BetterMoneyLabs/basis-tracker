@@ -1,0 +1,31 @@
+# Ergo node configurations for Basis Tracker
+
+# Mainnet nodes
+[mainnet]
+nodes = [
+    { url = "http://213.239.193.208:9052", description = "Public mainnet node" },
+    { url = "http://88.99.199.76:9052", description = "Another public mainnet node" },
+    { url = "http://159.65.11.55:9052", description = "Mainnet node with good uptime" },
+]
+
+# Testnet nodes  
+[testnet]
+nodes = [
+    { url = "http://213.239.193.208:9052", description = "Public testnet node" },
+    { url = "http://88.99.199.76:9052", description = "Another testnet node" },
+]
+
+# Local development nodes
+[local]
+nodes = [
+    { url = "http://localhost:9053", description = "Local Ergo node" },
+]
+
+# Default configuration
+default_network = "mainnet"
+default_timeout = 30
+
+# Contract templates for Basis reserves
+[contract_templates]
+mainnet_basis_reserve = "0008cd..."  # Replace with actual Basis contract template hash
+testnet_basis_reserve = "0008cd..."  # Replace with actual Basis contract template hash

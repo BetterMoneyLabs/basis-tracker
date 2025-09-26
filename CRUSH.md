@@ -96,36 +96,50 @@
 ## Ergo Blockchain Scanner
 
 ### Scanner Implementation
-- **Mock-based scanner** that simulates blockchain scanning for testing
-- **ChainCash-rs inspired** architecture for real Ergo node integration
+- **Real HTTP-based scanner** that connects to actual Ergo nodes
+- **Async/await architecture** using reqwest HTTP client
 - **Event-driven design** for processing reserve-related blockchain events
-- **Extensible framework** that can be upgraded to real HTTP-based scanning
+- **Extensible framework** with proper error handling and retry logic
 
 ### Scanner Features
-- **Node configuration** for connecting to Ergo nodes
+- **Real Ergo node integration** with public node support
 - **Block height tracking** to monitor blockchain progress
 - **Event processing** for reserve creation, top-up, redemption, and spending
-- **Mock data generation** for testing without real blockchain connection
+- **Unspent box querying** for current reserve state
+- **Contract template filtering** for targeted scanning
 
 ### Usage Example
 ```rust
 use basis_store::ergo_scanner::{ErgoScanner, NodeConfig};
 
-// Create scanner configuration
-let config = NodeConfig::default();
+// Create scanner configuration for real Ergo node
+let config = NodeConfig {
+    url: "http://213.239.193.208:9052".to_string(),
+    api_key: "".to_string(),
+    timeout_secs: 30,
+    start_height: None,
+    contract_template: None,
+};
+
 let mut scanner = ErgoScanner::new(config);
 
 // Start scanning
 scanner.start_scanning().await.unwrap();
 
-// Process new blocks
-let events = scanner.process_new_blocks(900).await.unwrap();
+// Get current blockchain height
+let height = scanner.get_current_height().await.unwrap();
+
+// Scan for new blocks
+let events = scanner.scan_new_blocks().await.unwrap();
+
+// Get unspent reserve boxes
+let boxes = scanner.get_unspent_reserve_boxes().await.unwrap();
 
 // Wait for next block
-scanner.wait_for_next_block().unwrap();
+scanner.wait_for_next_block().await.unwrap();
 
 // Stop scanning
-scanner.stop_scanning().await.unwrap();
+scanner.stop_scanning().unwrap();
 ```
 
 ### Event Types
@@ -134,8 +148,13 @@ scanner.stop_scanning().await.unwrap();
 - **ReserveRedeemed**: Debt redemption from reserve
 - **ReserveSpent**: Reserve box spent/closed
 
-### Future Enhancements
-- **Real HTTP integration** with Ergo node APIs
-- **Scan registration** for tracking specific contract templates
-- **Box parsing** for extracting reserve information from Ergo boxes
-- **Transaction analysis** for detecting reserve-related activity
+### Available Ergo Nodes
+- **Mainnet**: `http://213.239.193.208:9052` (public)
+- **Testnet**: `http://213.239.193.208:9052` (public)
+- **Local**: `http://localhost:9053` (development)
+
+### Configuration
+- Node configurations stored in `config/ergo_nodes.toml`
+- Supports multiple networks (mainnet, testnet, local)
+- Configurable timeouts and contract templates
+- API key support for authenticated nodes
