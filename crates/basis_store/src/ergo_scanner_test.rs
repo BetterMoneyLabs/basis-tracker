@@ -1,6 +1,6 @@
 //! Test utilities for Ergo scanner transaction processing
 
-use super::ergo_scanner::{ErgoScanner, NodeConfig, ReserveEvent, ErgoBox};
+use super::ergo_scanner::{ErgoScanner, NodeConfig, ReserveEvent};
 use serde_json::json;
 
 /// Create a test transaction with Basis reserve boxes

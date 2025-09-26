@@ -117,39 +117,7 @@ fn test_message_format_compatibility() -> Result<(), String> {
     Ok(())
 }
 
-/// Verify that challenge computation matches basis.es
-fn test_challenge_computation_compatibility() -> Result<(), String> {
-    use blake2::{Blake2b512, Digest};
-    
-    // In basis.es lines 130 and 143: 
-    // trackerE = blake2b256(trackerABytes ++ message ++ trackerPubKey.getEncoded)
-    // reserveE = blake2b256(reserveABytes ++ message ++ ownerKey.getEncoded)
-    
-    let a_bytes = [0x01u8; 33];
-    let message = [0x02u8; 49]; // 33 + 8 + 8
-    let pubkey = [0x03u8; 33];
-    
-    // Compute challenge exactly as in basis.es
-    let mut hasher = Blake2b512::new();
-    hasher.update(a_bytes);
-    hasher.update(message);
-    hasher.update(pubkey);
-    let challenge = hasher.finalize();
-    let challenge_256 = &challenge[..32];
-    
-    // Verify properties
-    assert_eq!(challenge_256.len(), 32);
-    
-    // Test determinism
-    let mut hasher2 = Blake2b512::new();
-    hasher2.update(a_bytes);
-    hasher2.update(message);
-    hasher2.update(pubkey);
-    let challenge2 = hasher2.finalize();
-    assert_eq!(challenge, challenge2);
-    
-    Ok(())
-}
+
 
 /// Generate a compatibility report
 pub fn generate_compatibility_report() -> String {

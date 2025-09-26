@@ -3,7 +3,8 @@
 use basis_store::ergo_scanner::{ErgoScanner, NodeConfig};
 use std::time::Duration;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("=== Continuous Ergo Scanner Demo ===\n");
 
     // Create node configuration for the test node
@@ -21,7 +22,7 @@ fn main() {
     println!("Starting continuous scanner...");
     
     // Start scanning
-    if let Err(e) = scanner.start_scanning() {
+    if let Err(e) = scanner.start_scanning().await {
         println!("✗ Failed to start scanner: {}", e);
         println!("This is expected if the Ergo node is not accessible");
         return;
@@ -30,7 +31,7 @@ fn main() {
     println!("✓ Scanner started successfully");
     
     // Get initial height
-    let initial_height = match scanner.get_current_height() {
+    let initial_height = match scanner.get_current_height().await {
         Ok(height) => height,
         Err(e) => {
             println!("✗ Failed to get initial height: {}", e);
@@ -49,13 +50,13 @@ fn main() {
         println!("=== Iteration {} ===", iteration);
         
         // Check current height
-        match scanner.get_current_height() {
+        match scanner.get_current_height().await {
             Ok(current_height) => {
                 println!("Current height: {} (last scanned: {})", 
                         current_height, scanner.last_scanned_height());
                 
                 // Scan for new blocks
-                match scanner.scan_new_blocks() {
+                match scanner.scan_new_blocks().await {
                     Ok(events) => {
                         if !events.is_empty() {
                             println!("✓ Found {} new events:", events.len());
@@ -80,7 +81,7 @@ fn main() {
         
         // Wait before next iteration
         println!("Waiting 30 seconds before next scan...\n");
-        std::thread::sleep(Duration::from_secs(30));
+        tokio::time::sleep(Duration::from_secs(30)).await;
         
         // Break after a few iterations for demo purposes
         if iteration >= 3 {

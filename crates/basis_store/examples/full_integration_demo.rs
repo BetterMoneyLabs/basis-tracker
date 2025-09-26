@@ -5,7 +5,8 @@ use basis_store::{
     reserve_tracker::{ExtendedReserveInfo, ReserveTracker},
 };
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("=== Basis Full Integration Demo ===\n");
 
     // Create reserve tracker
@@ -16,12 +17,12 @@ fn main() {
     let mut ergo_scanner = ErgoScanner::new(node_config);
 
     println!("1. Starting Ergo scanner...");
-    ergo_scanner.start_scanning().unwrap();
+    ergo_scanner.start_scanning().await.unwrap();
     println!("   Scanner active: {}", ergo_scanner.is_active());
     println!();
 
     println!("2. Processing mock blockchain events...");
-    let events = ergo_scanner.scan_new_blocks().unwrap();
+    let events = ergo_scanner.scan_new_blocks().await.unwrap();
 
     for event in events {
         match event {

@@ -2,7 +2,8 @@
 
 use basis_store::ergo_scanner::{ErgoScanner, NodeConfig};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("=== Real Ergo Scanner Demo ===\n");
 
     // Create node configuration for the test node
@@ -27,13 +28,13 @@ fn main() {
 
     // Start scanning
     println!("Starting scanner...");
-    match scanner.start_scanning() {
+    match scanner.start_scanning().await {
         Ok(_) => {
             println!("✓ Scanner started successfully");
             println!("Scanner is active: {}", scanner.is_active());
             
             // Get current height
-            match scanner.get_current_height() {
+            match scanner.get_current_height().await {
                 Ok(height) => {
                     println!("✓ Current blockchain height: {}", height);
                     println!("✓ Last scanned height: {}", scanner.last_scanned_height());
@@ -45,7 +46,7 @@ fn main() {
 
             // Try to scan new blocks
             println!("\nScanning for new blocks...");
-            match scanner.scan_new_blocks() {
+            match scanner.scan_new_blocks().await {
                 Ok(events) => {
                     println!("✓ Scan completed. Found {} events", events.len());
                     if !events.is_empty() {
@@ -61,7 +62,7 @@ fn main() {
 
             // Try to get unspent reserve boxes
             println!("\nGetting unspent reserve boxes...");
-            match scanner.get_unspent_reserve_boxes() {
+            match scanner.get_unspent_reserve_boxes().await {
                 Ok(boxes) => {
                     println!("✓ Found {} unspent boxes", boxes.len());
                     if !boxes.is_empty() {

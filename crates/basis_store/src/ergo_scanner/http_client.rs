@@ -179,6 +179,7 @@ impl SimpleHttpClient {
     }
 
     /// Get block by ID
+    #[allow(dead_code)]
     pub async fn get_block_by_id(&self, block_id: &str) -> Result<Value, HttpClientError> {
         self.get(&format!("/blocks/{}", block_id)).await
     }
@@ -230,6 +231,7 @@ impl SimpleHttpClient {
     }
 
     /// Get block headers for a range of heights
+    #[allow(dead_code)]
     pub async fn get_block_headers_range(&self, from: u64, to: u64) -> Result<Vec<Value>, HttpClientError> {
         let mut headers = Vec::new();
         
@@ -247,6 +249,7 @@ impl SimpleHttpClient {
     }
 
     /// Search for boxes with specific criteria
+    #[allow(dead_code)]
     pub async fn search_boxes(&self, criteria: Value) -> Result<Value, HttpClientError> {
         self.post("/blockchain/box/search", criteria).await
     }
