@@ -8,7 +8,7 @@ use axum::{routing::{get, post}, Router};
 use basis_store::ergo_scanner::NodeConfig;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{api::*, config::*, models::*, store::EventStore};
+use crate::{api::*, config::*, models::*, store::EventStore, reserve_api::*};
 
 // Application state that holds a channel to communicate with the tracker thread
 #[derive(Clone)]
@@ -27,6 +27,10 @@ enum TrackerCommand {
     },
     GetNotesByIssuer {
         issuer_pubkey: basis_store::PubKey,
+        response_tx: tokio::sync::oneshot::Sender<Result<Vec<basis_store::IouNote>, basis_store::NoteError>>,
+    },
+    GetNotesByRecipient {
+        recipient_pubkey: basis_store::PubKey,
         response_tx: tokio::sync::oneshot::Sender<Result<Vec<basis_store::IouNote>, basis_store::NoteError>>,
     },
     GetNoteByIssuerAndRecipient {
@@ -113,6 +117,13 @@ async fn main() {
                     response_tx,
                 } => {
                     let result = tracker.get_issuer_notes(&issuer_pubkey);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::GetNotesByRecipient {
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = tracker.get_recipient_notes(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -246,6 +257,9 @@ async fn main() {
         .route("/", get(root))
         .route("/notes", post(create_note))
         .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
+        .route("/notes/recipient/{pubkey}", get(get_notes_by_recipient))
+        .route("/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}", get(get_note_by_issuer_and_recipient))
+        .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/events", get(get_events))
         .route("/events/paginated", get(get_events_paginated))
         .route("/key-status/{pubkey}", get(get_key_status))
@@ -260,6 +274,9 @@ async fn main() {
     eprintln!("  GET /");
     eprintln!("  POST /notes");
     eprintln!("  GET /notes/issuer/{{pubkey}}");
+    eprintln!("  GET /notes/recipient/{{pubkey}}");
+    eprintln!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
+    eprintln!("  GET /reserves/issuer/{{pubkey}}");
     eprintln!("  GET /events");
     eprintln!("  GET /events/paginated");
     eprintln!("  GET /key-status/{{pubkey}}");
@@ -268,14 +285,14 @@ async fn main() {
     tracing::debug!("  GET /");
     tracing::debug!("  POST /notes");
     tracing::debug!("  GET /notes/issuer/{{pubkey}}");
+    tracing::debug!("  GET /notes/recipient/{{pubkey}}");
+    tracing::debug!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
+    tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
     tracing::debug!("  GET /events");
     tracing::debug!("  GET /events/paginated");
     tracing::debug!("  GET /key-status/{{pubkey}}");
     tracing::debug!("  POST /redeem");
     tracing::debug!("  GET /proof");
-    tracing::debug!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
-    tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
-    tracing::debug!("  GET /events (Event polling)");
 
     // Run our app with hyper
     let addr = config.socket_addr();

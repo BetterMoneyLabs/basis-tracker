@@ -64,7 +64,7 @@ pub async fn create_note(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("signature must be 64 bytes".to_string())),
+                Json(crate::models::error_response("signature must be 65 bytes".to_string())),
             )
         }
     };
@@ -241,6 +241,90 @@ pub async fn get_notes_by_issuer(
             for note in &notes {
                 tracing::debug!("Note found: amount={}, timestamp={}", note.amount, note.timestamp);
             }
+            
+            // Convert to serializable format
+            let serializable_notes: Vec<SerializableIouNote> =
+                notes.into_iter().map(SerializableIouNote::from).collect();
+            (StatusCode::OK, Json(crate::models::success_response(serializable_notes)))
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Failed to get notes: {:?}", e);
+            let error_message = match e {
+                NoteError::InvalidSignature => "Invalid signature".to_string(),
+                NoteError::AmountOverflow => "Amount overflow".to_string(),
+                NoteError::FutureTimestamp => "Future timestamp".to_string(),
+                NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
+                NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
+                NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+            };
+            (StatusCode::BAD_REQUEST, Json(crate::models::error_response(error_message)))
+        }
+        Err(_) => {
+            tracing::error!("Tracker thread response channel closed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response("Internal server error".to_string())),
+            )
+        }
+    }
+}
+
+// Get notes by recipient public key
+#[axum::debug_handler]
+pub async fn get_notes_by_recipient(
+    State(state): State<AppState>,
+    axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
+) -> (StatusCode, Json<ApiResponse<Vec<SerializableIouNote>>>) {
+    tracing::debug!("Getting notes for recipient: {}", pubkey_hex);
+
+    // Decode hex string to bytes
+    let recipient_pubkey_bytes = match hex::decode(&pubkey_hex) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("Invalid hex encoding".to_string())),
+            )
+        }
+    };
+
+    // Convert to fixed-size array
+    let recipient_pubkey: PubKey = match recipient_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response("recipient_pubkey must be 33 bytes".to_string())),
+            )
+        }
+    };
+
+    // Send command to tracker thread
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    if let Err(e) = state
+        .tx
+        .send(crate::TrackerCommand::GetNotesByRecipient {
+            recipient_pubkey,
+            response_tx,
+        })
+        .await
+    {
+        tracing::error!("Failed to send to tracker thread: {:?}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response("Tracker thread unavailable".to_string())),
+        );
+    }
+
+    // Wait for response from tracker thread
+    match response_rx.await {
+        Ok(Ok(notes)) => {
+            tracing::info!(
+                "Successfully retrieved {} notes for recipient {}",
+                notes.len(),
+                pubkey_hex
+            );
             
             // Convert to serializable format
             let serializable_notes: Vec<SerializableIouNote> =
