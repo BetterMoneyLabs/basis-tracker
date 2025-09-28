@@ -41,6 +41,16 @@ enum TrackerCommand {
         recipient_pubkey: basis_store::PubKey,
         response_tx: tokio::sync::oneshot::Sender<Result<Option<basis_store::IouNote>, basis_store::NoteError>>,
     },
+    InitiateRedemption {
+        request: basis_store::RedemptionRequest,
+        response_tx: tokio::sync::oneshot::Sender<Result<basis_store::RedemptionData, basis_store::RedemptionError>>,
+    },
+    CompleteRedemption {
+        issuer_pubkey: basis_store::PubKey,
+        recipient_pubkey: basis_store::PubKey,
+        redeemed_amount: u64,
+        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::RedemptionError>>,
+    },
 }
 
 #[tokio::main]
@@ -114,10 +124,11 @@ async fn main() {
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
     tokio::task::spawn_blocking(move || {
-        use basis_store::TrackerStateManager;
+        use basis_store::{TrackerStateManager, RedemptionManager};
 
         tracing::debug!("Tracker thread started");
         let mut tracker = TrackerStateManager::new();
+        let mut redemption_manager = RedemptionManager::new(tracker);
 
         while let Some(cmd) = rx.blocking_recv() {
             tracing::debug!("Tracker thread received command: {:?}", cmd);
@@ -127,7 +138,7 @@ async fn main() {
                     note,
                     response_tx,
                 } => {
-                    let result = tracker.add_note(&issuer_pubkey, &note);
+                    let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
                     
                     // Create event if successful
                     if result.is_ok() {
@@ -141,14 +152,14 @@ async fn main() {
                     issuer_pubkey,
                     response_tx,
                 } => {
-                    let result = tracker.get_issuer_notes(&issuer_pubkey);
+                    let result = redemption_manager.tracker.get_issuer_notes(&issuer_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNotesByRecipient {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = tracker.get_recipient_notes(&recipient_pubkey);
+                    let result = redemption_manager.tracker.get_recipient_notes(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -156,9 +167,25 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = tracker
+                    let result = redemption_manager.tracker
                         .lookup_note(&issuer_pubkey, &recipient_pubkey)
                         .map(Some);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::InitiateRedemption {
+                    request,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.initiate_redemption(&request);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::CompleteRedemption {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    redeemed_amount,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, redeemed_amount);
                     let _ = response_tx.send(result);
                 }
             }
@@ -294,6 +321,7 @@ async fn main() {
         .route("/events/paginated", get(get_events_paginated))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/redeem", post(initiate_redemption))
+        .route("/redeem/complete", post(complete_redemption))
         .route("/proof", get(get_proof))
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http());
@@ -311,6 +339,7 @@ async fn main() {
     eprintln!("  GET /events/paginated");
     eprintln!("  GET /key-status/{{pubkey}}");
     eprintln!("  POST /redeem");
+    eprintln!("  POST /redeem/complete");
     eprintln!("  GET /proof");
     tracing::debug!("  GET /");
     tracing::debug!("  POST /notes");

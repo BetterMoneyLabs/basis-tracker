@@ -104,7 +104,7 @@ fn get_test_vectors() -> Vec<SchnorrTestVector> {
 
 /// Test that the signing message format matches basis.es
 fn test_signing_message_format() {
-    let note = IouNote::new([1u8; 33], 1000, 1234567890, [0u8; 65]);
+    let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [0u8; 65]);
     let message = note.signing_message();
     
     // Message should be: recipient_pubkey || amount_be_bytes || timestamp_be_bytes
@@ -156,6 +156,7 @@ pub fn run_schnorr_test_vectors() -> Result<(), String> {
         let note = IouNote::new(
             vector.recipient_pubkey,
             vector.amount,
+            0, // amount_redeemed
             vector.timestamp,
             vector.signature,
         );

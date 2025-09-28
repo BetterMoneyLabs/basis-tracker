@@ -6,8 +6,8 @@ use axum::{
 use std::collections::HashMap;
 
 use crate::{
-    models::{ApiResponse, CreateNoteRequest, SerializableIouNote, TrackerEvent, KeyStatusResponse, RedeemRequest, RedeemResponse, ProofResponse},
-    AppState,
+    models::{ApiResponse, CreateNoteRequest, SerializableIouNote, TrackerEvent, KeyStatusResponse, RedeemRequest, RedeemResponse, ProofResponse, CompleteRedemptionRequest},
+    AppState, TrackerCommand,
 };
 use basis_store::{IouNote, NoteError, PubKey, Signature};
 
@@ -93,6 +93,7 @@ pub async fn create_note(
     let note = IouNote::new(
         recipient_pubkey,
         payload.amount,
+        0, // amount_redeemed
         payload.timestamp,
         signature,
     );
@@ -239,7 +240,7 @@ pub async fn get_notes_by_issuer(
             
             // Debug: log the actual notes found
             for note in &notes {
-                tracing::debug!("Note found: amount={}, timestamp={}", note.amount, note.timestamp);
+                tracing::debug!("Note found: collected={}, redeemed={}, timestamp={}", note.amount_collected, note.amount_redeemed, note.timestamp);
             }
             
             // Convert to serializable format
@@ -661,13 +662,84 @@ pub async fn get_key_status(
 // Initiate redemption process
 #[axum::debug_handler]
 pub async fn initiate_redemption(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(payload): Json<RedeemRequest>,
 ) -> (StatusCode, Json<ApiResponse<RedeemResponse>>) {
     tracing::debug!("Initiating redemption: {:?}", payload);
 
-    // Validate input parameters
-    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
+    // Create redemption request
+    let redemption_request = basis_store::RedemptionRequest {
+        issuer_pubkey: payload.issuer_pubkey.clone(),
+        recipient_pubkey: payload.recipient_pubkey.clone(),
+        amount: payload.amount,
+        timestamp: payload.timestamp,
+        reserve_box_id: "".to_string(), // Will be looked up from reserve tracker
+        recipient_address: "".to_string(), // Will be provided by client in real implementation
+    };
+
+    // Send command to tracker thread to initiate redemption
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    
+    let cmd = TrackerCommand::InitiateRedemption {
+        request: redemption_request,
+        response_tx,
+    };
+
+    if let Err(e) = state.tx.send(cmd).await {
+        tracing::error!("Failed to send redemption command to tracker: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response("Failed to process redemption request".to_string())),
+        );
+    }
+
+    // Wait for response from tracker thread
+    match response_rx.await {
+        Ok(Ok(redemption_data)) => {
+            let response = RedeemResponse {
+                redemption_id: redemption_data.redemption_id,
+                amount: payload.amount,
+                timestamp: payload.timestamp,
+                proof_available: !redemption_data.avl_proof.is_empty(),
+                transaction_pending: true,
+            };
+
+            tracing::info!(
+                "Redemption initiated successfully for {} -> {}: {}",
+                payload.issuer_pubkey,
+                payload.recipient_pubkey,
+                response.redemption_id
+            );
+            
+            (StatusCode::OK, Json(crate::models::success_response(response)))
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Redemption failed: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!("Redemption failed: {}", e))),
+            )
+        }
+        Err(_) => {
+            tracing::error!("Failed to receive redemption response from tracker");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response("Failed to process redemption request".to_string())),
+            )
+        }
+    }
+}
+
+// Complete redemption process by removing the note from tracker state
+#[axum::debug_handler]
+pub async fn complete_redemption(
+    State(state): State<AppState>,
+    Json(payload): Json<CompleteRedemptionRequest>,
+) -> (StatusCode, Json<ApiResponse<()>>) {
+    tracing::debug!("Completing redemption: {:?}", payload);
+
+    // Parse public keys
+    let issuer_pubkey = match hex::decode(&payload.issuer_pubkey) {
         Ok(bytes) => bytes,
         Err(_) => {
             return (
@@ -677,7 +749,7 @@ pub async fn initiate_redemption(
         }
     };
 
-    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+    let recipient_pubkey = match hex::decode(&payload.recipient_pubkey) {
         Ok(bytes) => bytes,
         Err(_) => {
             return (
@@ -687,7 +759,7 @@ pub async fn initiate_redemption(
         }
     };
 
-    let _issuer_pubkey: basis_store::PubKey = match issuer_pubkey_bytes.try_into() {
+    let issuer_pubkey: PubKey = match issuer_pubkey.try_into() {
         Ok(arr) => arr,
         Err(_) => {
             return (
@@ -697,7 +769,7 @@ pub async fn initiate_redemption(
         }
     };
 
-    let _recipient_pubkey: basis_store::PubKey = match recipient_pubkey_bytes.try_into() {
+    let recipient_pubkey: PubKey = match recipient_pubkey.try_into() {
         Ok(arr) => arr,
         Err(_) => {
             return (
@@ -707,24 +779,50 @@ pub async fn initiate_redemption(
         }
     };
 
-    // In a real implementation, this would:
-    // 1. Verify the note exists and is valid
-    // 2. Generate redemption proof
-    // 3. Create redemption transaction
-    // 4. Return redemption information
-
-    // Mock implementation for now
-    let response = RedeemResponse {
-        redemption_id: format!("redeem_{}_{}", &payload.issuer_pubkey[..16], &payload.recipient_pubkey[..16]),
-        amount: payload.amount,
-        timestamp: payload.timestamp,
-        proof_available: true,
-        transaction_pending: false,
+    // Send command to tracker thread to complete redemption
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    
+    let cmd = TrackerCommand::CompleteRedemption {
+        issuer_pubkey,
+        recipient_pubkey,
+        redeemed_amount: payload.redeemed_amount,
+        response_tx,
     };
 
-    tracing::info!("Redemption initiated for {} -> {}", payload.issuer_pubkey, payload.recipient_pubkey);
-    
-    (StatusCode::OK, Json(crate::models::success_response(response)))
+    if let Err(e) = state.tx.send(cmd).await {
+        tracing::error!("Failed to send complete redemption command to tracker: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response("Failed to complete redemption".to_string())),
+        );
+    }
+
+    // Wait for response from tracker thread
+    match response_rx.await {
+        Ok(Ok(())) => {
+            tracing::info!(
+                "Redemption completed successfully for {} -> {}",
+                payload.issuer_pubkey,
+                payload.recipient_pubkey
+            );
+            
+            (StatusCode::OK, Json(crate::models::success_response(())))
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Redemption completion failed: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!("Redemption completion failed: {}", e))),
+            )
+        }
+        Err(_) => {
+            tracing::error!("Failed to receive redemption completion response from tracker");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response("Failed to complete redemption".to_string())),
+            )
+        }
+    }
 }
 
 // Get proof for a specific note

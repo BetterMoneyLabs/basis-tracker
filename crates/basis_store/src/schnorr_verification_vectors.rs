@@ -194,6 +194,7 @@ pub fn verify_all_test_vectors() -> Result<(), String> {
         let note = IouNote::new(
             vector.recipient_pubkey,
             vector.amount,
+            0, // amount_redeemed
             vector.timestamp,
             vector.signature,
         );

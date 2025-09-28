@@ -12,6 +12,7 @@ pub mod schnorr_verification_vectors;
 pub mod cross_verification;
 pub mod schnorr;
 pub mod schnorr_comprehensive_test;
+pub mod redemption;
 
 use secp256k1;
 
@@ -26,8 +27,10 @@ pub type Signature = [u8; 65];
 pub struct IouNote {
     /// Recipient's public key
     pub recipient_pubkey: PubKey,
-    /// Total amount of debt
-    pub amount: u64,
+    /// Total amount ever collected (cumulative debt)
+    pub amount_collected: u64,
+    /// Total amount ever redeemed
+    pub amount_redeemed: u64,
     /// Timestamp of latest payment/update
     pub timestamp: u64,
     /// Signature from issuer (A)
@@ -159,7 +162,8 @@ impl TrackerStateManager {
         // Create value bytes matching persistence format
         let mut value_bytes = Vec::new();
         value_bytes.extend_from_slice(issuer_pubkey);
-        value_bytes.extend_from_slice(&note.amount.to_be_bytes());
+        value_bytes.extend_from_slice(&note.amount_collected.to_be_bytes());
+        value_bytes.extend_from_slice(&note.amount_redeemed.to_be_bytes());
         value_bytes.extend_from_slice(&note.timestamp.to_be_bytes());
         value_bytes.extend_from_slice(&note.signature);
         value_bytes.extend_from_slice(&note.recipient_pubkey);
@@ -184,7 +188,8 @@ impl TrackerStateManager {
         // Update AVL tree state
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let value_bytes = [
-            &note.amount.to_be_bytes()[..],
+            &note.amount_collected.to_be_bytes()[..],
+            &note.amount_redeemed.to_be_bytes()[..],
             &note.timestamp.to_be_bytes()[..],
         ]
         .concat();
@@ -288,22 +293,34 @@ impl IouNote {
     /// Create a new IOU note
     pub fn new(
         recipient_pubkey: PubKey,
-        amount: u64,
+        amount_collected: u64,
+        amount_redeemed: u64,
         timestamp: u64,
         signature: Signature,
     ) -> Self {
         Self {
             recipient_pubkey,
-            amount,
+            amount_collected,
+            amount_redeemed,
             timestamp,
             signature,
         }
     }
 
+    /// Get the current outstanding debt (collected - redeemed)
+    pub fn outstanding_debt(&self) -> u64 {
+        self.amount_collected.saturating_sub(self.amount_redeemed)
+    }
+
+    /// Check if the note is fully redeemed
+    pub fn is_fully_redeemed(&self) -> bool {
+        self.amount_collected == self.amount_redeemed
+    }
+
     /// Create and sign a new IOU note using the chaincash-rs Schnorr signature approach
     pub fn create_and_sign(
         recipient_pubkey: PubKey,
-        amount: u64,
+        amount_collected: u64,
         timestamp: u64,
         issuer_secret_key: &[u8; 32],
     ) -> Result<Self, NoteError> {
@@ -320,14 +337,15 @@ impl IouNote {
         let issuer_pubkey = public_key.serialize();
         
         // Generate the signing message (same format as chaincash-rs)
-        let message = schnorr::signing_message(&recipient_pubkey, amount, timestamp);
+        let message = schnorr::signing_message(&recipient_pubkey, amount_collected, timestamp);
         
         // Use the chaincash-rs approach for Schnorr signing
         let signature = schnorr::schnorr_sign(&message, &secret_key, &issuer_pubkey)?;
         
         Ok(Self {
             recipient_pubkey,
-            amount,
+            amount_collected,
+            amount_redeemed: 0, // Start with no redemptions
             timestamp,
             signature,
         })
@@ -337,7 +355,7 @@ impl IouNote {
     pub fn signing_message(&self) -> Vec<u8> {
         let mut message = Vec::new();
         message.extend_from_slice(&self.recipient_pubkey);
-        message.extend_from_slice(&self.amount.to_be_bytes());
+        message.extend_from_slice(&self.amount_collected.to_be_bytes());
         message.extend_from_slice(&self.timestamp.to_be_bytes());
         message
     }
@@ -394,3 +412,6 @@ pub use reserve_tracker::{ExtendedReserveInfo, ReserveTracker, ReserveTrackerErr
 
 // Re-export ergo scanner types
 pub use ergo_scanner::{ErgoScanner, ErgoScannerError, NodeConfig, ReserveEvent, ErgoBox};
+
+// Re-export redemption types
+pub use redemption::{RedemptionData, RedemptionError, RedemptionManager, RedemptionRequest};

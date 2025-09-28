@@ -31,7 +31,8 @@ impl NoteStorage {
         // Manual serialization to avoid serde issues with arrays
         let mut value_bytes = Vec::new();
         value_bytes.extend_from_slice(issuer_pubkey);
-        value_bytes.extend_from_slice(&note.amount.to_be_bytes());
+        value_bytes.extend_from_slice(&note.amount_collected.to_be_bytes());
+        value_bytes.extend_from_slice(&note.amount_redeemed.to_be_bytes());
         value_bytes.extend_from_slice(&note.timestamp.to_be_bytes());
         value_bytes.extend_from_slice(&note.signature);
         value_bytes.extend_from_slice(&note.recipient_pubkey);
@@ -55,7 +56,7 @@ impl NoteStorage {
         match self.partition.get(&key_bytes) {
             Ok(Some(value_bytes)) => {
                 // Manual deserialization
-                if value_bytes.len() != 33 + 8 + 8 + 65 + 33 {
+                if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
                     return Err(NoteError::StorageError(
                         "Invalid stored note format".to_string(),
                     ));
@@ -66,7 +67,11 @@ impl NoteStorage {
                     value_bytes[offset..offset + 33].try_into().unwrap();
                 offset += 33;
 
-                let amount =
+                let amount_collected =
+                    u64::from_be_bytes(value_bytes[offset..offset + 8].try_into().unwrap());
+                offset += 8;
+
+                let amount_redeemed =
                     u64::from_be_bytes(value_bytes[offset..offset + 8].try_into().unwrap());
                 offset += 8;
 
@@ -81,7 +86,8 @@ impl NoteStorage {
 
                 let note = IouNote {
                     recipient_pubkey,
-                    amount,
+                    amount_collected,
+                    amount_redeemed,
                     timestamp,
                     signature,
                 };
@@ -128,21 +134,23 @@ impl NoteStorage {
             })?;
 
             // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 65 + 33 {
+            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
                 continue; // Skip invalid entries
             }
 
             let stored_issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
 
             if stored_issuer_pubkey == *issuer_pubkey {
-                let amount = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                let timestamp = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-                let signature: [u8; 65] = value_bytes[49..114].try_into().unwrap();
-                let recipient_pubkey: PubKey = value_bytes[114..147].try_into().unwrap();
+                let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+                let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+                let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
+                let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
+                let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
 
                 let note = IouNote {
                     recipient_pubkey,
-                    amount,
+                    amount_collected,
+                    amount_redeemed,
                     timestamp,
                     signature,
                 };
@@ -167,20 +175,22 @@ impl NoteStorage {
             })?;
 
             // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 65 + 33 {
+            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
                 continue; // Skip invalid entries
             }
 
-            let note_recipient_pubkey: PubKey = value_bytes[114..147].try_into().unwrap();
+            let note_recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
 
             if note_recipient_pubkey == *recipient_pubkey {
-                let amount = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                let timestamp = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-                let signature: [u8; 65] = value_bytes[49..114].try_into().unwrap();
+                let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+                let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+                let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
+                let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
 
                 let note = IouNote {
                     recipient_pubkey: note_recipient_pubkey,
-                    amount,
+                    amount_collected,
+                    amount_redeemed,
                     timestamp,
                     signature,
                 };
@@ -202,18 +212,20 @@ impl NoteStorage {
             })?;
 
             // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 65 + 33 {
+            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
                 continue; // Skip invalid entries
             }
 
-            let amount = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-            let timestamp = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-            let signature: [u8; 65] = value_bytes[49..114].try_into().unwrap();
-            let recipient_pubkey: PubKey = value_bytes[114..147].try_into().unwrap();
+            let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+            let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+            let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
+            let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
+            let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
 
             let note = IouNote {
                 recipient_pubkey,
-                amount,
+                amount_collected,
+                amount_redeemed,
                 timestamp,
                 signature,
             };

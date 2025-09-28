@@ -61,7 +61,7 @@ impl From<IouNote> for SerializableIouNote {
     fn from(note: IouNote) -> Self {
         Self {
             recipient_pubkey: hex::encode(note.recipient_pubkey),
-            amount: note.amount,
+            amount: note.amount_collected,
             timestamp: note.timestamp,
             signature: hex::encode(note.signature),
         }
@@ -86,6 +86,15 @@ pub struct RedeemRequest {
     pub recipient_pubkey: String,
     pub amount: u64,
     pub timestamp: u64,
+}
+
+// Redemption completion request
+#[derive(Debug, Deserialize)]
+pub struct CompleteRedemptionRequest {
+    pub redemption_id: String,
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub redeemed_amount: u64,
 }
 
 // Redemption response

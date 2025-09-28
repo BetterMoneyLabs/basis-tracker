@@ -23,13 +23,16 @@ fn test_iou_note_creation() -> Result<(), String> {
     let recipient_pubkey = [1u8; 33];
     let signature = [2u8; 65];
 
-    let note = IouNote::new(recipient_pubkey, 1000, 1234567890, signature);
+    let note = IouNote::new(recipient_pubkey, 1000, 0, 1234567890, signature);
 
     if note.recipient_pubkey != recipient_pubkey {
         return Err("recipient_pubkey mismatch".to_string());
     }
-    if note.amount != 1000 {
-        return Err("amount mismatch".to_string());
+    if note.amount_collected != 1000 {
+        return Err("amount_collected mismatch".to_string());
+    }
+    if note.amount_redeemed != 0 {
+        return Err("amount_redeemed mismatch".to_string());
     }
     if note.timestamp != 1234567890 {
         return Err("timestamp mismatch".to_string());
@@ -43,7 +46,7 @@ fn test_iou_note_creation() -> Result<(), String> {
 }
 
 fn test_signing_message() -> Result<(), String> {
-    let note = IouNote::new([1u8; 33], 1000, 1234567890, [2u8; 65]);
+    let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [2u8; 65]);
 
     let message = note.signing_message();
     if message.is_empty() {
@@ -118,7 +121,7 @@ fn test_signature_verification() -> Result<(), String> {
     }
     
     // Test invalid signature (all zeros)
-    let invalid_note = IouNote::new(recipient_pubkey, amount, timestamp, [0u8; 65]);
+    let invalid_note = IouNote::new(recipient_pubkey, amount, 0, timestamp, [0u8; 65]);
     
     if invalid_note.verify_signature(&issuer_pubkey).is_ok() {
         return Err("should fail with zero signature".to_string());
@@ -182,8 +185,8 @@ fn test_roundtrip_signature() -> Result<(), String> {
     if note.recipient_pubkey != recipient_pubkey {
         return Err("recipient_pubkey mismatch".to_string());
     }
-    if note.amount != amount {
-        return Err("amount mismatch".to_string());
+    if note.amount_collected != amount {
+        return Err("amount_collected mismatch".to_string());
     }
     if note.timestamp != timestamp {
         return Err("timestamp mismatch".to_string());
@@ -236,7 +239,7 @@ fn test_signature_tampering() -> Result<(), String> {
         1234567890,
         &secret_key.secret_bytes(),
     ).map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
-    note3.amount = 2000;
+    note3.amount_collected = 2000;
     if note3.verify_signature(&issuer_pubkey).is_ok() {
         return Err("Tampered amount should fail verification".to_string());
     }

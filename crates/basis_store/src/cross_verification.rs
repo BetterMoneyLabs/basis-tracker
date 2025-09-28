@@ -36,7 +36,7 @@ fn test_basic_cryptography() -> Result<(), String> {
     use crate::IouNote;
     
     // Test that we can create notes and generate signing messages
-    let note = IouNote::new([1u8; 33], 1000, 1234567890, [0u8; 65]);
+    let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [0u8; 65]);
     let message = note.signing_message();
     assert_eq!(message.len(), 33 + 8 + 8);
     
@@ -85,12 +85,12 @@ fn test_edge_cases() -> Result<(), String> {
     let max_timestamp = u64::MAX;
     let max_pubkey = [0xFFu8; 33];
     
-    let note = IouNote::new(max_pubkey, max_amount, max_timestamp, [0x01u8; 65]);
+    let note = IouNote::new(max_pubkey, max_amount, 0, max_timestamp, [0x01u8; 65]);
     let message = note.signing_message();
     assert_eq!(message.len(), 33 + 8 + 8);
     
     // Test 3: Zero values (except signature which would fail verification)
-    let zero_note = IouNote::new([0u8; 33], 0, 0, [0u8; 65]);
+    let zero_note = IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]);
     let zero_message = zero_note.signing_message();
     assert_eq!(zero_message.len(), 33 + 8 + 8);
     
@@ -105,7 +105,7 @@ fn test_message_format_compatibility() -> Result<(), String> {
     // Our implementation: message = recipient_pubkey || amount_be_bytes || timestamp_be_bytes
     // This matches the basis.es format for the part after the key hash
     
-    let note = IouNote::new([1u8; 33], 1000, 1234567890, [0u8; 65]);
+    let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [0u8; 65]);
     let message = note.signing_message();
     
     // Verify structure: recipient_pubkey (33) + amount (8) + timestamp (8)
