@@ -8,41 +8,33 @@ use crate::{models::{ApiResponse, success_response}, AppState};
 /// Get reserves by issuer public key
 #[axum::debug_handler]
 pub async fn get_reserves_by_issuer(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
 ) -> (StatusCode, Json<ApiResponse<Vec<SerializableReserveInfo>>>) {
     tracing::debug!("Getting reserves for issuer: {}", pubkey_hex);
 
-    // In a real implementation, this would:
-    // 1. Connect to the reserve tracker (which would be part of AppState)
-    // 2. Look up reserves by owner public key
-    // 3. Return the reserve information
-
-    // For now, return a realistic mock response
-    let reserves = vec![
-        SerializableReserveInfo {
-            box_id: "f1e2d3c4b5a697887766554433221100ffeeddccbbaa99887766554433221100".to_string(),
-            owner_pubkey: pubkey_hex.clone(),
-            collateral_amount: 2500000000, // 2.5 ERG
-            total_debt: 1200000000,        // 1.2 ERG debt
-            tracker_nft_id: Some(
-                "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122".to_string(),
-            ),
-            last_updated_height: 1250,
-            last_updated_timestamp: 1672531200, // Jan 1, 2023
-            collateralization_ratio: 2.08,
-        },
-        SerializableReserveInfo {
-            box_id: "aa11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233445566778899".to_string(),
-            owner_pubkey: pubkey_hex.clone(),
-            collateral_amount: 1000000000, // 1.0 ERG
-            total_debt: 800000000,         // 0.8 ERG debt
-            tracker_nft_id: None,
-            last_updated_height: 1248,
-            last_updated_timestamp: 1672444800, // Dec 31, 2022
-            collateralization_ratio: 1.25,
-        },
-    ];
+    // Get reserve info from tracker
+    let tracker = state.reserve_tracker.lock().await;
+    let all_reserves = tracker.get_all_reserves();
+    
+    // Filter reserves by owner pubkey
+    let reserves: Vec<SerializableReserveInfo> = all_reserves
+        .into_iter()
+        .filter(|reserve| reserve.owner_pubkey == pubkey_hex)
+        .map(|info| {
+            let collateralization_ratio = info.collateralization_ratio();
+            SerializableReserveInfo {
+                box_id: info.box_id,
+                owner_pubkey: info.owner_pubkey,
+                collateral_amount: info.base_info.collateral_amount,
+                total_debt: info.total_debt,
+                tracker_nft_id: info.tracker_nft_id,
+                last_updated_height: info.base_info.last_updated_height,
+                last_updated_timestamp: info.last_updated_timestamp,
+                collateralization_ratio,
+            }
+        })
+        .collect();
 
     tracing::info!(
         "Returning {} reserves for issuer {}",

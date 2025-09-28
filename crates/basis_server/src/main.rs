@@ -5,8 +5,9 @@ mod reserve_api;
 mod store;
 
 use axum::{routing::{get, post}, Router};
-use basis_store::ergo_scanner::NodeConfig;
+use basis_store::{ergo_scanner::{NodeConfig, ErgoScanner, ReserveEvent}, ReserveTracker};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tokio::sync::Mutex;
 
 use crate::{api::*, config::*, models::*, store::EventStore, reserve_api::*};
 
@@ -15,6 +16,8 @@ use crate::{api::*, config::*, models::*, store::EventStore, reserve_api::*};
 struct AppState {
     tx: tokio::sync::mpsc::Sender<TrackerCommand>,
     event_store: std::sync::Arc<EventStore>,
+    ergo_scanner: std::sync::Arc<Mutex<ErgoScanner>>,
+    reserve_tracker: std::sync::Arc<Mutex<ReserveTracker>>,
 }
 
 // Commands that can be sent to the tracker thread
@@ -83,6 +86,28 @@ async fn main() {
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    // Initialize Ergo scanner
+    eprintln!("Initializing Ergo scanner...");
+    let node_config = config.ergo_node_config();
+    let mut ergo_scanner = ErgoScanner::new(node_config);
+    
+    // Start scanner
+    match ergo_scanner.start_scanning().await {
+        Ok(()) => {
+            eprintln!("Ergo scanner started successfully");
+            let current_height = ergo_scanner.get_current_height().await.unwrap_or(0);
+            eprintln!("Current blockchain height: {}", current_height);
+        }
+        Err(e) => {
+            eprintln!("Failed to start Ergo scanner: {}. Continuing without scanner...", e);
+        }
+    }
+
+    // Initialize reserve tracker
+    eprintln!("Initializing reserve tracker...");
+    let reserve_tracker = ReserveTracker::new();
+    eprintln!("Reserve tracker initialized successfully");
 
     // Create channel for communicating with tracker thread
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
@@ -248,7 +273,12 @@ async fn main() {
     }
     eprintln!("Demo events added successfully");
     
-    let app_state = AppState { tx, event_store };
+    let app_state = AppState { 
+        tx, 
+        event_store,
+        ergo_scanner: std::sync::Arc::new(Mutex::new(ergo_scanner)),
+        reserve_tracker: std::sync::Arc::new(Mutex::new(reserve_tracker)),
+    };
     eprintln!("App state created successfully");
 
     // Build our application with routes
@@ -265,7 +295,7 @@ async fn main() {
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/redeem", post(initiate_redemption))
         .route("/proof", get(get_proof))
-        .with_state(app_state)
+        .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     eprintln!("Router built successfully");
@@ -310,9 +340,199 @@ async fn main() {
         }
     };
     
+    // Start background scanner task
+    let scanner_state = app_state.clone();
+    tokio::spawn(async move {
+        background_scanner_task(scanner_state).await;
+    });
+    
     eprintln!("Starting axum server...");
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("Server error: {}", e);
         std::process::exit(1);
     };
+}
+
+/// Background task that continuously scans the blockchain for reserve events
+async fn background_scanner_task(state: AppState) {
+    tracing::info!("Starting background blockchain scanner task");
+    
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await; // Scan every 30 seconds
+        
+        let mut scanner = match state.ergo_scanner.try_lock() {
+            Ok(scanner) => scanner,
+            Err(_) => {
+                tracing::debug!("Scanner is busy, skipping this scan cycle");
+                continue;
+            }
+        };
+        
+        // Check if scanner is active
+        if !scanner.is_active() {
+            tracing::warn!("Scanner is not active, attempting to restart...");
+            match scanner.start_scanning().await {
+                Ok(()) => {
+                    tracing::info!("Scanner restarted successfully");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to restart scanner: {}", e);
+                    continue;
+                }
+            }
+        }
+        
+        // Scan for new blocks
+        match scanner.scan_new_blocks().await {
+            Ok(events) => {
+                if !events.is_empty() {
+                    tracing::info!("Found {} new reserve events", events.len());
+                    
+                    // Process each event
+                    for event in events {
+                        if let Err(e) = process_reserve_event(&state, event).await {
+                            tracing::error!("Failed to process reserve event: {}", e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to scan new blocks: {}", e);
+            }
+        }
+        
+        // Update reserve tracker with current unspent boxes
+        match scanner.get_unspent_reserve_boxes().await {
+            Ok(boxes) => {
+                let tracker = match state.reserve_tracker.try_lock() {
+                    Ok(tracker) => tracker,
+                    Err(_) => {
+                        tracing::debug!("Reserve tracker is busy, skipping update");
+                        continue;
+                    }
+                };
+                
+                for ergo_box in &boxes {
+                    // For now, use a placeholder owner pubkey since extract_owner_pubkey is private
+                    // In real implementation, we'd need to extract this from the box registers
+                    let owner_pubkey = format!("owner_of_{}", &ergo_box.box_id[..16]);
+                    
+                    let reserve_info = basis_store::ExtendedReserveInfo::new(
+                        ergo_box.box_id.as_bytes(),
+                        owner_pubkey.as_bytes(),
+                        ergo_box.value,
+                        None, // tracker_nft_id
+                        scanner.last_scanned_height(),
+                    );
+                    
+                    if let Err(e) = tracker.update_reserve(reserve_info) {
+                        tracing::warn!("Failed to update reserve info for {}: {}", owner_pubkey, e);
+                    }
+                }
+                
+                tracing::debug!("Updated reserve tracker with {} unspent boxes", boxes.len());
+            }
+            Err(e) => {
+                tracing::error!("Failed to get unspent reserve boxes: {}", e);
+            }
+        }
+    }
+}
+
+/// Process a reserve event and store it in the event store
+async fn process_reserve_event(state: &AppState, event: ReserveEvent) -> Result<(), Box<dyn std::error::Error>> {
+    let tracker_event = match event {
+        ReserveEvent::ReserveCreated { box_id, owner_pubkey, collateral_amount, height } => {
+            tracing::info!("Reserve created: {} with {} nanoERG at height {}", box_id, collateral_amount, height);
+            
+            // Update reserve tracker
+            let tracker = state.reserve_tracker.lock().await;
+            let reserve_info = basis_store::ExtendedReserveInfo::new(
+                box_id.as_bytes(),
+                owner_pubkey.as_bytes(),
+                collateral_amount,
+                None, // tracker_nft_id
+                height,
+            );
+            tracker.update_reserve(reserve_info)?;
+            
+            TrackerEvent {
+                id: 0,
+                event_type: EventType::ReserveCreated,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                issuer_pubkey: Some(owner_pubkey),
+                recipient_pubkey: None,
+                amount: None,
+                reserve_box_id: Some(box_id),
+                collateral_amount: Some(collateral_amount),
+                redeemed_amount: None,
+                height: Some(height),
+            }
+        }
+        ReserveEvent::ReserveToppedUp { box_id, additional_collateral, height } => {
+            tracing::info!("Reserve topped up: {} +{} nanoERG at height {}", box_id, additional_collateral, height);
+            
+            TrackerEvent {
+                id: 0,
+                event_type: EventType::ReserveToppedUp,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                issuer_pubkey: None, // Will be filled from reserve tracker if needed
+                recipient_pubkey: None,
+                amount: None,
+                reserve_box_id: Some(box_id),
+                collateral_amount: Some(additional_collateral),
+                redeemed_amount: None,
+                height: Some(height),
+            }
+        }
+        ReserveEvent::ReserveRedeemed { box_id, redeemed_amount, height } => {
+            tracing::info!("Reserve redeemed: {} -{} nanoERG at height {}", box_id, redeemed_amount, height);
+            
+            TrackerEvent {
+                id: 0,
+                event_type: EventType::ReserveRedeemed,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                issuer_pubkey: None, // Will be filled from reserve tracker if needed
+                recipient_pubkey: None,
+                amount: None,
+                reserve_box_id: Some(box_id),
+                collateral_amount: None,
+                redeemed_amount: Some(redeemed_amount),
+                height: Some(height),
+            }
+        }
+        ReserveEvent::ReserveSpent { box_id, height } => {
+            tracing::info!("Reserve spent: {} at height {}", box_id, height);
+            
+            TrackerEvent {
+                id: 0,
+                event_type: EventType::ReserveSpent,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                issuer_pubkey: None, // Will be filled from reserve tracker if needed
+                recipient_pubkey: None,
+                amount: None,
+                reserve_box_id: Some(box_id),
+                collateral_amount: None,
+                redeemed_amount: None,
+                height: Some(height),
+            }
+        }
+    };
+    
+    // Store the event
+    state.event_store.add_event(tracker_event).await?;
+    
+    Ok(())
 }
