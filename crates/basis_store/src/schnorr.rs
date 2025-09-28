@@ -2,7 +2,7 @@
 
 use crate::{NoteError, PubKey, Signature};
 use blake2::{Blake2b512, Digest};
-use secp256k1::{self, PublicKey, SecretKey};
+use secp256k1::{self, PublicKey, SecretKey, Scalar};
 use std::convert::TryInto;
 
 /// Generate the signing message in the same format as chaincash-rs
@@ -150,7 +150,125 @@ mod tests {
         let wrong_public_key = secp256k1::PublicKey::from_secret_key(&secp, &wrong_secret_key);
         let wrong_issuer_pubkey = wrong_public_key.serialize();
         assert!(schnorr_verify(&signature, &message, &wrong_issuer_pubkey).is_err());
+        
+        // Test with corrupted signature
+        let mut corrupted_signature = signature;
+        corrupted_signature[50] ^= 0x01; // Flip one bit
+        assert!(schnorr_verify(&corrupted_signature, &message, &issuer_pubkey).is_err());
     }
+    
+    #[test]
+    fn test_compute_challenge() {
+        let a_bytes = [0x02u8; 33];
+        let message = b"test message";
+        let issuer_pubkey = [0x03u8; 33];
+        
+        let challenge = compute_challenge(&a_bytes, message, &issuer_pubkey)
+            .expect("Failed to compute challenge");
+        
+        // Challenge should be a valid scalar
+        assert!(challenge.to_be_bytes().iter().any(|&b| b != 0));
+    }
+    
+    #[test]
+    fn test_key_generation() {
+        let (_secret_key, pubkey) = generate_keypair();
+        
+        // Validate the generated public key
+        assert!(validate_public_key(&pubkey).is_ok());
+        
+        // Test hex conversion
+        let hex_pubkey = pubkey_to_hex(&pubkey);
+        let pubkey_from_hex = pubkey_from_hex(&hex_pubkey).expect("Failed to parse hex pubkey");
+        assert_eq!(pubkey, pubkey_from_hex);
+    }
+    
+    #[test]
+    fn test_signature_hex_conversion() {
+        let (secret_key, pubkey) = generate_keypair();
+        let message = b"test message for hex conversion";
+        
+        let signature = schnorr_sign(message, &secret_key, &pubkey)
+            .expect("Failed to create signature");
+        
+        // Test hex conversion
+        let hex_signature = signature_to_hex(&signature);
+        let signature_from_hex = signature_from_hex(&hex_signature)
+            .expect("Failed to parse hex signature");
+        
+        assert_eq!(signature, signature_from_hex);
+        
+        // Verify the signature still works after hex conversion
+        assert!(schnorr_verify(&signature_from_hex, message, &pubkey).is_ok());
+    }
+}
+
+/// Compute the challenge e = H(a || message || issuer_pubkey)
+fn compute_challenge(a_bytes: &[u8], message: &[u8], issuer_pubkey: &PubKey) -> Result<Scalar, NoteError> {
+    let mut hasher = Blake2b512::new();
+    hasher.update(a_bytes);
+    hasher.update(message);
+    hasher.update(issuer_pubkey);
+    let e_bytes = hasher.finalize();
+    
+    // Take first 32 bytes for the scalar
+    let e_bytes_32: [u8; 32] = e_bytes[..32].try_into()
+        .map_err(|_| NoteError::InvalidSignature)?;
+    
+    Scalar::from_be_bytes(e_bytes_32)
+        .map_err(|_| NoteError::InvalidSignature)
+}
+
+/// Generate a new key pair for testing and development
+pub fn generate_keypair() -> (SecretKey, PubKey) {
+    let secp = secp256k1::Secp256k1::new();
+    let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    let pubkey_bytes = public_key.serialize();
+    
+    (secret_key, pubkey_bytes)
+}
+
+/// Convert a hex string to a public key
+pub fn pubkey_from_hex(hex_str: &str) -> Result<PubKey, NoteError> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| NoteError::InvalidSignature)?;
+    
+    if bytes.len() != 33 {
+        return Err(NoteError::InvalidSignature);
+    }
+    
+    let mut pubkey = [0u8; 33];
+    pubkey.copy_from_slice(&bytes);
+    
+    validate_public_key(&pubkey)?;
+    Ok(pubkey)
+}
+
+/// Convert a public key to a hex string
+pub fn pubkey_to_hex(pubkey: &PubKey) -> String {
+    hex::encode(pubkey)
+}
+
+/// Convert a signature to a hex string
+pub fn signature_to_hex(signature: &Signature) -> String {
+    hex::encode(signature)
+}
+
+/// Convert a hex string to a signature
+pub fn signature_from_hex(hex_str: &str) -> Result<Signature, NoteError> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| NoteError::InvalidSignature)?;
+    
+    if bytes.len() != 65 {
+        return Err(NoteError::InvalidSignature);
+    }
+    
+    let mut signature = [0u8; 65];
+    signature.copy_from_slice(&bytes);
+    
+    validate_signature_format(&signature)?;
+    Ok(signature)
 }
 
 /// Schnorr signature implementation following chaincash-rs approach
@@ -165,15 +283,8 @@ pub fn schnorr_sign(message: &[u8], secret_key: &secp256k1::SecretKey, issuer_pu
     let a_bytes = a_point.serialize();
     
     // Compute challenge e = H(a || message || issuer_pubkey)
-    let mut hasher = Blake2b512::new();
-    hasher.update(a_bytes);
-    hasher.update(message);
-    hasher.update(issuer_pubkey);
-    let e_bytes = hasher.finalize();
-    let e_scalar = secp256k1::Scalar::from_be_bytes(e_bytes[..32].try_into().unwrap())
-        .map_err(|_| NoteError::InvalidSignature)?;
+    let e_scalar = compute_challenge(&a_bytes, message, issuer_pubkey)?;
     
-    // Compute z = k + e * s (mod n) using secp256k1's native scalar operations
     // Convert scalars to their big integer representations for modular arithmetic
     let k_big = num_bigint::BigUint::from_bytes_be(&nonce_secret.secret_bytes());
     let s_big = num_bigint::BigUint::from_bytes_be(&secret_key.secret_bytes());
@@ -247,13 +358,7 @@ pub fn schnorr_verify(signature: &Signature, message: &[u8], issuer_pubkey: &Pub
         .map_err(|_| NoteError::InvalidSignature)?;
     
     // Compute challenge e = H(a || message || issuer_pubkey)
-    let mut hasher = Blake2b512::new();
-    hasher.update(a_bytes);
-    hasher.update(message);
-    hasher.update(issuer_pubkey);
-    let e_bytes = hasher.finalize();
-    let e_scalar = secp256k1::Scalar::from_be_bytes(e_bytes[..32].try_into().unwrap())
-        .map_err(|_| NoteError::InvalidSignature)?;
+    let e_scalar = compute_challenge(a_bytes, message, issuer_pubkey)?;
     
     // Parse z as a scalar (32 bytes)
     let z_scalar = SecretKey::from_slice(z_bytes)

@@ -11,6 +11,7 @@ pub mod schnorr_tests;
 pub mod schnorr_verification_vectors;
 pub mod cross_verification;
 pub mod schnorr;
+pub mod schnorr_comprehensive_test;
 
 use secp256k1;
 
