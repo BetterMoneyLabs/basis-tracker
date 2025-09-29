@@ -121,10 +121,10 @@ impl NoteStorage {
     /// Get all notes for a specific issuer
     pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
         let mut notes = Vec::new();
-        
+
         tracing::debug!("Looking for notes from issuer: {:?}", issuer_pubkey);
         tracing::debug!("Partition item count: {:?}", self.partition.iter().count());
-        
+
         // Debug: log the actual issuer pubkey we're looking for
         tracing::debug!("Searching for issuer: {:?}", issuer_pubkey);
 

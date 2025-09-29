@@ -1,6 +1,6 @@
 //! Comprehensive test vectors for Schnorr signature verification
 //! These vectors can be used to verify compatibility between Rust and ErgoScript implementations
-//! 
+//!
 //! Each test vector includes:
 //! - Inputs: issuer_pubkey, recipient_pubkey, amount, timestamp, signature
 //! - Intermediate values: signing message, challenge hash
@@ -15,18 +15,18 @@ pub struct SchnorrVerificationVector {
     pub id: &'static str,
     /// Test case description
     pub description: &'static str,
-    
+
     // Inputs
     pub issuer_pubkey: [u8; 33],
     pub recipient_pubkey: [u8; 33],
     pub amount: u64,
     pub timestamp: u64,
     pub signature: [u8; 65],
-    
+
     // Intermediate values (for verification)
     pub signing_message: Vec<u8>,
     pub challenge_hash: [u8; 32],
-    
+
     // Expected result
     pub should_verify: bool,
 }
@@ -48,7 +48,7 @@ impl SchnorrVerificationVector {
         signing_message.extend_from_slice(&recipient_pubkey);
         signing_message.extend_from_slice(&amount.to_be_bytes());
         signing_message.extend_from_slice(&timestamp.to_be_bytes());
-        
+
         // Compute challenge: H(a || message || issuer_pubkey)
         let a_bytes = &signature[0..33];
         let mut hasher = Blake2b512::new();
@@ -57,7 +57,7 @@ impl SchnorrVerificationVector {
         hasher.update(&issuer_pubkey);
         let challenge_full = hasher.finalize();
         let challenge_hash: [u8; 32] = challenge_full[..32].try_into().unwrap();
-        
+
         Self {
             id,
             description,
@@ -71,7 +71,7 @@ impl SchnorrVerificationVector {
             should_verify,
         }
     }
-    
+
     /// Convert to JSON for cross-language testing
     pub fn to_json(&self) -> String {
         format!(
@@ -112,13 +112,12 @@ pub fn get_comprehensive_test_vectors() -> Vec<SchnorrVerificationVector> {
             [1u8; 33],
             // recipient_pubkey
             [2u8; 33],
-            1000,      // amount
+            1000,       // amount
             1234567890, // timestamp
             // signature (pattern for now - would be replaced with actual ECDSA signature)
             [1u8; 65],
-            true
+            true,
         ),
-        
         // Vector 2: All zeros (invalid)
         SchnorrVerificationVector::new(
             "TV002",
@@ -128,9 +127,8 @@ pub fn get_comprehensive_test_vectors() -> Vec<SchnorrVerificationVector> {
             500,
             9876543210,
             [0u8; 65],
-            false
+            false,
         ),
-        
         // Vector 3: Edge case - maximum values
         SchnorrVerificationVector::new(
             "TV003",
@@ -145,9 +143,8 @@ pub fn get_comprehensive_test_vectors() -> Vec<SchnorrVerificationVector> {
                 sig[33..65].copy_from_slice(&[0xCCu8; 32]);
                 sig
             },
-            true
+            true,
         ),
-        
         // Vector 4: Minimum non-zero values
         SchnorrVerificationVector::new(
             "TV004",
@@ -162,9 +159,8 @@ pub fn get_comprehensive_test_vectors() -> Vec<SchnorrVerificationVector> {
                 sig[33] = 0x01; // minimal non-zero z
                 sig
             },
-            true
+            true,
         ),
-        
         // Vector 5: Specific pattern for cross-verification
         SchnorrVerificationVector::new(
             "TV005",
@@ -177,19 +173,17 @@ pub fn get_comprehensive_test_vectors() -> Vec<SchnorrVerificationVector> {
             0xFEDCBA9876543210, // pattern timestamp
             // signature: pattern-based
             [0xFFu8; 65],
-            true
+            true,
         ),
     ]
 }
 
-
-
 /// Run verification against all test vectors
 pub fn verify_all_test_vectors() -> Result<(), String> {
     use crate::IouNote;
-    
+
     let vectors = get_comprehensive_test_vectors();
-    
+
     for vector in vectors {
         let note = IouNote::new(
             vector.recipient_pubkey,
@@ -198,10 +192,10 @@ pub fn verify_all_test_vectors() -> Result<(), String> {
             vector.timestamp,
             vector.signature,
         );
-        
+
         let result = note.verify_signature(&vector.issuer_pubkey);
         let verified = result.is_ok();
-        
+
         if verified != vector.should_verify {
             return Err(format!(
                 "Test vector {} failed: {} (expected {}, got {})",
@@ -209,20 +203,18 @@ pub fn verify_all_test_vectors() -> Result<(), String> {
             ));
         }
     }
-    
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_verification_vectors() {
         // This test is disabled for now as it uses pattern-based signatures
         // that don't pass cryptographic verification
         // verify_all_test_vectors().unwrap();
     }
-    
-
 }

@@ -1,6 +1,6 @@
 // Manual test runner functions
 
-use crate::{simple_hash, IouNote, NoteKey, schnorr_tests};
+use crate::{schnorr_tests, simple_hash, IouNote, NoteKey};
 
 pub fn run_all_tests() -> Result<(), String> {
     println!("Running Basis Store tests...");
@@ -100,29 +100,29 @@ fn test_signature_verification() -> Result<(), String> {
     use secp256k1::{Secp256k1, SecretKey};
 
     let secp = Secp256k1::new();
-    
+
     // Generate a test key pair
     let secret_key = SecretKey::from_slice(&[1u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
     let issuer_pubkey = public_key.serialize();
-    
+
     // Create a test note
     let recipient_pubkey = [2u8; 33];
     let amount = 1000u64;
     let timestamp = 1234567890u64;
-    
+
     // Create a valid signature using our implementation
     let note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &[1u8; 32])
         .expect("Failed to create valid signature");
-    
+
     // Test valid signature (basic format validation)
     if note.verify_signature(&issuer_pubkey).is_err() {
         return Err("should pass with valid signature format".to_string());
     }
-    
+
     // Test invalid signature (all zeros)
     let invalid_note = IouNote::new(recipient_pubkey, amount, 0, timestamp, [0u8; 65]);
-    
+
     if invalid_note.verify_signature(&issuer_pubkey).is_ok() {
         return Err("should fail with zero signature".to_string());
     }
@@ -152,35 +152,36 @@ fn test_simple_hash_consistency() -> Result<(), String> {
 
 fn test_roundtrip_signature() -> Result<(), String> {
     use secp256k1::{Secp256k1, SecretKey};
-    
+
     let secp = Secp256k1::new();
-    
+
     // Generate test key pair
     let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
     let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
     let issuer_pubkey = public_key.serialize();
-    
+
     // Test data
     let recipient_pubkey = [2u8; 33];
     let amount = 1000u64;
     let timestamp = 1234567890u64;
-    
+
     // Create and sign a note
     let note = IouNote::create_and_sign(
         recipient_pubkey,
         amount,
         timestamp,
         &secret_key.secret_bytes(),
-    ).map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
-    
+    )
+    .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+
     // Verify the signature
     println!("Testing signature verification...");
     println!("Signature: {:?}", note.signature);
     println!("Issuer pubkey: {:?}", issuer_pubkey);
-    
+
     note.verify_signature(&issuer_pubkey)
         .map_err(|e| format!("Signature verification failed: {:?}", e))?;
-    
+
     // Verify note data is correct
     if note.recipient_pubkey != recipient_pubkey {
         return Err("recipient_pubkey mismatch".to_string());
@@ -191,125 +192,104 @@ fn test_roundtrip_signature() -> Result<(), String> {
     if note.timestamp != timestamp {
         return Err("timestamp mismatch".to_string());
     }
-    
+
     println!("✓ test_roundtrip_signature passed");
     Ok(())
 }
 
 fn test_signature_tampering() -> Result<(), String> {
     use secp256k1::{Secp256k1, SecretKey};
-    
+
     let secp = Secp256k1::new();
-    
+
     // Generate test key pair
     let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
     let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
     let issuer_pubkey = public_key.serialize();
-    
+
     // Create and sign a valid note
-    let mut note = IouNote::create_and_sign(
-        [2u8; 33],
-        1000,
-        1234567890,
-        &secret_key.secret_bytes(),
-    ).map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
-    
+    let mut note =
+        IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key.secret_bytes())
+            .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+
     // Test 1: Tamper with signature
     note.signature[0] ^= 0x01; // Flip a bit in the signature
     if note.verify_signature(&issuer_pubkey).is_ok() {
         return Err("Tampered signature should fail verification".to_string());
     }
-    
+
     // Test 2: Tamper with recipient
-    let mut note2 = IouNote::create_and_sign(
-        [2u8; 33],
-        1000,
-        1234567890,
-        &secret_key.secret_bytes(),
-    ).map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+    let mut note2 =
+        IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key.secret_bytes())
+            .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
     note2.recipient_pubkey[0] ^= 0x01;
     if note2.verify_signature(&issuer_pubkey).is_ok() {
         return Err("Tampered recipient should fail verification".to_string());
     }
-    
+
     // Test 3: Tamper with amount
-    let mut note3 = IouNote::create_and_sign(
-        [2u8; 33],
-        1000,
-        1234567890,
-        &secret_key.secret_bytes(),
-    ).map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+    let mut note3 =
+        IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key.secret_bytes())
+            .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
     note3.amount_collected = 2000;
     if note3.verify_signature(&issuer_pubkey).is_ok() {
         return Err("Tampered amount should fail verification".to_string());
     }
-    
+
     // Test 4: Wrong issuer public key
     let wrong_pubkey = [0u8; 33];
-    let note4 = IouNote::create_and_sign(
-        [2u8; 33],
-        1000,
-        1234567890,
-        &secret_key.secret_bytes(),
-    ).map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+    let note4 = IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key.secret_bytes())
+        .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
     if note4.verify_signature(&wrong_pubkey).is_ok() {
         return Err("Wrong issuer pubkey should fail verification".to_string());
     }
-    
+
     println!("✓ test_signature_tampering passed");
     Ok(())
 }
 
 fn test_multiple_signatures() -> Result<(), String> {
     use secp256k1::{Secp256k1, SecretKey};
-    
+
     let secp = Secp256k1::new();
-    
+
     // Generate multiple key pairs
     let secret_key1 = SecretKey::new(&mut secp256k1::rand::thread_rng());
     let public_key1 = secp256k1::PublicKey::from_secret_key(&secp, &secret_key1);
     let issuer_pubkey1 = public_key1.serialize();
-    
+
     let secret_key2 = SecretKey::new(&mut secp256k1::rand::thread_rng());
     let public_key2 = secp256k1::PublicKey::from_secret_key(&secp, &secret_key2);
     let issuer_pubkey2 = public_key2.serialize();
-    
+
     // Create notes with different issuers
-    let note1 = IouNote::create_and_sign(
-        [2u8; 33],
-        1000,
-        1234567890,
-        &secret_key1.secret_bytes(),
-    ).map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
-    
-    let note2 = IouNote::create_and_sign(
-        [2u8; 33],
-        2000,
-        1234567891,
-        &secret_key2.secret_bytes(),
-    ).map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
-    
+    let note1 = IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key1.secret_bytes())
+        .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+
+    let note2 = IouNote::create_and_sign([2u8; 33], 2000, 1234567891, &secret_key2.secret_bytes())
+        .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+
     // Verify each note with its correct issuer
-    note1.verify_signature(&issuer_pubkey1)
+    note1
+        .verify_signature(&issuer_pubkey1)
         .map_err(|e| format!("Note1 verification failed: {:?}", e))?;
-    
-    note2.verify_signature(&issuer_pubkey2)
+
+    note2
+        .verify_signature(&issuer_pubkey2)
         .map_err(|e| format!("Note2 verification failed: {:?}", e))?;
-    
+
     // Verify that notes fail with wrong issuers
     if note1.verify_signature(&issuer_pubkey2).is_ok() {
         return Err("Note1 should fail with issuer2 pubkey".to_string());
     }
-    
+
     if note2.verify_signature(&issuer_pubkey1).is_ok() {
         return Err("Note2 should fail with issuer1 pubkey".to_string());
     }
-    
+
     println!("✓ test_multiple_signatures passed");
     Ok(())
 }
-
-
 
 #[cfg(test)]
 mod test_module {
@@ -339,8 +319,6 @@ mod test_module {
     fn test_simple_hash_consistency() {
         super::test_simple_hash_consistency().unwrap();
     }
-
-
 
     #[test]
     fn test_schnorr_test_vectors() {

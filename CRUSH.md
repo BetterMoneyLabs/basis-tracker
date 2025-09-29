@@ -96,50 +96,29 @@
 ## Ergo Blockchain Scanner
 
 ### Scanner Implementation
-- **Real HTTP-based scanner** that connects to actual Ergo nodes
-- **Async/await architecture** using reqwest HTTP client
-- **Event-driven design** for processing reserve-related blockchain events
-- **Extensible framework** with proper error handling and retry logic
+- **Chaincash-rs style scanner** - Following chaincash-rs pattern with background scanning tasks
+- **Single unified implementation** - Clean, consistent API
 
 ### Scanner Features
-- **Real Ergo node integration** with public node support
-- **Block height tracking** to monitor blockchain progress
+- **Background scanning tasks** running independently
+- **Event-driven architecture** similar to chaincash-rs
+- **Automatic block waiting** and continuous scanning
+- **Simplified API** with ServerState pattern
 - **Event processing** for reserve creation, top-up, redemption, and spending
 - **Unspent box querying** for current reserve state
 - **Contract template filtering** for targeted scanning
 
 ### Usage Example
 ```rust
-use basis_store::ergo_scanner::{ErgoScanner, NodeConfig};
+use basis_store::ergo_scanner::{start_scanner, create_default_scanner};
 
-// Create scanner configuration for real Ergo node
-let config = NodeConfig {
-    url: "http://213.239.193.208:9052".to_string(),
-    api_key: "".to_string(),
-    timeout_secs: 30,
-    start_height: None,
-    contract_template: None,
-};
+// Create a scanner with default configuration
+let state = create_default_scanner();
 
-let mut scanner = ErgoScanner::new(config);
+// Start the scanner (runs background tasks)
+start_scanner(state).await.unwrap();
 
-// Start scanning
-scanner.start_scanning().await.unwrap();
-
-// Get current blockchain height
-let height = scanner.get_current_height().await.unwrap();
-
-// Scan for new blocks
-let events = scanner.scan_new_blocks().await.unwrap();
-
-// Get unspent reserve boxes
-let boxes = scanner.get_unspent_reserve_boxes().await.unwrap();
-
-// Wait for next block
-scanner.wait_for_next_block().await.unwrap();
-
-// Stop scanning
-scanner.stop_scanning().unwrap();
+// Scanner runs in background, processing events automatically
 ```
 
 ### Event Types

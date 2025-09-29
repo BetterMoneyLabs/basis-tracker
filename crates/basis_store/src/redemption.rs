@@ -105,7 +105,7 @@ impl RedemptionManager {
         if note.amount_collected != request.amount || note.timestamp != request.timestamp {
             return Err(RedemptionError::InvalidNoteSignature);
         }
-        
+
         // Check if there's sufficient outstanding debt to redeem
         if note.outstanding_debt() < request.amount {
             return Err(RedemptionError::InsufficientCollateral(
@@ -200,13 +200,14 @@ impl RedemptionManager {
         redeemed_amount: u64,
     ) -> Result<(), RedemptionError> {
         // Get the current note
-        let mut note = self.tracker
+        let mut note = self
+            .tracker
             .lookup_note(issuer_pubkey, recipient_pubkey)
             .map_err(|_| RedemptionError::NoteNotFound)?;
-        
+
         // Update the redeemed amount
         note.amount_redeemed += redeemed_amount;
-        
+
         // Update the note in tracker
         self.tracker
             .update_note(issuer_pubkey, &note)

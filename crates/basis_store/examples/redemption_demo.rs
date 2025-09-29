@@ -1,8 +1,7 @@
 //! Demonstration of the redemption flow for Basis offchain notes
 
 use basis_store::{
-    IouNote, RedemptionManager, RedemptionRequest, TrackerStateManager,
-    schnorr::generate_keypair,
+    schnorr::generate_keypair, IouNote, RedemptionManager, RedemptionRequest, TrackerStateManager,
 };
 use secp256k1::SecretKey;
 
@@ -13,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1. Generating test keypairs...");
     let (issuer_secret, issuer_pubkey) = generate_keypair();
     let (recipient_secret, recipient_pubkey) = generate_keypair();
-    
+
     println!("   Issuer pubkey: {}", hex::encode(issuer_pubkey));
     println!("   Recipient pubkey: {}\n", hex::encode(recipient_pubkey));
 
@@ -26,26 +25,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("3. Creating and signing a test note...");
     let amount_collected = 1000;
     let timestamp = 1672531200; // Jan 1, 2023
-    
+
     // Convert secret key to bytes
     let issuer_secret_bytes: [u8; 32] = issuer_secret.secret_bytes();
-    
+
     let note = IouNote::create_and_sign(
         recipient_pubkey,
         amount_collected,
         timestamp,
         &issuer_secret_bytes,
-    ).map_err(|e| format!("Failed to create note: {:?}", e))?;
-    
-    println!("   Note created: {} -> {} ({} nanoERG collected, {} nanoERG redeemed)", 
-             hex::encode(&issuer_pubkey[..8]), 
-             hex::encode(&recipient_pubkey[..8]), 
-             note.amount_collected,
-             note.amount_redeemed);
+    )
+    .map_err(|e| format!("Failed to create note: {:?}", e))?;
+
+    println!(
+        "   Note created: {} -> {} ({} nanoERG collected, {} nanoERG redeemed)",
+        hex::encode(&issuer_pubkey[..8]),
+        hex::encode(&recipient_pubkey[..8]),
+        note.amount_collected,
+        note.amount_redeemed
+    );
 
     // Add note to tracker
     println!("4. Adding note to tracker...");
-    redemption_manager.tracker.add_note(&issuer_pubkey, &note)
+    redemption_manager
+        .tracker
+        .add_note(&issuer_pubkey, &note)
         .map_err(|e| format!("Failed to add note: {:?}", e))?;
     println!("   Note added successfully\n");
 
@@ -60,7 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         recipient_address: "test_address".to_string(),
     };
 
-    println!("   Redemption request created for amount: {} nanoERG\n", amount_collected);
+    println!(
+        "   Redemption request created for amount: {} nanoERG\n",
+        amount_collected
+    );
 
     // Try to initiate redemption (this will fail due to time lock)
     println!("6. Attempting to initiate redemption...");
@@ -68,42 +75,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(redemption_data) => {
             println!("   Redemption initiated successfully!");
             println!("   Redemption ID: {}", redemption_data.redemption_id);
-            println!("   Transaction bytes: {}...", &redemption_data.transaction_bytes[..20]);
-            println!("   Required signatures: {:?}", redemption_data.required_signatures);
-            println!("   Estimated fee: {} nanoERG", redemption_data.estimated_fee);
-            
+            println!(
+                "   Transaction bytes: {}...",
+                &redemption_data.transaction_bytes[..20]
+            );
+            println!(
+                "   Required signatures: {:?}",
+                redemption_data.required_signatures
+            );
+            println!(
+                "   Estimated fee: {} nanoERG",
+                redemption_data.estimated_fee
+            );
+
             // Complete redemption
             println!("\n7. Completing redemption...");
             let redeemed_amount = 500; // Redeem half the amount
-            redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, redeemed_amount)
+            redemption_manager
+                .complete_redemption(&issuer_pubkey, &recipient_pubkey, redeemed_amount)
                 .map_err(|e| format!("Failed to complete redemption: {}", e))?;
             println!("   Redemption completed successfully!");
             println!("   Redeemed {} nanoERG", redeemed_amount);
-            
+
             // Check note status after redemption
-            let updated_note = redemption_manager.tracker
+            let updated_note = redemption_manager
+                .tracker
                 .lookup_note(&issuer_pubkey, &recipient_pubkey)
                 .map_err(|e| format!("Failed to lookup note: {:?}", e))?;
-            println!("   Note after redemption: collected={}, redeemed={}, outstanding={}",
-                     updated_note.amount_collected, 
-                     updated_note.amount_redeemed,
-                     updated_note.outstanding_debt());
+            println!(
+                "   Note after redemption: collected={}, redeemed={}, outstanding={}",
+                updated_note.amount_collected,
+                updated_note.amount_redeemed,
+                updated_note.outstanding_debt()
+            );
         }
         Err(e) => {
             println!("   Redemption failed (expected due to time lock): {}", e);
-            println!("   This is expected behavior - notes require 1 week minimum before redemption\n");
+            println!(
+                "   This is expected behavior - notes require 1 week minimum before redemption\n"
+            );
         }
     }
 
     // Test redemption proof verification
     println!("8. Testing redemption proof verification...");
     let proof = vec![0u8; 32]; // Mock proof
-    let is_valid = redemption_manager.verify_redemption_proof(
-        &proof,
-        &note,
-        &issuer_pubkey,
-    ).map_err(|e| format!("Failed to verify proof: {}", e))?;
-    
+    let is_valid = redemption_manager
+        .verify_redemption_proof(&proof, &note, &issuer_pubkey)
+        .map_err(|e| format!("Failed to verify proof: {}", e))?;
+
     println!("   Proof verification result: {}\n", is_valid);
 
     println!("=== Redemption Flow Demo Complete ===");

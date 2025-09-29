@@ -1,8 +1,6 @@
 //! Memory-only demonstration of the redemption flow for Basis offchain notes
 
-use basis_store::{
-    IouNote, schnorr::generate_keypair,
-};
+use basis_store::{schnorr::generate_keypair, IouNote};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Memory-Only Basis Redemption Flow Demo ===\n");
@@ -11,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1. Generating test keypairs...");
     let (issuer_secret, issuer_pubkey) = generate_keypair();
     let (_recipient_secret, recipient_pubkey) = generate_keypair();
-    
+
     println!("   Issuer pubkey: {}", hex::encode(issuer_pubkey));
     println!("   Recipient pubkey: {}\n", hex::encode(recipient_pubkey));
 
@@ -19,22 +17,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("2. Creating and signing a test note...");
     let amount_collected = 1000;
     let timestamp = 1672531200; // Jan 1, 2023
-    
+
     // Convert secret key to bytes
     let issuer_secret_bytes: [u8; 32] = issuer_secret.secret_bytes();
-    
+
     let note = IouNote::create_and_sign(
         recipient_pubkey,
         amount_collected,
         timestamp,
         &issuer_secret_bytes,
-    ).map_err(|e| format!("Failed to create note: {:?}", e))?;
-    
-    println!("   Note created: {} -> {} ({} nanoERG collected, {} nanoERG redeemed)", 
-             hex::encode(&issuer_pubkey[..8]), 
-             hex::encode(&recipient_pubkey[..8]), 
-             note.amount_collected,
-             note.amount_redeemed);
+    )
+    .map_err(|e| format!("Failed to create note: {:?}", e))?;
+
+    println!(
+        "   Note created: {} -> {} ({} nanoERG collected, {} nanoERG redeemed)",
+        hex::encode(&issuer_pubkey[..8]),
+        hex::encode(&recipient_pubkey[..8]),
+        note.amount_collected,
+        note.amount_redeemed
+    );
 
     // Test note methods
     println!("\n3. Testing note methods...");
@@ -51,32 +52,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n5. Testing note with partial redemption...");
     let partially_redeemed_note = IouNote::new(
         recipient_pubkey,
-        amount_collected,  // collected
-        500,               // redeemed
+        amount_collected, // collected
+        500,              // redeemed
         timestamp,
-        note.signature,    // Note: In real usage, this would need to be re-signed
+        note.signature, // Note: In real usage, this would need to be re-signed
     );
-    
-    println!("   Partially redeemed note: collected={}, redeemed={}, outstanding={}",
-             partially_redeemed_note.amount_collected,
-             partially_redeemed_note.amount_redeemed,
-             partially_redeemed_note.outstanding_debt());
+
+    println!(
+        "   Partially redeemed note: collected={}, redeemed={}, outstanding={}",
+        partially_redeemed_note.amount_collected,
+        partially_redeemed_note.amount_redeemed,
+        partially_redeemed_note.outstanding_debt()
+    );
 
     // Test creating a fully redeemed note
     println!("\n6. Testing fully redeemed note...");
     let fully_redeemed_note = IouNote::new(
         recipient_pubkey,
-        amount_collected,  // collected
-        amount_collected,  // fully redeemed
+        amount_collected, // collected
+        amount_collected, // fully redeemed
         timestamp,
-        note.signature,    // Note: In real usage, this would need to be re-signed
+        note.signature, // Note: In real usage, this would need to be re-signed
     );
-    
-    println!("   Fully redeemed note: collected={}, redeemed={}, outstanding={}",
-             fully_redeemed_note.amount_collected,
-             fully_redeemed_note.amount_redeemed,
-             fully_redeemed_note.outstanding_debt());
-    println!("   Fully redeemed: {}", fully_redeemed_note.is_fully_redeemed());
+
+    println!(
+        "   Fully redeemed note: collected={}, redeemed={}, outstanding={}",
+        fully_redeemed_note.amount_collected,
+        fully_redeemed_note.amount_redeemed,
+        fully_redeemed_note.outstanding_debt()
+    );
+    println!(
+        "   Fully redeemed: {}",
+        fully_redeemed_note.is_fully_redeemed()
+    );
 
     // Test signing message format
     println!("\n7. Testing signing message format...");

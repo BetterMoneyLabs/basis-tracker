@@ -2,19 +2,18 @@
 
 pub mod avl_tree;
 pub mod contract_compiler;
-pub mod ergo_scanner;
-pub mod ergo_scanner_test;
-pub mod persistence;
-pub mod reserve_tracker;
-pub mod tests;
-pub mod schnorr_tests;
-pub mod schnorr_verification_vectors;
 pub mod cross_verification;
-pub mod schnorr;
-pub mod schnorr_comprehensive_test;
+pub mod ergo_scanner;
+pub mod persistence;
 pub mod redemption;
 pub mod redemption_blockchain_tests;
 pub mod redemption_simple_tests;
+pub mod reserve_tracker;
+pub mod schnorr;
+pub mod schnorr_comprehensive_test;
+pub mod schnorr_tests;
+pub mod schnorr_verification_vectors;
+pub mod tests;
 
 use secp256k1;
 
@@ -132,7 +131,7 @@ impl TrackerStateManager {
             Ok(storage) => {
                 eprintln!("Note storage opened successfully");
                 storage
-            },
+            }
             Err(e) => {
                 eprintln!("Failed to initialize note storage: {:?}", e);
                 // Fallback to in-memory storage if file storage fails
@@ -160,7 +159,7 @@ impl TrackerStateManager {
 
         // Update AVL tree state
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
-        
+
         // Create value bytes matching persistence format
         let mut value_bytes = Vec::new();
         value_bytes.extend_from_slice(issuer_pubkey);
@@ -327,23 +326,23 @@ impl IouNote {
         issuer_secret_key: &[u8; 32],
     ) -> Result<Self, NoteError> {
         use secp256k1::{Secp256k1, SecretKey};
-        
+
         let secp = Secp256k1::new();
-        
+
         // Parse the secret key
-        let secret_key = SecretKey::from_slice(issuer_secret_key)
-            .map_err(|_| NoteError::InvalidSignature)?;
-        
+        let secret_key =
+            SecretKey::from_slice(issuer_secret_key).map_err(|_| NoteError::InvalidSignature)?;
+
         // Generate the corresponding public key
         let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let issuer_pubkey = public_key.serialize();
-        
+
         // Generate the signing message (same format as chaincash-rs)
         let message = schnorr::signing_message(&recipient_pubkey, amount_collected, timestamp);
-        
+
         // Use the chaincash-rs approach for Schnorr signing
         let signature = schnorr::schnorr_sign(&message, &secret_key, &issuer_pubkey)?;
-        
+
         Ok(Self {
             recipient_pubkey,
             amount_collected,
@@ -367,13 +366,13 @@ impl IouNote {
     pub fn verify_signature(&self, issuer_pubkey: &PubKey) -> Result<(), NoteError> {
         // Validate the issuer public key first
         schnorr::validate_public_key(issuer_pubkey)?;
-        
+
         // Validate the signature format
         schnorr::validate_signature_format(&self.signature)?;
-        
+
         // Generate the signing message
         let message = self.signing_message();
-        
+
         // Use the chaincash-rs approach for Schnorr verification
         schnorr::schnorr_verify(&self.signature, &message, issuer_pubkey)
     }
@@ -407,13 +406,14 @@ pub fn simple_hash(data: &[u8]) -> [u8; 32] {
     result
 }
 
-
-
 // Re-export reserve tracker types
 pub use reserve_tracker::{ExtendedReserveInfo, ReserveTracker, ReserveTrackerError};
 
-// Re-export ergo scanner types
-pub use ergo_scanner::{ErgoScanner, ErgoScannerError, NodeConfig, ReserveEvent, ErgoBox};
+// Re-export ergo scanner types (chaincash-rs pattern)
+pub use ergo_scanner::{
+    create_default_scanner, start_scanner, ErgoBox, NodeConfig, ReserveEvent, ScanType,
+    ScannerError, ServerState,
+};
 
 // Re-export redemption types
 pub use redemption::{RedemptionData, RedemptionError, RedemptionManager, RedemptionRequest};
