@@ -13,6 +13,8 @@ pub mod cross_verification;
 pub mod schnorr;
 pub mod schnorr_comprehensive_test;
 pub mod redemption;
+pub mod redemption_blockchain_tests;
+pub mod redemption_simple_tests;
 
 use secp256k1;
 

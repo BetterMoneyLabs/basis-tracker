@@ -22,9 +22,10 @@ fn simple_resolver(_digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
 impl AvlTreeState {
     /// Create a new AVL tree state
     pub fn new() -> Self {
-        // Create an AVL tree with appropriate parameters
-        // Value length: issuer_pubkey(33) + amount(8) + timestamp(8) + signature(65) + recipient_pubkey(33) = 147 bytes
-        let tree = AVLTree::new(simple_resolver, 64, Some(147));
+        // Create an AVL tree with variable length values
+        // Key length: 64 bytes (issuer_hash + recipient_hash)
+        // Value length: None for variable length values
+        let tree = AVLTree::new(simple_resolver, 64, None);
         let prover = BatchAVLProver::new(tree, true);
 
         Self { prover }

@@ -1,36 +1,6 @@
 //! Contract compilation utilities for Basis tracker
 
-use std::fs;
-use std::path::Path;
 use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum CompilerError {
-    #[error("File not found: {0}")]
-    FileNotFound(String),
-    #[error("Compilation failed: {0}")]
-    CompilationFailed(String),
-    #[error("Ergo-lib not available: {0}")]
-    ErgoLibUnavailable(String),
-}
-
-/// Compile an ErgoScript contract to get the ErgoTree template
-pub fn compile_contract(contract_path: &str) -> Result<String, CompilerError> {
-    // Read the contract source
-    let contract_source = fs::read_to_string(contract_path)
-        .map_err(|_| CompilerError::FileNotFound(contract_path.to_string()))?;
-    
-    // For now, return a placeholder template since we don't have the actual compiler set up
-    // In a real implementation, this would use ergo-lib's compiler
-    
-    // Generate a deterministic placeholder based on the contract content
-    let template_hash = blake2_hash(&contract_source);
-    
-    // Format as a placeholder ErgoTree (this would be the actual compiled template)
-    let ergo_tree = format!("0008cd{}", hex::encode(&template_hash[..20]));
-    
-    Ok(ergo_tree)
-}
 
 /// Simple Blake2b hash function for placeholder template generation
 fn blake2_hash(data: &str) -> [u8; 32] {
@@ -45,24 +15,22 @@ fn blake2_hash(data: &str) -> [u8; 32] {
     hash
 }
 
+#[derive(Error, Debug)]
+pub enum CompilerError {
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+    #[error("Compilation failed: {0}")]
+    CompilationFailed(String),
+    #[error("Ergo-lib not available: {0}")]
+    ErgoLibUnavailable(String),
+}
+
+
+
 /// Get the Basis contract template from the contract file
 pub fn get_basis_contract_template() -> Result<String, CompilerError> {
-    // Try to find the contract file
-    let contract_paths = [
-        "contract/basis.es",
-        "../contract/basis.es",
-        "./basis.es",
-    ];
-    
-    for path in &contract_paths {
-        if Path::new(path).exists() {
-            return compile_contract(path);
-        }
-    }
-    
-    // If contract file not found, return a hardcoded placeholder
-    // This would be replaced with the actual compiled template
-    Ok("0008cd0101010101010101010101010101010101010101".to_string())
+    // Return the compiled Basis contract address
+    Ok("2WbQhe1AudMj9Cx2DtNYwDVn6YVS5GA5S9otJfkAmARDrZ6wQczry4SbM2RafQoJ5gZj83L9BkjjkYUE95HrPM5dDSxeJCApKtomhTHvXFfyXBNAKj2rV2PVdnkJnZBFzvRoXwCMwgfP1shCPau2CrMYJmBg5HoFtLAvcHYuKNpjK8NRHoHVtCMvkVN2QnSezJcUukCudUyT1Gqy4hQFbLAEo9ZPUPnjuuoqscsvWouf4DRXJX3uPeaNaCEEeJtBRfx4aXaX36WEfauDCZ6Kc6XSVTDanXkGqvveLfLtk9DAA3Z7EU1jBhVoGy8nscW5UbUdJm7dLT6ZjaH29LjnPo3GaJfhcoRE6wUnDgX2xea4t23xkQNWebDEn2Yiv4JLTirGnGH5fBRZjueUivRv1ipp8G3tm3wKP5UM79AaRfVw5NecDTpR4QrKooqchNGSanTfLwzTEnwvqGSnqKbqJtJXyAfLX6Mf374ULUNa2C7ui8xip9RfmqNnv6cNDpexbQgTDKghhNtP2YWj8vssV65LNvVEaVNZAyrmCNfV3QVdn".to_string())
 }
 
 #[cfg(test)]
@@ -71,10 +39,11 @@ mod tests {
     
     #[test]
     fn test_contract_compilation_placeholder() {
-        // Test that we can generate a placeholder template
+        // Test that we can get the Basis contract template
         let template = get_basis_contract_template().unwrap();
         assert!(!template.is_empty());
-        assert!(template.starts_with("0008cd"));
+        // The template should be a valid P2S address
+        assert!(template.len() > 50);
     }
     
     #[test]
