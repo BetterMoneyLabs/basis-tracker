@@ -114,7 +114,7 @@ use basis_store::ergo_scanner::{ErgoScanner, NodeConfig};
 
 // Create scanner configuration for real Ergo node
 let config = NodeConfig {
-    url: "http://213.239.193.208:9052".to_string(),
+    url: "http://213.239.193.208:9053".to_string(),
     api_key: "".to_string(),
     timeout_secs: 30,
     start_height: None,
@@ -149,7 +149,7 @@ scanner.stop_scanning().unwrap();
 - **ReserveSpent**: Reserve box spent/closed
 
 ### Available Ergo Nodes
-- **Mainnet**: `http://213.239.193.208:9052` (public)
+- **Mainnet**: `http://213.239.193.208:9053` (public)
 - **Testnet**: `http://213.239.193.208:9052` (public)
 - **Local**: `http://localhost:9053` (development)
 

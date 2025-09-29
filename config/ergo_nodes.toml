@@ -3,9 +3,8 @@
 # Mainnet nodes
 [mainnet]
 nodes = [
-    { url = "http://213.239.193.208:9052", description = "Public mainnet node" },
-    { url = "http://88.99.199.76:9052", description = "Another public mainnet node" },
-    { url = "http://159.65.11.55:9052", description = "Mainnet node with good uptime" },
+    { url = "http://213.239.193.208:9053", description = "Public mainnet node" },
+    { url = "http://159.65.11.55:9053", description = "Mainnet node with good uptime" },
 ]
 
 # Testnet nodes  
