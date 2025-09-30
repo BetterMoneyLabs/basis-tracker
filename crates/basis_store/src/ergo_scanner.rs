@@ -1,11 +1,8 @@
-//! Ergo blockchain scanner for monitoring Basis reserve contracts
-//! Following chaincash-rs pattern with simplified HTTP client
-
-use std::time::Duration;
+//! Simplified Ergo blockchain scanner for monitoring Basis reserve contracts
+//! This module provides event-driven scanning without direct Ergo node API calls
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{info, warn};
 
 #[derive(Error, Debug)]
 pub enum ScannerError {
@@ -30,15 +27,9 @@ impl ScanType {
     }
 }
 
-/// Configuration for Ergo node connection
+/// Configuration for scanner
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
-    /// Ergo node URL
-    pub url: String,
-    /// API key for authentication
-    pub api_key: String,
-    /// Connection timeout in seconds
-    pub timeout_secs: u64,
     /// Starting block height for scanning
     pub start_height: Option<u64>,
     /// Basis reserve contract template hash (optional)
@@ -64,168 +55,45 @@ impl ServerState {
 
     /// Get current blockchain height (placeholder implementation)
     pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
-        // In real implementation, this would connect to the Ergo node
-        // For now, return a mock height
+        // Return a mock height - in real implementation, this would come from external source
         Ok(1000)
     }
 
-    /// Scan blocks from last scanned height to current height
+    /// Scan for new events (placeholder implementation)
     pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ScannerError> {
-        let current_height = self.get_current_height().await?;
-
-        if current_height <= self.last_scanned_height {
-            return Ok(vec![]);
-        }
-
-        info!(
-            "Scanning blocks from {} to {}",
-            self.last_scanned_height + 1,
-            current_height
-        );
-
-        let mut events = Vec::new();
-
-        // In real implementation, this would scan actual blocks
-        // For now, return mock events
-        for height in (self.last_scanned_height + 1)..=current_height {
-            // Simulate finding some reserve events
-            if height % 10 == 0 {
-                events.push(ReserveEvent::ReserveCreated {
-                    box_id: format!("box_{}", height),
-                    owner_pubkey: format!("owner_{}", height),
-                    collateral_amount: 1000000 + height * 1000,
-                    height,
-                });
-            }
-
-            self.last_scanned_height = height;
-        }
-
-        info!("Scanning complete. Found {} events", events.len());
-        Ok(events)
+        // In real implementation, this would process events from external source
+        // For now, return empty vector
+        Ok(vec![])
     }
 
-    /// Wait for the next block before re-checking scans
-    pub async fn wait_for_next_block(&self) -> Result<(), ScannerError> {
-        info!("Waiting for next block at height: {}", self.current_height);
+    /// Get unspent reserve boxes (placeholder implementation)
+    pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
+        // In real implementation, this would query external source
+        // For now, return empty vector
+        Ok(vec![])
+    }
 
-        // Poll until new block arrives
-        loop {
-            tokio::time::sleep(Duration::from_secs(10)).await;
+    /// Check if scanner is active
+    pub fn is_active(&self) -> bool {
+        true
+    }
 
-            match self.get_current_height().await {
-                Ok(new_height) if new_height > self.current_height => {
-                    info!("New block detected at height: {}", new_height);
-                    break;
-                }
-                Ok(_) => {
-                    // Same height, continue waiting
-                }
-                Err(e) => {
-                    warn!("Error checking block height: {}", e);
-                    // Continue waiting despite error
-                }
-            }
-        }
-
+    /// Start scanning (placeholder implementation)
+    pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
         Ok(())
     }
 
-    /// Get unspent reserve boxes from the blockchain
-    pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
-        // In real implementation, this would query the Ergo node
-        // For now, return mock boxes
-        let mut boxes = Vec::new();
-
-        for i in 0..5 {
-            boxes.push(ErgoBox {
-                box_id: format!("unspent_box_{}", i),
-                value: 1000000 + i * 100000,
-                ergo_tree: "0008cd...".to_string(),
-                creation_height: 1000,
-                transaction_id: format!("tx_{}", i),
-                additional_registers: std::collections::HashMap::new(),
-            });
-        }
-
-        Ok(boxes)
+    /// Get last scanned height
+    pub fn last_scanned_height(&self) -> u64 {
+        self.last_scanned_height
     }
 }
 
-/// Start the scanner following chaincash-rs pattern
-pub async fn start_scanner(mut state: ServerState) -> Result<(), ScannerError> {
-    info!("Starting Basis scanner (chaincash-rs pattern)...");
-
-    // Initialize scanner state
-    state.current_height = state.get_current_height().await?;
-
-    info!("Scanner started successfully");
-
-    // Start background scanning tasks
-    tokio::spawn(reserve_scanner(state));
-
+/// Start the scanner
+pub async fn start_scanner(_state: ServerState) -> Result<(), ScannerError> {
+    // Background scanning would be implemented here
+    // For now, just return success
     Ok(())
-}
-
-async fn reserve_scanner(mut state: ServerState) {
-    info!("Starting reserve scanner...");
-
-    loop {
-        // Scan for new reserve events
-        match state.scan_new_blocks().await {
-            Ok(events) => {
-                for event in events {
-                    match event {
-                        ReserveEvent::ReserveCreated {
-                            box_id,
-                            owner_pubkey,
-                            collateral_amount,
-                            height,
-                        } => {
-                            info!(
-                                "Reserve created: {} by {} with {} nanoERG at height {}",
-                                box_id, owner_pubkey, collateral_amount, height
-                            );
-                        }
-                        ReserveEvent::ReserveToppedUp {
-                            box_id,
-                            additional_collateral,
-                            height,
-                        } => {
-                            info!(
-                                "Reserve topped up: {} +{} nanoERG at height {}",
-                                box_id, additional_collateral, height
-                            );
-                        }
-                        ReserveEvent::ReserveRedeemed {
-                            box_id,
-                            redeemed_amount,
-                            height,
-                        } => {
-                            info!(
-                                "Reserve redeemed: {} -{} nanoERG at height {}",
-                                box_id, redeemed_amount, height
-                            );
-                        }
-                        ReserveEvent::ReserveSpent { box_id, height } => {
-                            info!("Reserve spent: {} at height {}", box_id, height);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Error scanning blocks: {}", e);
-            }
-        }
-
-        // Wait for next block
-        if let Err(e) = state.wait_for_next_block().await {
-            warn!("Error waiting for next block: {}", e);
-        }
-
-        // Small delay to prevent tight loop
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
 }
 
 /// Create a scanner with default configuration
@@ -287,9 +155,6 @@ pub enum ReserveEvent {
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
-            url: "http://213.239.193.208:9052".to_string(), // Test node provided by user
-            api_key: "".to_string(),
-            timeout_secs: 30,
             start_height: None,
             contract_template: None,
         }

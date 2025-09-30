@@ -52,9 +52,6 @@ impl AppConfig {
             .set_default("server.host", "127.0.0.1")?
             .set_default("server.port", 3000)?
             .set_default("server.database_url", "sqlite:data/basis.db")?
-            .set_default("ergo.node.url", "http://localhost:9053")?
-            .set_default("ergo.node.api_key", "")?
-            .set_default("ergo.node.timeout_secs", 30)?
             .set_default("ergo.basis_contract_template", "")?
             .set_default("ergo.start_height", 0)?
             // Environment variables

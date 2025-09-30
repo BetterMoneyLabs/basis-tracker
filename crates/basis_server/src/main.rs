@@ -5,7 +5,7 @@ mod reserve_api;
 mod store;
 
 use axum::{routing::{get, post}, Router};
-use basis_store::{ergo_scanner::{NodeConfig, ErgoScanner, ReserveEvent}, ReserveTracker};
+use basis_store::{ergo_scanner::{NodeConfig, ServerState, ReserveEvent}, ReserveTracker};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tokio::sync::Mutex;
 
@@ -16,7 +16,7 @@ use crate::{api::*, config::*, models::*, store::EventStore, reserve_api::*};
 struct AppState {
     tx: tokio::sync::mpsc::Sender<TrackerCommand>,
     event_store: std::sync::Arc<EventStore>,
-    ergo_scanner: std::sync::Arc<Mutex<ErgoScanner>>,
+    ergo_scanner: std::sync::Arc<Mutex<ServerState>>,
     reserve_tracker: std::sync::Arc<Mutex<ReserveTracker>>,
 }
 
@@ -73,9 +73,6 @@ async fn main() {
                     },
                     ergo: ErgoConfig {
                         node: NodeConfig {
-                            url: "http://localhost:9053".to_string(),
-                            api_key: "".to_string(),
-                            timeout_secs: 30,
                             start_height: None,
                             contract_template: None,
                         },
@@ -100,7 +97,7 @@ async fn main() {
     // Initialize Ergo scanner
     eprintln!("Initializing Ergo scanner...");
     let node_config = config.ergo_node_config();
-    let mut ergo_scanner = ErgoScanner::new(node_config);
+    let mut ergo_scanner = ServerState::new(node_config);
     
     // Start scanner
     match ergo_scanner.start_scanning().await {
