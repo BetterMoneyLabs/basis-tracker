@@ -1,6 +1,6 @@
 // Manual test runner functions
 
-use crate::{schnorr_tests, simple_hash, IouNote, NoteKey};
+use crate::{blake2b256_hash, schnorr_tests, IouNote, NoteKey};
 
 pub fn run_all_tests() -> Result<(), String> {
     println!("Running Basis Store tests...");
@@ -135,13 +135,13 @@ fn test_simple_hash_consistency() -> Result<(), String> {
     let data1 = [1u8; 33];
     let data2 = [2u8; 33];
 
-    let hash1 = simple_hash(&data1);
-    let hash2 = simple_hash(&data1);
+    let hash1 = blake2b256_hash(&data1);
+    let hash2 = blake2b256_hash(&data1);
     if hash1 != hash2 {
         return Err("same input should produce same hash".to_string());
     }
 
-    let hash3 = simple_hash(&data2);
+    let hash3 = blake2b256_hash(&data2);
     if hash1 == hash3 {
         return Err("different input should produce different hash".to_string());
     }

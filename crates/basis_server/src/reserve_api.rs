@@ -3,7 +3,10 @@
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
 
-use crate::{models::{ApiResponse, success_response}, AppState};
+use crate::{
+    models::{success_response, ApiResponse},
+    AppState,
+};
 
 /// Get reserves by issuer public key
 #[axum::debug_handler]
@@ -16,7 +19,7 @@ pub async fn get_reserves_by_issuer(
     // Get reserve info from tracker
     let tracker = state.reserve_tracker.lock().await;
     let all_reserves = tracker.get_all_reserves();
-    
+
     // Filter reserves by owner pubkey
     let reserves: Vec<SerializableReserveInfo> = all_reserves
         .into_iter()

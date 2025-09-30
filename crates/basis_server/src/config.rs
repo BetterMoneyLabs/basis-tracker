@@ -41,10 +41,10 @@ impl AppConfig {
         let config = config::Config::builder()
             .add_source(config::File::from(path.as_ref()))
             .build()?;
-        
+
         config.try_deserialize()
     }
-    
+
     /// Load configuration from default locations
     pub fn load() -> Result<Self, config::ConfigError> {
         let config = config::Config::builder()
@@ -59,17 +59,17 @@ impl AppConfig {
             // Configuration file
             .add_source(config::File::with_name("config/basis").required(false))
             .build()?;
-        
+
         config.try_deserialize()
     }
-    
+
     /// Get the socket address for the server
     pub fn socket_addr(&self) -> std::net::SocketAddr {
         format!("{}:{}", self.server.host, self.server.port)
             .parse()
             .expect("Invalid socket address")
     }
-    
+
     /// Get the Ergo node configuration
     pub fn ergo_node_config(&self) -> NodeConfig {
         let mut node_config = self.ergo.node.clone();
@@ -79,7 +79,7 @@ impl AppConfig {
         }
         node_config
     }
-    
+
     /// Get the Basis contract template bytes
     pub fn basis_contract_bytes(&self) -> Result<Vec<u8>, hex::FromHexError> {
         hex::decode(&self.ergo.basis_contract_template)

@@ -1,12 +1,11 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use std::collections::HashMap;
 
 use crate::{
-    models::{ApiResponse, CreateNoteRequest, SerializableIouNote, TrackerEvent, KeyStatusResponse, RedeemRequest, RedeemResponse, ProofResponse, CompleteRedemptionRequest},
+    models::{
+        ApiResponse, CompleteRedemptionRequest, CreateNoteRequest, KeyStatusResponse,
+        ProofResponse, RedeemRequest, RedeemResponse, SerializableIouNote, TrackerEvent,
+    },
     AppState, TrackerCommand,
 };
 use basis_store::{IouNote, NoteError, PubKey, Signature};
@@ -54,7 +53,9 @@ pub async fn create_note(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("signature must be hex-encoded".to_string())),
+                Json(crate::models::error_response(
+                    "signature must be hex-encoded".to_string(),
+                )),
             )
         }
     };
@@ -64,7 +65,9 @@ pub async fn create_note(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("signature must be 65 bytes".to_string())),
+                Json(crate::models::error_response(
+                    "signature must be 65 bytes".to_string(),
+                )),
             )
         }
     };
@@ -74,7 +77,9 @@ pub async fn create_note(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("issuer_pubkey must be hex-encoded".to_string())),
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be hex-encoded".to_string(),
+                )),
             )
         }
     };
@@ -84,7 +89,9 @@ pub async fn create_note(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("issuer_pubkey must be 33 bytes".to_string())),
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes".to_string(),
+                )),
             )
         }
     };
@@ -113,7 +120,9 @@ pub async fn create_note(
         tracing::error!("Failed to send to tracker thread: {:?}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response("Tracker thread unavailable".to_string())),
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
         );
     }
 
@@ -125,7 +134,7 @@ pub async fn create_note(
                 hex::encode(&issuer_pubkey),
                 hex::encode(&recipient_pubkey)
             );
-            
+
             // Store event in event store
             let event = TrackerEvent {
                 id: 0, // Will be set by event store
@@ -139,7 +148,7 @@ pub async fn create_note(
                 redeemed_amount: None,
                 height: None,
             };
-            
+
             match state.event_store.add_event(event).await {
                 Ok(event_id) => {
                     tracing::debug!("Stored note creation event with ID: {}", event_id);
@@ -148,8 +157,11 @@ pub async fn create_note(
                     tracing::warn!("Failed to store event: {:?}", e);
                 }
             }
-            
-            (StatusCode::CREATED, Json(crate::models::success_response(())))
+
+            (
+                StatusCode::CREATED,
+                Json(crate::models::success_response(())),
+            )
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to create note: {:?}", e);
@@ -161,13 +173,18 @@ pub async fn create_note(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
             };
-            (StatusCode::BAD_REQUEST, Json(crate::models::error_response(error_message)))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(error_message)),
+            )
         }
         Err(_) => {
             tracing::error!("Tracker thread response channel closed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Internal server error".to_string())),
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
             )
         }
     }
@@ -191,7 +208,9 @@ pub async fn get_notes_by_issuer(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("Invalid hex encoding".to_string())),
+                Json(crate::models::error_response(
+                    "Invalid hex encoding".to_string(),
+                )),
             )
         }
     };
@@ -202,7 +221,9 @@ pub async fn get_notes_by_issuer(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("issuer_pubkey must be 33 bytes".to_string())),
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes".to_string(),
+                )),
             )
         }
     };
@@ -211,7 +232,7 @@ pub async fn get_notes_by_issuer(
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     tracing::debug!("Sending GetNotesByIssuer command to tracker thread");
-    
+
     if let Err(e) = state
         .tx
         .send(crate::TrackerCommand::GetNotesByIssuer {
@@ -223,10 +244,12 @@ pub async fn get_notes_by_issuer(
         tracing::error!("Failed to send to tracker thread: {:?}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response("Tracker thread unavailable".to_string())),
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
         );
     }
-    
+
     tracing::debug!("GetNotesByIssuer command sent successfully");
 
     // Wait for response from tracker thread
@@ -237,16 +260,24 @@ pub async fn get_notes_by_issuer(
                 notes.len(),
                 pubkey_hex
             );
-            
+
             // Debug: log the actual notes found
             for note in &notes {
-                tracing::debug!("Note found: collected={}, redeemed={}, timestamp={}", note.amount_collected, note.amount_redeemed, note.timestamp);
+                tracing::debug!(
+                    "Note found: collected={}, redeemed={}, timestamp={}",
+                    note.amount_collected,
+                    note.amount_redeemed,
+                    note.timestamp
+                );
             }
-            
+
             // Convert to serializable format
             let serializable_notes: Vec<SerializableIouNote> =
                 notes.into_iter().map(SerializableIouNote::from).collect();
-            (StatusCode::OK, Json(crate::models::success_response(serializable_notes)))
+            (
+                StatusCode::OK,
+                Json(crate::models::success_response(serializable_notes)),
+            )
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to get notes: {:?}", e);
@@ -258,13 +289,18 @@ pub async fn get_notes_by_issuer(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
             };
-            (StatusCode::BAD_REQUEST, Json(crate::models::error_response(error_message)))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(error_message)),
+            )
         }
         Err(_) => {
             tracing::error!("Tracker thread response channel closed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Internal server error".to_string())),
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
             )
         }
     }
@@ -284,7 +320,9 @@ pub async fn get_notes_by_recipient(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("Invalid hex encoding".to_string())),
+                Json(crate::models::error_response(
+                    "Invalid hex encoding".to_string(),
+                )),
             )
         }
     };
@@ -295,7 +333,9 @@ pub async fn get_notes_by_recipient(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("recipient_pubkey must be 33 bytes".to_string())),
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes".to_string(),
+                )),
             )
         }
     };
@@ -314,7 +354,9 @@ pub async fn get_notes_by_recipient(
         tracing::error!("Failed to send to tracker thread: {:?}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response("Tracker thread unavailable".to_string())),
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
         );
     }
 
@@ -326,11 +368,14 @@ pub async fn get_notes_by_recipient(
                 notes.len(),
                 pubkey_hex
             );
-            
+
             // Convert to serializable format
             let serializable_notes: Vec<SerializableIouNote> =
                 notes.into_iter().map(SerializableIouNote::from).collect();
-            (StatusCode::OK, Json(crate::models::success_response(serializable_notes)))
+            (
+                StatusCode::OK,
+                Json(crate::models::success_response(serializable_notes)),
+            )
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to get notes: {:?}", e);
@@ -342,13 +387,18 @@ pub async fn get_notes_by_recipient(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
             };
-            (StatusCode::BAD_REQUEST, Json(crate::models::error_response(error_message)))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(error_message)),
+            )
         }
         Err(_) => {
             tracing::error!("Tracker thread response channel closed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Internal server error".to_string())),
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
             )
         }
     }
@@ -400,7 +450,9 @@ pub async fn get_note_by_issuer_and_recipient(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("issuer_pubkey must be 33 bytes".to_string())),
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes".to_string(),
+                )),
             )
         }
     };
@@ -431,7 +483,9 @@ pub async fn get_note_by_issuer_and_recipient(
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response("Tracker thread unavailable".to_string())),
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
         );
     }
 
@@ -456,7 +510,10 @@ pub async fn get_note_by_issuer_and_recipient(
                 issuer_pubkey_hex,
                 recipient_pubkey_hex
             );
-            (StatusCode::NOT_FOUND, Json(crate::models::success_response(None)))
+            (
+                StatusCode::NOT_FOUND,
+                Json(crate::models::success_response(None)),
+            )
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to get note: {:?}", e);
@@ -468,13 +525,18 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
             };
-            (StatusCode::BAD_REQUEST, Json(crate::models::error_response(error_message)))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(error_message)),
+            )
         }
         Err(_) => {
             tracing::error!("Tracker thread response channel closed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Internal server error".to_string())),
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
             )
         }
     }
@@ -484,7 +546,12 @@ pub async fn get_note_by_issuer_and_recipient(
 #[axum::debug_handler]
 pub async fn test_endpoint() -> (StatusCode, Json<ApiResponse<String>>) {
     tracing::debug!("Test endpoint called");
-    (StatusCode::OK, Json(crate::models::success_response("Test successful".to_string())))
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(
+            "Test successful".to_string(),
+        )),
+    )
 }
 
 // Simple GET endpoint without state
@@ -493,14 +560,25 @@ pub async fn simple_get(
     axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
 ) -> (StatusCode, Json<ApiResponse<String>>) {
     eprintln!("Simple GET endpoint called with: {}", pubkey_hex);
-    (StatusCode::OK, Json(crate::models::success_response(format!("Simple response: {}", pubkey_hex))))
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(format!(
+            "Simple response: {}",
+            pubkey_hex
+        ))),
+    )
 }
 
 // Very simple GET endpoint without any extractors
 #[axum::debug_handler]
 pub async fn very_simple_get() -> (StatusCode, Json<ApiResponse<String>>) {
     eprintln!("Very simple GET endpoint called");
-    (StatusCode::OK, Json(crate::models::success_response("Very simple response".to_string())))
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(
+            "Very simple response".to_string(),
+        )),
+    )
 }
 
 // GET endpoint with path parameter but no state
@@ -509,7 +587,13 @@ pub async fn get_with_param_only(
     axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
 ) -> (StatusCode, Json<ApiResponse<String>>) {
     eprintln!("GET with param only called with: {}", pubkey_hex);
-    (StatusCode::OK, Json(crate::models::success_response(format!("Param only: {}", pubkey_hex))))
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(format!(
+            "Param only: {}",
+            pubkey_hex
+        ))),
+    )
 }
 
 // GET endpoint with state but no path parameters
@@ -518,7 +602,12 @@ pub async fn get_with_state_only(
     State(_state): State<AppState>,
 ) -> (StatusCode, Json<ApiResponse<String>>) {
     eprintln!("GET with state only called");
-    (StatusCode::OK, Json(crate::models::success_response("State only response".to_string())))
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(
+            "State only response".to_string(),
+        )),
+    )
 }
 
 // GET endpoint with both state and path parameters
@@ -528,7 +617,13 @@ pub async fn get_with_state_and_param(
     axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
 ) -> (StatusCode, Json<ApiResponse<String>>) {
     eprintln!("GET with state and param called with: {}", pubkey_hex);
-    (StatusCode::OK, Json(crate::models::success_response(format!("State and param: {}", pubkey_hex))))
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(format!(
+            "State and param: {}",
+            pubkey_hex
+        ))),
+    )
 }
 
 // Simple test endpoint for notes issuer
@@ -537,7 +632,13 @@ pub async fn test_notes_issuer_simple(
     axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
 ) -> (StatusCode, Json<ApiResponse<String>>) {
     eprintln!("Test notes issuer simple called with: {}", pubkey_hex);
-    (StatusCode::OK, Json(crate::models::success_response(format!("Simple test: {}", pubkey_hex))))
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(format!(
+            "Simple test: {}",
+            pubkey_hex
+        ))),
+    )
 }
 
 // Test endpoint for notes issuer route
@@ -547,7 +648,13 @@ pub async fn test_notes_issuer(
 ) -> (StatusCode, Json<ApiResponse<String>>) {
     tracing::debug!("Test notes issuer endpoint called with: {}", pubkey_hex);
     eprintln!("Test notes issuer endpoint called with: {}", pubkey_hex);
-    (StatusCode::OK, Json(crate::models::success_response(format!("Received pubkey: {}", pubkey_hex))))
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(format!(
+            "Received pubkey: {}",
+            pubkey_hex
+        ))),
+    )
 }
 
 // Get paginated tracker events from event store
@@ -560,28 +667,40 @@ pub async fn get_events_paginated(
 
     // Parse pagination parameters with defaults
     let page = params.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
-    let page_size = params.get("page_size").and_then(|ps| ps.parse().ok()).unwrap_or(20);
+    let page_size = params
+        .get("page_size")
+        .and_then(|ps| ps.parse().ok())
+        .unwrap_or(20);
 
     // Get events from event store
-    let events = match state.event_store.get_events_paginated(page, page_size).await {
+    let events = match state
+        .event_store
+        .get_events_paginated(page, page_size)
+        .await
+    {
         Ok(events) => events,
         Err(e) => {
             tracing::error!("Failed to retrieve events: {:?}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Failed to retrieve events".to_string())),
+                Json(crate::models::error_response(
+                    "Failed to retrieve events".to_string(),
+                )),
             );
         }
     };
-    
+
     tracing::info!(
         "Successfully retrieved {} events for page {} (size: {})",
         events.len(),
         page,
         page_size
     );
-    
-    (StatusCode::OK, Json(crate::models::success_response(events)))
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(events)),
+    )
 }
 
 // Get recent tracker events (simple events endpoint)
@@ -598,14 +717,19 @@ pub async fn get_events(
             tracing::error!("Failed to retrieve events: {:?}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Failed to retrieve events".to_string())),
+                Json(crate::models::error_response(
+                    "Failed to retrieve events".to_string(),
+                )),
             );
         }
     };
-    
+
     tracing::info!("Successfully retrieved {} recent events", events.len());
-    
-    (StatusCode::OK, Json(crate::models::success_response(events)))
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(events)),
+    )
 }
 
 // Get key status information
@@ -622,7 +746,9 @@ pub async fn get_key_status(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("Invalid hex encoding".to_string())),
+                Json(crate::models::error_response(
+                    "Invalid hex encoding".to_string(),
+                )),
             )
         }
     };
@@ -633,7 +759,9 @@ pub async fn get_key_status(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("Public key must be 33 bytes".to_string())),
+                Json(crate::models::error_response(
+                    "Public key must be 33 bytes".to_string(),
+                )),
             )
         }
     };
@@ -655,8 +783,11 @@ pub async fn get_key_status(
     };
 
     tracing::info!("Returning key status for {}", pubkey_hex);
-    
-    (StatusCode::OK, Json(crate::models::success_response(status)))
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(status)),
+    )
 }
 
 // Initiate redemption process
@@ -679,7 +810,7 @@ pub async fn initiate_redemption(
 
     // Send command to tracker thread to initiate redemption
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    
+
     let cmd = TrackerCommand::InitiateRedemption {
         request: redemption_request,
         response_tx,
@@ -689,7 +820,9 @@ pub async fn initiate_redemption(
         tracing::error!("Failed to send redemption command to tracker: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response("Failed to process redemption request".to_string())),
+            Json(crate::models::error_response(
+                "Failed to process redemption request".to_string(),
+            )),
         );
     }
 
@@ -710,21 +843,29 @@ pub async fn initiate_redemption(
                 payload.recipient_pubkey,
                 response.redemption_id
             );
-            
-            (StatusCode::OK, Json(crate::models::success_response(response)))
+
+            (
+                StatusCode::OK,
+                Json(crate::models::success_response(response)),
+            )
         }
         Ok(Err(e)) => {
             tracing::error!("Redemption failed: {}", e);
             (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(format!("Redemption failed: {}", e))),
+                Json(crate::models::error_response(format!(
+                    "Redemption failed: {}",
+                    e
+                ))),
             )
         }
         Err(_) => {
             tracing::error!("Failed to receive redemption response from tracker");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Failed to process redemption request".to_string())),
+                Json(crate::models::error_response(
+                    "Failed to process redemption request".to_string(),
+                )),
             )
         }
     }
@@ -744,7 +885,9 @@ pub async fn complete_redemption(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("Invalid issuer_pubkey hex encoding".to_string())),
+                Json(crate::models::error_response(
+                    "Invalid issuer_pubkey hex encoding".to_string(),
+                )),
             )
         }
     };
@@ -754,7 +897,9 @@ pub async fn complete_redemption(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("Invalid recipient_pubkey hex encoding".to_string())),
+                Json(crate::models::error_response(
+                    "Invalid recipient_pubkey hex encoding".to_string(),
+                )),
             )
         }
     };
@@ -764,7 +909,9 @@ pub async fn complete_redemption(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("issuer_pubkey must be 33 bytes".to_string())),
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes".to_string(),
+                )),
             )
         }
     };
@@ -774,14 +921,16 @@ pub async fn complete_redemption(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response("recipient_pubkey must be 33 bytes".to_string())),
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes".to_string(),
+                )),
             )
         }
     };
 
     // Send command to tracker thread to complete redemption
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    
+
     let cmd = TrackerCommand::CompleteRedemption {
         issuer_pubkey,
         recipient_pubkey,
@@ -790,10 +939,15 @@ pub async fn complete_redemption(
     };
 
     if let Err(e) = state.tx.send(cmd).await {
-        tracing::error!("Failed to send complete redemption command to tracker: {}", e);
+        tracing::error!(
+            "Failed to send complete redemption command to tracker: {}",
+            e
+        );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response("Failed to complete redemption".to_string())),
+            Json(crate::models::error_response(
+                "Failed to complete redemption".to_string(),
+            )),
         );
     }
 
@@ -805,21 +959,26 @@ pub async fn complete_redemption(
                 payload.issuer_pubkey,
                 payload.recipient_pubkey
             );
-            
+
             (StatusCode::OK, Json(crate::models::success_response(())))
         }
         Ok(Err(e)) => {
             tracing::error!("Redemption completion failed: {}", e);
             (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(format!("Redemption completion failed: {}", e))),
+                Json(crate::models::error_response(format!(
+                    "Redemption completion failed: {}",
+                    e
+                ))),
             )
         }
         Err(_) => {
             tracing::error!("Failed to receive redemption completion response from tracker");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Failed to complete redemption".to_string())),
+                Json(crate::models::error_response(
+                    "Failed to complete redemption".to_string(),
+                )),
             )
         }
     }
@@ -840,7 +999,9 @@ pub async fn get_proof(
     if issuer_pubkey.is_empty() || recipient_pubkey.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(crate::models::error_response("issuer_pubkey and recipient_pubkey parameters are required".to_string())),
+            Json(crate::models::error_response(
+                "issuer_pubkey and recipient_pubkey parameters are required".to_string(),
+            )),
         );
     }
 
@@ -848,7 +1009,9 @@ pub async fn get_proof(
     if hex::decode(issuer_pubkey).is_err() || hex::decode(recipient_pubkey).is_err() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(crate::models::error_response("Invalid hex encoding for public keys".to_string())),
+            Json(crate::models::error_response(
+                "Invalid hex encoding for public keys".to_string(),
+            )),
         );
     }
 
@@ -867,7 +1030,11 @@ pub async fn get_proof(
         timestamp: 1672531200,
     };
 
-    tracing::info!("Proof generated for {} -> {}", issuer_pubkey, recipient_pubkey);
-    
+    tracing::info!(
+        "Proof generated for {} -> {}",
+        issuer_pubkey,
+        recipient_pubkey
+    );
+
     (StatusCode::OK, Json(crate::models::success_response(proof)))
 }

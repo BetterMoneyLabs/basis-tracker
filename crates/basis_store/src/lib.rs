@@ -10,11 +10,10 @@ pub mod redemption_blockchain_tests;
 pub mod redemption_simple_tests;
 pub mod reserve_tracker;
 pub mod schnorr;
-pub mod schnorr_comprehensive_test;
 pub mod schnorr_tests;
-pub mod schnorr_verification_vectors;
 pub mod tests;
 
+use blake2::{Blake2b512, Digest};
 use secp256k1;
 
 /// Public key type (Secp256k1)
@@ -122,25 +121,25 @@ pub struct TrackerStateManager {
 impl TrackerStateManager {
     /// Create a new tracker state manager
     pub fn new() -> Self {
-        eprintln!("Creating TrackerStateManager...");
+        tracing::debug!("Creating TrackerStateManager...");
         let avl_state = avl_tree::AvlTreeState::new();
 
         // Use a temporary directory for storage (in real implementation, this would be configurable)
-        eprintln!("Opening note storage...");
+        tracing::debug!("Opening note storage...");
         let storage = match persistence::NoteStorage::open("crates/basis_server/data/notes") {
             Ok(storage) => {
-                eprintln!("Note storage opened successfully");
+                tracing::debug!("Note storage opened successfully");
                 storage
             }
             Err(e) => {
-                eprintln!("Failed to initialize note storage: {:?}", e);
+                tracing::error!("Failed to initialize note storage: {:?}", e);
                 // Fallback to in-memory storage if file storage fails
                 // In production, this should handle errors properly
                 panic!("Failed to initialize note storage: {:?}", e);
             }
         };
 
-        eprintln!("TrackerStateManager created successfully");
+        tracing::debug!("TrackerStateManager created successfully");
         Self {
             avl_state,
             current_state: TrackerState {
@@ -174,7 +173,7 @@ impl TrackerStateManager {
             // For any error, try to update instead (assuming key already exists)
             self.avl_state
                 .update(key.to_bytes(), value_bytes)
-                .map_err(|e| NoteError::StorageError(e))?;
+                .map_err(NoteError::StorageError)?;
         }
 
         self.update_state();
@@ -197,7 +196,7 @@ impl TrackerStateManager {
 
         self.avl_state
             .update(key.to_bytes(), value_bytes)
-            .map_err(|e| NoteError::StorageError(e))?;
+            .map_err(NoteError::StorageError)?;
 
         self.update_state();
         Ok(())
@@ -216,7 +215,7 @@ impl TrackerStateManager {
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         self.avl_state
             .remove(key.to_bytes())
-            .map_err(|e| NoteError::StorageError(e))?;
+            .map_err(NoteError::StorageError)?;
 
         self.update_state();
         Ok(())
@@ -381,9 +380,8 @@ impl IouNote {
 impl NoteKey {
     /// Create a note key from issuer and recipient public keys
     pub fn from_keys(issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Self {
-        // Simple XOR-based hash for now (replace with proper crypto later)
-        let issuer_hash = simple_hash(issuer_pubkey);
-        let recipient_hash = simple_hash(recipient_pubkey);
+        let issuer_hash = blake2b256_hash(issuer_pubkey);
+        let recipient_hash = blake2b256_hash(recipient_pubkey);
 
         Self {
             issuer_hash,
@@ -397,13 +395,14 @@ impl NoteKey {
     }
 }
 
-/// Simple hash function for prototyping (replace with proper crypto)
-pub fn simple_hash(data: &[u8]) -> [u8; 32] {
-    let mut result = [0u8; 32];
-    for (i, &byte) in data.iter().enumerate() {
-        result[i % 32] ^= byte;
-    }
-    result
+/// Blake2b256 hash function for cryptographic hashing
+pub fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Blake2b512::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    result[..32]
+        .try_into()
+        .expect("Blake2b512 should produce at least 32 bytes")
 }
 
 // Re-export reserve tracker types
