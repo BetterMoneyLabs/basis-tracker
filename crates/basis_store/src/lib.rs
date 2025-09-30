@@ -4,6 +4,7 @@ pub mod avl_tree;
 pub mod contract_compiler;
 pub mod cross_verification;
 pub mod ergo_scanner;
+pub mod integration_tests;
 pub mod persistence;
 pub mod redemption;
 pub mod redemption_blockchain_tests;
@@ -11,6 +12,7 @@ pub mod redemption_simple_tests;
 pub mod reserve_tracker;
 pub mod schnorr;
 pub mod schnorr_tests;
+pub mod simple_integration_tests;
 pub mod tests;
 
 use blake2::{Blake2b512, Digest};

@@ -1,8 +1,14 @@
-//! Simplified Ergo blockchain scanner for monitoring Basis reserve contracts
-//! This module provides event-driven scanning without direct Ergo node API calls
+//! Ergo blockchain scanner for monitoring Basis reserve contracts
+//! This module provides both simplified and real blockchain integration
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[cfg(feature = "real_scanner")]
+pub mod real_ergo_scanner;
+
+#[cfg(feature = "minimal_scanner")]
+pub mod minimal_ergo_scanner;
 
 #[derive(Error, Debug)]
 pub enum ScannerError {
@@ -10,6 +16,10 @@ pub enum ScannerError {
     Generic(String),
     #[error("Store error: {0}")]
     StoreError(String),
+    #[error("Node error: {0}")]
+    NodeError(String),
+    #[error("Network error: {0}")]
+    NetworkError(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +46,8 @@ pub struct NodeConfig {
     pub contract_template: Option<String>,
 }
 
-/// Simplified server state for scanner
+/// Server state for scanner (simplified implementation)
+/// For real blockchain integration, use real_ergo_scanner::RealScannerState
 pub struct ServerState {
     pub config: NodeConfig,
     pub current_height: u64,
@@ -53,23 +64,40 @@ impl ServerState {
         }
     }
 
-    /// Get current blockchain height (placeholder implementation)
+    /// Get current blockchain height (simplified implementation)
+    /// For real implementation, use real_ergo_scanner::RealScannerState
     pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
-        // Return a mock height - in real implementation, this would come from external source
+        // Return a mock height - use real_ergo_scanner for actual blockchain integration
         Ok(1000)
     }
 
-    /// Scan for new events (placeholder implementation)
+    /// Scan for new events (simplified implementation)
+    /// For real implementation, use real_ergo_scanner::RealScannerState
     pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ScannerError> {
-        // In real implementation, this would process events from external source
-        // For now, return empty vector
-        Ok(vec![])
+        // Simplified implementation - use real_ergo_scanner for actual blockchain scanning
+        // This returns mock events for testing
+        if self.current_height < self.last_scanned_height + 10 {
+            self.current_height += 1;
+            Ok(vec![])
+        } else {
+            // Simulate finding a reserve event occasionally
+            if self.current_height % 100 == 0 {
+                Ok(vec![ReserveEvent::ReserveCreated {
+                    box_id: format!("mock_box_{}", self.current_height),
+                    owner_pubkey: "mock_pubkey".to_string(),
+                    collateral_amount: 1000000000, // 1 ERG
+                    height: self.current_height,
+                }])
+            } else {
+                Ok(vec![])
+            }
+        }
     }
 
-    /// Get unspent reserve boxes (placeholder implementation)
+    /// Get unspent reserve boxes (simplified implementation)
+    /// For real implementation, use real_ergo_scanner::RealScannerState
     pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
-        // In real implementation, this would query external source
-        // For now, return empty vector
+        // Simplified implementation - returns mock boxes for testing
         Ok(vec![])
     }
 
@@ -78,8 +106,10 @@ impl ServerState {
         true
     }
 
-    /// Start scanning (placeholder implementation)
+    /// Start scanning (simplified implementation)
+    /// For real implementation, use real_ergo_scanner::RealScannerState
     pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
+        // Simplified implementation - use real_ergo_scanner for continuous scanning
         Ok(())
     }
 

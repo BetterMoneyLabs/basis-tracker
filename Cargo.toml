@@ -9,9 +9,8 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1.37"
 axum = "0.7"
 fjall = "2"
-ergo-lib = { version = "0.28.0", features = [
-    "compiler",
-] }
+# ergo-lib removed due to dependency conflicts with Rust 1.82.0
+# Using minimal scanner approach instead
 ergo_avltree_rust = "0.1.1"
 secp256k1 = "0.27"
 blake2 = "0.10"
