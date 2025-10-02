@@ -1,10 +1,11 @@
-//! Example demonstrating the Ergo scanner for Basis tracker
+//! Demo of Ergo scanner
 
 use basis_store::ergo_scanner::ergo_scanner::create_ergo_scanner;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting Basis tracker Ergo scanner...");
+
+    println!("=== Ergo Scanner Demo ===");
 
     // Example contract template hash (replace with actual Basis reserve contract hash)
     let contract_template_hash = "example_contract_template_hash_here";
@@ -58,6 +59,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     
-    println!("\nDemo completed");
+    println!("\n=== Demo Complete ===");
+    println!("Ergo Scanner Features:");
+    println!("1. Uses /scan API for efficient box tracking");
+    println!("2. Uses /blockchain API for optimized queries");
+    println!("3. No block-by-block transaction scanning");
+    println!("4. Scan persistence across restarts");
+    println!("5. Bulk unspent box retrieval");
+    
     Ok(())
 }

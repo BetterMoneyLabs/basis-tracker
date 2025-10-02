@@ -139,7 +139,7 @@ async fn main() {
         use basis_store::{RedemptionManager, TrackerStateManager};
 
         tracing::debug!("Tracker thread started");
-        let mut tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         while let Some(cmd) = rx.blocking_recv() {
@@ -211,10 +211,10 @@ async fn main() {
         }
     });
 
-    eprintln!("Creating event store...");
+
     let event_store = match EventStore::new().await {
         Ok(store) => {
-            eprintln!("Event store created successfully");
+
             std::sync::Arc::new(store)
         }
         Err(e) => {
@@ -327,13 +327,13 @@ async fn main() {
         },
     ];
 
-    eprintln!("Adding demo events...");
+
     for event in demo_events {
         if let Err(e) = event_store.add_event(event).await {
             tracing::warn!("Failed to add demo event: {:?}", e);
         }
     }
-    eprintln!("Demo events added successfully");
+
 
     let app_state = AppState {
         tx,
@@ -341,10 +341,10 @@ async fn main() {
         ergo_scanner: std::sync::Arc::new(Mutex::new(ergo_scanner)),
         reserve_tracker: std::sync::Arc::new(Mutex::new(reserve_tracker)),
     };
-    eprintln!("App state created successfully");
+
 
     // Build our application with routes
-    eprintln!("Building router...");
+
     let app = Router::new()
         .route("/", get(root))
         .route("/notes", post(create_note))
@@ -381,7 +381,7 @@ async fn main() {
     // Run our app with hyper
     let addr = config.socket_addr();
     tracing::debug!("listening on {}", addr);
-    eprintln!("Starting server on {}", addr);
+
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => {

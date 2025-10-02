@@ -197,10 +197,6 @@ pub async fn get_notes_by_issuer(
     axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
 ) -> (StatusCode, Json<ApiResponse<Vec<SerializableIouNote>>>) {
     tracing::debug!("Getting notes for issuer: {}", pubkey_hex);
-    tracing::debug!("get_notes_by_issuer function called");
-    eprintln!("GET /notes/issuer/{} called", pubkey_hex);
-    eprintln!("DEBUG: get_notes_by_issuer function executed");
-    eprintln!("DEBUG: pubkey_hex = {}", pubkey_hex);
 
     // Decode hex string to bytes
     let issuer_pubkey_bytes = match hex::decode(&pubkey_hex) {
@@ -542,120 +538,7 @@ pub async fn get_note_by_issuer_and_recipient(
     }
 }
 
-// Simple test endpoint
-#[axum::debug_handler]
-pub async fn test_endpoint() -> (StatusCode, Json<ApiResponse<String>>) {
-    tracing::debug!("Test endpoint called");
-    (
-        StatusCode::OK,
-        Json(crate::models::success_response(
-            "Test successful".to_string(),
-        )),
-    )
-}
 
-// Simple GET endpoint without state
-#[axum::debug_handler]
-pub async fn simple_get(
-    axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
-) -> (StatusCode, Json<ApiResponse<String>>) {
-    eprintln!("Simple GET endpoint called with: {}", pubkey_hex);
-    (
-        StatusCode::OK,
-        Json(crate::models::success_response(format!(
-            "Simple response: {}",
-            pubkey_hex
-        ))),
-    )
-}
-
-// Very simple GET endpoint without any extractors
-#[axum::debug_handler]
-pub async fn very_simple_get() -> (StatusCode, Json<ApiResponse<String>>) {
-    eprintln!("Very simple GET endpoint called");
-    (
-        StatusCode::OK,
-        Json(crate::models::success_response(
-            "Very simple response".to_string(),
-        )),
-    )
-}
-
-// GET endpoint with path parameter but no state
-#[axum::debug_handler]
-pub async fn get_with_param_only(
-    axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
-) -> (StatusCode, Json<ApiResponse<String>>) {
-    eprintln!("GET with param only called with: {}", pubkey_hex);
-    (
-        StatusCode::OK,
-        Json(crate::models::success_response(format!(
-            "Param only: {}",
-            pubkey_hex
-        ))),
-    )
-}
-
-// GET endpoint with state but no path parameters
-#[axum::debug_handler]
-pub async fn get_with_state_only(
-    State(_state): State<AppState>,
-) -> (StatusCode, Json<ApiResponse<String>>) {
-    eprintln!("GET with state only called");
-    (
-        StatusCode::OK,
-        Json(crate::models::success_response(
-            "State only response".to_string(),
-        )),
-    )
-}
-
-// GET endpoint with both state and path parameters
-#[axum::debug_handler]
-pub async fn get_with_state_and_param(
-    State(_state): State<AppState>,
-    axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
-) -> (StatusCode, Json<ApiResponse<String>>) {
-    eprintln!("GET with state and param called with: {}", pubkey_hex);
-    (
-        StatusCode::OK,
-        Json(crate::models::success_response(format!(
-            "State and param: {}",
-            pubkey_hex
-        ))),
-    )
-}
-
-// Simple test endpoint for notes issuer
-#[axum::debug_handler]
-pub async fn test_notes_issuer_simple(
-    axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
-) -> (StatusCode, Json<ApiResponse<String>>) {
-    eprintln!("Test notes issuer simple called with: {}", pubkey_hex);
-    (
-        StatusCode::OK,
-        Json(crate::models::success_response(format!(
-            "Simple test: {}",
-            pubkey_hex
-        ))),
-    )
-}
-
-// Test endpoint for notes issuer route
-#[axum::debug_handler]
-pub async fn test_notes_issuer(
-    axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
-) -> (StatusCode, Json<ApiResponse<String>>) {
-    tracing::debug!("Test notes issuer endpoint called with: {}", pubkey_hex);
-    eprintln!("Test notes issuer endpoint called with: {}", pubkey_hex);
-    (
-        StatusCode::OK,
-        Json(crate::models::success_response(format!(
-            "Received pubkey: {}",
-            pubkey_hex
-        ))),
-    )
-}
 
 // Get paginated tracker events from event store
 #[axum::debug_handler]
@@ -735,7 +618,7 @@ pub async fn get_events(
 // Get key status information
 #[axum::debug_handler]
 pub async fn get_key_status(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
 ) -> (StatusCode, Json<ApiResponse<KeyStatusResponse>>) {
     tracing::debug!("Getting key status for: {}", pubkey_hex);
@@ -754,7 +637,7 @@ pub async fn get_key_status(
     };
 
     // Convert to fixed-size array
-    let pubkey: basis_store::PubKey = match pubkey_bytes.try_into() {
+    let _pubkey: basis_store::PubKey = match pubkey_bytes.try_into() {
         Ok(arr) => arr,
         Err(_) => {
             return (
@@ -874,7 +757,7 @@ pub async fn initiate_redemption(
 // Complete redemption process by removing the note from tracker state
 #[axum::debug_handler]
 pub async fn complete_redemption(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(payload): Json<CompleteRedemptionRequest>,
 ) -> (StatusCode, Json<ApiResponse<()>>) {
     tracing::debug!("Completing redemption: {:?}", payload);
@@ -938,7 +821,7 @@ pub async fn complete_redemption(
         response_tx,
     };
 
-    if let Err(e) = state.tx.send(cmd).await {
+    if let Err(e) = _state.tx.send(cmd).await {
         tracing::error!(
             "Failed to send complete redemption command to tracker: {}",
             e

@@ -1,4 +1,4 @@
-//! Simple integration tests that work without the real scanner feature
+//! Simple integration tests that work with mock scanner implementation
 
 use crate::ergo_scanner::{NodeConfig, ReserveEvent, ScannerError, ServerState};
 
@@ -45,7 +45,7 @@ impl SimpleIntegrationTestSuite {
         // Process any events found
         for event in events {
             match event {
-                ReserveEvent::ReserveCreated { box_id, owner_pubkey, collateral_amount, height } => {
+                ReserveEvent::ReserveCreated { box_id, owner_pubkey: _, collateral_amount, height } => {
                     println!("Mock reserve created: {} with {} nanoERG at height {}", 
                             box_id, collateral_amount, height);
                     assert!(!box_id.is_empty(), "Box ID should not be empty");

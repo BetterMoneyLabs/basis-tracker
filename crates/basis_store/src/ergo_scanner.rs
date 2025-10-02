@@ -1,14 +1,10 @@
 //! Ergo blockchain scanner for monitoring Basis reserve contracts
-//! This module provides both simplified and real blockchain integration
+//! This module provides modern blockchain integration using /scan and /blockchain APIs
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[cfg(feature = "real_scanner")]
-pub mod real_ergo_scanner;
-
-#[cfg(feature = "minimal_scanner")]
-pub mod minimal_ergo_scanner;
+pub mod ergo_scanner;
 
 #[derive(Error, Debug)]
 pub enum ScannerError {
@@ -47,7 +43,7 @@ pub struct NodeConfig {
 }
 
 /// Server state for scanner (simplified implementation)
-/// For real blockchain integration, use real_ergo_scanner::RealScannerState
+/// For real blockchain integration, use chaincash_style_scanner::ModernScannerState
 pub struct ServerState {
     pub config: NodeConfig,
     pub current_height: u64,
@@ -65,14 +61,14 @@ impl ServerState {
     }
 
     /// Get current blockchain height (simplified implementation)
-    /// For real implementation, use real_ergo_scanner::RealScannerState
+    /// For real implementation, use chaincash_style_scanner::ModernScannerState
     pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
         // Return a mock height - use real_ergo_scanner for actual blockchain integration
         Ok(1000)
     }
 
     /// Scan for new events (simplified implementation)
-    /// For real implementation, use real_ergo_scanner::RealScannerState
+    /// For real implementation, use chaincash_style_scanner::ModernScannerState
     pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ScannerError> {
         // Simplified implementation - use real_ergo_scanner for actual blockchain scanning
         // This returns mock events for testing
@@ -95,7 +91,7 @@ impl ServerState {
     }
 
     /// Get unspent reserve boxes (simplified implementation)
-    /// For real implementation, use real_ergo_scanner::RealScannerState
+    /// For real implementation, use chaincash_style_scanner::ModernScannerState
     pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
         // Simplified implementation - returns mock boxes for testing
         Ok(vec![])
@@ -107,7 +103,7 @@ impl ServerState {
     }
 
     /// Start scanning (simplified implementation)
-    /// For real implementation, use real_ergo_scanner::RealScannerState
+    /// For real implementation, use chaincash_style_scanner::ModernScannerState
     pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
         // Simplified implementation - use real_ergo_scanner for continuous scanning
         Ok(())
