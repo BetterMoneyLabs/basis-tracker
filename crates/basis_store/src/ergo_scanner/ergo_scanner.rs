@@ -3,7 +3,7 @@
 
 use tracing::info;
 
-use super::{ScannerError, NodeConfig, ErgoBox, ReserveEvent};
+use super::{ErgoBox, NodeConfig, ReserveEvent, ScannerError};
 
 /// Configuration for a specific scan
 #[derive(Debug, Clone)]
@@ -81,17 +81,20 @@ impl ErgoScannerState {
 
     /// Start scanning
     pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
-        info!("Starting Ergo scanner for contract: {}", self.scan_config.contract_template_hash);
-        
+        info!(
+            "Starting Ergo scanner for contract: {}",
+            self.scan_config.contract_template_hash
+        );
+
         // Register scan with node
         let scan_id = self.node_client.register_scan(&self.scan_config).await?;
         self.scan_id = Some(scan_id);
-        
+
         info!("Scan registered with ID: {}", scan_id);
-        
+
         // Initial scan to catch up
         let _ = self.scan_new_events().await?;
-        
+
         // In a real implementation, this would run in a background task
         // and periodically scan for new events
         Ok(())
@@ -122,19 +125,26 @@ impl ErgoScannerState {
         // Mock implementation - in real scanner this would query the node
         // for new boxes matching our scan criteria
         let current_height = self.node_client.get_current_height().await?;
-        
+
         if current_height > self.last_scanned_height {
-            info!("Scanning blocks from {} to {}", self.last_scanned_height, current_height);
+            info!(
+                "Scanning blocks from {} to {}",
+                self.last_scanned_height, current_height
+            );
             self.last_scanned_height = current_height;
         }
-        
+
         // Return empty events for now
         Ok(vec![])
     }
 }
 
 /// Create an Ergo scanner with default configuration
-pub fn create_ergo_scanner(node_url: &str, scan_name: &str, contract_template_hash: &str) -> ErgoScannerState {
+pub fn create_ergo_scanner(
+    node_url: &str,
+    scan_name: &str,
+    contract_template_hash: &str,
+) -> ErgoScannerState {
     let config = NodeConfig::default();
     let scan_config = ScanConfig::new(scan_name, contract_template_hash);
     ErgoScannerState::new(node_url, config, scan_config)

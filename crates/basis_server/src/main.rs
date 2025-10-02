@@ -211,12 +211,8 @@ async fn main() {
         }
     });
 
-
     let event_store = match EventStore::new().await {
-        Ok(store) => {
-
-            std::sync::Arc::new(store)
-        }
+        Ok(store) => std::sync::Arc::new(store),
         Err(e) => {
             tracing::error!("Failed to initialize event store: {:?}", e);
             std::process::exit(1);
@@ -327,13 +323,11 @@ async fn main() {
         },
     ];
 
-
     for event in demo_events {
         if let Err(e) = event_store.add_event(event).await {
             tracing::warn!("Failed to add demo event: {:?}", e);
         }
     }
-
 
     let app_state = AppState {
         tx,
@@ -341,7 +335,6 @@ async fn main() {
         ergo_scanner: std::sync::Arc::new(Mutex::new(ergo_scanner)),
         reserve_tracker: std::sync::Arc::new(Mutex::new(reserve_tracker)),
     };
-
 
     // Build our application with routes
 
@@ -381,7 +374,6 @@ async fn main() {
     // Run our app with hyper
     let addr = config.socket_addr();
     tracing::debug!("listening on {}", addr);
-
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => {

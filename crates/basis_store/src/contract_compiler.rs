@@ -2,8 +2,6 @@
 
 use thiserror::Error;
 
-
-
 #[derive(Error, Debug)]
 pub enum CompilerError {
     #[error("File not found: {0}")]
@@ -32,6 +30,4 @@ mod tests {
         // The template should be a valid P2S address
         assert!(template.len() > 50);
     }
-
-
 }

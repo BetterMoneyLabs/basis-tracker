@@ -21,6 +21,10 @@ path = "../basis_store"
 version = "0.13"
 features = ["toml"]
 
+# Test dependencies
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "rt-multi-thread"] }
+
 [[bin]]
 name = "basis_server"
 path = "src/main.rs"

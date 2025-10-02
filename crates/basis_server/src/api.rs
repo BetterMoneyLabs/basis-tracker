@@ -538,8 +538,6 @@ pub async fn get_note_by_issuer_and_recipient(
     }
 }
 
-
-
 // Get paginated tracker events from event store
 #[axum::debug_handler]
 pub async fn get_events_paginated(

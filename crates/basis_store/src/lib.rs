@@ -17,6 +17,14 @@ pub mod schnorr_tests;
 pub mod simple_integration_tests;
 pub mod tests;
 
+// Test modules
+#[cfg(test)]
+pub mod cross_verification_tests;
+#[cfg(test)]
+pub mod property_tests;
+#[cfg(test)]
+pub mod test_helpers;
+
 use blake2::{Blake2b512, Digest};
 use secp256k1;
 
@@ -419,9 +427,7 @@ pub use ergo_scanner::{
 };
 
 // Re-export Ergo scanner types
-pub use ergo_scanner::ergo_scanner::{
-    create_ergo_scanner, ErgoScannerState, ScanConfig,
-};
+pub use ergo_scanner::ergo_scanner::{create_ergo_scanner, ErgoScannerState, ScanConfig};
 
 // Re-export redemption types
 pub use redemption::{RedemptionData, RedemptionError, RedemptionManager, RedemptionRequest};
