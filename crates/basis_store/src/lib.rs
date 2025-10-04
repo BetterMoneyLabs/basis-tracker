@@ -23,6 +23,8 @@ pub mod cross_verification_tests;
 #[cfg(test)]
 pub mod property_tests;
 #[cfg(test)]
+pub mod real_scanner_integration_tests;
+#[cfg(test)]
 pub mod test_helpers;
 
 use blake2::{Blake2b512, Digest};
@@ -428,6 +430,9 @@ pub use ergo_scanner::{
 
 // Re-export Ergo scanner types
 pub use ergo_scanner::ergo_scanner::{create_ergo_scanner, ErgoScannerState, ScanConfig};
+
+#[cfg(feature = "ergo_scanner")]
+pub use ergo_scanner::real_ergo_scanner::{create_real_ergo_scanner, RealErgoScanner};
 
 // Re-export redemption types
 pub use redemption::{RedemptionData, RedemptionError, RedemptionManager, RedemptionRequest};

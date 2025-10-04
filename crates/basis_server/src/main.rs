@@ -22,7 +22,7 @@ use crate::{api::*, config::*, models::*, reserve_api::*, store::EventStore};
 struct AppState {
     tx: tokio::sync::mpsc::Sender<TrackerCommand>,
     event_store: std::sync::Arc<EventStore>,
-    ergo_scanner: std::sync::Arc<Mutex<ServerState>>,
+    ergo_scanner: std::sync::Arc<Mutex<basis_store::ergo_scanner::ErgoScannerState>>,
     reserve_tracker: std::sync::Arc<Mutex<ReserveTracker>>,
 }
 
@@ -108,15 +108,32 @@ async fn main() {
 
     // Initialize Ergo scanner
     tracing::info!("Initializing Ergo scanner...");
+    
+    // Use real Ergo scanner with specified node
+    let node_url = if !config.ergo.node.url.is_empty() {
+        config.ergo.node.url.clone()
+    } else {
+        "http://213.239.193.208:9053".to_string()
+    };
+    
+    let contract_template = if !config.ergo.basis_contract_template.is_empty() {
+        config.ergo.basis_contract_template.clone()
+    } else {
+        // Use default Basis contract template
+        "2WbQhe1AudMj9Cx2DtNYwDVn6YVS5GA5S9otJfkAmARDrZ6wQczry4SbM2RafQoJ5gZj83L9BkjjkYUE95HrPM5dDSxeJCApKtomhTHvXFfyXBNAKj2rV2PVdnkJnZBFzvRoXwCMwgfP1shCPau2CrMYJmBg5HoFtLAvcHYuKNpjK8NRHoHVtCMvkVN2QnSezJcUukCudUyT1Gqy4hQFbLAEo9ZPUPnjuuoqscsvWouf4DRXJX3uPeaNaCEEeJtBRfx4aXaX36WEfauDCZ6Kc6XSVTDanXkGqvveLfLtk9DAA3Z7EU1jBhVoGy8nscW5UbUdJm7dLT6ZjaH29LjnPo3GaJfhcoRE6wUnDgX2xea4t23xkQNWebDEn2Yiv4JLTirGnGH5fBRZjueUivRv1ipp8G3tm3wKP5UM79AaRfVw5NecDTpR4QrKooqchNGSanTfLwzTEnwvqGSnqKbqJtJXyAfLX6Mf374ULUNa2C7ui8xip9RfmqNnv6cNDpexbQgTDKghhNtP2YWj8vssV65LNvVEaVNZAyrmCNfV3QVdn".to_string()
+    };
+    
     let node_config = config.ergo_node_config();
-    let mut ergo_scanner = ServerState::new(node_config);
+    let scan_config = basis_store::ergo_scanner::ScanConfig::new("basis_reserves", &contract_template);
+    let mut ergo_scanner = basis_store::ergo_scanner::ErgoScannerState::new(&node_url, node_config, scan_config);
 
     // Start scanner
     match ergo_scanner.start_scanning().await {
         Ok(()) => {
             tracing::info!("Ergo scanner started successfully");
-            let current_height = ergo_scanner.get_current_height().await.unwrap_or(0);
+            let current_height = ergo_scanner.node_client.get_current_height().await.unwrap_or(0);
             tracing::info!("Current blockchain height: {}", current_height);
+            tracing::info!("Connected to Ergo node: {}", node_url);
         }
         Err(e) => {
             tracing::warn!(

@@ -8,6 +8,6 @@ basis_contract_template = "2WbQhe1AudMj9Cx2DtNYwDVn6YVS5GA5S9otJfkAmARDrZ6wQczry
 start_height = 0
 
 [ergo.node]
-url = ""
+url = "http://213.239.193.208:9053"
 api_key = ""
-timeout_secs = 1
+timeout_secs = 30

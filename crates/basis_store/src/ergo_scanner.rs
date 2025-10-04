@@ -6,6 +6,9 @@ use thiserror::Error;
 
 pub mod ergo_scanner;
 
+#[cfg(feature = "ergo_scanner")]
+pub mod real_ergo_scanner;
+
 #[derive(Error, Debug)]
 pub enum ScannerError {
     #[error("Scanner error: {0}")]
@@ -42,12 +45,14 @@ pub struct NodeConfig {
     pub contract_template: Option<String>,
 }
 
-/// Server state for scanner (simplified implementation)
-/// For real blockchain integration, use chaincash_style_scanner::ModernScannerState
+/// Server state for scanner
+/// Can use either mock implementation or real blockchain integration
 pub struct ServerState {
     pub config: NodeConfig,
     pub current_height: u64,
     pub last_scanned_height: u64,
+    pub use_real_scanner: bool,
+    pub node_url: Option<String>,
 }
 
 impl ServerState {
@@ -57,44 +62,102 @@ impl ServerState {
             config,
             current_height: 0,
             last_scanned_height: start_height,
+            use_real_scanner: false,
+            node_url: None,
         }
     }
 
-    /// Get current blockchain height (simplified implementation)
-    /// For real implementation, use chaincash_style_scanner::ModernScannerState
-    pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
-        // Return a mock height - use real_ergo_scanner for actual blockchain integration
-        Ok(1000)
+    /// Create a server state that uses real Ergo scanner
+    pub fn new_real_scanner(config: NodeConfig, node_url: String) -> Self {
+        let start_height = config.start_height.unwrap_or(0);
+        Self {
+            config,
+            current_height: 0,
+            last_scanned_height: start_height,
+            use_real_scanner: true,
+            node_url: Some(node_url),
+        }
     }
 
-    /// Scan for new events (simplified implementation)
-    /// For real implementation, use chaincash_style_scanner::ModernScannerState
-    pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ScannerError> {
-        // Simplified implementation - use real_ergo_scanner for actual blockchain scanning
-        // This returns mock events for testing
-        if self.current_height < self.last_scanned_height + 10 {
-            self.current_height += 1;
-            Ok(vec![])
+    /// Get current blockchain height
+    pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
+        if self.use_real_scanner {
+            #[cfg(feature = "ergo_scanner")]
+            {
+                if let Some(node_url) = &self.node_url {
+                    let mut real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(node_url);
+                    real_scanner.get_current_height().await
+                } else {
+                    Err(ScannerError::Generic("No node URL configured for real scanner".to_string()))
+                }
+            }
+            #[cfg(not(feature = "ergo_scanner"))]
+            {
+                Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
+            }
         } else {
-            // Simulate finding a reserve event occasionally
-            if self.current_height % 100 == 0 {
-                Ok(vec![ReserveEvent::ReserveCreated {
-                    box_id: format!("mock_box_{}", self.current_height),
-                    owner_pubkey: "mock_pubkey".to_string(),
-                    collateral_amount: 1000000000, // 1 ERG
-                    height: self.current_height,
-                }])
-            } else {
+            // Return a mock height for testing
+            Ok(1000)
+        }
+    }
+
+    /// Scan for new events
+    pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ScannerError> {
+        if self.use_real_scanner {
+            #[cfg(feature = "ergo_scanner")]
+            {
+                if let Some(node_url) = &self.node_url {
+                    let mut real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(node_url);
+                    real_scanner.scan_new_blocks().await
+                } else {
+                    Err(ScannerError::Generic("No node URL configured for real scanner".to_string()))
+                }
+            }
+            #[cfg(not(feature = "ergo_scanner"))]
+            {
+                Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
+            }
+        } else {
+            // Simplified implementation - returns mock events for testing
+            if self.current_height < self.last_scanned_height + 10 {
+                self.current_height += 1;
                 Ok(vec![])
+            } else {
+                // Simulate finding a reserve event occasionally
+                if self.current_height % 100 == 0 {
+                    Ok(vec![ReserveEvent::ReserveCreated {
+                        box_id: format!("mock_box_{}", self.current_height),
+                        owner_pubkey: "mock_pubkey".to_string(),
+                        collateral_amount: 1000000000, // 1 ERG
+                        height: self.current_height,
+                    }])
+                } else {
+                    Ok(vec![])
+                }
             }
         }
     }
 
-    /// Get unspent reserve boxes (simplified implementation)
-    /// For real implementation, use chaincash_style_scanner::ModernScannerState
+    /// Get unspent reserve boxes
     pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
-        // Simplified implementation - returns mock boxes for testing
-        Ok(vec![])
+        if self.use_real_scanner {
+            #[cfg(feature = "ergo_scanner")]
+            {
+                if let Some(node_url) = &self.node_url {
+                    let real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(node_url);
+                    real_scanner.get_unspent_reserve_boxes().await
+                } else {
+                    Err(ScannerError::Generic("No node URL configured for real scanner".to_string()))
+                }
+            }
+            #[cfg(not(feature = "ergo_scanner"))]
+            {
+                Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
+            }
+        } else {
+            // Simplified implementation - returns mock boxes for testing
+            Ok(vec![])
+        }
     }
 
     /// Check if scanner is active
@@ -102,11 +165,26 @@ impl ServerState {
         true
     }
 
-    /// Start scanning (simplified implementation)
-    /// For real implementation, use chaincash_style_scanner::ModernScannerState
+    /// Start scanning
     pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
-        // Simplified implementation - use real_ergo_scanner for continuous scanning
-        Ok(())
+        if self.use_real_scanner {
+            #[cfg(feature = "ergo_scanner")]
+            {
+                if let Some(node_url) = &self.node_url {
+                    let mut real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(node_url);
+                    real_scanner.start_scanning().await
+                } else {
+                    Err(ScannerError::Generic("No node URL configured for real scanner".to_string()))
+                }
+            }
+            #[cfg(not(feature = "ergo_scanner"))]
+            {
+                Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
+            }
+        } else {
+            // Simplified implementation for testing
+            Ok(())
+        }
     }
 
     /// Get last scanned height

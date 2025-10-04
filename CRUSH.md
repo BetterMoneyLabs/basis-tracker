@@ -98,6 +98,8 @@
 ### Scanner Implementation
 - **Chaincash-rs style scanner** - Following chaincash-rs pattern with background scanning tasks
 - **Single unified implementation** - Clean, consistent API
+- **Real blockchain integration** - Connects to actual Ergo nodes for production use
+- **Mock scanner** - For testing and development without network dependency
 
 ### Scanner Features
 - **Background scanning tasks** running independently
@@ -107,6 +109,7 @@
 - **Event processing** for reserve creation, top-up, redemption, and spending
 - **Unspent box querying** for current reserve state
 - **Contract template filtering** for targeted scanning
+- **Real Ergo node integration** - Connects to mainnet and testnet nodes
 
 ### Usage Example
 ```rust
@@ -121,6 +124,19 @@ start_scanner(state).await.unwrap();
 // Scanner runs in background, processing events automatically
 ```
 
+### Real Scanner Usage
+```rust
+use basis_store::ergo_scanner::{NodeConfig, ServerState};
+
+// Create real scanner for mainnet
+let config = NodeConfig::default();
+let scanner = ServerState::new_real_scanner(config, "http://213.239.193.208:9053".to_string());
+
+// Test connectivity
+let height = scanner.get_current_height().await?;
+println!("Current blockchain height: {}", height);
+```
+
 ### Event Types
 - **ReserveCreated**: New reserve box created on-chain
 - **ReserveToppedUp**: Existing reserve receives additional collateral
@@ -128,7 +144,7 @@ start_scanner(state).await.unwrap();
 - **ReserveSpent**: Reserve box spent/closed
 
 ### Available Ergo Nodes
-- **Mainnet**: `http://213.239.193.208:9052` (public)
+- **Mainnet**: `http://213.239.193.208:9053` (public)
 - **Testnet**: `http://213.239.193.208:9052` (public)
 - **Local**: `http://localhost:9053` (development)
 
@@ -137,3 +153,12 @@ start_scanner(state).await.unwrap();
 - Supports multiple networks (mainnet, testnet, local)
 - Configurable timeouts and contract templates
 - API key support for authenticated nodes
+
+### Testing with Real Scanner
+```bash
+# Run real scanner integration tests (requires network)
+cargo test -p basis_store --features ergo_scanner real_scanner_integration_tests -- --ignored
+
+# Test script for real scanner
+./test_real_scanner.sh
+```
