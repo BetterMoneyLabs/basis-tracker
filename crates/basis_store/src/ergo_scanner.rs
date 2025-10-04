@@ -46,117 +46,62 @@ pub struct NodeConfig {
 }
 
 /// Server state for scanner
-/// Can use either mock implementation or real blockchain integration
+/// Uses real blockchain integration only
 pub struct ServerState {
     pub config: NodeConfig,
     pub current_height: u64,
     pub last_scanned_height: u64,
-    pub use_real_scanner: bool,
-    pub node_url: Option<String>,
+    pub node_url: String,
 }
 
 impl ServerState {
-    pub fn new(config: NodeConfig) -> Self {
-        let start_height = config.start_height.unwrap_or(0);
-        Self {
-            config,
-            current_height: 0,
-            last_scanned_height: start_height,
-            use_real_scanner: false,
-            node_url: None,
-        }
-    }
-
     /// Create a server state that uses real Ergo scanner
-    pub fn new_real_scanner(config: NodeConfig, node_url: String) -> Self {
+    pub fn new(config: NodeConfig, node_url: String) -> Self {
         let start_height = config.start_height.unwrap_or(0);
         Self {
             config,
             current_height: 0,
             last_scanned_height: start_height,
-            use_real_scanner: true,
-            node_url: Some(node_url),
+            node_url,
         }
     }
 
     /// Get current blockchain height
     pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
-        if self.use_real_scanner {
-            #[cfg(feature = "ergo_scanner")]
-            {
-                if let Some(node_url) = &self.node_url {
-                    let mut real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(node_url);
-                    real_scanner.get_current_height().await
-                } else {
-                    Err(ScannerError::Generic("No node URL configured for real scanner".to_string()))
-                }
-            }
-            #[cfg(not(feature = "ergo_scanner"))]
-            {
-                Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
-            }
-        } else {
-            // Return a mock height for testing
-            Ok(1000)
+        #[cfg(feature = "ergo_scanner")]
+        {
+            let mut real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(&self.node_url);
+            real_scanner.get_current_height().await
+        }
+        #[cfg(not(feature = "ergo_scanner"))]
+        {
+            Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
         }
     }
 
     /// Scan for new events
     pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ScannerError> {
-        if self.use_real_scanner {
-            #[cfg(feature = "ergo_scanner")]
-            {
-                if let Some(node_url) = &self.node_url {
-                    let mut real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(node_url);
-                    real_scanner.scan_new_blocks().await
-                } else {
-                    Err(ScannerError::Generic("No node URL configured for real scanner".to_string()))
-                }
-            }
-            #[cfg(not(feature = "ergo_scanner"))]
-            {
-                Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
-            }
-        } else {
-            // Simplified implementation - returns mock events for testing
-            if self.current_height < self.last_scanned_height + 10 {
-                self.current_height += 1;
-                Ok(vec![])
-            } else {
-                // Simulate finding a reserve event occasionally
-                if self.current_height % 100 == 0 {
-                    Ok(vec![ReserveEvent::ReserveCreated {
-                        box_id: format!("mock_box_{}", self.current_height),
-                        owner_pubkey: "mock_pubkey".to_string(),
-                        collateral_amount: 1000000000, // 1 ERG
-                        height: self.current_height,
-                    }])
-                } else {
-                    Ok(vec![])
-                }
-            }
+        #[cfg(feature = "ergo_scanner")]
+        {
+            let mut real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(&self.node_url);
+            real_scanner.scan_new_blocks().await
+        }
+        #[cfg(not(feature = "ergo_scanner"))]
+        {
+            Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
         }
     }
 
     /// Get unspent reserve boxes
     pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
-        if self.use_real_scanner {
-            #[cfg(feature = "ergo_scanner")]
-            {
-                if let Some(node_url) = &self.node_url {
-                    let real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(node_url);
-                    real_scanner.get_unspent_reserve_boxes().await
-                } else {
-                    Err(ScannerError::Generic("No node URL configured for real scanner".to_string()))
-                }
-            }
-            #[cfg(not(feature = "ergo_scanner"))]
-            {
-                Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
-            }
-        } else {
-            // Simplified implementation - returns mock boxes for testing
-            Ok(vec![])
+        #[cfg(feature = "ergo_scanner")]
+        {
+            let real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(&self.node_url);
+            real_scanner.get_unspent_reserve_boxes().await
+        }
+        #[cfg(not(feature = "ergo_scanner"))]
+        {
+            Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
         }
     }
 
@@ -167,23 +112,14 @@ impl ServerState {
 
     /// Start scanning
     pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
-        if self.use_real_scanner {
-            #[cfg(feature = "ergo_scanner")]
-            {
-                if let Some(node_url) = &self.node_url {
-                    let mut real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(node_url);
-                    real_scanner.start_scanning().await
-                } else {
-                    Err(ScannerError::Generic("No node URL configured for real scanner".to_string()))
-                }
-            }
-            #[cfg(not(feature = "ergo_scanner"))]
-            {
-                Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
-            }
-        } else {
-            // Simplified implementation for testing
-            Ok(())
+        #[cfg(feature = "ergo_scanner")]
+        {
+            let mut real_scanner = crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(&self.node_url);
+            real_scanner.start_scanning().await
+        }
+        #[cfg(not(feature = "ergo_scanner"))]
+        {
+            Err(ScannerError::Generic("ergo_scanner feature not enabled".to_string()))
         }
     }
 
@@ -203,7 +139,9 @@ pub async fn start_scanner(_state: ServerState) -> Result<(), ScannerError> {
 /// Create a scanner with default configuration
 pub fn create_default_scanner() -> ServerState {
     let config = NodeConfig::default();
-    ServerState::new(config)
+    // Use a public Ergo node by default
+    let node_url = "http://213.239.193.208:9053".to_string();
+    ServerState::new(config, node_url)
 }
 
 /// Ergo box representation

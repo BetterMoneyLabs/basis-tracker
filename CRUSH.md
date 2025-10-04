@@ -130,7 +130,7 @@ use basis_store::ergo_scanner::{NodeConfig, ServerState};
 
 // Create real scanner for mainnet
 let config = NodeConfig::default();
-let scanner = ServerState::new_real_scanner(config, "http://213.239.193.208:9053".to_string());
+let scanner = ServerState::new(config, "http://213.239.193.208:9053".to_string());
 
 // Test connectivity
 let height = scanner.get_current_height().await?;

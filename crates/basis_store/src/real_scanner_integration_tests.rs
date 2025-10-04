@@ -12,7 +12,7 @@ impl RealScannerIntegrationTestSuite {
     /// Create a new integration test suite with real Ergo scanner
     pub fn new(node_url: &str) -> Self {
         let config = NodeConfig::default();
-        let scanner = ServerState::new_real_scanner(config, node_url.to_string());
+        let scanner = ServerState::new(config, node_url.to_string());
 
         Self {
             scanner,

@@ -1,17 +1,18 @@
 //! Simple integration tests that work with mock scanner implementation
 
-use crate::ergo_scanner::{NodeConfig, ReserveEvent, ScannerError, ServerState};
+use crate::ergo_scanner::{NodeConfig, ReserveEvent, ScannerError};
+#[cfg(test)]
+use crate::test_ergo_scanner::{MockServerState, create_mock_scanner};
 
-/// Simple integration test suite that works with both real and mock scanners
+/// Simple integration test suite that works with mock scanners (test-only)
 pub struct SimpleIntegrationTestSuite {
-    scanner: ServerState,
+    scanner: MockServerState,
 }
 
 impl SimpleIntegrationTestSuite {
     /// Create a new simple integration test suite
     pub fn new() -> Self {
-        let config = NodeConfig::default();
-        let scanner = ServerState::new(config);
+        let scanner = create_mock_scanner();
 
         Self { scanner }
     }
