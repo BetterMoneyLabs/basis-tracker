@@ -5,7 +5,7 @@ mod http_api_tests {
     use axum::{
         http::StatusCode,
     };
-    use basis_server::{
+    use crate::{
         api::{get_notes_by_issuer, get_notes_by_recipient},
         models::{ApiResponse, SerializableIouNote},
         AppState,
@@ -16,7 +16,7 @@ mod http_api_tests {
     // Test helper to create a mock app state
     fn create_mock_app_state() -> AppState {
         let (tx, _rx) = mpsc::channel(100);
-        let event_store = Arc::new(basis_server::store::EventStore::new());
+        let event_store = Arc::new(crate::store::EventStore::new());
         
         // Create a default NodeConfig for the scanner
         let config = basis_store::ergo_scanner::NodeConfig::default();
