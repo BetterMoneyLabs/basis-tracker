@@ -24,6 +24,7 @@ features = ["toml"]
 # Test dependencies
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "rt-multi-thread"] }
+tower = "0.4"
 
 [[bin]]
 name = "basis_server"

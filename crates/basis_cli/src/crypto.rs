@@ -68,8 +68,11 @@ impl KeyPair {
     }
 
     pub fn from_private_key_bytes(bytes: &[u8; 32]) -> Result<Self> {
+        let secp = Secp256k1::new();
         let private_key = SecretKey::from_slice(bytes)?;
-        Self::from_private_key(private_key)
+        let keypair = SecpKeyPair::from_secret_key(&secp, &private_key);
+        
+        Ok(Self { keypair })
     }
 }
 

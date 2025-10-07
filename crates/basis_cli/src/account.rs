@@ -32,6 +32,26 @@ impl Account {
         }
     }
 
+    pub fn from_private_key_hex(name: &str, private_key_hex: &str) -> Result<Self> {
+        let private_key_bytes = hex::decode(private_key_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid hex encoding: {}", e))?;
+        
+        let private_key_array: [u8; 32] = private_key_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Private key must be 32 bytes"))?;
+        
+        let keypair = KeyPair::from_private_key_bytes(&private_key_array)?;
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        
+        Ok(Self {
+            name: name.to_string(),
+            keypair,
+            created_at,
+        })
+    }
+
     pub fn get_pubkey_hex(&self) -> String {
         hex::encode(self.keypair.get_public_key_bytes())
     }
@@ -47,16 +67,23 @@ impl Account {
 
 #[derive(Debug)]
 pub struct AccountManager {
-    config_manager: ConfigManager,
-    accounts: HashMap<String, Account>,
+    pub config_manager: ConfigManager,
+    pub accounts: HashMap<String, Account>,
 }
 
 impl AccountManager {
     pub fn new(config_manager: ConfigManager) -> Result<Self> {
-        let accounts = HashMap::new();
+        let mut accounts = HashMap::new();
         
-        // We don't load accounts from config to avoid key management complexity
-        // Accounts are created fresh each session for testing purposes
+        // Load accounts from config
+        // Note: This only loads account metadata, not private keys
+        // Private keys are generated fresh each session for security
+        for account_config in config_manager.list_accounts() {
+            // Create a new account with the same name
+            // This generates a new keypair since we don't persist private keys
+            let account = Account::new(account_config.name.clone())?;
+            accounts.insert(account_config.name.clone(), account);
+        }
         
         Ok(Self {
             config_manager,
