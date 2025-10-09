@@ -341,24 +341,27 @@ async fn main() {
         reserve_tracker: std::sync::Arc::new(Mutex::new(reserve_tracker)),
     };
 
-    // Build our application with routes
-
+    // Build our application with routes - FIXED ROUTE ORDER
     let app = Router::new()
+        // Root route
         .route("/", get(root))
+        // Static routes
+        .route("/events", get(get_events))
+        .route("/events/paginated", get(get_events_paginated))
         .route("/notes", post(create_note))
-        .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
-        .route("/notes/recipient/{pubkey}", get(get_notes_by_recipient))
+        .route("/redeem", post(initiate_redemption))
+        .route("/redeem/complete", post(complete_redemption))
+        .route("/proof", get(get_proof))
+        // Most specific parameterized routes first
         .route(
             "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",
             get(get_note_by_issuer_and_recipient),
         )
+        // Parameterized routes
+        .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
+        .route("/notes/recipient/{pubkey}", get(get_notes_by_recipient))
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
-        .route("/events", get(get_events))
-        .route("/events/paginated", get(get_events_paginated))
         .route("/key-status/{pubkey}", get(get_key_status))
-        .route("/redeem", post(initiate_redemption))
-        .route("/redeem/complete", post(complete_redemption))
-        .route("/proof", get(get_proof))
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http());
 

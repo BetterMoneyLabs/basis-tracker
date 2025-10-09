@@ -9,7 +9,7 @@ axum = { workspace = true, features = ["macros"] }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-tower-http = { version = "0.5", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = "0.4"
