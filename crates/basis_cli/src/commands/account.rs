@@ -59,7 +59,7 @@ pub async fn handle_account_command(
                             .map(|current| current.name == account_config.name)
                             .unwrap_or(false);
                         
-                        let current_indicator = if is_current { " (current)" } else { "" };
+                        let current_indicator = if is_current { " ⭐ (current)" } else { "" };
                         println!("  {}: {}{}", account_config.name, account_config.pubkey_hex, current_indicator);
                     }
                 }
@@ -71,7 +71,7 @@ pub async fn handle_account_command(
                             .map(|current| current.name == account.name)
                             .unwrap_or(false);
                         
-                        let current_indicator = if is_current { " (current)" } else { "" };
+                        let current_indicator = if is_current { " ⭐ (current)" } else { "" };
                         println!("  {}: {}{}", account.name, account.get_pubkey_hex(), current_indicator);
                     }
                 }
@@ -83,11 +83,13 @@ pub async fn handle_account_command(
         }
         AccountCommands::Info => {
             if let Some(account) = account_manager.get_current() {
-                println!("Current Account: {}", account.name);
-                println!("Public Key: {}", account.get_pubkey_hex());
-                println!("Created at: {}", account.created_at);
+                println!("⭐ Current Account: {}", account.name);
+                println!("  Public Key: {}", account.get_pubkey_hex());
+                println!("  Created at: {}", account.created_at);
             } else {
-                println!("No current account selected. Use 'basis-cli account switch <name>' to select one.");
+                println!("No current account selected.");
+                println!("Use 'basis-cli account create <name>' to create an account.");
+                println!("Use 'basis-cli account switch <name>' to select an existing account.");
             }
         }
         AccountCommands::Export { name } => {
@@ -109,7 +111,7 @@ pub async fn handle_account_command(
             let pubkey_hex = account.get_pubkey_hex();
             
             // Save to config
-            account_manager.config_manager.add_account(&name, &pubkey_hex)?;
+            account_manager.config_manager.add_account(&name, &pubkey_hex, &private_key)?;
             
             // Add to in-memory accounts
             account_manager.accounts.insert(name.clone(), account);

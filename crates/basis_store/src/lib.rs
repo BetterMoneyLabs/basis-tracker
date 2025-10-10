@@ -144,7 +144,10 @@ impl TrackerStateManager {
 
         // Use a temporary directory for storage (in real implementation, this would be configurable)
         tracing::debug!("Opening note storage...");
-        let storage = match persistence::NoteStorage::open("crates/basis_server/data/notes") {
+        let storage_path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("crates/basis_server/data/notes");
+        let storage = match persistence::NoteStorage::open(&storage_path) {
             Ok(storage) => {
                 tracing::debug!("Note storage opened successfully");
                 storage

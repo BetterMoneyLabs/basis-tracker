@@ -1,5 +1,5 @@
 use crate::account::AccountManager;
-use crate::api::{TrackerClient, CreateNoteRequest, RedeemRequest, CompleteRedemptionRequest};
+use crate::api::{TrackerClient, CreateNoteRequest, RedeemRequest, CompleteRedemptionRequest, KeyStatusResponse};
 use anyhow::Result;
 use clap::Subcommand;
 
@@ -58,6 +58,11 @@ pub async fn handle_note_command(
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_secs();
             
+            // Get reserve status before note creation
+            println!("📊 Reserve Status Before Note Creation:");
+            let status_before = client.get_reserve_status(&issuer_pubkey).await?;
+            print_reserve_status(&status_before);
+            
             // Create signing message: recipient_pubkey || amount_be_bytes || timestamp_be_bytes
             let mut message = Vec::new();
             message.extend_from_slice(&hex::decode(&recipient)?);
@@ -68,15 +73,26 @@ pub async fn handle_note_command(
             let signature_hex = hex::encode(signature);
             
             let request = CreateNoteRequest {
-                issuer_pubkey,
-                recipient_pubkey: recipient,
+                issuer_pubkey: issuer_pubkey.clone(),
+                recipient_pubkey: recipient.clone(),
                 amount,
                 timestamp,
                 signature: signature_hex,
             };
             
             client.create_note(request).await?;
-            println!("✅ Note created successfully");
+            
+            // Get reserve status after note creation
+            println!("\n📊 Reserve Status After Note Creation:");
+            let status_after = client.get_reserve_status(&issuer_pubkey).await?;
+            print_reserve_status(&status_after);
+            
+            println!("\n✅ Note created successfully");
+            println!("📝 Note Details:");
+            println!("  Issuer: {}", issuer_pubkey);
+            println!("  Recipient: {}", recipient);
+            println!("  Amount: {} nanoERG ({:.6} ERG)", amount, amount as f64 / 1_000_000_000.0);
+            println!("  Timestamp: {}", timestamp);
         }
         NoteCommands::List { issuer, recipient } => {
             let current_account = account_manager.get_current()
@@ -165,4 +181,28 @@ pub async fn handle_note_command(
     }
     
     Ok(())
+}
+
+fn print_reserve_status(status: &KeyStatusResponse) {
+    println!("  Total Debt: {} nanoERG ({:.6} ERG)", 
+        status.total_debt, 
+        status.total_debt as f64 / 1_000_000_000.0
+    );
+    println!("  Collateral: {} nanoERG ({:.6} ERG)", 
+        status.collateral, 
+        status.collateral as f64 / 1_000_000_000.0
+    );
+    println!("  Collateralization Ratio: {:.4}", status.collateralization_ratio);
+    println!("  Note Count: {}", status.note_count);
+    println!("  Last Updated: {}", status.last_updated);
+    
+    // Show collateralization status
+    let status_text = match status.collateralization_ratio {
+        r if r < 1.0 => "UNDER-COLLATERALIZED ⚠️",
+        r if r < 1.5 => "LOW ⚠️",
+        r if r < 2.0 => "ADEQUATE",
+        r if r < 3.0 => "GOOD",
+        _ => "EXCELLENT",
+    };
+    println!("  Status: {}", status_text);
 }

@@ -51,8 +51,10 @@ pub struct TrackerEvent {
 // Serializable version of IouNote for API responses
 #[derive(Debug, Serialize)]
 pub struct SerializableIouNote {
+    pub issuer_pubkey: String,
     pub recipient_pubkey: String,
-    pub amount: u64,
+    pub amount_collected: u64,
+    pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
 }
@@ -60,8 +62,10 @@ pub struct SerializableIouNote {
 impl From<IouNote> for SerializableIouNote {
     fn from(note: IouNote) -> Self {
         Self {
+            issuer_pubkey: "".to_string(), // Will be set by the API handler
             recipient_pubkey: hex::encode(note.recipient_pubkey),
-            amount: note.amount_collected,
+            amount_collected: note.amount_collected,
+            amount_redeemed: note.amount_redeemed,
             timestamp: note.timestamp,
             signature: hex::encode(note.signature),
         }

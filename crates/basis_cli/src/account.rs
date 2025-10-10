@@ -75,13 +75,13 @@ impl AccountManager {
     pub fn new(config_manager: ConfigManager) -> Result<Self> {
         let mut accounts = HashMap::new();
         
-        // Load accounts from config
-        // Note: This only loads account metadata, not private keys
-        // Private keys are generated fresh each session for security
+        // Load accounts from config with persistent private keys
         for account_config in config_manager.list_accounts() {
-            // Create a new account with the same name
-            // This generates a new keypair since we don't persist private keys
-            let account = Account::new(account_config.name.clone())?;
+            // Load account with persistent private key from config
+            let account = Account::from_private_key_hex(
+                &account_config.name,
+                &account_config.private_key_hex
+            )?;
             accounts.insert(account_config.name.clone(), account);
         }
         
@@ -98,9 +98,10 @@ impl AccountManager {
         
         let account = Account::new(name.to_string())?;
         let pubkey_hex = account.get_pubkey_hex();
+        let private_key_hex = account.get_private_key_hex();
         
-        // Save to config (just for reference, not for loading private keys)
-        self.config_manager.add_account(name, &pubkey_hex)?;
+        // Save to config with private key for persistence
+        self.config_manager.add_account(name, &pubkey_hex, &private_key_hex)?;
         
         self.accounts.insert(name.to_string(), account.clone());
         
@@ -128,9 +129,11 @@ impl AccountManager {
     }
 
     pub fn get_current(&self) -> Option<&Account> {
-        // For now, just return the first account if any exist
-        // In production, we'd properly track current account
-        self.accounts.values().next()
+        // Get current account name from config
+        let current_account_name = self.config_manager.get_config().current_account.as_ref()?;
+        
+        // Return the account with that name
+        self.accounts.get(current_account_name)
     }
 
     pub fn get_account(&self, name: &str) -> Option<&Account> {

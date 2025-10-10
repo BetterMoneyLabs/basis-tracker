@@ -15,6 +15,7 @@ pub struct CliConfig {
 pub struct AccountConfig {
     pub name: String,
     pub pubkey_hex: String,
+    pub private_key_hex: String,
     pub created_at: u64,
 }
 
@@ -74,10 +75,11 @@ impl ConfigManager {
         self.save()
     }
 
-    pub fn add_account(&mut self, name: &str, pubkey_hex: &str) -> Result<()> {
+    pub fn add_account(&mut self, name: &str, pubkey_hex: &str, private_key_hex: &str) -> Result<()> {
         let account_config = AccountConfig {
             name: name.to_string(),
             pubkey_hex: pubkey_hex.to_string(),
+            private_key_hex: private_key_hex.to_string(),
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_secs(),

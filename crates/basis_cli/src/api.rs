@@ -235,6 +235,23 @@ impl TrackerClient {
         }
     }
 
+    pub async fn get_recent_events(&self) -> Result<Vec<TrackerEvent>> {
+        let url = format!("{}/events", self.base_url);
+        let response = ureq::get(&url).call()?;
+        
+        if response.status() == 200 {
+            let api_response: ApiResponse<Vec<TrackerEvent>> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap_or_default())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("Failed to get recent events: {}", error_text))
+        }
+    }
+
     pub async fn get_proof(&self, issuer: &str, recipient: &str) -> Result<ProofResponse> {
         let url = format!("{}/proof?issuer_pubkey={}&recipient_pubkey={}", self.base_url, issuer, recipient);
         let response = ureq::get(&url).call()?;

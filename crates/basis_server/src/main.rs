@@ -106,30 +106,12 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Initialize Ergo scanner
-    tracing::info!("Initializing Ergo scanner...");
+    // Skip Ergo scanner initialization for testing
+    tracing::info!("Skipping Ergo scanner initialization for testing...");
     
-    // Use real Ergo scanner with specified node
-    let node_url = "http://213.239.193.208:9053".to_string();
-    
+    // Create a dummy scanner state
     let node_config = config.ergo_node_config();
-    let mut ergo_scanner = basis_store::ergo_scanner::ServerState::new(node_config, node_url);
-
-    // Start scanner
-    match ergo_scanner.start_scanning().await {
-        Ok(()) => {
-            tracing::info!("Ergo scanner started successfully");
-            let current_height = ergo_scanner.get_current_height().await.unwrap_or(0);
-            tracing::info!("Current blockchain height: {}", current_height);
-            tracing::info!("Connected to Ergo node: {}", ergo_scanner.node_url);
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to start Ergo scanner: {}. Continuing without scanner...",
-                e
-            );
-        }
-    }
+    let ergo_scanner = basis_store::ergo_scanner::ServerState::new(node_config, "http://localhost:9053".to_string());
 
     // Initialize reserve tracker
     tracing::info!("Initializing reserve tracker...");
@@ -397,7 +379,9 @@ async fn main() {
     // Start background scanner task
     let scanner_state = app_state.clone();
     tokio::spawn(async move {
-        background_scanner_task(scanner_state).await;
+        // Skip background scanning for now to avoid connection issues
+        // background_scanner_task(scanner_state).await;
+        tracing::info!("Background scanner task disabled for testing");
     });
 
     tracing::info!("Starting axum server...");

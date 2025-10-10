@@ -267,9 +267,15 @@ pub async fn get_notes_by_issuer(
                 );
             }
 
-            // Convert to serializable format
-            let serializable_notes: Vec<SerializableIouNote> =
-                notes.into_iter().map(SerializableIouNote::from).collect();
+            // Convert to serializable format with issuer pubkey
+            let serializable_notes: Vec<SerializableIouNote> = notes
+                .into_iter()
+                .map(|note| {
+                    let mut serializable_note = SerializableIouNote::from(note);
+                    serializable_note.issuer_pubkey = pubkey_hex.clone();
+                    serializable_note
+                })
+                .collect();
             (
                 StatusCode::OK,
                 Json(crate::models::success_response(serializable_notes)),
@@ -365,9 +371,15 @@ pub async fn get_notes_by_recipient(
                 pubkey_hex
             );
 
-            // Convert to serializable format
-            let serializable_notes: Vec<SerializableIouNote> =
-                notes.into_iter().map(SerializableIouNote::from).collect();
+            // Convert to serializable format with issuer pubkey
+            let serializable_notes: Vec<SerializableIouNote> = notes
+                .into_iter()
+                .map(|note| {
+                    let mut serializable_note = SerializableIouNote::from(note);
+                    serializable_note.issuer_pubkey = pubkey_hex.clone();
+                    serializable_note
+                })
+                .collect();
             (
                 StatusCode::OK,
                 Json(crate::models::success_response(serializable_notes)),
@@ -493,8 +505,9 @@ pub async fn get_note_by_issuer_and_recipient(
                 issuer_pubkey_hex,
                 recipient_pubkey_hex
             );
-            // Convert to serializable format
-            let serializable_note = SerializableIouNote::from(note);
+            // Convert to serializable format with issuer pubkey
+            let mut serializable_note = SerializableIouNote::from(note);
+            serializable_note.issuer_pubkey = issuer_pubkey_hex.clone();
             (
                 StatusCode::OK,
                 Json(crate::models::success_response(Some(serializable_note))),
@@ -616,7 +629,7 @@ pub async fn get_events(
 // Get key status information
 #[axum::debug_handler]
 pub async fn get_key_status(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
 ) -> (StatusCode, Json<ApiResponse<KeyStatusResponse>>) {
     tracing::debug!("Getting key status for: {}", pubkey_hex);
@@ -635,7 +648,7 @@ pub async fn get_key_status(
     };
 
     // Convert to fixed-size array
-    let _pubkey: basis_store::PubKey = match pubkey_bytes.try_into() {
+    let issuer_pubkey: basis_store::PubKey = match pubkey_bytes.try_into() {
         Ok(arr) => arr,
         Err(_) => {
             return (
@@ -647,23 +660,91 @@ pub async fn get_key_status(
         }
     };
 
-    // In a real implementation, this would:
-    // 1. Get total debt from note storage
-    // 2. Get collateral from reserve tracker
-    // 3. Calculate collateralization ratio
-    // 4. Return comprehensive status
+    // Get total debt from note storage
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    
+    if let Err(e) = state
+        .tx
+        .send(crate::TrackerCommand::GetNotesByIssuer {
+            issuer_pubkey,
+            response_tx,
+        })
+        .await
+    {
+        tracing::error!("Failed to send to tracker thread: {:?}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
 
-    // Mock implementation for now
+    let notes = match response_rx.await {
+        Ok(Ok(notes)) => notes,
+        Ok(Err(e)) => {
+            tracing::error!("Failed to get notes: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Failed to retrieve notes".to_string(),
+                )),
+            );
+        }
+        Err(_) => {
+            tracing::error!("Tracker thread response channel closed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
+            );
+        }
+    };
+
+    // Calculate total debt and note count
+    let total_debt: u64 = notes.iter().map(|note| note.outstanding_debt()).sum();
+    let note_count = notes.len();
+
+    // Get collateral from reserve tracker
+    let tracker = state.reserve_tracker.lock().await;
+    let all_reserves = tracker.get_all_reserves();
+    
+    // Find reserve for this issuer
+    let reserve = all_reserves
+        .into_iter()
+        .find(|reserve| reserve.owner_pubkey == pubkey_hex);
+
+    let (collateral, collateralization_ratio, last_updated) = if let Some(reserve) = reserve {
+        let collateral = reserve.base_info.collateral_amount;
+        let ratio = if total_debt > 0 {
+            collateral as f64 / total_debt as f64
+        } else {
+            // Use a very high ratio when there's no debt
+            999999.0
+        };
+        (collateral, ratio, reserve.last_updated_timestamp)
+    } else {
+        // No reserve found - use zero collateral
+        (0, if total_debt > 0 { 0.0 } else { 999999.0 }, 0)
+    };
+
     let status = KeyStatusResponse {
-        total_debt: 1500000000, // 1.5 ERG
-        collateral: 3000000000, // 3.0 ERG
-        collateralization_ratio: 2.0,
-        note_count: 5,
-        last_updated: 1672531200, // Jan 1, 2023
+        total_debt,
+        collateral,
+        collateralization_ratio,
+        note_count,
+        last_updated,
         issuer_pubkey: pubkey_hex.clone(),
     };
 
-    tracing::info!("Returning key status for {}", pubkey_hex);
+    tracing::info!(
+        "Returning real key status for {}: debt={}, collateral={}, ratio={:.2}",
+        pubkey_hex,
+        total_debt,
+        collateral,
+        collateralization_ratio
+    );
 
     (
         StatusCode::OK,

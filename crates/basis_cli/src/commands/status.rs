@@ -13,7 +13,7 @@ pub async fn handle_status_command(client: &TrackerClient) -> Result<()> {
     }
     
     // Get recent events
-    let events = client.get_events(0, 10).await?;
+    let events = client.get_recent_events().await?;
     
     println!("\nRecent Events (last {}):", events.len());
     for event in events {
