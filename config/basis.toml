@@ -6,6 +6,10 @@ database_url = "sqlite:data/basis.db"
 [ergo]
 basis_contract_template = "2WbQhe1AudMj9Cx2DtNYwDVn6YVS5GA5S9otJfkAmARDrZ6wQczry4SbM2RafQoJ5gZj83L9BkjjkYUE95HrPM5dDSxeJCApKtomhTHvXFfyXBNAKj2rV2PVdnkJnZBFzvRoXwCMwgfP1shCPau2CrMYJmBg5HoFtLAvcHYuKNpjK8NRHoHVtCMvkVN2QnSezJcUukCudUyT1Gqy4hQFbLAEo9ZPUPnjuuoqscsvWouf4DRXJX3uPeaNaCEEeJtBRfx4aXaX36WEfauDCZ6Kc6XSVTDanXkGqvveLfLtk9DAA3Z7EU1jBhVoGy8nscW5UbUdJm7dLT6ZjaH29LjnPo3GaJfhcoRE6wUnDgX2xea4t23xkQNWebDEn2Yiv4JLTirGnGH5fBRZjueUivRv1ipp8G3tm3wKP5UM79AaRfVw5NecDTpR4QrKooqchNGSanTfLwzTEnwvqGSnqKbqJtJXyAfLX6Mf374ULUNa2C7ui8xip9RfmqNnv6cNDpexbQgTDKghhNtP2YWj8vssV65LNvVEaVNZAyrmCNfV3QVdn"
 start_height = 0
+# Tracker NFT ID (hex-encoded) - required for reserve creation and redemption
+# This NFT identifies the tracker server and must be set in reserve contract R6 register
+# Example: tracker_nft_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+tracker_nft_id = ""
 
 [ergo.node]
 url = "http://213.239.193.208:9053"

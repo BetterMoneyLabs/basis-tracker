@@ -174,15 +174,27 @@ Collateralization for 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c
 ### 5.1 Deploy Basis Reserve Contract
 *(This step requires Ergo blockchain interaction - actual deployment steps depend on your setup)*
 
+**Prerequisites:**
+- Configure `tracker_nft_id` in `config/basis.toml`
+- This NFT identifies your tracker server and must be set in the reserve contract's R6 register
+
 **Example using Ergo AppKit or similar:**
 ```scala
 // Deploy Basis reserve contract with 10 ERG collateral
 val reserveContract = BasisReserveContract.deploy(
   issuerPubKey = ALICE_PUBKEY,
   collateralAmount = 10000000000L, // 10 ERG in nanoERG
+  trackerNftId = TRACKER_NFT_ID,   // From config/basis.toml
   minCollateralRatio = 1.5
 )
 ```
+
+**Reserve Box Structure:**
+- **Value**: Collateral amount (10 ERG)
+- **Tokens**: Reserve singleton token
+- **R4**: Issuer's public key
+- **R5**: Empty AVL tree for redeemed timestamps  
+- **R6**: Tracker NFT ID (from configuration)
 
 **Expected On-Chain Events:**
 - Reserve box created with 10 ERG collateral

@@ -1,9 +1,3 @@
-mod api;
-mod config;
-mod models;
-mod reserve_api;
-mod store;
-
 use axum::{
     routing::{get, post},
     Router,
@@ -12,58 +6,14 @@ use basis_store::{
     ergo_scanner::{NodeConfig, ReserveEvent, ServerState},
     ReserveTracker,
 };
+use basis_server::{
+    api::*, reserve_api::*, store::EventStore,
+    AppConfig, ServerConfig, ErgoConfig, TrackerEvent, EventType, AppState, TrackerCommand
+};
 use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{api::*, config::*, models::*, reserve_api::*, store::EventStore};
 
-// Application state that holds a channel to communicate with the tracker thread
-#[derive(Clone)]
-struct AppState {
-    tx: tokio::sync::mpsc::Sender<TrackerCommand>,
-    event_store: std::sync::Arc<EventStore>,
-    ergo_scanner: std::sync::Arc<Mutex<basis_store::ergo_scanner::ServerState>>,
-    reserve_tracker: std::sync::Arc<Mutex<ReserveTracker>>,
-}
-
-// Commands that can be sent to the tracker thread
-#[derive(Debug)]
-enum TrackerCommand {
-    AddNote {
-        issuer_pubkey: basis_store::PubKey,
-        note: basis_store::IouNote,
-        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
-    },
-    GetNotesByIssuer {
-        issuer_pubkey: basis_store::PubKey,
-        response_tx:
-            tokio::sync::oneshot::Sender<Result<Vec<basis_store::IouNote>, basis_store::NoteError>>,
-    },
-    GetNotesByRecipient {
-        recipient_pubkey: basis_store::PubKey,
-        response_tx:
-            tokio::sync::oneshot::Sender<Result<Vec<basis_store::IouNote>, basis_store::NoteError>>,
-    },
-    GetNoteByIssuerAndRecipient {
-        issuer_pubkey: basis_store::PubKey,
-        recipient_pubkey: basis_store::PubKey,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<Option<basis_store::IouNote>, basis_store::NoteError>,
-        >,
-    },
-    InitiateRedemption {
-        request: basis_store::RedemptionRequest,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<basis_store::RedemptionData, basis_store::RedemptionError>,
-        >,
-    },
-    CompleteRedemption {
-        issuer_pubkey: basis_store::PubKey,
-        recipient_pubkey: basis_store::PubKey,
-        redeemed_amount: u64,
-        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::RedemptionError>>,
-    },
-}
 
 #[tokio::main]
 async fn main() {
@@ -90,6 +40,7 @@ async fn main() {
                         },
                         basis_contract_template: "2WbQhe1AudMj9Cx2DtNYwDVn6YVS5GA5S9otJfkAmARDrZ6wQczry4SbM2RafQoJ5gZj83L9BkjjkYUE95HrPM5dDSxeJCApKtomhTHvXFfyXBNAKj2rV2PVdnkJnZBFzvRoXwCMwgfP1shCPau2CrMYJmBg5HoFtLAvcHYuKNpjK8NRHoHVtCMvkVN2QnSezJcUukCudUyT1Gqy4hQFbLAEo9ZPUPnjuuoqscsvWouf4DRXJX3uPeaNaCEEeJtBRfx4aXaX36WEfauDCZ6Kc6XSVTDanXkGqvveLfLtk9DAA3Z7EU1jBhVoGy8nscW5UbUdJm7dLT6ZjaH29LjnPo3GaJfhcoRE6wUnDgX2xea4t23xkQNWebDEn2Yiv4JLTirGnGH5fBRZjueUivRv1ipp8G3tm3wKP5UM79AaRfVw5NecDTpR4QrKooqchNGSanTfLwzTEnwvqGSnqKbqJtJXyAfLX6Mf374ULUNa2C7ui8xip9RfmqNnv6cNDpexbQgTDKghhNtP2YWj8vssV65LNvVEaVNZAyrmCNfV3QVdn".to_string(),
                         start_height: 0,
+                        tracker_nft_id: None,
                     },
                 }
             })

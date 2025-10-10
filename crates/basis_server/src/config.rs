@@ -33,6 +33,8 @@ pub struct ErgoConfig {
     pub basis_contract_template: String,
     /// Starting block height for scanning (legacy, use node.start_height instead)
     pub start_height: u64,
+    /// Tracker NFT ID (hex-encoded) - identifies the tracker server for reserve contracts
+    pub tracker_nft_id: Option<String>,
 }
 
 impl AppConfig {
@@ -54,6 +56,7 @@ impl AppConfig {
             .set_default("server.database_url", "sqlite:data/basis.db")?
             .set_default("ergo.basis_contract_template", "")?
             .set_default("ergo.start_height", 0)?
+            .set_default("ergo.tracker_nft_id", "")?
             // Environment variables
             .add_source(config::Environment::with_prefix("BASIS"))
             // Configuration file
@@ -83,5 +86,15 @@ impl AppConfig {
     /// Get the Basis contract template bytes
     pub fn basis_contract_bytes(&self) -> Result<Vec<u8>, hex::FromHexError> {
         hex::decode(&self.ergo.basis_contract_template)
+    }
+
+    /// Get the tracker NFT ID bytes (if configured)
+    pub fn tracker_nft_bytes(&self) -> Result<Option<Vec<u8>>, hex::FromHexError> {
+        match &self.ergo.tracker_nft_id {
+            Some(nft_id) if !nft_id.is_empty() => {
+                hex::decode(nft_id).map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 }
