@@ -5,18 +5,19 @@ mod http_api_tests {
     use axum::{
         http::StatusCode,
     };
-    use crate::{
+    use basis_server::{
         api::{get_notes_by_issuer, get_notes_by_recipient},
         models::{ApiResponse, SerializableIouNote},
         AppState,
+        store::EventStore,
     };
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
     // Test helper to create a mock app state
-    fn create_mock_app_state() -> AppState {
+    async fn create_mock_app_state() -> AppState {
         let (tx, _rx) = mpsc::channel(100);
-        let event_store = Arc::new(crate::store::EventStore::new());
+        let event_store = Arc::new(EventStore::new().await.unwrap());
         
         // Create a default NodeConfig for the scanner
         let config = basis_store::ergo_scanner::NodeConfig::default();
@@ -38,7 +39,7 @@ mod http_api_tests {
     #[tokio::test]
     async fn test_get_notes_by_issuer_empty_list() {
         // Test that when no notes exist for an issuer, we get an empty list (not 404)
-        let state = create_mock_app_state();
+        let state = create_mock_app_state().await;
         
         // Create a valid public key (33 bytes hex encoded)
         let valid_pubkey = "010101010101010101010101010101010101010101010101010101010101010101";
@@ -51,18 +52,18 @@ mod http_api_tests {
         // Should return 200 OK with empty array
         assert_eq!(response.0, StatusCode::OK);
         
-        let response_body = response.1;
+        let response_body = &response.1;
         assert!(response_body.success);
         assert!(response_body.data.is_some());
         
-        let notes = response_body.data.unwrap();
+        let notes = response_body.data.as_ref().unwrap();
         assert!(notes.is_empty(), "Expected empty notes list, got: {:?}", notes);
     }
 
     #[tokio::test]
     async fn test_get_notes_by_issuer_invalid_hex() {
         // Test that invalid hex encoding returns 400 Bad Request
-        let state = create_mock_app_state();
+        let state = create_mock_app_state().await;
         
         let invalid_hex = "not_a_valid_hex_string";
         
@@ -73,7 +74,7 @@ mod http_api_tests {
         
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         
-        let response_body = response.1;
+        let response_body = &response.1;
         assert!(!response_body.success);
         assert!(response_body.error.is_some());
         assert!(response_body.data.is_none());
@@ -82,7 +83,7 @@ mod http_api_tests {
     #[tokio::test]
     async fn test_get_notes_by_issuer_wrong_length() {
         // Test that wrong byte length returns 400 Bad Request
-        let state = create_mock_app_state();
+        let state = create_mock_app_state().await;
         
         // 32 bytes instead of 33
         let wrong_length_pubkey = "0101010101010101010101010101010101010101010101010101010101010101";
@@ -94,7 +95,7 @@ mod http_api_tests {
         
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         
-        let response_body = response.1;
+        let response_body = &response.1;
         assert!(!response_body.success);
         assert!(response_body.error.is_some());
         assert!(response_body.data.is_none());
@@ -103,7 +104,7 @@ mod http_api_tests {
     #[tokio::test]
     async fn test_get_notes_by_recipient_empty_list() {
         // Test that when no notes exist for a recipient, we get an empty list (not 404)
-        let state = create_mock_app_state();
+        let state = create_mock_app_state().await;
         
         // Create a valid public key (33 bytes hex encoded)
         let valid_pubkey = "020202020202020202020202020202020202020202020202020202020202020202";
@@ -116,11 +117,11 @@ mod http_api_tests {
         // Should return 200 OK with empty array
         assert_eq!(response.0, StatusCode::OK);
         
-        let response_body = response.1;
+        let response_body = &response.1;
         assert!(response_body.success);
         assert!(response_body.data.is_some());
         
-        let notes = response_body.data.unwrap();
+        let notes = response_body.data.as_ref().unwrap();
         assert!(notes.is_empty(), "Expected empty notes list, got: {:?}", notes);
     }
 }
