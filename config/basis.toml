@@ -9,7 +9,7 @@ start_height = 0
 # Tracker NFT ID (hex-encoded) - required for reserve creation and redemption
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
 # Example: tracker_nft_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-tracker_nft_id = ""
+tracker_nft_id = "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8"
 
 [ergo.node]
 url = "http://213.239.193.208:9053"
