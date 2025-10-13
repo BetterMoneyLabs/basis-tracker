@@ -1,7 +1,17 @@
 openapi: 3.0.3
 info:
   title: Basis Tracker API
-  description: HTTP API for Basis Tracker - a decentralized debt issuance and tracking system
+  description: |
+    HTTP API for Basis Tracker - a decentralized system for offchain IOU notes backed by on-chain reserves.
+    
+    Basis enables efficient offchain cash systems for micropayments and community currencies, allowing:
+    - Credit-based payments (unbacked IOU money)
+    - On-chain collateral management via Ergo reserves
+    - Real-time tracking of debt relationships
+    - Secure redemption processes with Schnorr signatures
+    
+    The system uses secp256k1 cryptography with 33-byte compressed public keys and 65-byte Schnorr signatures.
+    Trackers maintain offchain ledgers while reserves provide on-chain collateral backing.
   version: 1.0.0
   contact:
     name: Basis Tracker Team
