@@ -47,6 +47,7 @@ pub struct NodeConfig {
 
 /// Server state for scanner
 /// Uses real blockchain integration only
+#[derive(Clone)]
 pub struct ServerState {
     pub config: NodeConfig,
     pub current_height: u64,

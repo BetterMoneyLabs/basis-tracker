@@ -1,0 +1,35 @@
+Basis Tracker API - Real Endpoints
+==================================
+
+Core Note Management
+--------------------
+POST /notes - Create IOU notes with signature validation
+GET /notes/issuer/{pubkey} - Get all notes by issuer  
+GET /notes/recipient/{pubkey} - Get all notes by recipient
+GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey} - Get specific note
+
+Reserve & Status
+----------------
+GET /reserves/issuer/{pubkey} - Get reserve information
+GET /key-status/{pubkey} - Get debt/collateral ratios
+
+Event System
+------------
+GET /events - Recent tracker events
+GET /events/paginated - Paginated events
+
+Redemption
+----------
+POST /redeem - Initiate redemption
+POST /redeem/complete - Complete redemption
+
+Mock Endpoint
+-------------
+GET /proof - Returns mock proof data (placeholder)
+
+All endpoints except /proof process real data with:
+- Hex encoding/decoding for public keys and signatures
+- Integration with basis_store crate
+- Event store with sequential IDs and pagination
+- Reserve tracker for collateral calculations
+- Signature validation and data processing

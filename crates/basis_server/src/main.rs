@@ -3,7 +3,7 @@ use axum::{
     Router,
 };
 use basis_store::{
-    ergo_scanner::{NodeConfig, ReserveEvent, ServerState},
+    ergo_scanner::{NodeConfig, ReserveEvent, create_default_scanner, start_scanner},
     ReserveTracker,
 };
 use basis_server::{
@@ -57,12 +57,20 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Skip Ergo scanner initialization for testing
-    tracing::info!("Skipping Ergo scanner initialization for testing...");
+    // Initialize real Ergo scanner with blockchain monitoring
+    tracing::info!("Initializing Ergo scanner with blockchain monitoring...");
     
-    // Create a dummy scanner state
-    let node_config = config.ergo_node_config();
-    let ergo_scanner = basis_store::ergo_scanner::ServerState::new(node_config, "http://localhost:9053".to_string());
+    // Create real scanner state with configured node URL
+    let _node_config = config.ergo_node_config();
+    let ergo_scanner = create_default_scanner();
+    
+    // Start the scanner background task
+    if let Err(e) = start_scanner(ergo_scanner.clone()).await {
+        tracing::warn!("Failed to start background scanner: {}", e);
+        tracing::info!("Continuing without background scanner...");
+    } else {
+        tracing::info!("Ergo scanner started successfully");
+    }
 
     // Initialize reserve tracker
     tracing::info!("Initializing reserve tracker...");
@@ -327,12 +335,11 @@ async fn main() {
         }
     };
 
-    // Start background scanner task
+    // Start background scanner task for continuous blockchain monitoring
     let scanner_state = app_state.clone();
+    let config_clone = config.clone();
     tokio::spawn(async move {
-        // Skip background scanning for now to avoid connection issues
-        // background_scanner_task(scanner_state).await;
-        tracing::info!("Background scanner task disabled for testing");
+        background_scanner_task(scanner_state, config_clone).await;
     });
 
     tracing::info!("Starting axum server...");
@@ -343,7 +350,7 @@ async fn main() {
 }
 
 /// Background task that continuously scans the blockchain for reserve events
-async fn background_scanner_task(state: AppState) {
+async fn background_scanner_task(state: AppState, config: AppConfig) {
     tracing::info!("Starting background blockchain scanner task");
 
     loop {
@@ -371,7 +378,7 @@ async fn background_scanner_task(state: AppState) {
             }
         }
 
-        // Scan for new blocks
+        // Scan for new blocks and process reserve events
         match scanner.scan_new_blocks().await {
             Ok(events) => {
                 if !events.is_empty() {
@@ -379,14 +386,20 @@ async fn background_scanner_task(state: AppState) {
 
                     // Process each event
                     for event in events {
-                        if let Err(e) = process_reserve_event(&state, event).await {
+                        if let Err(e) = process_reserve_event(&state, event, &config).await {
                             tracing::error!("Failed to process reserve event: {}", e);
                         }
                     }
+                } else {
+                    tracing::debug!("No new reserve events found");
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to scan new blocks: {}", e);
+                // Try to restart scanner on persistent errors
+                if let Err(restart_err) = scanner.start_scanning().await {
+                    tracing::error!("Failed to restart scanner after error: {}", restart_err);
+                }
             }
         }
 
@@ -402,20 +415,28 @@ async fn background_scanner_task(state: AppState) {
                 };
 
                 for ergo_box in &boxes {
-                    // For now, use a placeholder owner pubkey since extract_owner_pubkey is private
-                    // In real implementation, we'd need to extract this from the box registers
-                    let owner_pubkey = format!("owner_of_{}", &ergo_box.box_id[..16]);
+                    // Extract owner pubkey from box registers (R4 register)
+                    let owner_pubkey = match ergo_box.get_register("R4") {
+                        Some(pubkey_hex) => {
+                            // Parse hex-encoded public key from register
+                            hex::decode(pubkey_hex).unwrap_or_default()
+                        }
+                        None => {
+                            // Fallback to placeholder if register not found
+                            format!("owner_of_{}", &ergo_box.box_id[..16]).into_bytes()
+                        }
+                    };
 
                     let reserve_info = basis_store::ExtendedReserveInfo::new(
                         ergo_box.box_id.as_bytes(),
-                        owner_pubkey.as_bytes(),
+                        &owner_pubkey,
                         ergo_box.value,
-                        None, // tracker_nft_id
+                        config.tracker_nft_bytes().ok().flatten().as_deref(),
                         scanner.last_scanned_height(),
                     );
 
                     if let Err(e) = tracker.update_reserve(reserve_info) {
-                        tracing::warn!("Failed to update reserve info for {}: {}", owner_pubkey, e);
+                        tracing::warn!("Failed to update reserve info for {}: {}", ergo_box.box_id, e);
                     }
                 }
 
@@ -432,6 +453,7 @@ async fn background_scanner_task(state: AppState) {
 async fn process_reserve_event(
     state: &AppState,
     event: ReserveEvent,
+    config: &AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tracker_event = match event {
         ReserveEvent::ReserveCreated {
@@ -453,7 +475,7 @@ async fn process_reserve_event(
                 box_id.as_bytes(),
                 owner_pubkey.as_bytes(),
                 collateral_amount,
-                None, // tracker_nft_id
+                config.tracker_nft_bytes().ok().flatten().as_deref(),
                 height,
             );
             tracker.update_reserve(reserve_info)?;
