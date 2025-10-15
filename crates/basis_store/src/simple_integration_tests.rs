@@ -2,7 +2,7 @@
 
 use crate::ergo_scanner::{NodeConfig, ReserveEvent, ScannerError};
 #[cfg(test)]
-use crate::test_ergo_scanner::{MockServerState, create_mock_scanner};
+use crate::test_ergo_scanner::{create_mock_scanner, MockServerState};
 
 /// Simple integration test suite that works with mock scanners (test-only)
 pub struct SimpleIntegrationTestSuite {

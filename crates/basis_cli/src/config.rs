@@ -75,7 +75,12 @@ impl ConfigManager {
         self.save()
     }
 
-    pub fn add_account(&mut self, name: &str, pubkey_hex: &str, private_key_hex: &str) -> Result<()> {
+    pub fn add_account(
+        &mut self,
+        name: &str,
+        pubkey_hex: &str,
+        private_key_hex: &str,
+    ) -> Result<()> {
         let account_config = AccountConfig {
             name: name.to_string(),
             pubkey_hex: pubkey_hex.to_string(),
@@ -84,8 +89,10 @@ impl ConfigManager {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_secs(),
         };
-        
-        self.config.accounts.insert(name.to_string(), account_config);
+
+        self.config
+            .accounts
+            .insert(name.to_string(), account_config);
         self.save()
     }
 

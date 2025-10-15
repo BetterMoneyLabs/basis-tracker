@@ -662,7 +662,7 @@ pub async fn get_key_status(
 
     // Get total debt from note storage
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    
+
     if let Err(e) = state
         .tx
         .send(crate::TrackerCommand::GetNotesByIssuer {
@@ -709,7 +709,7 @@ pub async fn get_key_status(
     // Get collateral from reserve tracker
     let tracker = state.reserve_tracker.lock().await;
     let all_reserves = tracker.get_all_reserves();
-    
+
     // Find reserve for this issuer
     let reserve = all_reserves
         .into_iter()

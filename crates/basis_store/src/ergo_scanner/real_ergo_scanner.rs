@@ -47,20 +47,20 @@ impl RealErgoScanner {
     /// Get current blockchain height from the node
     pub async fn get_current_height(&mut self) -> Result<u64, ScannerError> {
         let client = reqwest::Client::new();
-        
+
         // Try multiple endpoints to get blockchain height
         let endpoints = [
             format!("{}/info", self.node_url),
             format!("{}/blocks/lastHeaders/1", self.node_url),
         ];
-        
+
         for url in &endpoints {
             let response = client
                 .get(url)
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
                 .await;
-                
+
             if let Ok(response) = response {
                 if response.status().is_success() {
                     // Try to parse as info endpoint response first
@@ -75,7 +75,8 @@ impl RealErgoScanner {
                         // Try to parse as block headers
                         if let Ok(headers) = response.json::<Vec<serde_json::Value>>().await {
                             if let Some(header) = headers.first() {
-                                if let Some(height) = header.get("height").and_then(|h| h.as_u64()) {
+                                if let Some(height) = header.get("height").and_then(|h| h.as_u64())
+                                {
                                     self.current_height = height;
                                     return Ok(height);
                                 }
@@ -85,8 +86,10 @@ impl RealErgoScanner {
                 }
             }
         }
-        
-        Err(ScannerError::NodeError("Failed to get blockchain height from any endpoint".to_string()))
+
+        Err(ScannerError::NodeError(
+            "Failed to get blockchain height from any endpoint".to_string(),
+        ))
     }
 
     /// Scan for new reserve events
@@ -101,7 +104,7 @@ impl RealErgoScanner {
 
         if end_height > start_height {
             println!("Scanning blocks from {} to {}", start_height, end_height);
-            
+
             // For testing purposes, we'll just check connectivity
             // Real implementation would scan blocks and extract events
             for height in start_height..=end_height {
@@ -109,7 +112,7 @@ impl RealErgoScanner {
                     events.extend(block_events);
                 }
             }
-            
+
             self.last_scanned_height = end_height;
         }
 
@@ -120,7 +123,7 @@ impl RealErgoScanner {
     async fn scan_block(&self, height: u64) -> Result<Vec<ReserveEvent>, ScannerError> {
         let client = reqwest::Client::new();
         let url = format!("{}/blocks/at/{}", self.node_url, height);
-        
+
         let response = client
             .get(&url)
             .timeout(std::time::Duration::from_secs(30))
@@ -160,11 +163,11 @@ impl RealErgoScanner {
     /// Start continuous scanning
     pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
         println!("Starting real Ergo scanner for node: {}", self.node_url);
-        
+
         // Initial height check
         let height = self.get_current_height().await?;
         println!("Current blockchain height: {}", height);
-        
+
         // In production, this would start a background scanning task
         Ok(())
     }

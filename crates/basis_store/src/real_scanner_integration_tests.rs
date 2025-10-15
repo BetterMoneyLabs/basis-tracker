@@ -27,7 +27,7 @@ impl RealScannerIntegrationTestSuite {
         // Test getting current height
         let height = self.scanner.get_current_height().await?;
         println!("Current blockchain height: {}", height);
-        
+
         // Height should be reasonable (not 0 for mainnet/testnet)
         // For local development, height might be 0
         if self.node_url.contains("213.239.193.208") {
@@ -45,9 +45,9 @@ impl RealScannerIntegrationTestSuite {
 
         // Start scanning
         self.scanner.start_scanning().await?;
-        
+
         assert!(self.scanner.is_active(), "Scanner should be active");
-        
+
         let last_scanned = self.scanner.last_scanned_height();
         assert!(
             last_scanned >= 0,
@@ -64,11 +64,11 @@ impl RealScannerIntegrationTestSuite {
 
         // Scan for new blocks
         let events = self.scanner.scan_new_blocks().await?;
-        
+
         // With real scanner, we might get actual events or empty
         // The important thing is that it doesn't error
         println!("Scanned {} events", events.len());
-        
+
         // Process any events found
         for event in events {
             match event {
@@ -84,7 +84,10 @@ impl RealScannerIntegrationTestSuite {
                     );
                     assert!(!box_id.is_empty(), "Box ID should not be empty");
                     assert!(!owner_pubkey.is_empty(), "Owner pubkey should not be empty");
-                    assert!(collateral_amount > 0, "Collateral amount should be positive");
+                    assert!(
+                        collateral_amount > 0,
+                        "Collateral amount should be positive"
+                    );
                     assert!(height > 0, "Height should be positive");
                 }
                 ReserveEvent::ReserveToppedUp {
@@ -130,7 +133,7 @@ impl RealScannerIntegrationTestSuite {
         println!("Testing unspent boxes query...");
 
         let boxes = self.scanner.get_unspent_reserve_boxes().await?;
-        
+
         // With real scanner, we might get actual boxes or empty
         // The important thing is that it doesn't error
         println!("Found {} unspent boxes", boxes.len());
@@ -141,7 +144,10 @@ impl RealScannerIntegrationTestSuite {
 
     /// Run all real scanner integration tests
     pub async fn run_all_tests(&mut self) -> Result<(), ScannerError> {
-        println!("Running real scanner integration tests against: {}", self.node_url);
+        println!(
+            "Running real scanner integration tests against: {}",
+            self.node_url
+        );
 
         self.test_node_connectivity().await?;
         self.test_scanner_initialization().await?;
@@ -166,7 +172,7 @@ mod tests {
 
         // These tests require network connectivity
         let result = test_suite.run_all_tests().await;
-        
+
         // Test should either pass or fail gracefully due to network issues
         // but not panic
         if let Err(e) = result {
@@ -183,7 +189,7 @@ mod tests {
         let mut test_suite = RealScannerIntegrationTestSuite::new(node_url);
 
         let result = test_suite.run_all_tests().await;
-        
+
         if let Err(e) = result {
             println!("Testnet test failed with error: {}", e);
         }
@@ -198,7 +204,7 @@ mod tests {
 
         // Just test connectivity
         let result = test_suite.test_node_connectivity().await;
-        
+
         if let Err(e) = result {
             println!("Connectivity test failed: {}", e);
             // Don't fail - network issues are expected

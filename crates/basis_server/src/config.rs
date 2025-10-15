@@ -91,9 +91,7 @@ impl AppConfig {
     /// Get the tracker NFT ID bytes (if configured)
     pub fn tracker_nft_bytes(&self) -> Result<Option<Vec<u8>>, hex::FromHexError> {
         match &self.ergo.tracker_nft_id {
-            Some(nft_id) if !nft_id.is_empty() => {
-                hex::decode(nft_id).map(Some)
-            }
+            Some(nft_id) if !nft_id.is_empty() => hex::decode(nft_id).map(Some),
             _ => Ok(None),
         }
     }

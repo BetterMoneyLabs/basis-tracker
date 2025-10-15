@@ -2,18 +2,16 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use basis_store::{
-    ergo_scanner::{NodeConfig, ReserveEvent, create_default_scanner, start_scanner},
-    ReserveTracker,
-};
 use basis_server::{
-    api::*, reserve_api::*, store::EventStore,
-    AppConfig, ServerConfig, ErgoConfig, TrackerEvent, EventType, AppState, TrackerCommand
+    api::*, reserve_api::*, store::EventStore, AppConfig, AppState, ErgoConfig, EventType,
+    ServerConfig, TrackerCommand, TrackerEvent,
+};
+use basis_store::{
+    ergo_scanner::{create_default_scanner, start_scanner, NodeConfig, ReserveEvent},
+    ReserveTracker,
 };
 use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-
 
 #[tokio::main]
 async fn main() {
@@ -59,11 +57,11 @@ async fn main() {
 
     // Initialize real Ergo scanner with blockchain monitoring
     tracing::info!("Initializing Ergo scanner with blockchain monitoring...");
-    
+
     // Create real scanner state with configured node URL
     let _node_config = config.ergo_node_config();
     let ergo_scanner = create_default_scanner();
-    
+
     // Start the scanner background task
     if let Err(e) = start_scanner(ergo_scanner.clone()).await {
         tracing::warn!("Failed to start background scanner: {}", e);
@@ -436,7 +434,11 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                     );
 
                     if let Err(e) = tracker.update_reserve(reserve_info) {
-                        tracing::warn!("Failed to update reserve info for {}: {}", ergo_box.box_id, e);
+                        tracing::warn!(
+                            "Failed to update reserve info for {}: {}",
+                            ergo_box.box_id,
+                            e
+                        );
                     }
                 }
 

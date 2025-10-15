@@ -1,4 +1,4 @@
-use crate::config::{ConfigManager, AccountConfig};
+use crate::config::{AccountConfig, ConfigManager};
 use crate::crypto::{KeyPair, PubKey};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ impl Account {
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
-        
+
         Ok(Self {
             name,
             keypair,
@@ -35,16 +35,16 @@ impl Account {
     pub fn from_private_key_hex(name: &str, private_key_hex: &str) -> Result<Self> {
         let private_key_bytes = hex::decode(private_key_hex)
             .map_err(|e| anyhow::anyhow!("Invalid hex encoding: {}", e))?;
-        
+
         let private_key_array: [u8; 32] = private_key_bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("Private key must be 32 bytes"))?;
-        
+
         let keypair = KeyPair::from_private_key_bytes(&private_key_array)?;
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
-        
+
         Ok(Self {
             name: name.to_string(),
             keypair,
@@ -74,17 +74,17 @@ pub struct AccountManager {
 impl AccountManager {
     pub fn new(config_manager: ConfigManager) -> Result<Self> {
         let mut accounts = HashMap::new();
-        
+
         // Load accounts from config with persistent private keys
         for account_config in config_manager.list_accounts() {
             // Load account with persistent private key from config
             let account = Account::from_private_key_hex(
                 &account_config.name,
-                &account_config.private_key_hex
+                &account_config.private_key_hex,
             )?;
             accounts.insert(account_config.name.clone(), account);
         }
-        
+
         Ok(Self {
             config_manager,
             accounts,
@@ -95,21 +95,22 @@ impl AccountManager {
         if self.accounts.contains_key(name) {
             return Err(anyhow::anyhow!("Account '{}' already exists", name));
         }
-        
+
         let account = Account::new(name.to_string())?;
         let pubkey_hex = account.get_pubkey_hex();
         let private_key_hex = account.get_private_key_hex();
-        
+
         // Save to config with private key for persistence
-        self.config_manager.add_account(name, &pubkey_hex, &private_key_hex)?;
-        
+        self.config_manager
+            .add_account(name, &pubkey_hex, &private_key_hex)?;
+
         self.accounts.insert(name.to_string(), account.clone());
-        
+
         // Set as current if no current account
         if self.config_manager.get_config().current_account.is_none() {
             self.config_manager.set_current_account(name)?;
         }
-        
+
         Ok(account)
     }
 
@@ -117,7 +118,7 @@ impl AccountManager {
         if !self.accounts.contains_key(name) {
             return Err(anyhow::anyhow!("Account '{}' not found", name));
         }
-        
+
         self.config_manager.set_current_account(name)
     }
 
@@ -131,7 +132,7 @@ impl AccountManager {
     pub fn get_current(&self) -> Option<&Account> {
         // Get current account name from config
         let current_account_name = self.config_manager.get_config().current_account.as_ref()?;
-        
+
         // Return the account with that name
         self.accounts.get(current_account_name)
     }
@@ -141,7 +142,8 @@ impl AccountManager {
     }
 
     pub fn get_current_pubkey(&self) -> Option<PubKey> {
-        self.get_current().map(|account| account.keypair.get_public_key_bytes())
+        self.get_current()
+            .map(|account| account.keypair.get_public_key_bytes())
     }
 
     pub fn get_current_pubkey_hex(&self) -> Option<String> {
@@ -149,9 +151,10 @@ impl AccountManager {
     }
 
     pub fn sign_with_current(&self, message: &[u8]) -> Result<[u8; 65]> {
-        let current = self.get_current()
+        let current = self
+            .get_current()
             .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
-        
+
         current.sign_message(message)
     }
 }

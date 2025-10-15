@@ -84,21 +84,21 @@ mod cli_tests {
     fn test_note_list_issuer_endpoint_should_not_return_404() {
         // Test that the /notes/issuer/{pubkey} endpoint returns results, not 404
         // This test should fail if the endpoint returns 404 instead of proper results
-        
+
         // The issue is that when the CLI runs "basis_cli note list --issuer",
         // it calls GET /notes/issuer/{pubkey} which should return:
         // - 200 OK with empty array if no notes exist
         // - 200 OK with notes array if notes exist
         // - NOT 404 Not Found
-        
+
         // This test documents the expected behavior and will fail if the endpoint
         // returns 404 instead of proper results
-        
+
         // Expected behavior:
         // - Server should handle GET /notes/issuer/{pubkey} requests
         // - Should return 200 OK with JSON array (empty or with notes)
         // - Should NOT return 404 Not Found
-        
+
         // Current issue: The endpoint might be returning 404 instead of proper results
         assert!(
             true, // This test will always pass, but documents the expected behavior

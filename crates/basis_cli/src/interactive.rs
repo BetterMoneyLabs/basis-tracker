@@ -22,7 +22,9 @@ impl InteractiveMode {
         println!("Type 'help' for available commands, 'exit' to quit\n");
 
         loop {
-            let current_account = self.account_manager.get_current()
+            let current_account = self
+                .account_manager
+                .get_current()
                 .map(|acc| acc.name.clone())
                 .unwrap_or_else(|| "none".to_string());
 
@@ -78,7 +80,7 @@ impl InteractiveMode {
 
     async fn handle_command(&mut self, input: &str) -> Result<()> {
         let parts: Vec<&str> = input.split_whitespace().collect();
-        
+
         if parts.is_empty() {
             return Ok(());
         }
@@ -89,7 +91,9 @@ impl InteractiveMode {
                     match parts[1] {
                         "create" if parts.len() >= 3 => {
                             let name = parts[2];
-                            let cmd = account::AccountCommands::Create { name: name.to_string() };
+                            let cmd = account::AccountCommands::Create {
+                                name: name.to_string(),
+                            };
                             account::handle_account_command(cmd, &mut self.account_manager).await?;
                         }
                         "list" => {
@@ -98,7 +102,9 @@ impl InteractiveMode {
                         }
                         "switch" if parts.len() >= 3 => {
                             let name = parts[2];
-                            let cmd = account::AccountCommands::Switch { name: name.to_string() };
+                            let cmd = account::AccountCommands::Switch {
+                                name: name.to_string(),
+                            };
                             account::handle_account_command(cmd, &mut self.account_manager).await?;
                         }
                         "info" => {
@@ -110,7 +116,9 @@ impl InteractiveMode {
                         }
                     }
                 } else {
-                    println!("Account command requires subcommand. Use 'help' for available commands.");
+                    println!(
+                        "Account command requires subcommand. Use 'help' for available commands."
+                    );
                 }
             }
             "note" => {
@@ -120,7 +128,7 @@ impl InteractiveMode {
                             // Parse --recipient and --amount flags
                             let mut recipient = None;
                             let mut amount = None;
-                            
+
                             let mut i = 2;
                             while i < parts.len() {
                                 match parts[i] {
@@ -137,13 +145,14 @@ impl InteractiveMode {
                                     }
                                 }
                             }
-                            
+
                             if let (Some(recipient), Some(amount)) = (recipient, amount) {
                                 let cmd = note::NoteCommands::Create {
                                     recipient: recipient.to_string(),
                                     amount,
                                 };
-                                note::handle_note_command(cmd, &self.account_manager, &self.client).await?;
+                                note::handle_note_command(cmd, &self.account_manager, &self.client)
+                                    .await?;
                             } else {
                                 println!("Note create requires --recipient <pubkey> and --amount <amount>");
                             }
@@ -151,7 +160,7 @@ impl InteractiveMode {
                         "list" => {
                             let mut issuer = false;
                             let mut recipient = false;
-                            
+
                             for part in &parts[2..] {
                                 match *part {
                                     "--issuer" => issuer = true,
@@ -159,16 +168,19 @@ impl InteractiveMode {
                                     _ => {}
                                 }
                             }
-                            
+
                             let cmd = note::NoteCommands::List { issuer, recipient };
-                            note::handle_note_command(cmd, &self.account_manager, &self.client).await?;
+                            note::handle_note_command(cmd, &self.account_manager, &self.client)
+                                .await?;
                         }
                         _ => {
                             println!("Unknown note command. Use 'help' for available commands.");
                         }
                     }
                 } else {
-                    println!("Note command requires subcommand. Use 'help' for available commands.");
+                    println!(
+                        "Note command requires subcommand. Use 'help' for available commands."
+                    );
                 }
             }
             "reserve" => {
@@ -176,7 +188,7 @@ impl InteractiveMode {
                     match parts[1] {
                         "status" => {
                             let mut issuer = None;
-                            
+
                             let mut i = 2;
                             while i < parts.len() {
                                 match parts[i] {
@@ -189,13 +201,18 @@ impl InteractiveMode {
                                     }
                                 }
                             }
-                            
+
                             let cmd = reserve::ReserveCommands::Status { issuer };
-                            reserve::handle_reserve_command(cmd, &self.account_manager, &self.client).await?;
+                            reserve::handle_reserve_command(
+                                cmd,
+                                &self.account_manager,
+                                &self.client,
+                            )
+                            .await?;
                         }
                         "collateralization" => {
                             let mut issuer = None;
-                            
+
                             let mut i = 2;
                             while i < parts.len() {
                                 match parts[i] {
@@ -208,20 +225,30 @@ impl InteractiveMode {
                                     }
                                 }
                             }
-                            
+
                             let cmd = reserve::ReserveCommands::Collateralization { issuer };
-                            reserve::handle_reserve_command(cmd, &self.account_manager, &self.client).await?;
+                            reserve::handle_reserve_command(
+                                cmd,
+                                &self.account_manager,
+                                &self.client,
+                            )
+                            .await?;
                         }
                         _ => {
                             println!("Unknown reserve command. Use 'help' for available commands.");
                         }
                     }
                 } else {
-                    println!("Reserve command requires subcommand. Use 'help' for available commands.");
+                    println!(
+                        "Reserve command requires subcommand. Use 'help' for available commands."
+                    );
                 }
             }
             _ => {
-                println!("Unknown command '{}'. Type 'help' for available commands.", parts[0]);
+                println!(
+                    "Unknown command '{}'. Type 'help' for available commands.",
+                    parts[0]
+                );
             }
         }
 
