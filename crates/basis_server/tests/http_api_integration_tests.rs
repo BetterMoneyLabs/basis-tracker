@@ -10,6 +10,7 @@ mod http_api_tests {
     };
     use std::sync::Arc;
     use tokio::sync::mpsc;
+    use tower::util::ServiceExt;
 
     // Test helper to create a mock app state
     async fn create_mock_app_state() -> AppState {
@@ -204,5 +205,61 @@ mod http_api_tests {
             "Expected empty notes list, got: {:?}",
             notes
         );
+    }
+
+    #[tokio::test]
+    async fn test_cors_headers_present() {
+        // Test that CORS headers are properly set on responses
+        use axum::{
+            routing::get,
+            Router,
+        };
+        use tower_http::cors::{Any, CorsLayer};
+
+        // Create a test app with CORS enabled (same as main server)
+        let app = Router::new()
+            .route("/", get(|| async { "Hello, Basis Tracker API!" }))
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any),
+            );
+
+        // Test with a preflight OPTIONS request
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/")
+                    .header("Origin", "http://example.com")
+                    .header("Access-Control-Request-Method", "GET")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Check that CORS headers are present
+        assert!(response.headers().contains_key("access-control-allow-origin"));
+        assert!(response.headers().contains_key("access-control-allow-methods"));
+        assert!(response.headers().contains_key("access-control-allow-headers"));
+
+        // Test with a regular GET request
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .header("Origin", "http://example.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Check that CORS headers are present on regular responses too
+        assert!(response.headers().contains_key("access-control-allow-origin"));
     }
 }

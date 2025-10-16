@@ -2,6 +2,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use tower_http::cors::{Any, CorsLayer};
 use basis_server::{
     api::*, reserve_api::*, store::EventStore, AppConfig, AppState, ErgoConfig, EventType,
     ServerConfig, TrackerCommand, TrackerEvent,
@@ -302,7 +303,13 @@ async fn main() {
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
         .with_state(app_state.clone())
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
 
     tracing::debug!("Router built successfully");
     tracing::debug!("Registered routes:");
