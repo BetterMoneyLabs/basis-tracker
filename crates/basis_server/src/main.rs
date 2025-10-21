@@ -2,7 +2,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tower_http::cors::{Any, CorsLayer};
 use basis_server::{
     api::*, reserve_api::*, store::EventStore, AppConfig, AppState, ErgoConfig, EventType,
     ServerConfig, TrackerCommand, TrackerEvent,
@@ -12,6 +11,7 @@ use basis_store::{
     ReserveTracker,
 };
 use tokio::sync::Mutex;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]

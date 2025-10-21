@@ -210,10 +210,7 @@ mod http_api_tests {
     #[tokio::test]
     async fn test_cors_headers_present() {
         // Test that CORS headers are properly set on responses
-        use axum::{
-            routing::get,
-            Router,
-        };
+        use axum::{routing::get, Router};
         use tower_http::cors::{Any, CorsLayer};
 
         // Create a test app with CORS enabled (same as main server)
@@ -242,9 +239,15 @@ mod http_api_tests {
             .unwrap();
 
         // Check that CORS headers are present
-        assert!(response.headers().contains_key("access-control-allow-origin"));
-        assert!(response.headers().contains_key("access-control-allow-methods"));
-        assert!(response.headers().contains_key("access-control-allow-headers"));
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-origin"));
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-methods"));
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-headers"));
 
         // Test with a regular GET request
         let response = app
@@ -260,6 +263,8 @@ mod http_api_tests {
             .unwrap();
 
         // Check that CORS headers are present on regular responses too
-        assert!(response.headers().contains_key("access-control-allow-origin"));
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-origin"));
     }
 }
