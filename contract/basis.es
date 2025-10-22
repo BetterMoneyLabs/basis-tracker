@@ -80,7 +80,7 @@
 
       // Create key for debt record: hash(ownerKey || receiverKey)
       val key = blake2b256(ownerKeyBytes ++ receiverBytes)
-
+      
       // Reserve owner's signature for the debt record
       val reserveSigBytes = getVar[Coll[Byte]](2).get
 
