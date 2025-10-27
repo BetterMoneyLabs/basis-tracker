@@ -88,7 +88,7 @@ async fn main() {
                             start_height: None,
                             contract_template: None,
                         },
-                        basis_contract_template: "2WbQhe1AudMj9Cx2DtNYwDVn6YVS5GA5S9otJfkAmARDrZ6wQczry4SbM2RafQoJ5gZj83L9BkjjkYUE95HrPM5dDSxeJCApKtomhTHvXFfyXBNAKj2rV2PVdnkJnZBFzvRoXwCMwgfP1shCPau2CrMYJmBg5HoFtLAvcHYuKNpjK8NRHoHVtCMvkVN2QnSezJcUukCudUyT1Gqy4hQFbLAEo9ZPUPnjuuoqscsvWouf4DRXJX3uPeaNaCEEeJtBRfx4aXaX36WEfauDCZ6Kc6XSVTDanXkGqvveLfLtk9DAA3Z7EU1jBhVoGy8nscW5UbUdJm7dLT6ZjaH29LjnPo3GaJfhcoRE6wUnDgX2xea4t23xkQNWebDEn2Yiv4JLTirGnGH5fBRZjueUivRv1ipp8G3tm3wKP5UM79AaRfVw5NecDTpR4QrKooqchNGSanTfLwzTEnwvqGSnqKbqJtJXyAfLX6Mf374ULUNa2C7ui8xip9RfmqNnv6cNDpexbQgTDKghhNtP2YWj8vssV65LNvVEaVNZAyrmCNfV3QVdn".to_string(),
+                        basis_contract_template: "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREnehzz21DdYTdrsuw268CxW3gkXE6D5B8748FYGg3JEVW9R6VFJe8ZDknCtiPbh56QUCJo5QDizMfXaKnJ3jbWV72baYPCw85tmiJowR2wd4AjsEuhZP4Ry4QRDcZPvGogGVbdk7ykPAB7KN2guYEhS7RU3xm23iY1YaM5TX1ditsWfxqCBsvq3U6X5EU2Y5KCrSjQxdtGcwoZsdPQhfpqcwHPcYqM5iwK33EU1cHqggeSKYtLMW263f1TY7Lfu3cKMkav1CyomR183TLnCfkRHN3vcX2e9fSaTpAhkb74yo6ZRXttHNP23JUASWs9ejCaguzGumwK3SpPCLBZY6jFMYWqeaanH7XAtTuJA6UCnxvrKko5PX1oSB435Bxd3FbvDAsEmHpUqqtP78B7SKxFNPvJeZuaN7r5p8nDLxUPZBrWwz2vtcgWPMq5RrnoJdrdqrnXMcMEQPF5AKDYuKMKbCRgn3HLvG98JXJ4bCc2wzuZhnCRQaFXTy88knEoj".to_string(),
                         start_height: 0,
                     },
                 }
