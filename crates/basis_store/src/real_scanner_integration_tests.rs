@@ -167,7 +167,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "Requires network connection to Ergo node"]
     async fn test_real_scanner_against_public_node() {
-        let node_url = "http://213.239.193.208:9053";
+        let node_url = "http://159.89.116.15:11088/";
         let mut test_suite = RealScannerIntegrationTestSuite::new(node_url);
 
         // These tests require network connectivity
@@ -199,7 +199,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "Requires network connection"]
     async fn test_connectivity_only() {
-        let node_url = "http://213.239.193.208:9053";
+        let node_url = "http://159.89.116.15:11088";
         let mut test_suite = RealScannerIntegrationTestSuite::new(node_url);
 
         // Just test connectivity

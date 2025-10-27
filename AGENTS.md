@@ -130,7 +130,7 @@ use basis_store::ergo_scanner::{NodeConfig, ServerState};
 
 // Create real scanner for mainnet
 let config = NodeConfig::default();
-let scanner = ServerState::new(config, "http://213.239.193.208:9053".to_string());
+let scanner = ServerState::new(config, "http://159.89.116.15:11088".to_string());
 
 // Test connectivity
 let height = scanner.get_current_height().await?;
@@ -144,7 +144,7 @@ println!("Current blockchain height: {}", height);
 - **ReserveSpent**: Reserve box spent/closed
 
 ### Available Ergo Nodes
-- **Mainnet**: `http://213.239.193.208:9053` (public)
+- **Mainnet**: `http://159.89.116.15:11088` (public)
 - **Testnet**: `http://213.239.193.208:9052` (public)
 - **Local**: `http://localhost:9053` (development)
 

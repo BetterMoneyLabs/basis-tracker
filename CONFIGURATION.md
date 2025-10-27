@@ -39,8 +39,8 @@ start_height = 0
 tracker_nft_id = ""
 
 [ergo.node]
-url = "http://213.239.193.208:9053"  # Ergo node URL
-api_key = ""                         # API key for authenticated nodes
+url = "http://159.89.116.15:11088"   # Ergo node URL
+api_key = "hello"                    # API key for authenticated nodes
 timeout_secs = 30                    # Request timeout in seconds
 ```
 
@@ -106,8 +106,8 @@ start_height = 0
 tracker_nft_id = ""
 
 [ergo.node]
-url = "http://213.239.193.208:9053"
-api_key = ""
+url = "http://159.89.116.15:11088"
+api_key = "hello"
 timeout_secs = 30
 ```
 

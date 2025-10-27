@@ -7,7 +7,7 @@ echo "Testing real Ergo scanner against Ergo nodes..."
 
 # Test against mainnet node
 echo ""
-echo "=== Testing against mainnet node: 213.239.193.208:9053 ==="
+echo "=== Testing against mainnet node: 159.89.116.15:11088 ==="
 cargo test -p basis_store real_scanner_integration_tests::tests::test_connectivity_only -- --nocapture --ignored
 
 # Test against testnet node
