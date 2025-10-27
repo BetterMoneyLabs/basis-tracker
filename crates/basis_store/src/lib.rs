@@ -4,16 +4,32 @@ pub mod avl_tree;
 pub mod contract_compiler;
 pub mod cross_verification;
 pub mod ergo_scanner;
-pub mod integration_tests;
 pub mod persistence;
 pub mod redemption;
+#[cfg(test)]
 pub mod redemption_blockchain_tests;
+#[cfg(test)]
 pub mod redemption_simple_tests;
 pub mod reserve_tracker;
 pub mod schnorr;
 pub mod schnorr_tests;
+#[cfg(test)]
 pub mod simple_integration_tests;
 pub mod tests;
+
+// Test modules
+#[cfg(test)]
+pub mod cross_verification_tests;
+#[cfg(test)]
+pub mod property_tests;
+#[cfg(test)]
+pub mod real_scanner_integration_tests;
+#[cfg(test)]
+pub mod test_helpers;
+
+// Test-only modules
+#[cfg(test)]
+pub mod test_ergo_scanner;
 
 use blake2::{Blake2b512, Digest};
 use secp256k1;
@@ -128,7 +144,10 @@ impl TrackerStateManager {
 
         // Use a temporary directory for storage (in real implementation, this would be configurable)
         tracing::debug!("Opening note storage...");
-        let storage = match persistence::NoteStorage::open("crates/basis_server/data/notes") {
+        let storage_path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("crates/basis_server/data/notes");
+        let storage = match persistence::NoteStorage::open(&storage_path) {
             Ok(storage) => {
                 tracing::debug!("Note storage opened successfully");
                 storage
@@ -415,6 +434,12 @@ pub use ergo_scanner::{
     create_default_scanner, start_scanner, ErgoBox, NodeConfig, ReserveEvent, ScanType,
     ScannerError, ServerState,
 };
+
+// Re-export Ergo scanner types
+pub use ergo_scanner::ergo_scanner::{create_ergo_scanner, ErgoScannerState, ScanConfig};
+
+#[cfg(feature = "ergo_scanner")]
+pub use ergo_scanner::real_ergo_scanner::{create_real_ergo_scanner, RealErgoScanner};
 
 // Re-export redemption types
 pub use redemption::{RedemptionData, RedemptionError, RedemptionManager, RedemptionRequest};

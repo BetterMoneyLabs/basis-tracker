@@ -1,23 +1,37 @@
-//! Example demonstrating the chaincash-rs style scanner for Basis tracker
+//! Example demonstrating the Ergo scanner for Basis tracker
 
-use basis_store::ergo_scanner::{create_default_scanner, start_scanner, ScannerError};
+use basis_store::ergo_scanner::ergo_scanner::create_ergo_scanner;
 
 #[tokio::main]
-async fn main() -> Result<(), ScannerError> {
-    println!("Starting Basis tracker scanner (chaincash-rs style)...");
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Starting Basis tracker Ergo scanner...");
 
-    // Create a scanner with default configuration
-    let state = create_default_scanner();
+    // Example contract template hash (replace with actual Basis reserve contract hash)
+    let contract_template_hash = "example_contract_template_hash_here";
 
-    // Start the scanner
-    println!("Starting scanner...");
-    start_scanner(state).await?;
+    // Example node URL (replace with actual Ergo node URL)
+    let node_url = "http://localhost:9053";
+
+    // Create Ergo scanner
+    let mut scanner = create_ergo_scanner(node_url, "basis_reserves", contract_template_hash);
+
+    println!("Starting Ergo scanner...");
+
+    // Start scanner (registers scan with node)
+    if let Err(e) = scanner.start_scanning().await {
+        println!("Failed to start scanner: {}", e);
+        println!("Note: This demo requires a running Ergo node with scan API enabled");
+        return Ok(());
+    }
 
     println!("Scanner started successfully!");
+    println!("Scan ID: {:?}", scanner.scan_id);
+    println!("Last scanned height: {}", scanner.last_scanned_height());
 
-    // The scanner runs in background tasks, so we need to keep the main thread alive
-    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    println!("\nDemo completed");
 
-    println!("Demo completed");
+    // Cleanup scanner
+    scanner.cleanup().await?;
+
     Ok(())
 }

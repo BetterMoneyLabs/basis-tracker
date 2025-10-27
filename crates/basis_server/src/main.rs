@@ -1,69 +1,18 @@
-mod api;
-mod config;
-mod models;
-mod reserve_api;
-mod store;
-
 use axum::{
     routing::{get, post},
     Router,
 };
+use basis_server::{
+    api::*, reserve_api::*, store::EventStore, AppConfig, AppState, ErgoConfig, EventType,
+    ServerConfig, TrackerCommand, TrackerEvent,
+};
 use basis_store::{
-    ergo_scanner::{NodeConfig, ReserveEvent, ServerState},
+    ergo_scanner::{create_default_scanner, start_scanner, NodeConfig, ReserveEvent},
     ReserveTracker,
 };
 use tokio::sync::Mutex;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-use crate::{api::*, config::*, models::*, reserve_api::*, store::EventStore};
-
-// Application state that holds a channel to communicate with the tracker thread
-#[derive(Clone)]
-struct AppState {
-    tx: tokio::sync::mpsc::Sender<TrackerCommand>,
-    event_store: std::sync::Arc<EventStore>,
-    ergo_scanner: std::sync::Arc<Mutex<ServerState>>,
-    reserve_tracker: std::sync::Arc<Mutex<ReserveTracker>>,
-}
-
-// Commands that can be sent to the tracker thread
-#[derive(Debug)]
-enum TrackerCommand {
-    AddNote {
-        issuer_pubkey: basis_store::PubKey,
-        note: basis_store::IouNote,
-        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
-    },
-    GetNotesByIssuer {
-        issuer_pubkey: basis_store::PubKey,
-        response_tx:
-            tokio::sync::oneshot::Sender<Result<Vec<basis_store::IouNote>, basis_store::NoteError>>,
-    },
-    GetNotesByRecipient {
-        recipient_pubkey: basis_store::PubKey,
-        response_tx:
-            tokio::sync::oneshot::Sender<Result<Vec<basis_store::IouNote>, basis_store::NoteError>>,
-    },
-    GetNoteByIssuerAndRecipient {
-        issuer_pubkey: basis_store::PubKey,
-        recipient_pubkey: basis_store::PubKey,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<Option<basis_store::IouNote>, basis_store::NoteError>,
-        >,
-    },
-    InitiateRedemption {
-        request: basis_store::RedemptionRequest,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<basis_store::RedemptionData, basis_store::RedemptionError>,
-        >,
-    },
-    CompleteRedemption {
-        issuer_pubkey: basis_store::PubKey,
-        recipient_pubkey: basis_store::PubKey,
-        redeemed_amount: u64,
-        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::RedemptionError>>,
-    },
-}
 
 #[tokio::main]
 async fn main() {
@@ -90,6 +39,7 @@ async fn main() {
                         },
                         basis_contract_template: "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREnehzz21DdYTdrsuw268CxW3gkXE6D5B8748FYGg3JEVW9R6VFJe8ZDknCtiPbh56QUCJo5QDizMfXaKnJ3jbWV72baYPCw85tmiJowR2wd4AjsEuhZP4Ry4QRDcZPvGogGVbdk7ykPAB7KN2guYEhS7RU3xm23iY1YaM5TX1ditsWfxqCBsvq3U6X5EU2Y5KCrSjQxdtGcwoZsdPQhfpqcwHPcYqM5iwK33EU1cHqggeSKYtLMW263f1TY7Lfu3cKMkav1CyomR183TLnCfkRHN3vcX2e9fSaTpAhkb74yo6ZRXttHNP23JUASWs9ejCaguzGumwK3SpPCLBZY6jFMYWqeaanH7XAtTuJA6UCnxvrKko5PX1oSB435Bxd3FbvDAsEmHpUqqtP78B7SKxFNPvJeZuaN7r5p8nDLxUPZBrWwz2vtcgWPMq5RrnoJdrdqrnXMcMEQPF5AKDYuKMKbCRgn3HLvG98JXJ4bCc2wzuZhnCRQaFXTy88knEoj".to_string(),
                         start_height: 0,
+                        tracker_nft_id: None,
                     },
                 }
             })
@@ -106,24 +56,19 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Initialize Ergo scanner
-    tracing::info!("Initializing Ergo scanner...");
-    let node_config = config.ergo_node_config();
-    let mut ergo_scanner = ServerState::new(node_config);
+    // Initialize real Ergo scanner with blockchain monitoring
+    tracing::info!("Initializing Ergo scanner with blockchain monitoring...");
 
-    // Start scanner
-    match ergo_scanner.start_scanning().await {
-        Ok(()) => {
-            tracing::info!("Ergo scanner started successfully");
-            let current_height = ergo_scanner.get_current_height().await.unwrap_or(0);
-            tracing::info!("Current blockchain height: {}", current_height);
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to start Ergo scanner: {}. Continuing without scanner...",
-                e
-            );
-        }
+    // Create real scanner state with configured node URL
+    let _node_config = config.ergo_node_config();
+    let ergo_scanner = create_default_scanner();
+
+    // Start the scanner background task
+    if let Err(e) = start_scanner(ergo_scanner.clone()).await {
+        tracing::warn!("Failed to start background scanner: {}", e);
+        tracing::info!("Continuing without background scanner...");
+    } else {
+        tracing::info!("Ergo scanner started successfully");
     }
 
     // Initialize reserve tracker
@@ -139,7 +84,7 @@ async fn main() {
         use basis_store::{RedemptionManager, TrackerStateManager};
 
         tracing::debug!("Tracker thread started");
-        let mut tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         while let Some(cmd) = rx.blocking_recv() {
@@ -211,12 +156,8 @@ async fn main() {
         }
     });
 
-    eprintln!("Creating event store...");
     let event_store = match EventStore::new().await {
-        Ok(store) => {
-            eprintln!("Event store created successfully");
-            std::sync::Arc::new(store)
-        }
+        Ok(store) => std::sync::Arc::new(store),
         Err(e) => {
             tracing::error!("Failed to initialize event store: {:?}", e);
             std::process::exit(1);
@@ -327,13 +268,11 @@ async fn main() {
         },
     ];
 
-    eprintln!("Adding demo events...");
     for event in demo_events {
         if let Err(e) = event_store.add_event(event).await {
             tracing::warn!("Failed to add demo event: {:?}", e);
         }
     }
-    eprintln!("Demo events added successfully");
 
     let app_state = AppState {
         tx,
@@ -341,28 +280,36 @@ async fn main() {
         ergo_scanner: std::sync::Arc::new(Mutex::new(ergo_scanner)),
         reserve_tracker: std::sync::Arc::new(Mutex::new(reserve_tracker)),
     };
-    eprintln!("App state created successfully");
 
-    // Build our application with routes
-    eprintln!("Building router...");
+    // Build our application with routes - FIXED ROUTE ORDER
     let app = Router::new()
+        // Root route
         .route("/", get(root))
+        // Static routes
+        .route("/events", get(get_events))
+        .route("/events/paginated", get(get_events_paginated))
         .route("/notes", post(create_note))
-        .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
-        .route("/notes/recipient/{pubkey}", get(get_notes_by_recipient))
+        .route("/redeem", post(initiate_redemption))
+        .route("/redeem/complete", post(complete_redemption))
+        .route("/proof", get(get_proof))
+        // Most specific parameterized routes first
         .route(
             "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",
             get(get_note_by_issuer_and_recipient),
         )
+        // Parameterized routes
+        .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
+        .route("/notes/recipient/{pubkey}", get(get_notes_by_recipient))
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
-        .route("/events", get(get_events))
-        .route("/events/paginated", get(get_events_paginated))
         .route("/key-status/{pubkey}", get(get_key_status))
-        .route("/redeem", post(initiate_redemption))
-        .route("/redeem/complete", post(complete_redemption))
-        .route("/proof", get(get_proof))
         .with_state(app_state.clone())
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
 
     tracing::debug!("Router built successfully");
     tracing::debug!("Registered routes:");
@@ -381,7 +328,6 @@ async fn main() {
     // Run our app with hyper
     let addr = config.socket_addr();
     tracing::debug!("listening on {}", addr);
-    eprintln!("Starting server on {}", addr);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => {
@@ -394,10 +340,11 @@ async fn main() {
         }
     };
 
-    // Start background scanner task
+    // Start background scanner task for continuous blockchain monitoring
     let scanner_state = app_state.clone();
+    let config_clone = config.clone();
     tokio::spawn(async move {
-        background_scanner_task(scanner_state).await;
+        background_scanner_task(scanner_state, config_clone).await;
     });
 
     tracing::info!("Starting axum server...");
@@ -408,7 +355,7 @@ async fn main() {
 }
 
 /// Background task that continuously scans the blockchain for reserve events
-async fn background_scanner_task(state: AppState) {
+async fn background_scanner_task(state: AppState, config: AppConfig) {
     tracing::info!("Starting background blockchain scanner task");
 
     loop {
@@ -436,7 +383,7 @@ async fn background_scanner_task(state: AppState) {
             }
         }
 
-        // Scan for new blocks
+        // Scan for new blocks and process reserve events
         match scanner.scan_new_blocks().await {
             Ok(events) => {
                 if !events.is_empty() {
@@ -444,14 +391,20 @@ async fn background_scanner_task(state: AppState) {
 
                     // Process each event
                     for event in events {
-                        if let Err(e) = process_reserve_event(&state, event).await {
+                        if let Err(e) = process_reserve_event(&state, event, &config).await {
                             tracing::error!("Failed to process reserve event: {}", e);
                         }
                     }
+                } else {
+                    tracing::debug!("No new reserve events found");
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to scan new blocks: {}", e);
+                // Try to restart scanner on persistent errors
+                if let Err(restart_err) = scanner.start_scanning().await {
+                    tracing::error!("Failed to restart scanner after error: {}", restart_err);
+                }
             }
         }
 
@@ -467,20 +420,32 @@ async fn background_scanner_task(state: AppState) {
                 };
 
                 for ergo_box in &boxes {
-                    // For now, use a placeholder owner pubkey since extract_owner_pubkey is private
-                    // In real implementation, we'd need to extract this from the box registers
-                    let owner_pubkey = format!("owner_of_{}", &ergo_box.box_id[..16]);
+                    // Extract owner pubkey from box registers (R4 register)
+                    let owner_pubkey = match ergo_box.get_register("R4") {
+                        Some(pubkey_hex) => {
+                            // Parse hex-encoded public key from register
+                            hex::decode(pubkey_hex).unwrap_or_default()
+                        }
+                        None => {
+                            // Fallback to placeholder if register not found
+                            format!("owner_of_{}", &ergo_box.box_id[..16]).into_bytes()
+                        }
+                    };
 
                     let reserve_info = basis_store::ExtendedReserveInfo::new(
                         ergo_box.box_id.as_bytes(),
-                        owner_pubkey.as_bytes(),
+                        &owner_pubkey,
                         ergo_box.value,
-                        None, // tracker_nft_id
+                        config.tracker_nft_bytes().ok().flatten().as_deref(),
                         scanner.last_scanned_height(),
                     );
 
                     if let Err(e) = tracker.update_reserve(reserve_info) {
-                        tracing::warn!("Failed to update reserve info for {}: {}", owner_pubkey, e);
+                        tracing::warn!(
+                            "Failed to update reserve info for {}: {}",
+                            ergo_box.box_id,
+                            e
+                        );
                     }
                 }
 
@@ -497,6 +462,7 @@ async fn background_scanner_task(state: AppState) {
 async fn process_reserve_event(
     state: &AppState,
     event: ReserveEvent,
+    config: &AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tracker_event = match event {
         ReserveEvent::ReserveCreated {
@@ -518,7 +484,7 @@ async fn process_reserve_event(
                 box_id.as_bytes(),
                 owner_pubkey.as_bytes(),
                 collateral_amount,
-                None, // tracker_nft_id
+                config.tracker_nft_bytes().ok().flatten().as_deref(),
                 height,
             );
             tracker.update_reserve(reserve_info)?;

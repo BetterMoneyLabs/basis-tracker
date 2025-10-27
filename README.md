@@ -131,6 +131,42 @@ Not hard to do redemptions to stealth addresses.
 
 ## Economy
 
+## Ergo Scanner Implementation
+
+We've updated the Ergo scanner to use the `/scan` and `/blockchain` API endpoints following the chaincash-rs approach, which is much more efficient than the previous block-by-block transaction scanning.
+
+### Key Features:
+
+1. **Scan API Integration**: Uses `/scan/register` to register contract templates for automatic box tracking
+2. **Bulk Operations**: Uses `/scan/unspentBoxes/{scanId}` for efficient bulk retrieval of unspent boxes
+3. **Blockchain API**: Uses `/blockchain/box/byId/{boxId}` for optimized individual box lookups
+4. **Scan Persistence**: Registered scans persist across restarts
+5. **No Block Scanning**: Eliminates inefficient block-by-block transaction processing
+
+### Usage:
+
+```rust
+use basis_store::{
+    ergo_scanner::ergo_scanner::{create_ergo_scanner, ScanConfig},
+    NodeConfig,
+};
+
+#[tokio::main]
+async fn main() {
+    let mut scanner = create_ergo_scanner(
+        "http://localhost:9053", 
+        "basis_reserves", 
+        "contract_template_hash"
+    );
+    
+    scanner.initialize().await.unwrap();
+    let events = scanner.scan_new_events().await.unwrap();
+    let boxes = scanner.get_unspent_reserve_boxes().await.unwrap();
+}
+```
+
+Run the demo: `cargo run --example ergo_scanner_demo --features ergo_scanner`
+
 ## Continuous Integration
 
 This project uses GitHub Actions for continuous integration. On every commit to main/master branches and on every pull request, the following checks are run:

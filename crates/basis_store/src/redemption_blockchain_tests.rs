@@ -2,7 +2,7 @@
 
 use crate::{
     schnorr::{self, generate_keypair},
-    IouNote, NoteProof, PubKey, RedemptionManager, RedemptionRequest, TrackerStateManager,
+    IouNote, PubKey, RedemptionManager, RedemptionRequest, TrackerStateManager,
 };
 use serde_json::{json, Value};
 
@@ -75,7 +75,7 @@ pub fn create_simulated_redemption_transaction(
     reserve_box_id: &str,
     tracker_box_id: &str,
     output_value: u64,
-    action_byte: u8,
+    _action_byte: u8,
 ) -> Value {
     json!({
         "id": "test_redemption_tx",
@@ -152,7 +152,7 @@ pub fn create_complete_blockchain_data(
     issuer_pubkey: &PubKey,
     recipient_pubkey: &PubKey,
     amount: u64,
-    timestamp: u64,
+    _timestamp: u64,
 ) -> SimulatedBlockchainData {
     // Generate test keypairs
     let (_, tracker_pubkey) = generate_keypair();
@@ -225,7 +225,6 @@ fn blake2b_hash(data: &str) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secp256k1::SecretKey;
 
     /// Test 1: Valid redemption with proper signatures and time lock
     #[test]

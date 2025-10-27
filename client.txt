@@ -1,0 +1,265 @@
+# Basis Tracker CLI Client Implementation Plan
+
+## Overview
+Comprehensive CLI client for testing the Basis Tracker server with account management, note operations, reserve tracking, and interactive mode.
+
+## Core Features
+1. **Account Management** - Create/manage multiple test accounts
+2. **Note Operations** - Create, list, redeem debt notes
+3. **Reserve Tracking** - Monitor blockchain reserves and collateralization
+4. **Server Interaction** - Full API coverage for testing
+5. **Interactive Mode** - Switch between accounts and operations
+
+## Implementation Architecture
+
+### Phase 1: Core CLI Structure
+```rust
+// src/main.rs
+mod account;
+mod api;
+mod commands;
+mod config;
+mod crypto;
+mod interactive;
+
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(name = "basis-cli")]
+#[command(about = "Basis Tracker CLI Client")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+    
+    #[arg(long, default_value = "127.0.0.1:3000")]
+    server_url: String,
+    
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Account management
+    Account {
+        #[command(subcommand)]
+        cmd: AccountCommands,
+    },
+    /// Note operations
+    Note {
+        #[command(subcommand)]
+        cmd: NoteCommands,
+    },
+    /// Reserve operations
+    Reserve {
+        #[command(subcommand)]
+        cmd: ReserveCommands,
+    },
+    /// Interactive mode
+    Interactive,
+    /// Server status
+    Status,
+}
+```
+
+### Phase 2: Account Management
+```rust
+// src/account.rs
+pub struct Account {
+    pub name: String,
+    pub pubkey: [u8; 33],     // secp256k1 compressed
+    pub private_key: [u8; 32], // secp256k1 private
+    pub created_at: u64,
+}
+
+pub struct AccountManager {
+    accounts: HashMap<String, Account>,
+    current_account: Option<String>,
+    config_path: PathBuf,
+}
+
+impl AccountManager {
+    pub fn new() -> Self;
+    pub fn create_account(&mut self, name: &str) -> Result<Account>;
+    pub fn switch_account(&mut self, name: &str) -> Result<()>;
+    pub fn list_accounts(&self) -> Vec<&Account>;
+    pub fn get_current(&self) -> Option<&Account>;
+    pub fn sign_message(&self, message: &[u8]) -> Result<[u8; 65]>;
+}
+```
+
+### Phase 3: API Client
+```rust
+// src/api.rs
+pub struct TrackerClient {
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl TrackerClient {
+    pub fn new(base_url: String) -> Self;
+    
+    // Note operations
+    pub async fn create_note(&self, request: CreateNoteRequest) -> Result<()>;
+    pub async fn get_issuer_notes(&self, pubkey: &str) -> Result<Vec<IouNote>>;
+    pub async fn get_recipient_notes(&self, pubkey: &str) -> Result<Vec<IouNote>>;
+    pub async fn get_note(&self, issuer: &str, recipient: &str) -> Result<Option<IouNote>>;
+    
+    // Reserve operations
+    pub async fn get_issuer_reserves(&self, pubkey: &str) -> Result<Vec<ReserveInfo>>;
+    pub async fn get_reserve_status(&self, pubkey: &str) -> Result<KeyStatusResponse>;
+    
+    // Redemption
+    pub async fn initiate_redemption(&self, request: RedeemRequest) -> Result<RedeemResponse>;
+    pub async fn complete_redemption(&self, request: CompleteRedemptionRequest) -> Result<()>;
+    
+    // Events & Status
+    pub async fn get_events(&self, page: usize, page_size: usize) -> Result<Vec<TrackerEvent>>;
+    pub async fn get_proof(&self, issuer: &str, recipient: &str) -> Result<ProofResponse>;
+    pub async fn health_check(&self) -> Result<bool>;
+}
+```
+
+### Phase 4: Interactive Mode
+```rust
+// src/interactive.rs
+pub struct InteractiveMode {
+    account_manager: AccountManager,
+    client: TrackerClient,
+}
+
+impl InteractiveMode {
+    pub async fn run(&mut self) -> Result<()> {
+        loop {
+            println!("\n=== Basis Tracker CLI ===");
+            println!("Current account: {}", self.current_account_name());
+            println!("1. Account Management");
+            println!("2. Note Operations");
+            println!("3. Reserve Monitoring");
+            println!("4. Blockchain Status");
+            println!("5. Events & History");
+            println!("6. Switch Account");
+            println!("0. Exit");
+            
+            // Handle user input and dispatch commands
+        }
+    }
+}
+```
+
+## Command Structure
+
+### Account Commands
+```bash
+basis-cli account create alice
+basis-cli account list
+basis-cli account switch alice
+basis-cli account info
+```
+
+### Note Commands
+```bash
+basis-cli note create --recipient bob --amount 1000
+basis-cli note list --issuer
+basis-cli note list --recipient
+basis-cli note get --issuer alice --recipient bob
+basis-cli note redeem --issuer alice --amount 500
+```
+
+### Reserve Commands
+```bash
+basis-cli reserve status alice
+basis-cli reserve list alice
+basis-cli reserve collateralization alice
+```
+
+### Server Commands
+```bash
+basis-cli status
+basis-cli events --page 0 --page-size 20
+basis-cli proof --issuer alice --recipient bob
+```
+
+## Key Implementation Details
+
+1. **Cryptography Integration**
+   - Use `secp256k1` crate for key generation and signing
+   - Follow chaincash-rs Schnorr signature format (65 bytes)
+   - Proper message formatting for note signing
+
+2. **Configuration Management**
+   - Store accounts in `~/.basis/cli.toml`
+   - Support multiple server endpoints
+   - Persistent account switching
+
+3. **Error Handling**
+   - Comprehensive error types for all operations
+   - User-friendly error messages
+   - Network timeout handling
+
+4. **Testing Strategy**
+   - Unit tests for account management
+   - Integration tests with mock server
+   - End-to-end tests with local tracker
+
+## Development Timeline
+
+**Week 1**: Core CLI structure + account management
+- Set up project structure with Cargo.toml
+- Implement account management with key generation
+- Add configuration file handling
+
+**Week 2**: API client implementation + basic commands
+- Implement HTTP client for tracker API
+- Add note creation and listing commands
+- Add reserve status commands
+
+**Week 3**: Interactive mode + advanced features
+- Implement interactive shell
+- Add redemption workflow
+- Add event monitoring
+
+**Week 4**: Testing + documentation + polish
+- Comprehensive test suite
+- User documentation
+- Error handling improvements
+
+## Dependencies
+
+```toml
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1.0", features = ["full"] }
+secp256k1 = { version = "0.27", features = ["rand-std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+anyhow = "1.0"
+thiserror = "1.0"
+```
+
+## File Structure
+
+```
+crates/basis_cli/
+├── Cargo.toml
+├── src/
+│   ├── main.rs
+│   ├── account.rs
+│   ├── api.rs
+│   ├── commands/
+│   │   ├── mod.rs
+│   │   ├── account.rs
+│   │   ├── note.rs
+│   │   └── reserve.rs
+│   ├── config.rs
+│   ├── crypto.rs
+│   └── interactive.rs
+├── tests/
+│   └── cli_integration_tests.rs
+└── README.md
+```
+
+This CLI will provide comprehensive testing capabilities for the tracker server while maintaining a clean, user-friendly interface for developers and testers.

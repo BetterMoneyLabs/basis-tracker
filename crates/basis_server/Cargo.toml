@@ -9,7 +9,7 @@ axum = { workspace = true, features = ["macros"] }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-tower-http = { version = "0.5", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = "0.4"
@@ -20,6 +20,11 @@ path = "../basis_store"
 [dependencies.config]
 version = "0.13"
 features = ["toml"]
+
+# Test dependencies
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "rt-multi-thread"] }
+tower = { version = "0.4", features = ["util"] }
 
 [[bin]]
 name = "basis_server"

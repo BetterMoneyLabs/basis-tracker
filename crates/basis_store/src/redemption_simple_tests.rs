@@ -2,7 +2,7 @@
 
 use crate::{
     schnorr::{self, generate_keypair},
-    IouNote, PubKey, RedemptionManager, RedemptionRequest, TrackerStateManager,
+    IouNote, RedemptionRequest,
 };
 
 /// Test 1: Basic redemption validation without AVL tree

@@ -2,19 +2,6 @@
 
 use thiserror::Error;
 
-/// Simple Blake2b hash function for placeholder template generation
-fn blake2_hash(data: &str) -> [u8; 32] {
-    use blake2::{Blake2b, Digest};
-
-    let mut hasher = Blake2b::<blake2::digest::consts::U32>::new();
-    hasher.update(data.as_bytes());
-    let result = hasher.finalize();
-
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&result[..32]);
-    hash
-}
-
 #[derive(Error, Debug)]
 pub enum CompilerError {
     #[error("File not found: {0}")]
@@ -42,20 +29,5 @@ mod tests {
         assert!(!template.is_empty());
         // The template should be a valid P2S address
         assert!(template.len() > 50);
-    }
-
-    #[test]
-    fn test_blake2_hash() {
-        let data = "test data";
-        let hash = blake2_hash(data);
-        assert_eq!(hash.len(), 32);
-
-        // Same input should produce same hash
-        let hash2 = blake2_hash(data);
-        assert_eq!(hash, hash2);
-
-        // Different input should produce different hash
-        let hash3 = blake2_hash("different data");
-        assert_ne!(hash, hash3);
     }
 }
