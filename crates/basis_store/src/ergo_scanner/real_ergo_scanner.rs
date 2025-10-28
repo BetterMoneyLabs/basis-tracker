@@ -121,27 +121,6 @@ impl RealErgoScanner {
 
     /// Scan a specific block for reserve events
     async fn scan_block(&self, height: u64) -> Result<Vec<ReserveEvent>, ScannerError> {
-        let client = reqwest::Client::new();
-        let url = format!("{}/blocks/at/{}", self.node_url, height);
-
-        let response = client
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| ScannerError::NetworkError(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Ok(vec![]); // Block might not exist yet
-        }
-
-        // Parse block and extract reserve events
-        // This is a simplified implementation - real implementation would
-        // check for Basis reserve contract patterns in transactions
-        let _block: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ScannerError::NodeError(e.to_string()))?;
 
         // For now, return empty events - real implementation would parse transactions
         // and identify reserve creation, top-up, redemption, and spending events
