@@ -10,14 +10,17 @@ pub struct RealScannerIntegrationTestSuite {
 
 impl RealScannerIntegrationTestSuite {
     /// Create a new integration test suite with real Ergo scanner
-    pub fn new(node_url: &str) -> Self {
-        let config = NodeConfig::default();
-        let scanner = ServerState::new(config, node_url.to_string());
+    pub fn new(node_url: &str) -> Result<Self, ScannerError> {
+        let config = NodeConfig {
+            node_url: node_url.to_string(),
+            ..Default::default()
+        };
+        let scanner = ServerState::new(config)?;
 
-        Self {
+        Ok(Self {
             scanner,
             node_url: node_url.to_string(),
-        }
+        })
     }
 
     /// Test basic connectivity to Ergo node
@@ -168,7 +171,13 @@ mod tests {
     #[ignore = "Requires network connection to Ergo node"]
     async fn test_real_scanner_against_public_node() {
         let node_url = "http://159.89.116.15:11088/";
-        let mut test_suite = RealScannerIntegrationTestSuite::new(node_url);
+        let mut test_suite = match RealScannerIntegrationTestSuite::new(node_url) {
+            Ok(suite) => suite,
+            Err(e) => {
+                println!("Failed to create test suite: {}", e);
+                return;
+            }
+        };
 
         // These tests require network connectivity
         let result = test_suite.run_all_tests().await;
@@ -186,7 +195,13 @@ mod tests {
     #[ignore = "Requires network connection to Ergo testnet node"]
     async fn test_real_scanner_against_testnet_node() {
         let node_url = "http://213.239.193.208:9052";
-        let mut test_suite = RealScannerIntegrationTestSuite::new(node_url);
+        let mut test_suite = match RealScannerIntegrationTestSuite::new(node_url) {
+            Ok(suite) => suite,
+            Err(e) => {
+                println!("Failed to create test suite: {}", e);
+                return;
+            }
+        };
 
         let result = test_suite.run_all_tests().await;
 
@@ -200,7 +215,13 @@ mod tests {
     #[ignore = "Requires network connection"]
     async fn test_connectivity_only() {
         let node_url = "http://159.89.116.15:11088";
-        let mut test_suite = RealScannerIntegrationTestSuite::new(node_url);
+        let mut test_suite = match RealScannerIntegrationTestSuite::new(node_url) {
+            Ok(suite) => suite,
+            Err(e) => {
+                println!("Failed to create test suite: {}", e);
+                return;
+            }
+        };
 
         // Just test connectivity
         let result = test_suite.test_node_connectivity().await;

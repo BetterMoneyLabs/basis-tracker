@@ -7,7 +7,7 @@ use basis_server::{
     ServerConfig, TrackerCommand, TrackerEvent,
 };
 use basis_store::{
-    ergo_scanner::{create_default_scanner, start_scanner, NodeConfig, ReserveEvent},
+    ergo_scanner::{create_default_scanner, start_scanner, NodeConfig, ReserveEvent, ServerState},
     ReserveTracker,
 };
 use tokio::sync::Mutex;
@@ -36,6 +36,7 @@ async fn main() {
                         node: NodeConfig {
                             start_height: None,
                             contract_template: None,
+                            node_url: "http://213.239.193.208:9053".to_string(),
                         },
                         basis_contract_template: "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREnehzz21DdYTdrsuw268CxW3gkXE6D5B8748FYGg3JEVW9R6VFJe8ZDknCtiPbh56QUCJo5QDizMfXaKnJ3jbWV72baYPCw85tmiJowR2wd4AjsEuhZP4Ry4QRDcZPvGogGVbdk7ykPAB7KN2guYEhS7RU3xm23iY1YaM5TX1ditsWfxqCBsvq3U6X5EU2Y5KCrSjQxdtGcwoZsdPQhfpqcwHPcYqM5iwK33EU1cHqggeSKYtLMW263f1TY7Lfu3cKMkav1CyomR183TLnCfkRHN3vcX2e9fSaTpAhkb74yo6ZRXttHNP23JUASWs9ejCaguzGumwK3SpPCLBZY6jFMYWqeaanH7XAtTuJA6UCnxvrKko5PX1oSB435Bxd3FbvDAsEmHpUqqtP78B7SKxFNPvJeZuaN7r5p8nDLxUPZBrWwz2vtcgWPMq5RrnoJdrdqrnXMcMEQPF5AKDYuKMKbCRgn3HLvG98JXJ4bCc2wzuZhnCRQaFXTy88knEoj".to_string(),
                         start_height: 0,
@@ -60,8 +61,24 @@ async fn main() {
     tracing::info!("Initializing Ergo scanner with blockchain monitoring...");
 
     // Create real scanner state with configured node URL
-    let _node_config = config.ergo_node_config();
-    let ergo_scanner = create_default_scanner();
+    let ergo_scanner = match create_default_scanner() {
+        Ok(scanner) => scanner,
+        Err(e) => {
+            tracing::warn!("Failed to create Ergo scanner: {}", e);
+            tracing::info!("Continuing without blockchain scanner...");
+            // Create a minimal scanner that won't actually scan
+            let config = NodeConfig::default();
+            ServerState::new(config).unwrap_or_else(|_| {
+                // Fallback to minimal state
+                ServerState {
+                    config: NodeConfig::default(),
+                    current_height: 0,
+                    last_scanned_height: 0,
+                    scan_active: false,
+                }
+            })
+        }
+    };
 
     // Start the scanner background task
     if let Err(e) = start_scanner(ergo_scanner.clone()).await {

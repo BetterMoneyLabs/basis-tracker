@@ -20,12 +20,12 @@ mod cors_tests {
         let event_store = Arc::new(EventStore::new().await.unwrap());
 
         // Create a default NodeConfig for the scanner
-        let config = basis_store::ergo_scanner::NodeConfig::default();
+        let config = basis_store::ergo_scanner::NodeConfig {
+            node_url: "http://localhost:9053".to_string(),
+            ..Default::default()
+        };
         let ergo_scanner = Arc::new(tokio::sync::Mutex::new(
-            basis_store::ergo_scanner::ServerState::new(
-                config,
-                "http://localhost:9053".to_string(),
-            ),
+            basis_store::ergo_scanner::ServerState::new(config).unwrap(),
         ));
         let reserve_tracker = Arc::new(tokio::sync::Mutex::new(basis_store::ReserveTracker::new()));
 

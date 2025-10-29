@@ -1,18 +1,17 @@
-//! Simple integration tests that work with mock scanner implementation
+//! Simple integration tests that work with the reserves-only scanner implementation
 
-use crate::ergo_scanner::{create_mock_scanner, MockServerState, NodeConfig, ReserveEvent, ScannerError};
+use crate::ergo_scanner::{create_default_scanner, NodeConfig, ReserveEvent, ScannerError, ServerState};
 
-/// Simple integration test suite that works with mock scanners (test-only)
+/// Simple integration test suite that works with the reserves-only scanner
 pub struct SimpleIntegrationTestSuite {
-    scanner: MockServerState,
+    scanner: ServerState,
 }
 
 impl SimpleIntegrationTestSuite {
     /// Create a new simple integration test suite
-    pub fn new() -> Self {
-        let scanner = create_mock_scanner();
-
-        Self { scanner }
+    pub fn new() -> Result<Self, ScannerError> {
+        let scanner = create_default_scanner()?;
+        Ok(Self { scanner })
     }
 
     /// Test basic scanner functionality
@@ -25,13 +24,14 @@ impl SimpleIntegrationTestSuite {
 
         // Test scanning blocks
         let events = self.scanner.scan_new_blocks().await?;
-        assert!(events.len() <= 1, "Should return 0 or 1 mock events");
+        // With the new implementation, we might get 0 or more events
+        // Just verify the operation succeeds
 
         // Test unspent boxes
         let boxes = self.scanner.get_unspent_reserve_boxes().await?;
         assert!(
             boxes.is_empty(),
-            "Mock implementation should return empty boxes"
+            "Current implementation should return empty boxes"
         );
 
         println!("✓ Basic scanner functionality test passed");
@@ -54,7 +54,7 @@ impl SimpleIntegrationTestSuite {
                     height,
                 } => {
                     println!(
-                        "Mock reserve created: {} with {} nanoERG at height {}",
+                        "Reserve created: {} with {} nanoERG at height {}",
                         box_id, collateral_amount, height
                     );
                     assert!(!box_id.is_empty(), "Box ID should not be empty");
@@ -70,7 +70,7 @@ impl SimpleIntegrationTestSuite {
                     height,
                 } => {
                     println!(
-                        "Mock reserve topped up: {} with additional {} nanoERG at height {}",
+                        "Reserve topped up: {} with additional {} nanoERG at height {}",
                         box_id, additional_collateral, height
                     );
                     assert!(!box_id.is_empty(), "Box ID should not be empty");
@@ -85,14 +85,14 @@ impl SimpleIntegrationTestSuite {
                     height,
                 } => {
                     println!(
-                        "Mock reserve redeemed: {} with {} nanoERG at height {}",
+                        "Reserve redeemed: {} with {} nanoERG at height {}",
                         box_id, redeemed_amount, height
                     );
                     assert!(!box_id.is_empty(), "Box ID should not be empty");
                     assert!(redeemed_amount > 0, "Redeemed amount should be positive");
                 }
                 ReserveEvent::ReserveSpent { box_id, height } => {
-                    println!("Mock reserve spent: {} at height {}", box_id, height);
+                    println!("Reserve spent: {} at height {}", box_id, height);
                     assert!(!box_id.is_empty(), "Box ID should not be empty");
                 }
             }
@@ -103,9 +103,11 @@ impl SimpleIntegrationTestSuite {
     }
 
     /// Test scanner state management
-    pub async fn test_scanner_state(&self) -> Result<(), ScannerError> {
+    pub async fn test_scanner_state(&mut self) -> Result<(), ScannerError> {
         println!("Testing scanner state management...");
 
+        // Start scanning
+        self.scanner.start_scanning().await?;
         assert!(self.scanner.is_active(), "Scanner should be active");
 
         let last_scanned = self.scanner.last_scanned_height();
@@ -137,18 +139,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_integration_suite() {
-        let mut test_suite = SimpleIntegrationTestSuite::new();
+        let mut test_suite = SimpleIntegrationTestSuite::new().expect("Should create test suite");
 
-        // These tests should pass with the mock implementation
+        // These tests should pass with the new implementation
         let result = test_suite.run_all_tests().await;
         assert!(result.is_ok(), "Simple integration tests should pass");
     }
 
     #[tokio::test]
     async fn test_scanner_creation() {
-        let test_suite = SimpleIntegrationTestSuite::new();
+        let test_suite = SimpleIntegrationTestSuite::new().expect("Should create test suite");
 
         // Scanner should be created successfully
-        assert!(test_suite.scanner.is_active());
+        // Note: scanner starts inactive until start_scanning is called
+        assert!(!test_suite.scanner.is_active());
     }
 }
