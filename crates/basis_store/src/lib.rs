@@ -27,9 +27,6 @@ pub mod real_scanner_integration_tests;
 #[cfg(test)]
 pub mod test_helpers;
 
-// Test-only modules
-#[cfg(test)]
-pub mod test_ergo_scanner;
 
 use blake2::{Blake2b512, Digest};
 use secp256k1;

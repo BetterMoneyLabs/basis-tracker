@@ -1,9 +1,9 @@
 //! Ergo blockchain scanner for monitoring Basis reserve contracts
 //! This module provides modern blockchain integration using /scan and /blockchain APIs
+//! Includes both real scanner implementation for production and mock scanner for testing
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
 
 #[derive(Error, Debug)]
 pub enum ScannerError {
@@ -42,7 +42,7 @@ pub struct NodeConfig {
 }
 
 /// Server state for scanner
-/// Uses real blockchain integration only
+/// Uses real blockchain integration for production
 #[derive(Clone)]
 pub struct ServerState {
     pub config: NodeConfig,
@@ -94,6 +94,75 @@ impl ServerState {
     }
 }
 
+/// Mock server state for scanner (test-only)
+/// This provides mock blockchain data for testing without requiring network access
+pub struct MockServerState {
+    pub config: NodeConfig,
+    pub current_height: u64,
+    pub last_scanned_height: u64,
+}
+
+impl MockServerState {
+    /// Create a new mock server state
+    pub fn new(config: NodeConfig) -> Self {
+        let start_height = config.start_height.unwrap_or(0);
+        Self {
+            config,
+            current_height: 0,
+            last_scanned_height: start_height,
+        }
+    }
+
+    /// Get current blockchain height (mock)
+    pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
+        // Return a mock height for testing
+        Ok(1000)
+    }
+
+    /// Scan for new events (mock)
+    pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ScannerError> {
+        // Simplified implementation - returns mock events for testing
+        if self.current_height < self.last_scanned_height + 10 {
+            self.current_height += 1;
+            Ok(vec![])
+        } else {
+            // Simulate finding a reserve event occasionally
+            if self.current_height % 100 == 0 {
+                Ok(vec![ReserveEvent::ReserveCreated {
+                    box_id: format!("mock_box_{}", self.current_height),
+                    owner_pubkey: "mock_pubkey".to_string(),
+                    collateral_amount: 1000000000, // 1 ERG
+                    height: self.current_height,
+                }])
+            } else {
+                Ok(vec![])
+            }
+        }
+    }
+
+    /// Get unspent reserve boxes (mock)
+    pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
+        // Simplified implementation - returns mock boxes for testing
+        Ok(vec![])
+    }
+
+    /// Check if scanner is active
+    pub fn is_active(&self) -> bool {
+        true
+    }
+
+    /// Start scanning (mock)
+    pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
+        // Simplified implementation for testing
+        Ok(())
+    }
+
+    /// Get last scanned height
+    pub fn last_scanned_height(&self) -> u64 {
+        self.last_scanned_height
+    }
+}
+
 /// Start the scanner
 pub async fn start_scanner(_state: ServerState) -> Result<(), ScannerError> {
     // Background scanning would be implemented here
@@ -107,6 +176,12 @@ pub fn create_default_scanner() -> ServerState {
     // Use a public Ergo node by default
     let node_url = "http://213.239.193.208:9053".to_string();
     ServerState::new(config, node_url)
+}
+
+/// Create a mock scanner with default configuration (test-only)
+pub fn create_mock_scanner() -> MockServerState {
+    let config = NodeConfig::default();
+    MockServerState::new(config)
 }
 
 /// Ergo box representation
