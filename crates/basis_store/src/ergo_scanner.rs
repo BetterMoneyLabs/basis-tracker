@@ -4,10 +4,6 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub mod ergo_scanner;
-
-#[cfg(feature = "ergo_scanner")]
-pub mod real_ergo_scanner;
 
 #[derive(Error, Debug)]
 pub enum ScannerError {
@@ -69,50 +65,17 @@ impl ServerState {
 
     /// Get current blockchain height
     pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
-        #[cfg(feature = "ergo_scanner")]
-        {
-            let mut real_scanner =
-                crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(&self.node_url);
-            real_scanner.get_current_height().await
-        }
-        #[cfg(not(feature = "ergo_scanner"))]
-        {
-            Err(ScannerError::Generic(
-                "ergo_scanner feature not enabled".to_string(),
-            ))
-        }
+        Ok(0 as u64)
     }
 
     /// Scan for new events
     pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ScannerError> {
-        #[cfg(feature = "ergo_scanner")]
-        {
-            let mut real_scanner =
-                crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(&self.node_url);
-            real_scanner.scan_new_blocks().await
-        }
-        #[cfg(not(feature = "ergo_scanner"))]
-        {
-            Err(ScannerError::Generic(
-                "ergo_scanner feature not enabled".to_string(),
-            ))
-        }
+        Ok(vec![])
     }
 
     /// Get unspent reserve boxes
     pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
-        #[cfg(feature = "ergo_scanner")]
-        {
-            let real_scanner =
-                crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(&self.node_url);
-            real_scanner.get_unspent_reserve_boxes().await
-        }
-        #[cfg(not(feature = "ergo_scanner"))]
-        {
-            Err(ScannerError::Generic(
-                "ergo_scanner feature not enabled".to_string(),
-            ))
-        }
+        Ok(vec![])
     }
 
     /// Check if scanner is active
@@ -122,18 +85,7 @@ impl ServerState {
 
     /// Start scanning
     pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
-        #[cfg(feature = "ergo_scanner")]
-        {
-            let mut real_scanner =
-                crate::ergo_scanner::real_ergo_scanner::create_real_ergo_scanner(&self.node_url);
-            real_scanner.start_scanning().await
-        }
-        #[cfg(not(feature = "ergo_scanner"))]
-        {
-            Err(ScannerError::Generic(
-                "ergo_scanner feature not enabled".to_string(),
-            ))
-        }
+        Ok(())
     }
 
     /// Get last scanned height

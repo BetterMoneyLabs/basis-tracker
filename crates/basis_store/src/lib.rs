@@ -435,11 +435,5 @@ pub use ergo_scanner::{
     ScannerError, ServerState,
 };
 
-// Re-export Ergo scanner types
-pub use ergo_scanner::ergo_scanner::{create_ergo_scanner, ErgoScannerState, ScanConfig};
-
-#[cfg(feature = "ergo_scanner")]
-pub use ergo_scanner::real_ergo_scanner::{create_real_ergo_scanner, RealErgoScanner};
-
 // Re-export redemption types
 pub use redemption::{RedemptionData, RedemptionError, RedemptionManager, RedemptionRequest};
