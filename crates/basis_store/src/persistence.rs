@@ -9,6 +9,60 @@ pub struct NoteStorage {
     partition: fjall::Partition,
 }
 
+/// Database storage for scanner metadata
+#[derive(Clone)]
+pub struct ScannerMetadataStorage {
+    partition: fjall::Partition,
+}
+
+impl ScannerMetadataStorage {
+    /// Open or create a new scanner metadata storage database
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, NoteError> {
+        let keyspace = Config::new(path)
+            .open()
+            .map_err(|e| NoteError::StorageError(format!("Failed to open database: {}", e)))?;
+
+        let partition = keyspace
+            .open_partition("scanner_metadata", PartitionCreateOptions::default())
+            .map_err(|e| NoteError::StorageError(format!("Failed to open partition: {}", e)))?;
+
+        Ok(Self { partition })
+    }
+
+    /// Store scan ID for a specific scan name
+    pub fn store_scan_id(&self, scan_name: &str, scan_id: i32) -> Result<(), NoteError> {
+        let value_bytes = scan_id.to_be_bytes().to_vec();
+        self.partition
+            .insert(scan_name.as_bytes(), &value_bytes)
+            .map_err(|e| NoteError::StorageError(format!("Failed to store scan ID: {}", e)))?;
+        Ok(())
+    }
+
+    /// Retrieve scan ID for a specific scan name
+    pub fn get_scan_id(&self, scan_name: &str) -> Result<Option<i32>, NoteError> {
+        match self.partition.get(scan_name.as_bytes()) {
+            Ok(Some(value_bytes)) => {
+                if value_bytes.len() == 4 {
+                    let scan_id = i32::from_be_bytes(value_bytes[0..4].try_into().unwrap());
+                    Ok(Some(scan_id))
+                } else {
+                    Err(NoteError::StorageError("Invalid scan ID format".to_string()))
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!("Failed to get scan ID: {}", e))),
+        }
+    }
+
+    /// Remove scan ID for a specific scan name
+    pub fn remove_scan_id(&self, scan_name: &str) -> Result<(), NoteError> {
+        self.partition
+            .remove(scan_name.as_bytes())
+            .map_err(|e| NoteError::StorageError(format!("Failed to remove scan ID: {}", e)))?;
+        Ok(())
+    }
+}
+
 impl NoteStorage {
     /// Open or create a new note storage database
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, NoteError> {

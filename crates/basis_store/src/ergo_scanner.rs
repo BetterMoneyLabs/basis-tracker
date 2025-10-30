@@ -10,7 +10,7 @@ use tracing::{info, warn, error};
 
 use reqwest::Client;
 
-use crate::{ReserveTracker, ExtendedReserveInfo};
+use crate::{ReserveTracker, ExtendedReserveInfo, persistence::ScannerMetadataStorage};
 
 #[derive(Error, Debug)]
 pub enum ScannerError {
@@ -71,6 +71,7 @@ pub struct ServerState {
     client: Client,
     reserve_tracker: ReserveTracker,
     scan_id: Option<i32>,
+    metadata_storage: ScannerMetadataStorage,
 }
 
 impl ServerState {
@@ -78,6 +79,21 @@ impl ServerState {
     pub fn new(config: NodeConfig) -> Result<Self, ScannerError> {
         let start_height = config.start_height.unwrap_or(0);
         let client = Client::new();
+        
+        // Open scanner metadata storage - create directory if it doesn't exist
+        let storage_path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("crates/basis_server/data/scanner_metadata");
+        
+        // Create directory if it doesn't exist
+        if let Some(parent) = storage_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ScannerError::StoreError(format!("Failed to create scanner metadata directory: {}", e)))?;
+        }
+        
+        let metadata_storage = ScannerMetadataStorage::open(&storage_path)
+            .map_err(|e| ScannerError::StoreError(format!("Failed to open scanner metadata storage: {:?}", e)))?;
+        
         Ok(Self {
             config,
             current_height: 0,
@@ -86,6 +102,7 @@ impl ServerState {
             client,
             reserve_tracker: ReserveTracker::new(),
             scan_id: None,
+            metadata_storage,
         })
     }
 
@@ -160,6 +177,23 @@ impl ServerState {
             .as_deref()
             .unwrap_or("Basis Reserve Scanner");
 
+        // Check if scan ID already exists in database
+        if let Ok(Some(stored_scan_id)) = self.metadata_storage.get_scan_id(scan_name) {
+            info!("Found existing scan ID in database: {}", stored_scan_id);
+            self.scan_id = Some(stored_scan_id);
+            
+            // Verify the scan still exists on the node
+            if self.verify_scan_exists(stored_scan_id).await? {
+                info!("Using existing scan ID: {}", stored_scan_id);
+                return Ok(());
+            } else {
+                warn!("Stored scan ID {} no longer exists on node, re-registering", stored_scan_id);
+                self.metadata_storage.remove_scan_id(scan_name)
+                    .map_err(|e| ScannerError::StoreError(format!("Failed to remove invalid scan ID: {:?}", e)))?;
+            }
+        }
+
+        // Register new scan
         let scan_payload = serde_json::json!({
             "scanName": scan_name,
             "trackingRule": {
@@ -189,9 +223,50 @@ impl ServerState {
             .map_err(|e| ScannerError::JsonError(format!("Failed to parse scan registration response: {}", e)))?;
 
         self.scan_id = result["scanId"].as_i64().and_then(|v| i32::try_from(v).ok());
-        info!("Registered reserve scan with ID: {:?}", self.scan_id);
+        
+        // Store scan ID in database
+        if let Some(scan_id) = self.scan_id {
+            self.metadata_storage.store_scan_id(scan_name, scan_id)
+                .map_err(|e| ScannerError::StoreError(format!("Failed to store scan ID: {:?}", e)))?;
+            info!("Registered and stored reserve scan with ID: {}", scan_id);
+        } else {
+            return Err(ScannerError::Generic("Failed to get scan ID from registration response".to_string()));
+        }
         
         Ok(())
+    }
+
+    /// Verify that a scan ID still exists on the Ergo node
+    pub async fn verify_scan_exists(&self, scan_id: i32) -> Result<bool, ScannerError> {
+        let url = format!("{}/scan/list", self.config.node_url);
+        
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ScannerError::HttpError(format!("Failed to list scans: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(ScannerError::NodeError(format!("Failed to list scans with status: {}", response.status())));
+        }
+
+        let scans: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ScannerError::JsonError(format!("Failed to parse scan list: {}", e)))?;
+
+        // Check if our scan ID exists in the list
+        if let Some(scans_array) = scans.as_array() {
+            for scan in scans_array {
+                if let Some(id) = scan["scanId"].as_i64() {
+                    if id == scan_id as i64 {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        Ok(false)
     }
 
     /// Get unspent boxes from registered scan
