@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{info, warn};
 
+use reqwest::Client;
+
 #[derive(Error, Debug)]
 pub enum ScannerError {
     #[error("Scanner error: {0}")]
@@ -24,6 +26,10 @@ pub enum ScannerError {
     InvalidTransaction(String),
     #[error("Reserve box validation failed at TX id: {0}")]
     InvalidReserveBox(String),
+    #[error("HTTP error: {0}")]
+    HttpError(String),
+    #[error("JSON parse error: {0}")]
+    JsonError(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,25 +64,45 @@ pub struct ServerState {
     pub current_height: u64,
     pub last_scanned_height: u64,
     pub scan_active: bool,
+    client: Client,
 }
 
 impl ServerState {
     /// Create a server state that uses real Ergo scanner
     pub fn new(config: NodeConfig) -> Result<Self, ScannerError> {
         let start_height = config.start_height.unwrap_or(0);
+        let client = Client::new();
         Ok(Self {
             config,
             current_height: 0,
             last_scanned_height: start_height,
             scan_active: false,
+            client,
         })
     }
 
-    /// Get current blockchain height
+    /// Get current blockchain height from Ergo node
     pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
-        // In a real implementation, this would call the Ergo node API
-        // For now, simulate blockchain height for testing
-        Ok(self.current_height + 1000)
+        let url = format!("{}/info", self.config.node_url);
+        
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ScannerError::HttpError(format!("Failed to connect to node: {}", e)))?;
+        
+        if !response.status().is_success() {
+            return Err(ScannerError::NodeError(format!("Node returned status: {}", response.status())));
+        }
+        
+        let info: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
+        
+        info["fullHeight"]
+            .as_u64()
+            .ok_or_else(|| ScannerError::NodeError("Failed to parse fullHeight from node info".to_string()))
     }
 
     /// Scan for new reserve events

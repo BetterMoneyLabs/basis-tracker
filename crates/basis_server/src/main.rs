@@ -68,15 +68,17 @@ async fn main() {
             tracing::info!("Continuing without blockchain scanner...");
             // Create a minimal scanner that won't actually scan
             let config = NodeConfig::default();
-            ServerState::new(config).unwrap_or_else(|_| {
-                // Fallback to minimal state
-                ServerState {
-                    config: NodeConfig::default(),
-                    current_height: 0,
-                    last_scanned_height: 0,
-                    scan_active: false,
+            match ServerState::new(config) {
+                Ok(scanner) => scanner,
+                Err(_) => {
+                    // If even the minimal scanner fails, create a minimal one with a different approach
+                    let minimal_config = NodeConfig {
+                        node_url: "http://159.89.116.15:11088".to_string(), // Dummy URL that won't be used
+                        ..Default::default()
+                    };
+                    ServerState::new(minimal_config).unwrap_or_else(|_| panic!("Failed to create minimal scanner"))
                 }
-            })
+            }
         }
     };
 
