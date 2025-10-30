@@ -25,6 +25,8 @@ pub mod property_tests;
 #[cfg(test)]
 pub mod real_scanner_integration_tests;
 #[cfg(test)]
+pub mod reserve_tracking_test;
+#[cfg(test)]
 pub mod test_helpers;
 
 

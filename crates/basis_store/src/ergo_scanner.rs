@@ -68,10 +68,10 @@ pub struct ServerState {
     pub current_height: u64,
     pub last_scanned_height: u64,
     pub scan_active: bool,
-    client: Client,
-    reserve_tracker: ReserveTracker,
-    scan_id: Option<i32>,
-    metadata_storage: ScannerMetadataStorage,
+    pub(crate) client: Client,
+    pub(crate) reserve_tracker: ReserveTracker,
+    pub(crate) scan_id: Option<i32>,
+    pub(crate) metadata_storage: ScannerMetadataStorage,
 }
 
 impl ServerState {
