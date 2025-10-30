@@ -308,9 +308,9 @@ async fn main() {
         // Static routes
         .route("/events", get(get_events))
         .route("/events/paginated", get(get_events_paginated))
-        .route("/notes", post(create_note))
-        .route("/redeem", post(initiate_redemption))
-        .route("/redeem/complete", post(complete_redemption))
+        .route("/notes", post(create_note).options(handle_options))
+        .route("/redeem", post(initiate_redemption).options(handle_options))
+        .route("/redeem/complete", post(complete_redemption).options(handle_options))
         .route("/proof", get(get_proof))
         // Most specific parameterized routes first
         .route(
@@ -451,6 +451,15 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
             }
         }
     }
+}
+
+/// Handle OPTIONS preflight requests for CORS
+async fn handle_options() -> impl axum::response::IntoResponse {
+    (
+        axum::http::StatusCode::OK,
+        [("Access-Control-Allow-Origin", "*")],
+        "",
+    )
 }
 
 /// Process a reserve event and store it in the event store
