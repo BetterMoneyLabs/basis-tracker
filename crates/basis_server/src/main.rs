@@ -402,31 +402,6 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
             }
         }
 
-        // Scan for new blocks and process reserve events
-        match scanner.scan_new_blocks().await {
-            Ok(events) => {
-                if !events.is_empty() {
-                    tracing::info!("Found {} new reserve events", events.len());
-
-                    // Process each event
-                    for event in events {
-                        if let Err(e) = process_reserve_event(&state, event, &config).await {
-                            tracing::error!("Failed to process reserve event: {}", e);
-                        }
-                    }
-                } else {
-                    tracing::debug!("No new reserve events found");
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to scan new blocks: {}", e);
-                // Try to restart scanner on persistent errors
-                if let Err(restart_err) = scanner.start_scanning().await {
-                    tracing::error!("Failed to restart scanner after error: {}", restart_err);
-                }
-            }
-        }
-
         // Update reserve tracker with current unspent boxes
         match scanner.get_unspent_reserve_boxes().await {
             Ok(boxes) => {

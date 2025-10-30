@@ -22,11 +22,6 @@ impl SimpleIntegrationTestSuite {
         let height = self.scanner.get_current_height().await?;
         assert!(height > 0, "Height should be positive");
 
-        // Test scanning blocks
-        let events = self.scanner.scan_new_blocks().await?;
-        // With the new implementation, we might get 0 or more events
-        // Just verify the operation succeeds
-
         // Test unspent boxes
         let boxes = self.scanner.get_unspent_reserve_boxes().await?;
         assert!(
@@ -35,70 +30,6 @@ impl SimpleIntegrationTestSuite {
         );
 
         println!("✓ Basic scanner functionality test passed");
-        Ok(())
-    }
-
-    /// Test event processing
-    pub async fn test_event_processing(&mut self) -> Result<(), ScannerError> {
-        println!("Testing event processing...");
-
-        let events = self.scanner.scan_new_blocks().await?;
-
-        // Process any events found
-        for event in events {
-            match event {
-                ReserveEvent::ReserveCreated {
-                    box_id,
-                    owner_pubkey: _,
-                    collateral_amount,
-                    height,
-                } => {
-                    println!(
-                        "Reserve created: {} with {} nanoERG at height {}",
-                        box_id, collateral_amount, height
-                    );
-                    assert!(!box_id.is_empty(), "Box ID should not be empty");
-                    assert!(
-                        collateral_amount > 0,
-                        "Collateral amount should be positive"
-                    );
-                    assert!(height > 0, "Height should be positive");
-                }
-                ReserveEvent::ReserveToppedUp {
-                    box_id,
-                    additional_collateral,
-                    height,
-                } => {
-                    println!(
-                        "Reserve topped up: {} with additional {} nanoERG at height {}",
-                        box_id, additional_collateral, height
-                    );
-                    assert!(!box_id.is_empty(), "Box ID should not be empty");
-                    assert!(
-                        additional_collateral > 0,
-                        "Additional collateral should be positive"
-                    );
-                }
-                ReserveEvent::ReserveRedeemed {
-                    box_id,
-                    redeemed_amount,
-                    height,
-                } => {
-                    println!(
-                        "Reserve redeemed: {} with {} nanoERG at height {}",
-                        box_id, redeemed_amount, height
-                    );
-                    assert!(!box_id.is_empty(), "Box ID should not be empty");
-                    assert!(redeemed_amount > 0, "Redeemed amount should be positive");
-                }
-                ReserveEvent::ReserveSpent { box_id, height } => {
-                    println!("Reserve spent: {} at height {}", box_id, height);
-                    assert!(!box_id.is_empty(), "Box ID should not be empty");
-                }
-            }
-        }
-
-        println!("✓ Event processing test passed");
         Ok(())
     }
 
@@ -125,7 +56,6 @@ impl SimpleIntegrationTestSuite {
         println!("Running simple integration tests...");
 
         self.test_basic_functionality().await?;
-        self.test_event_processing().await?;
         self.test_scanner_state().await?;
 
         println!("✓ All simple integration tests passed!");

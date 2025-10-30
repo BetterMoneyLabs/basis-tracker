@@ -61,76 +61,6 @@ impl RealScannerIntegrationTestSuite {
         Ok(())
     }
 
-    /// Test block scanning functionality
-    pub async fn test_block_scanning(&mut self) -> Result<(), ScannerError> {
-        println!("Testing block scanning...");
-
-        // Scan for new blocks
-        let events = self.scanner.scan_new_blocks().await?;
-
-        // With real scanner, we might get actual events or empty
-        // The important thing is that it doesn't error
-        println!("Scanned {} events", events.len());
-
-        // Process any events found
-        for event in events {
-            match event {
-                ReserveEvent::ReserveCreated {
-                    box_id,
-                    owner_pubkey,
-                    collateral_amount,
-                    height,
-                } => {
-                    println!(
-                        "Reserve created: {} with {} nanoERG at height {}",
-                        box_id, collateral_amount, height
-                    );
-                    assert!(!box_id.is_empty(), "Box ID should not be empty");
-                    assert!(!owner_pubkey.is_empty(), "Owner pubkey should not be empty");
-                    assert!(
-                        collateral_amount > 0,
-                        "Collateral amount should be positive"
-                    );
-                    assert!(height > 0, "Height should be positive");
-                }
-                ReserveEvent::ReserveToppedUp {
-                    box_id,
-                    additional_collateral,
-                    height,
-                } => {
-                    println!(
-                        "Reserve topped up: {} with additional {} nanoERG at height {}",
-                        box_id, additional_collateral, height
-                    );
-                    assert!(!box_id.is_empty(), "Box ID should not be empty");
-                    assert!(
-                        additional_collateral > 0,
-                        "Additional collateral should be positive"
-                    );
-                }
-                ReserveEvent::ReserveRedeemed {
-                    box_id,
-                    redeemed_amount,
-                    height,
-                } => {
-                    println!(
-                        "Reserve redeemed: {} with {} nanoERG at height {}",
-                        box_id, redeemed_amount, height
-                    );
-                    assert!(!box_id.is_empty(), "Box ID should not be empty");
-                    assert!(redeemed_amount > 0, "Redeemed amount should be positive");
-                }
-                ReserveEvent::ReserveSpent { box_id, height } => {
-                    println!("Reserve spent: {} at height {}", box_id, height);
-                    assert!(!box_id.is_empty(), "Box ID should not be empty");
-                }
-            }
-        }
-
-        println!("✓ Block scanning test passed");
-        Ok(())
-    }
-
     /// Test unspent boxes query
     pub async fn test_unspent_boxes_query(&self) -> Result<(), ScannerError> {
         println!("Testing unspent boxes query...");
@@ -154,7 +84,6 @@ impl RealScannerIntegrationTestSuite {
 
         self.test_node_connectivity().await?;
         self.test_scanner_initialization().await?;
-        self.test_block_scanning().await?;
         self.test_unspent_boxes_query().await?;
 
         println!("✓ All real scanner integration tests passed!");

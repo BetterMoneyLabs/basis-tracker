@@ -105,33 +105,6 @@ impl ServerState {
             .ok_or_else(|| ScannerError::NodeError("Failed to parse fullHeight from node info".to_string()))
     }
 
-    /// Scan for new reserve events
-    pub async fn scan_new_blocks(&mut self) -> Result<Vec<ReserveEvent>, ScannerError> {
-        let current_height = self.get_current_height().await?;
-        let mut events = Vec::new();
-
-        if current_height > self.last_scanned_height {
-            // In a real implementation, we would scan blocks from last_scanned_height to current_height
-            // For now, we'll simulate finding reserve events
-            info!("Scanning blocks from {} to {}", self.last_scanned_height, current_height);
-            
-            // Simulate finding reserve events (this would be replaced with actual blockchain scanning)
-            if current_height % 10 == 0 {
-                events.push(ReserveEvent::ReserveCreated {
-                    box_id: format!("box_{}", current_height),
-                    owner_pubkey: "mock_pubkey".to_string(),
-                    collateral_amount: 1000000000, // 1 ERG
-                    height: current_height,
-                });
-            }
-            
-            self.last_scanned_height = current_height;
-            self.current_height = current_height;
-        }
-
-        Ok(events)
-    }
-
     /// Get unspent reserve boxes
     pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
         // This would use the scan API to get actual reserve boxes
@@ -243,17 +216,8 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
     let mut state = (*state).clone();
     
     loop {
-        match state.scan_new_blocks().await {
-            Ok(events) => {
-                for event in events {
-                    info!("Reserve event detected: {:?}", event);
-                    // Here we would process the event (store in database, notify subscribers, etc.)
-                }
-            }
-            Err(e) => {
-                warn!("Error during scan: {}", e);
-            }
-        }
+
+        // todo: implementation is missed
         
         // Wait before next scan
         tokio::time::sleep(Duration::from_secs(10)).await;
