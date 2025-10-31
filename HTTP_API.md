@@ -44,8 +44,8 @@ cargo build -p basis_server
 ## Server Information
 
 - **Host**: 127.0.0.1 (localhost)
-- **Port**: 3000
-- **Base URL**: http://localhost:3000
+- **Port**: 3048
+- **Base URL**: http://localhost:3048
 
 ## Current Endpoints
 

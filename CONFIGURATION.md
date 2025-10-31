@@ -19,7 +19,7 @@ The main configuration file is `config/basis.toml`. The server will look for thi
 ```toml
 [server]
 host = "0.0.0.0"        # Host address to bind to
-port = 3000             # Port to listen on
+port = 3048             # Port to listen on
 database_url = "sqlite:data/basis.db"  # Database path (optional)
 ```
 
@@ -84,7 +84,7 @@ All configuration options can also be set via environment variables with the `BA
 
 ```bash
 export BASIS_SERVER_HOST="0.0.0.0"
-export BASIS_SERVER_PORT=3000
+export BASIS_SERVER_PORT=3048
 export BASIS_ERGO_BASIS_CONTRACT_TEMPLATE="your_contract_hash"
 export BASIS_ERGO_TRACKER_NFT_ID="your_tracker_nft_id"
 export BASIS_ERGO_NODE_URL="http://your-node:9053"
@@ -97,7 +97,7 @@ If no configuration file is found, the server uses these defaults:
 ```toml
 [server]
 host = "127.0.0.1"
-port = 3000
+port = 3048
 database_url = "sqlite:data/basis.db"
 
 [ergo]

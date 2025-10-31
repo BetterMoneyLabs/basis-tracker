@@ -46,7 +46,7 @@ impl ConfigManager {
             CliConfig {
                 current_account: None,
                 accounts: HashMap::new(),
-                server_url: "http://127.0.0.1:3000".to_string(),
+                server_url: "http://127.0.0.1:3048".to_string(),
             }
         };
 

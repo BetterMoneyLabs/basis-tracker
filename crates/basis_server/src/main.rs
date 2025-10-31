@@ -29,7 +29,7 @@ async fn main() {
                 AppConfig {
                     server: ServerConfig {
                         host: "127.0.0.1".to_string(),
-                        port: 3000,
+                        port: 3048,
                         database_url: Some("sqlite:data/basis.db".to_string()),
                     },
                     ergo: ErgoConfig {

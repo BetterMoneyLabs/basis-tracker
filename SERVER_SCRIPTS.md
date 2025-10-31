@@ -76,7 +76,7 @@ Shows the current status of the Basis Tracker server.
 
 ## Notes
 
-- The server runs on `127.0.0.1:3000` by default
+- The server runs on `127.0.0.1:3048` by default
 - Logs are written to `server.log` in the current directory
 - The server binary is built automatically if not found
 - All scripts include colored output for better readability

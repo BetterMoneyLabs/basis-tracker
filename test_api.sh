@@ -2,7 +2,7 @@
 
 # Test the Basis Tracker HTTP API
 
-BASE_URL="http://localhost:3000"
+BASE_URL="http://localhost:3048"
 
 # Test 1: Health check
 echo "=== Test 1: Health Check ==="

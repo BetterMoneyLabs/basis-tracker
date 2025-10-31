@@ -110,7 +110,7 @@ mod cli_tests {
     fn test_config_loading_logic() {
         // Test configuration loading logic
         let default_host = "127.0.0.1";
-        let default_port = 3000;
+        let default_port = 3048;
 
         assert!(!default_host.is_empty(), "Default host should not be empty");
         assert!(default_port > 0, "Default port should be positive");

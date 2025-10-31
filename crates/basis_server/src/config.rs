@@ -52,7 +52,7 @@ impl AppConfig {
         let config = config::Config::builder()
             // Default configuration
             .set_default("server.host", "127.0.0.1")?
-            .set_default("server.port", 3000)?
+            .set_default("server.port", 3048)?
             .set_default("server.database_url", "sqlite:data/basis.db")?
             .set_default("ergo.basis_contract_template", "")?
             .set_default("ergo.start_height", 0)?

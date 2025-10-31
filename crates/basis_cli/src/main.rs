@@ -17,7 +17,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(long, default_value = "http://127.0.0.1:3000")]
+    #[arg(long, default_value = "http://127.0.0.1:3048")]
     server_url: String,
 
     #[arg(long)]

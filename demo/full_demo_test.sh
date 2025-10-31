@@ -24,7 +24,7 @@ echo "Server started with PID: $SERVER_PID"
 # Wait for server to be ready
 echo "Waiting for server to start..."
 for i in {1..30}; do
-    if curl -s http://localhost:3000/ > /dev/null; then
+    if curl -s http://localhost:3048/ > /dev/null; then
         echo "Server is ready!"
         break
     fi

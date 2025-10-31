@@ -68,7 +68,7 @@ All endpoints return a standardized response format:
 
 ### Create a Note
 ```bash
-curl -X POST http://localhost:3000/notes \
+curl -X POST http://localhost:3048/notes \
   -H "Content-Type: application/json" \
   -d '{
     "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
@@ -81,26 +81,26 @@ curl -X POST http://localhost:3000/notes \
 
 ### Get Notes by Issuer
 ```bash
-curl http://localhost:3000/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101
+curl http://localhost:3048/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101
 ```
 
 ### Get Events
 ```bash
 # Get recent events
-curl http://localhost:3000/events
+curl http://localhost:3048/events
 
 # Get paginated events
-curl "http://localhost:3000/events/paginated?page=0&page_size=10"
+curl "http://localhost:3048/events/paginated?page=0&page_size=10"
 ```
 
 ### Get Key Status
 ```bash
-curl http://localhost:3000/key-status/010101010101010101010101010101010101010101010101010101010101010101
+curl http://localhost:3048/key-status/010101010101010101010101010101010101010101010101010101010101010101
 ```
 
 ### Initiate Redemption
 ```bash
-curl -X POST http://localhost:3000/redeem \
+curl -X POST http://localhost:3048/redeem \
   -H "Content-Type: application/json" \
   -d '{
     "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
@@ -112,7 +112,7 @@ curl -X POST http://localhost:3000/redeem \
 
 ### Get Proof
 ```bash
-curl "http://localhost:3000/proof?issuer_pubkey=010101010101010101010101010101010101010101010101010101010101010101&recipient_pubkey=020202020202020202020202020202020202020202020202020202020202020202"
+curl "http://localhost:3048/proof?issuer_pubkey=010101010101010101010101010101010101010101010101010101010101010101&recipient_pubkey=020202020202020202020202020202020202020202020202020202020202020202"
 ```
 
 ## Validation
