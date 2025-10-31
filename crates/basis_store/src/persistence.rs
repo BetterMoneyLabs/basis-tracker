@@ -1,6 +1,6 @@
 //! Persistence layer for IouNote storage using fjall database
 
-use crate::{IouNote, NoteError, NoteKey, PubKey};
+use crate::{IouNote, NoteError, NoteKey, PubKey, reserve_tracker::ExtendedReserveInfo};
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
 
@@ -12,6 +12,12 @@ pub struct NoteStorage {
 /// Database storage for scanner metadata
 #[derive(Clone)]
 pub struct ScannerMetadataStorage {
+    partition: fjall::Partition,
+}
+
+/// Database storage for reserve information
+#[derive(Clone)]
+pub struct ReserveStorage {
     partition: fjall::Partition,
 }
 
@@ -288,5 +294,73 @@ impl NoteStorage {
         }
 
         Ok(notes)
+    }
+}
+
+impl ReserveStorage {
+    /// Open or create a new reserve storage database
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, NoteError> {
+        let keyspace = Config::new(path)
+            .open()
+            .map_err(|e| NoteError::StorageError(format!("Failed to open database: {}", e)))?;
+
+        let partition = keyspace
+            .open_partition("reserves", PartitionCreateOptions::default())
+            .map_err(|e| NoteError::StorageError(format!("Failed to open partition: {}", e)))?;
+
+        Ok(Self { partition })
+    }
+
+    /// Store a reserve in the database
+    pub fn store_reserve(&self, reserve: &ExtendedReserveInfo) -> Result<(), NoteError> {
+        let key = reserve.box_id.as_bytes();
+        let value = serde_json::to_vec(reserve)
+            .map_err(|e| NoteError::StorageError(format!("Failed to serialize reserve: {}", e)))?;
+
+        self.partition
+            .insert(key, &value)
+            .map_err(|e| NoteError::StorageError(format!("Failed to store reserve: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Retrieve a reserve by box ID
+    pub fn get_reserve(&self, box_id: &str) -> Result<Option<ExtendedReserveInfo>, NoteError> {
+        match self.partition.get(box_id.as_bytes()) {
+            Ok(Some(value_bytes)) => {
+                let reserve: ExtendedReserveInfo = serde_json::from_slice(&value_bytes)
+                    .map_err(|e| NoteError::StorageError(format!("Failed to deserialize reserve: {}", e)))?;
+                Ok(Some(reserve))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!("Failed to get reserve: {}", e))),
+        }
+    }
+
+    /// Get all reserves from the database
+    pub fn get_all_reserves(&self) -> Result<Vec<ExtendedReserveInfo>, NoteError> {
+        let mut reserves = Vec::new();
+
+        for item in self.partition.iter() {
+            let (_key_bytes, value_bytes) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate partition: {}", e))
+            })?;
+
+            let reserve: ExtendedReserveInfo = serde_json::from_slice(&value_bytes)
+                .map_err(|e| NoteError::StorageError(format!("Failed to deserialize reserve: {}", e)))?;
+
+            reserves.push(reserve);
+        }
+
+        Ok(reserves)
+    }
+
+    /// Remove a reserve from the database
+    pub fn remove_reserve(&self, box_id: &str) -> Result<(), NoteError> {
+        self.partition
+            .remove(box_id.as_bytes())
+            .map_err(|e| NoteError::StorageError(format!("Failed to remove reserve: {}", e)))?;
+
+        Ok(())
     }
 }

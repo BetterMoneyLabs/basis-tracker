@@ -10,7 +10,7 @@ use tracing::{info, warn, error};
 
 use reqwest::Client;
 
-use crate::{ReserveTracker, ExtendedReserveInfo, persistence::ScannerMetadataStorage};
+use crate::{ReserveTracker, ExtendedReserveInfo, persistence::{ScannerMetadataStorage, ReserveStorage}};
 
 #[derive(Error, Debug)]
 pub enum ScannerError {
@@ -72,6 +72,7 @@ pub struct ServerState {
     pub(crate) reserve_tracker: ReserveTracker,
     pub(crate) scan_id: Option<i32>,
     pub(crate) metadata_storage: ScannerMetadataStorage,
+    pub(crate) reserve_storage: ReserveStorage,
 }
 
 impl ServerState {
@@ -94,15 +95,44 @@ impl ServerState {
         let metadata_storage = ScannerMetadataStorage::open(&storage_path)
             .map_err(|e| ScannerError::StoreError(format!("Failed to open scanner metadata storage: {:?}", e)))?;
         
+        // Open reserve storage - create directory if it doesn't exist
+        let reserve_storage_path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("crates/basis_server/data/reserves");
+        
+        // Create directory if it doesn't exist
+        if let Some(parent) = reserve_storage_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ScannerError::StoreError(format!("Failed to create reserve storage directory: {}", e)))?;
+        }
+        
+        let reserve_storage = ReserveStorage::open(&reserve_storage_path)
+            .map_err(|e| ScannerError::StoreError(format!("Failed to open reserve storage: {:?}", e)))?;
+        
+        // Create reserve tracker and load existing reserves from database
+        let reserve_tracker = ReserveTracker::new();
+        
+        // Load existing reserves from database
+        if let Ok(existing_reserves) = reserve_storage.get_all_reserves() {
+            let reserves_count = existing_reserves.len();
+            for reserve in existing_reserves {
+                if let Err(e) = reserve_tracker.update_reserve(reserve) {
+                    warn!("Failed to load reserve from database: {}", e);
+                }
+            }
+            info!("Loaded {} reserves from database", reserves_count);
+        }
+        
         Ok(Self {
             config,
             current_height: 0,
             last_scanned_height: start_height,
             scan_active: false,
             client,
-            reserve_tracker: ReserveTracker::new(),
+            reserve_tracker,
             scan_id: None,
             metadata_storage,
+            reserve_storage,
         })
     }
 
@@ -332,10 +362,17 @@ impl ServerState {
             match self.parse_reserve_box(scan_box) {
                 Ok(reserve_info) => {
                     current_box_ids.push(reserve_info.box_id.clone());
-                    if let Err(e) = self.reserve_tracker.update_reserve(reserve_info) {
+                    
+                    // Update in-memory tracker
+                    if let Err(e) = self.reserve_tracker.update_reserve(reserve_info.clone()) {
                         warn!("Failed to update reserve {}: {}", scan_box.box_id, e);
                     } else {
-                        info!("Updated reserve: {}", scan_box.box_id);
+                        // Persist to database
+                        if let Err(e) = self.reserve_storage.store_reserve(&reserve_info) {
+                            warn!("Failed to persist reserve {} to database: {:?}", scan_box.box_id, e);
+                        } else {
+                            info!("Updated and persisted reserve: {}", scan_box.box_id);
+                        }
                     }
                 }
                 Err(e) => {
@@ -348,10 +385,16 @@ impl ServerState {
         let all_reserves = self.reserve_tracker.get_all_reserves();
         for reserve in all_reserves {
             if !current_box_ids.contains(&reserve.box_id) {
+                // Remove from in-memory tracker
                 if let Err(e) = self.reserve_tracker.remove_reserve(&reserve.box_id) {
                     warn!("Failed to remove reserve {}: {}", reserve.box_id, e);
                 } else {
-                    info!("Removed spent reserve: {}", reserve.box_id);
+                    // Remove from database
+                    if let Err(e) = self.reserve_storage.remove_reserve(&reserve.box_id) {
+                        warn!("Failed to remove reserve {} from database: {:?}", reserve.box_id, e);
+                    } else {
+                        info!("Removed spent reserve: {}", reserve.box_id);
+                    }
                 }
             }
         }
