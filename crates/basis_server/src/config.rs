@@ -51,7 +51,7 @@ impl AppConfig {
     pub fn load() -> Result<Self, config::ConfigError> {
         let config = config::Config::builder()
             // Default configuration
-            .set_default("server.host", "127.0.0.1")?
+            .set_default("server.host", "0.0.0.0")?
             .set_default("server.port", 3048)?
             .set_default("server.database_url", "sqlite:data/basis.db")?
             .set_default("ergo.basis_contract_template", "")?

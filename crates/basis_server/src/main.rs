@@ -28,7 +28,7 @@ async fn main() {
                 // Fallback to hardcoded defaults if config loading fails completely
                 AppConfig {
                     server: ServerConfig {
-                        host: "127.0.0.1".to_string(),
+                        host: "0.0.0.0".to_string(),
                         port: 3048,
                         database_url: Some("sqlite:data/basis.db".to_string()),
                     },
