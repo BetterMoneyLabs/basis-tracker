@@ -16,36 +16,47 @@ pub async fn get_reserves_by_issuer(
 ) -> (StatusCode, Json<ApiResponse<Vec<SerializableReserveInfo>>>) {
     tracing::debug!("Getting reserves for issuer: {}", pubkey_hex);
 
-    // Get reserve info from tracker
-    let tracker = state.reserve_tracker.lock().await;
-    let all_reserves = tracker.get_all_reserves();
+    // Get reserve storage from scanner and query database directly
+    let scanner = state.ergo_scanner.lock().await;
+    let reserve_storage = scanner.reserve_storage();
 
-    // Filter reserves by owner pubkey
-    let reserves: Vec<SerializableReserveInfo> = all_reserves
-        .into_iter()
-        .filter(|reserve| reserve.owner_pubkey == pubkey_hex)
-        .map(|info| {
-            let collateralization_ratio = info.collateralization_ratio();
-            SerializableReserveInfo {
-                box_id: info.box_id,
-                owner_pubkey: info.owner_pubkey,
-                collateral_amount: info.base_info.collateral_amount,
-                total_debt: info.total_debt,
-                tracker_nft_id: info.tracker_nft_id,
-                last_updated_height: info.base_info.last_updated_height,
-                last_updated_timestamp: info.last_updated_timestamp,
-                collateralization_ratio,
-            }
-        })
-        .collect();
+    // Get all reserves from database and filter by issuer
+    match reserve_storage.get_all_reserves() {
+        Ok(all_reserves) => {
+            let reserves: Vec<SerializableReserveInfo> = all_reserves
+                .into_iter()
+                .filter(|reserve| reserve.owner_pubkey == pubkey_hex)
+                .map(|info| {
+                    let collateralization_ratio = info.collateralization_ratio();
+                    SerializableReserveInfo {
+                        box_id: info.box_id,
+                        owner_pubkey: info.owner_pubkey,
+                        collateral_amount: info.base_info.collateral_amount,
+                        total_debt: info.total_debt,
+                        tracker_nft_id: info.tracker_nft_id,
+                        last_updated_height: info.base_info.last_updated_height,
+                        last_updated_timestamp: info.last_updated_timestamp,
+                        collateralization_ratio,
+                    }
+                })
+                .collect();
 
-    tracing::info!(
-        "Returning {} reserves for issuer {}",
-        reserves.len(),
-        pubkey_hex
-    );
+            tracing::info!(
+                "Returning {} reserves for issuer {} (from database)",
+                reserves.len(),
+                pubkey_hex
+            );
 
-    (StatusCode::OK, Json(success_response(reserves)))
+            (StatusCode::OK, Json(success_response(reserves)))
+        }
+        Err(e) => {
+            tracing::error!("Failed to get reserves from database: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response("Failed to retrieve reserves from database".to_string())),
+            )
+        }
+    }
 }
 
 /// Serializable version of ExtendedReserveInfo for API responses

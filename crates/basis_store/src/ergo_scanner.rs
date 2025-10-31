@@ -198,6 +198,11 @@ impl ServerState {
         &self.reserve_tracker
     }
 
+    /// Get the reserve storage for direct database access
+    pub fn reserve_storage(&self) -> &ReserveStorage {
+        &self.reserve_storage
+    }
+
     /// Register reserve scan with Ergo node
     pub async fn register_reserve_scan(&mut self) -> Result<(), ScannerError> {
         let contract_template = self.config.contract_template.as_ref()
