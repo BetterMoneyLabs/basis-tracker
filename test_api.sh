@@ -24,13 +24,18 @@ echo "=== Test 4: Get Key Status ==="
 curl -s "$BASE_URL/key-status/010101010101010101010101010101010101010101010101010101010101010101" | jq .
 echo -e "\n"
 
-# Test 5: Get reserves by issuer
-echo "=== Test 5: Get Reserves by Issuer ==="
+# Test 5: Get all reserves
+echo "=== Test 5: Get All Reserves ==="
+curl -s "$BASE_URL/reserves" | jq .
+echo -e "\n"
+
+# Test 6: Get reserves by issuer
+echo "=== Test 6: Get Reserves by Issuer ==="
 curl -s "$BASE_URL/reserves/issuer/010101010101010101010101010101010101010101010101010101010101010101" | jq .
 echo -e "\n"
 
-# Test 6: Get proof
-echo "=== Test 6: Get Proof ==="
+# Test 7: Get proof
+echo "=== Test 7: Get Proof ==="
 curl -s "$BASE_URL/proof?issuer_pubkey=010101010101010101010101010101010101010101010101010101010101010101&recipient_pubkey=020202020202020202020202020202020202020202020202020202020202020202" | jq .
 echo -e "\n"
 

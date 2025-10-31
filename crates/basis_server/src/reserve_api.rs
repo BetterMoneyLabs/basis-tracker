@@ -8,6 +8,54 @@ use crate::{
     AppState,
 };
 
+/// Get all reserves (regardless of issuer)
+#[axum::debug_handler]
+pub async fn get_all_reserves(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<Vec<SerializableReserveInfo>>>) {
+    tracing::debug!("Getting all reserves");
+
+    // Get reserve storage from scanner and query database directly
+    let scanner = state.ergo_scanner.lock().await;
+    let reserve_storage = scanner.reserve_storage();
+
+    // Get all reserves from database
+    match reserve_storage.get_all_reserves() {
+        Ok(all_reserves) => {
+            let reserves: Vec<SerializableReserveInfo> = all_reserves
+                .into_iter()
+                .map(|info| {
+                    let collateralization_ratio = info.collateralization_ratio();
+                    SerializableReserveInfo {
+                        box_id: info.box_id,
+                        owner_pubkey: info.owner_pubkey,
+                        collateral_amount: info.base_info.collateral_amount,
+                        total_debt: info.total_debt,
+                        tracker_nft_id: info.tracker_nft_id,
+                        last_updated_height: info.base_info.last_updated_height,
+                        last_updated_timestamp: info.last_updated_timestamp,
+                        collateralization_ratio,
+                    }
+                })
+                .collect();
+
+            tracing::info!(
+                "Returning {} reserves (from database)",
+                reserves.len()
+            );
+
+            (StatusCode::OK, Json(success_response(reserves)))
+        }
+        Err(e) => {
+            tracing::error!("Failed to get reserves from database: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response("Failed to retrieve reserves from database".to_string())),
+            )
+        }
+    }
+}
+
 /// Get reserves by issuer public key
 #[axum::debug_handler]
 pub async fn get_reserves_by_issuer(
