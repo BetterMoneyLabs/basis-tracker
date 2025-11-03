@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 
 use reqwest::Client;
 use ergo_lib::ergotree_ir::ergo_tree::ErgoTree;
@@ -84,6 +84,9 @@ impl ServerState {
     pub fn new(config: NodeConfig) -> Result<Self, ScannerError> {
         let start_height = config.start_height.unwrap_or(0);
         let client = Client::new();
+        
+        // Log which Ergo node is being used (INFO level)
+        info!("Initializing Ergo scanner with node: {}", config.node_url);
         
         // Open scanner metadata storage - create directory if it doesn't exist
         let storage_path = std::env::current_dir()
@@ -249,6 +252,10 @@ impl ServerState {
             },
             "removeOffchain": false
         });
+
+        // Log scan registration (INFO level) and JSON payload (DEBUG level)
+        info!("Registering new reserve scan with name: {}", scan_name);
+        debug!("Reserve scan registration JSON payload: {}", scan_payload);
 
         let url = format!("{}/scan/register", self.config.node_url);
         
