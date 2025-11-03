@@ -365,8 +365,12 @@ async fn main() {
     // Start background scanner task for continuous blockchain monitoring
     let scanner_state = app_state.clone();
     let config_clone = config.clone();
-    tokio::spawn(async move {
-        background_scanner_task(scanner_state, config_clone).await;
+    // Use spawn_blocking for scanner since it may use non-Send types
+    tokio::task::spawn_blocking(move || {
+        // Run the scanner in a blocking task
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            background_scanner_task(scanner_state, config_clone).await;
+        });
     });
 
     tracing::info!("Starting axum server...");

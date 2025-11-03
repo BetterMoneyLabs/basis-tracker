@@ -9,6 +9,10 @@ use thiserror::Error;
 use tracing::{info, warn, error};
 
 use reqwest::Client;
+use ergo_lib::ergotree_ir::ergo_tree::ErgoTree;
+use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+use ergo_lib::ergotree_ir::address::AddressEncoder;
+use ergo_lib::ergotree_ir::address::NetworkPrefix;
 
 use crate::{ReserveTracker, ExtendedReserveInfo, persistence::{ScannerMetadataStorage, ReserveStorage}};
 
@@ -68,11 +72,11 @@ pub struct ServerState {
     pub current_height: u64,
     pub last_scanned_height: u64,
     pub scan_active: bool,
-    pub(crate) client: Client,
-    pub(crate) reserve_tracker: ReserveTracker,
-    pub(crate) scan_id: Option<i32>,
-    pub(crate) metadata_storage: ScannerMetadataStorage,
-    pub(crate) reserve_storage: ReserveStorage,
+    pub client: Client,
+    pub reserve_tracker: ReserveTracker,
+    pub scan_id: Option<i32>,
+    pub metadata_storage: ScannerMetadataStorage,
+    pub reserve_storage: ReserveStorage,
 }
 
 impl ServerState {
@@ -206,7 +210,14 @@ impl ServerState {
     /// Register reserve scan with Ergo node
     pub async fn register_reserve_scan(&mut self) -> Result<(), ScannerError> {
         let contract_template = self.config.contract_template.as_ref()
+
             .ok_or_else(|| ScannerError::Generic("Contract template not configured".to_string()))?;
+
+        let tree: ErgoTree = AddressEncoder::new(NetworkPrefix::Mainnet)
+                    .parse_address_from_str(contract_template)
+                    .unwrap()
+                    .script()
+                    .unwrap();
 
         let scan_name = self.config.scan_name
             .as_deref()
@@ -234,7 +245,7 @@ impl ServerState {
             "trackingRule": {
                 "predicate": "contains",
                 "register": "R1",
-                "value": contract_template
+                "value": hex::encode(tree.sigma_serialize_bytes())
             },
             "removeOffchain": false
         });

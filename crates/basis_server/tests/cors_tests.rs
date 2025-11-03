@@ -2,17 +2,17 @@
 
 #[cfg(test)]
 mod cors_tests {
-    use axum::{
-        body::Body,
-        http::{Method, Request, StatusCode},
-        routing::{get, post},
-        Router,
-    };
-    use basis_server::{api::*, reserve_api::*, store::EventStore, AppState, TrackerCommand};
-    use std::sync::Arc;
-    use tokio::sync::mpsc;
-    use tower::ServiceExt;
-    use tower_http::cors::{Any, CorsLayer};
+use axum::{
+    body::Body,
+    http::{Method, Request, StatusCode},
+    routing::{get, post},
+    Router,
+};
+use basis_server::{api::*, reserve_api::*, store::EventStore, AppState, TrackerCommand};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tower::ServiceExt;
+use tower_http::cors::{Any, CorsLayer};
 
     // Test helper to create a mock app state with CORS enabled
     async fn create_mock_app_with_cors() -> Router {
@@ -24,8 +24,36 @@ mod cors_tests {
             node_url: "http://localhost:9053".to_string(),
             ..Default::default()
         };
+        
+        // Create temporary directories for test storage using std::fs
+        let temp_dir = std::env::temp_dir().join(format!("basis_test_{}", std::process::id()));
+        let scanner_metadata_path = temp_dir.join("scanner_metadata");
+        let reserve_storage_path = temp_dir.join("reserves");
+        
+        std::fs::create_dir_all(&scanner_metadata_path).expect("Failed to create scanner metadata dir");
+        std::fs::create_dir_all(&reserve_storage_path).expect("Failed to create reserve storage dir");
+        
+        // Create scanner metadata storage
+        let metadata_storage = basis_store::persistence::ScannerMetadataStorage::open(&scanner_metadata_path)
+            .expect("Failed to create scanner metadata storage");
+        
+        // Create reserve storage
+        let reserve_storage = basis_store::persistence::ReserveStorage::open(&reserve_storage_path)
+            .expect("Failed to create reserve storage");
+        
+        // Create server state with temporary storage
         let ergo_scanner = Arc::new(tokio::sync::Mutex::new(
-            basis_store::ergo_scanner::ServerState::new(config).unwrap(),
+            basis_store::ergo_scanner::ServerState {
+                config,
+                current_height: 0,
+                last_scanned_height: 0,
+                scan_active: false,
+                client: basis_store::reqwest::Client::new(), // Use the same client creation method as basis_store
+                reserve_tracker: basis_store::ReserveTracker::new(),
+                scan_id: None,
+                metadata_storage,
+                reserve_storage,
+            }
         ));
         let reserve_tracker = Arc::new(tokio::sync::Mutex::new(basis_store::ReserveTracker::new()));
 

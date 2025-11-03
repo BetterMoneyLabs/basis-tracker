@@ -436,3 +436,6 @@ pub use ergo_scanner::{
 
 // Re-export redemption types
 pub use redemption::{RedemptionData, RedemptionError, RedemptionManager, RedemptionRequest};
+
+// Re-export reqwest for use in dependent crates
+pub use reqwest;

@@ -4,7 +4,7 @@
 mod tests {
     use crate::ergo_scanner::{ServerState, NodeConfig, ScanBox};
     use crate::{ReserveTracker, ExtendedReserveInfo};
-    use crate::persistence::ScannerMetadataStorage;
+    use crate::persistence::{ScannerMetadataStorage, ReserveStorage};
     use tempfile::TempDir;
 
     /// Test that verifies the reserve tracking functionality
@@ -27,6 +27,11 @@ mod tests {
             scan_name: Some("Test Reserve Scanner".to_string()),
         };
 
+        // Create reserve storage
+        let reserve_storage_path = temp_dir.path().join("reserves");
+        let reserve_storage = ReserveStorage::open(&reserve_storage_path)
+            .expect("Failed to create reserve storage");
+
         // Create server state
         let mut state = ServerState {
             config,
@@ -37,6 +42,7 @@ mod tests {
             reserve_tracker: ReserveTracker::new(),
             scan_id: Some(123),
             metadata_storage,
+            reserve_storage,
         };
 
         // Create test scan boxes that simulate reserve boxes from the blockchain
@@ -212,6 +218,11 @@ mod tests {
             scan_name: Some("Test Scanner".to_string()),
         };
 
+        // Create reserve storage for the second test
+        let reserve_storage_path = temp_dir.path().join("reserves_comprehensive");
+        let reserve_storage = ReserveStorage::open(&reserve_storage_path)
+            .expect("Failed to create reserve storage");
+
         let mut state = ServerState {
             config,
             current_height: 1000,
@@ -221,6 +232,7 @@ mod tests {
             reserve_tracker: ReserveTracker::new(),
             scan_id: Some(123),
             metadata_storage,
+            reserve_storage,
         };
 
         // Test multiple reserve operations
