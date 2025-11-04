@@ -7,7 +7,7 @@ use basis_server::{
     ServerConfig, TrackerCommand, TrackerEvent,
 };
 use basis_store::{
-    ergo_scanner::{create_default_scanner, start_scanner, NodeConfig, ReserveEvent, ServerState},
+    ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
     ReserveTracker,
 };
 use tokio::sync::Mutex;
@@ -61,25 +61,22 @@ async fn main() {
     // Initialize real Ergo scanner with blockchain monitoring
     tracing::info!("Initializing Ergo scanner with blockchain monitoring...");
 
-    // Create real scanner state with configured node URL
-    let ergo_scanner = match create_default_scanner() {
+    // Create scanner configuration with actual contract template
+    let mut scanner_config = config.ergo.node.clone();
+    scanner_config.contract_template = Some(config.ergo.basis_contract_template.clone());
+
+    // Create real scanner state with configured node URL and contract template
+    let ergo_scanner = match ServerState::new(scanner_config) {
         Ok(scanner) => scanner,
         Err(e) => {
             tracing::warn!("Failed to create Ergo scanner: {}", e);
             tracing::info!("Continuing without blockchain scanner...");
             // Create a minimal scanner that won't actually scan
-            let config = NodeConfig::default();
-            match ServerState::new(config) {
-                Ok(scanner) => scanner,
-                Err(_) => {
-                    // If even the minimal scanner fails, create a minimal one with a different approach
-                    let minimal_config = NodeConfig {
-                        node_url: "http://159.89.116.15:11088".to_string(), // Dummy URL that won't be used
-                        ..Default::default()
-                    };
-                    ServerState::new(minimal_config).unwrap_or_else(|_| panic!("Failed to create minimal scanner"))
-                }
-            }
+            let minimal_config = NodeConfig {
+                node_url: "http://159.89.116.15:11088".to_string(), // Dummy URL that won't be used
+                ..Default::default()
+            };
+            ServerState::new(minimal_config).unwrap_or_else(|_| panic!("Failed to create minimal scanner"))
         }
     };
 
