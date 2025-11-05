@@ -36,8 +36,9 @@ async fn main() {
                         node: NodeConfig {
                             start_height: None,
                             contract_template: None,
-                            node_url: "http://213.239.193.208:9053".to_string(),
+                            node_url: "http://159.89.116.15:11088".to_string(),
                             scan_name: Some("Basis Reserve Scanner".to_string()),
+                            api_key: Some("hello".to_string()),
                         },
                         basis_contract_template: "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREnehzz21DdYTdrsuw268CxW3gkXE6D5B8748FYGg3JEVW9R6VFJe8ZDknCtiPbh56QUCJo5QDizMfXaKnJ3jbWV72baYPCw85tmiJowR2wd4AjsEuhZP4Ry4QRDcZPvGogGVbdk7ykPAB7KN2guYEhS7RU3xm23iY1YaM5TX1ditsWfxqCBsvq3U6X5EU2Y5KCrSjQxdtGcwoZsdPQhfpqcwHPcYqM5iwK33EU1cHqggeSKYtLMW263f1TY7Lfu3cKMkav1CyomR183TLnCfkRHN3vcX2e9fSaTpAhkb74yo6ZRXttHNP23JUASWs9ejCaguzGumwK3SpPCLBZY6jFMYWqeaanH7XAtTuJA6UCnxvrKko5PX1oSB435Bxd3FbvDAsEmHpUqqtP78B7SKxFNPvJeZuaN7r5p8nDLxUPZBrWwz2vtcgWPMq5RrnoJdrdqrnXMcMEQPF5AKDYuKMKbCRgn3HLvG98JXJ4bCc2wzuZhnCRQaFXTy88knEoj".to_string(),
                         start_height: 0,
@@ -53,7 +54,7 @@ async fn main() {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
             std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "basis_server=debug,tower_http=debug,axum=debug".into()),
+                .unwrap_or_else(|_| "basis_server=debug,basis_store=debug,tower_http=debug,axum=debug".into()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();

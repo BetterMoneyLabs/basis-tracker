@@ -57,6 +57,12 @@ impl AppConfig {
             .set_default("ergo.basis_contract_template", "")?
             .set_default("ergo.start_height", 0)?
             .set_default("ergo.tracker_nft_id", "")?
+            // Node configuration defaults
+            .set_default("ergo.node.start_height", "")?
+            .set_default("ergo.node.contract_template", "")?
+            .set_default("ergo.node.node_url", "http://159.89.116.15:11088")?
+            .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
+            .set_default("ergo.node.api_key", "hello")?
             // Environment variables
             .add_source(config::Environment::with_prefix("BASIS"))
             // Configuration file

@@ -62,6 +62,8 @@ pub struct NodeConfig {
     pub node_url: String,
     /// Scan registration name
     pub scan_name: Option<String>,
+    /// API key for Ergo node authentication
+    pub api_key: Option<String>,
 }
 
 /// Server state for scanner
@@ -80,6 +82,23 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    /// Create HTTP request builder with API key header if configured
+    fn request_builder(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        debug!("Request method: {}, URL: {}", method, url);
+        
+        let mut request = self.client.request(method, url);
+        
+        // Add API key header if configured
+        if let Some(api_key) = &self.config.api_key {
+            debug!("Using API key '{}' for request to: {}", api_key, url);
+            request = request.header("api_key", api_key);
+        } else {
+            debug!("No API key configured for request to: {}", url);
+        }
+        
+        request
+    }
+
     /// Create a server state that uses real Ergo scanner
     pub fn new(config: NodeConfig) -> Result<Self, ScannerError> {
         let start_height = config.start_height.unwrap_or(0);
@@ -87,6 +106,11 @@ impl ServerState {
         
         // Log which Ergo node is being used (INFO level)
         info!("Initializing Ergo scanner with node: {}", config.node_url);
+        if let Some(api_key) = &config.api_key {
+            info!("Using API key: {}", api_key);
+        } else {
+            warn!("No API key configured for Ergo node");
+        }
         
         // Open scanner metadata storage - create directory if it doesn't exist
         let storage_path = std::env::current_dir()
@@ -147,8 +171,7 @@ impl ServerState {
     pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
         let url = format!("{}/info", self.config.node_url);
         
-        let response = self.client
-            .get(&url)
+        let response = self.request_builder(reqwest::Method::GET, &url)
             .send()
             .await
             .map_err(|e| ScannerError::HttpError(format!("Failed to connect to node: {}", e)))?;
@@ -259,15 +282,34 @@ impl ServerState {
 
         let url = format!("{}/scan/register", self.config.node_url);
         
-        let response = self.client
-            .post(&url)
-            .json(&scan_payload)
+        // Create request builder and log request details
+        let request_builder = self.request_builder(reqwest::Method::POST, &url)
+            .json(&scan_payload);
+        
+        debug!("Sending scan registration request to: {}", url);
+        if let Some(api_key) = &self.config.api_key {
+            debug!("Request includes API key: {}", api_key);
+        } else {
+            debug!("Request does NOT include API key");
+        }
+        
+        let response = request_builder
             .send()
             .await
-            .map_err(|e| ScannerError::HttpError(format!("Failed to register scan: {}", e)))?;
+            .map_err(|e| {
+                error!("HTTP request failed: {}", e);
+                ScannerError::HttpError(format!("Failed to register scan: {}", e))
+            })?;
 
-        if !response.status().is_success() {
-            return Err(ScannerError::NodeError(format!("Scan registration failed with status: {}", response.status())));
+        // Log response details
+        let status = response.status();
+        debug!("Response status: {}", status);
+        
+        if !status.is_success() {
+            // Try to read response body for more details
+            let response_text = response.text().await.unwrap_or_else(|_| "Unable to read response body".to_string());
+            error!("Scan registration failed with status: {}. Response body: {}", status, response_text);
+            return Err(ScannerError::NodeError(format!("Scan registration failed with status: {}. Response: {}", status, response_text)));
         }
 
         let result: serde_json::Value = response
@@ -293,8 +335,7 @@ impl ServerState {
     pub async fn verify_scan_exists(&self, scan_id: i32) -> Result<bool, ScannerError> {
         let url = format!("{}/scan/list", self.config.node_url);
         
-        let response = self.client
-            .get(&url)
+        let response = self.request_builder(reqwest::Method::GET, &url)
             .send()
             .await
             .map_err(|e| ScannerError::HttpError(format!("Failed to list scans: {}", e)))?;
@@ -329,8 +370,7 @@ impl ServerState {
 
         let url = format!("{}/scan/unspentBoxes/{}", self.config.node_url, scan_id);
         
-        let response = self.client
-            .get(&url)
+        let response = self.request_builder(reqwest::Method::GET, &url)
             .send()
             .await
             .map_err(|e| ScannerError::HttpError(format!("Failed to fetch scan boxes: {}", e)))?;
@@ -505,8 +545,9 @@ impl Default for NodeConfig {
         Self {
             start_height: None,
             contract_template: None,
-            node_url: "http://213.239.193.208:9053".to_string(), // Public Ergo node
+            node_url: "http://159.89.116.15:11088".to_string(), // Your Ergo node
             scan_name: Some("Basis Reserve Scanner".to_string()),
+            api_key: Some("hello".to_string()),
         }
     }
 }
