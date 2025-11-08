@@ -1,6 +1,8 @@
 //! Simple integration tests that work with the reserves-only scanner implementation
 
-use crate::ergo_scanner::{create_default_scanner, NodeConfig, ReserveEvent, ScannerError, ServerState};
+use crate::ergo_scanner::{
+    create_default_scanner, NodeConfig, ReserveEvent, ScannerError, ServerState,
+};
 
 /// Simple integration test suite that works with the reserves-only scanner
 pub struct SimpleIntegrationTestSuite {
@@ -39,7 +41,7 @@ impl SimpleIntegrationTestSuite {
 
         // Start scanning
         self.scanner.start_scanning().await?;
-        assert!(self.scanner.is_active(), "Scanner should be active");
+        assert!(self.scanner.is_active().await, "Scanner should be active");
 
         let last_scanned = self.scanner.last_scanned_height();
         assert!(
@@ -82,6 +84,6 @@ mod tests {
 
         // Scanner should be created successfully
         // Note: scanner starts inactive until start_scanning is called
-        assert!(!test_suite.scanner.is_active());
+        assert!(!test_suite.scanner.is_active().await);
     }
 }

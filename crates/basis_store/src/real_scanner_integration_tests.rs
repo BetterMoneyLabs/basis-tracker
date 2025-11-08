@@ -49,7 +49,7 @@ impl RealScannerIntegrationTestSuite {
         // Start scanning
         self.scanner.start_scanning().await?;
 
-        assert!(self.scanner.is_active(), "Scanner should be active");
+        assert!(self.scanner.is_active().await, "Scanner should be active");
 
         let last_scanned = self.scanner.last_scanned_height();
         assert!(

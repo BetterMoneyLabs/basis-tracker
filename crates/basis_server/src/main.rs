@@ -386,7 +386,7 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
         };
 
         // Check if scanner is active
-        if !scanner.is_active() {
+        if !scanner.is_active().await {
             tracing::warn!("Scanner is not active, attempting to restart...");
             match scanner.start_scanning().await {
                 Ok(()) => {

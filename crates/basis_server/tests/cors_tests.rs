@@ -27,33 +27,9 @@ use tower_http::cors::{Any, CorsLayer};
         
         // Create temporary directories for test storage using std::fs
         let temp_dir = std::env::temp_dir().join(format!("basis_test_{}", std::process::id()));
-        let scanner_metadata_path = temp_dir.join("scanner_metadata");
-        let reserve_storage_path = temp_dir.join("reserves");
-        
-        std::fs::create_dir_all(&scanner_metadata_path).expect("Failed to create scanner metadata dir");
-        std::fs::create_dir_all(&reserve_storage_path).expect("Failed to create reserve storage dir");
-        
-        // Create scanner metadata storage
-        let metadata_storage = basis_store::persistence::ScannerMetadataStorage::open(&scanner_metadata_path)
-            .expect("Failed to create scanner metadata storage");
-        
-        // Create reserve storage
-        let reserve_storage = basis_store::persistence::ReserveStorage::open(&reserve_storage_path)
-            .expect("Failed to create reserve storage");
-        
         // Create server state with temporary storage
         let ergo_scanner = Arc::new(tokio::sync::Mutex::new(
-            basis_store::ergo_scanner::ServerState {
-                config,
-                current_height: 0,
-                last_scanned_height: 0,
-                scan_active: false,
-                client: basis_store::reqwest::Client::new(), // Use the same client creation method as basis_store
-                reserve_tracker: basis_store::ReserveTracker::new(),
-                scan_id: None,
-                metadata_storage,
-                reserve_storage,
-            }
+            basis_store::ergo_scanner::ServerState::new(config).unwrap()
         ));
         let reserve_tracker = Arc::new(tokio::sync::Mutex::new(basis_store::ReserveTracker::new()));
 

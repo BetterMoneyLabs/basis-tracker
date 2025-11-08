@@ -1,6 +1,6 @@
 //! Persistence layer for IouNote storage using fjall database
 
-use crate::{IouNote, NoteError, NoteKey, PubKey, reserve_tracker::ExtendedReserveInfo};
+use crate::{reserve_tracker::ExtendedReserveInfo, IouNote, NoteError, NoteKey, PubKey};
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
 
@@ -52,11 +52,16 @@ impl ScannerMetadataStorage {
                     let scan_id = i32::from_be_bytes(value_bytes[0..4].try_into().unwrap());
                     Ok(Some(scan_id))
                 } else {
-                    Err(NoteError::StorageError("Invalid scan ID format".to_string()))
+                    Err(NoteError::StorageError(
+                        "Invalid scan ID format".to_string(),
+                    ))
                 }
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(NoteError::StorageError(format!("Failed to get scan ID: {}", e))),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get scan ID: {}",
+                e
+            ))),
         }
     }
 
@@ -328,12 +333,17 @@ impl ReserveStorage {
     pub fn get_reserve(&self, box_id: &str) -> Result<Option<ExtendedReserveInfo>, NoteError> {
         match self.partition.get(box_id.as_bytes()) {
             Ok(Some(value_bytes)) => {
-                let reserve: ExtendedReserveInfo = serde_json::from_slice(&value_bytes)
-                    .map_err(|e| NoteError::StorageError(format!("Failed to deserialize reserve: {}", e)))?;
+                let reserve: ExtendedReserveInfo =
+                    serde_json::from_slice(&value_bytes).map_err(|e| {
+                        NoteError::StorageError(format!("Failed to deserialize reserve: {}", e))
+                    })?;
                 Ok(Some(reserve))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(NoteError::StorageError(format!("Failed to get reserve: {}", e))),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get reserve: {}",
+                e
+            ))),
         }
     }
 
@@ -346,8 +356,10 @@ impl ReserveStorage {
                 NoteError::StorageError(format!("Failed to iterate partition: {}", e))
             })?;
 
-            let reserve: ExtendedReserveInfo = serde_json::from_slice(&value_bytes)
-                .map_err(|e| NoteError::StorageError(format!("Failed to deserialize reserve: {}", e)))?;
+            let reserve: ExtendedReserveInfo =
+                serde_json::from_slice(&value_bytes).map_err(|e| {
+                    NoteError::StorageError(format!("Failed to deserialize reserve: {}", e))
+                })?;
 
             reserves.push(reserve);
         }
