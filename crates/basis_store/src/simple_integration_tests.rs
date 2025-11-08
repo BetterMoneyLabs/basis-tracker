@@ -43,7 +43,7 @@ impl SimpleIntegrationTestSuite {
         self.scanner.start_scanning().await?;
         assert!(self.scanner.is_active().await, "Scanner should be active");
 
-        let last_scanned = self.scanner.last_scanned_height();
+        let last_scanned = self.scanner.last_scanned_height().await;
         assert!(
             last_scanned >= 0,
             "Last scanned height should be non-negative"

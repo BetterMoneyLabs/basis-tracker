@@ -259,8 +259,8 @@ impl ServerState {
     }
 
     /// Get last scanned height
-    pub fn last_scanned_height(&self) -> u64 {
-        let inner = self.inner.blocking_lock();
+    pub async fn last_scanned_height(&self) -> u64 {
+        let inner = self.inner.lock().await;
         inner.last_scanned_height
     }
 
@@ -868,7 +868,7 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
                     }
                 } else {
                     // Process scan boxes if we have a valid scan
-                    if height > state.last_scanned_height() {
+                    if height > state.last_scanned_height().await {
                         match state.process_scan_boxes().await {
                             Ok(()) => {
                                 consecutive_failures = 0;

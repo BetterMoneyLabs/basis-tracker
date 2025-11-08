@@ -428,7 +428,7 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                         &owner_pubkey,
                         ergo_box.value,
                         config.tracker_nft_bytes().ok().flatten().as_deref(),
-                        scanner.last_scanned_height(),
+                        scanner.last_scanned_height().await,
                     );
 
                     if let Err(e) = tracker.update_reserve(reserve_info) {
