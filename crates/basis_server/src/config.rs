@@ -31,8 +31,6 @@ pub struct ErgoConfig {
     pub node: NodeConfig,
     /// Basis contract template (hex-encoded)
     pub basis_contract_template: String,
-    /// Starting block height for scanning (legacy, use node.start_height instead)
-    pub start_height: u64,
     /// Tracker NFT ID (hex-encoded) - identifies the tracker server for reserve contracts
     pub tracker_nft_id: Option<String>,
 }
@@ -54,7 +52,6 @@ impl AppConfig {
             .set_default("server.host", "0.0.0.0")?
             .set_default("server.port", 3048)?
             .set_default("server.database_url", "sqlite:data/basis.db")?
-            .set_default("ergo.start_height", 0)?
             // Node configuration defaults
             .set_default("ergo.node.start_height", "")?
             .set_default("ergo.node.contract_template", "")?
@@ -79,12 +76,7 @@ impl AppConfig {
 
     /// Get the Ergo node configuration
     pub fn ergo_node_config(&self) -> NodeConfig {
-        let mut node_config = self.ergo.node.clone();
-        // Set start_height from legacy field if not already set
-        if node_config.start_height.is_none() && self.ergo.start_height > 0 {
-            node_config.start_height = Some(self.ergo.start_height);
-        }
-        node_config
+        self.ergo.node.clone()
     }
 
     /// Get the Basis contract template bytes
