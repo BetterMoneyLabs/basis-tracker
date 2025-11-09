@@ -54,9 +54,7 @@ impl AppConfig {
             .set_default("server.host", "0.0.0.0")?
             .set_default("server.port", 3048)?
             .set_default("server.database_url", "sqlite:data/basis.db")?
-            .set_default("ergo.basis_contract_template", "")?
             .set_default("ergo.start_height", 0)?
-            .set_default("ergo.tracker_nft_id", "")?
             // Node configuration defaults
             .set_default("ergo.node.start_height", "")?
             .set_default("ergo.node.contract_template", "")?
