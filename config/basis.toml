@@ -15,3 +15,7 @@ tracker_nft_id = "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86
 url = "http://159.89.116.15:11088"
 api_key = "hello"
 timeout_secs = 30
+
+[transaction]
+# Default transaction fee in nanoERG (0.001 ERG = 1,000,000 nanoERG)
+fee = 1000000

@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     /// Ergo node configuration
     pub ergo: ErgoConfig,
+    /// Transaction configuration
+    pub transaction: TransactionConfig,
 }
 
 /// Server-specific configuration
@@ -33,6 +35,13 @@ pub struct ErgoConfig {
     pub basis_reserve_contract_p2s: String,
     /// Tracker NFT ID (hex-encoded) - identifies the tracker server for reserve contracts
     pub tracker_nft_id: Option<String>,
+}
+
+/// Transaction configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionConfig {
+    /// Default transaction fee in nanoERG (0.001 ERG = 1,000,000 nanoERG)
+    pub fee: u64,
 }
 
 impl AppConfig {
@@ -58,6 +67,8 @@ impl AppConfig {
             .set_default("ergo.node.node_url", "http://159.89.116.15:11088")?
             .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
             .set_default("ergo.node.api_key", "hello")?
+            // Transaction configuration defaults
+            .set_default("transaction.fee", 1000000)? // 0.001 ERG
             // Environment variables
             .add_source(config::Environment::with_prefix("BASIS"))
             // Configuration file
@@ -90,5 +101,10 @@ impl AppConfig {
             Some(nft_id) if !nft_id.is_empty() => hex::decode(nft_id).map(Some),
             _ => Ok(None),
         }
+    }
+
+    /// Get the default transaction fee
+    pub fn transaction_fee(&self) -> u64 {
+        self.transaction.fee
     }
 }
