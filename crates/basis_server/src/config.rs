@@ -29,8 +29,8 @@ pub struct ServerConfig {
 pub struct ErgoConfig {
     /// Ergo node configuration
     pub node: NodeConfig,
-    /// Basis contract template (hex-encoded)
-    pub basis_contract_template: String,
+    /// Basis reserve contract P2S address
+    pub basis_reserve_contract_p2s: String,
     /// Tracker NFT ID (hex-encoded) - identifies the tracker server for reserve contracts
     pub tracker_nft_id: Option<String>,
 }
@@ -54,7 +54,7 @@ impl AppConfig {
             .set_default("server.database_url", "sqlite:data/basis.db")?
             // Node configuration defaults
             .set_default("ergo.node.start_height", "")?
-            .set_default("ergo.node.contract_template", "")?
+            .set_default("ergo.node.reserve_contract_p2s", "")?
             .set_default("ergo.node.node_url", "http://159.89.116.15:11088")?
             .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
             .set_default("ergo.node.api_key", "hello")?
@@ -79,9 +79,9 @@ impl AppConfig {
         self.ergo.node.clone()
     }
 
-    /// Get the Basis contract template bytes
-    pub fn basis_contract_bytes(&self) -> Result<Vec<u8>, hex::FromHexError> {
-        hex::decode(&self.ergo.basis_contract_template)
+    /// Get the Basis reserve contract P2S address
+    pub fn basis_reserve_contract_p2s(&self) -> &str {
+        &self.ergo.basis_reserve_contract_p2s
     }
 
     /// Get the tracker NFT ID bytes (if configured)

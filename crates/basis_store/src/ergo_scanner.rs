@@ -62,8 +62,8 @@ impl ScanType {
 pub struct NodeConfig {
     /// Starting block height for scanning
     pub start_height: Option<u64>,
-    /// Basis reserve contract template hash (optional)
-    pub contract_template: Option<String>,
+    /// Basis reserve contract P2S address (optional)
+    pub reserve_contract_p2s: Option<String>,
     /// Ergo node URL
     pub node_url: String,
     /// Scan registration name
@@ -104,9 +104,11 @@ impl ServerState {
         // Add API key header if configured
         if let Some(api_key) = &self.config.api_key {
             debug!("Using API key '{}' for request to: {}", api_key, url);
+            info!("Adding HTTP header: api_key: {}", api_key);
             request = request.header("api_key", api_key);
         } else {
             debug!("No API key configured for request to: {}", url);
+            info!("No API key header added to HTTP request");
         }
 
         request
@@ -247,12 +249,12 @@ impl ServerState {
             inner.scan_active = true;
         }
 
-        if let Some(contract_template) = &self.config.contract_template {
-            info!("Using reserve contract template: {}", contract_template);
+        if let Some(reserve_contract_p2s) = &self.config.reserve_contract_p2s {
+            info!("Using reserve contract P2S: {}", reserve_contract_p2s);
             // Register the scan for reserves
             self.register_reserve_scan().await?;
         } else {
-            warn!("No contract template specified, using polling mode");
+            warn!("No reserve contract P2S specified, using polling mode");
         }
 
         Ok(())
@@ -278,9 +280,9 @@ impl ServerState {
 
     /// Register reserve scan with Ergo node
     pub async fn register_reserve_scan(&mut self) -> Result<(), ScannerError> {
-        let contract_template =
-            self.config.contract_template.as_ref().ok_or_else(|| {
-                ScannerError::Generic("Contract template not configured".to_string())
+        let reserve_contract_p2s =
+            self.config.reserve_contract_p2s.as_ref().ok_or_else(|| {
+                ScannerError::Generic("Reserve contract P2S not configured".to_string())
             })?;
 
         let scan_name = self
@@ -385,7 +387,7 @@ impl ServerState {
         // Create the ErgoTree and serialize it right before use (don't hold it across await)
         let serialized_contract_bytes = {
             let tree: ErgoTree = AddressEncoder::new(NetworkPrefix::Mainnet)
-                .parse_address_from_str(contract_template)
+                .parse_address_from_str(reserve_contract_p2s)
                 .unwrap()
                 .script()
                 .unwrap();
@@ -417,6 +419,10 @@ impl ServerState {
             .request_builder(reqwest::Method::POST, &url)
             .json(&scan_payload);
 
+        // Log exact HTTP request details
+        info!("Sending HTTP POST request to Ergo node: {}", url);
+        info!("Request headers: API key present: {}", self.config.api_key.is_some());
+        info!("Request body (JSON): {}", scan_payload);
         debug!("Sending scan registration request to: {}", url);
         debug!(
             "Request headers include: {}",
@@ -532,6 +538,8 @@ impl ServerState {
         let url = format!("{}/scan/listAll", self.config.node_url);
         debug!("Verifying scan exists - URL: {}", url);
         debug!("Looking for scan ID: {}", scan_id);
+        info!("Sending HTTP GET request to Ergo node: {}", url);
+        info!("Looking for scan ID: {}", scan_id);
 
         let response = self
             .request_builder(reqwest::Method::GET, &url)
@@ -624,6 +632,9 @@ impl ServerState {
             scan_id.ok_or_else(|| ScannerError::Generic("Scan not registered".to_string()))?;
 
         let url = format!("{}/scan/unspentBoxes/{}", self.config.node_url, scan_id);
+
+        info!("Sending HTTP GET request to Ergo node: {}", url);
+        info!("Requesting unspent boxes for scan ID: {}", scan_id);
 
         let response = self
             .request_builder(reqwest::Method::GET, &url)
@@ -734,10 +745,10 @@ impl ServerState {
         Ok(())
     }
 
-    /// Get the contract template bytecode for scan registration
-    async fn get_contract_template(&self) -> Result<String, ScannerError> {
-        self.config.contract_template.clone().ok_or_else(|| {
-            ScannerError::Generic("No contract template configured in node config".to_string())
+    /// Get the reserve contract P2S for scan registration
+    async fn get_reserve_contract_p2s(&self) -> Result<String, ScannerError> {
+        self.config.reserve_contract_p2s.clone().ok_or_else(|| {
+            ScannerError::Generic("No reserve contract P2S configured in node config".to_string())
         })
     }
 }
@@ -820,7 +831,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             start_height: None,
-            contract_template: None,
+            reserve_contract_p2s: None,
             node_url: "http://159.89.116.15:11088".to_string(), // Your Ergo node
             scan_name: Some("Basis Reserve Scanner".to_string()),
             api_key: Some("hello".to_string()),

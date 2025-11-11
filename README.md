@@ -156,7 +156,7 @@ async fn main() {
     let mut scanner = create_ergo_scanner(
         "http://localhost:9053", 
         "basis_reserves", 
-        "contract_template_hash"
+        "reserve_contract_p2s"
     );
     
     scanner.initialize().await.unwrap();

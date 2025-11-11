@@ -22,7 +22,7 @@ mod tests {
         // Create a test configuration
         let config = NodeConfig {
             start_height: Some(0),
-            contract_template: Some("test_contract_template".to_string()),
+            reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
             node_url: "http://test-node:9053".to_string(),
             scan_name: Some("Test Reserve Scanner".to_string()),
             api_key: None,
@@ -244,7 +244,7 @@ mod tests {
 
         let config = NodeConfig {
             start_height: Some(0),
-            contract_template: Some("test_contract".to_string()),
+            reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
             node_url: "http://test:9053".to_string(),
             scan_name: Some("Test Scanner".to_string()),
             api_key: None,
