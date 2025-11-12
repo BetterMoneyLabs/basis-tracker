@@ -6,6 +6,7 @@ pub mod cross_verification;
 pub mod ergo_scanner;
 pub mod persistence;
 pub mod redemption;
+pub mod transaction_builder;
 #[cfg(test)]
 pub mod redemption_blockchain_tests;
 #[cfg(test)]
@@ -28,6 +29,8 @@ pub mod real_scanner_integration_tests;
 pub mod reserve_tracking_test;
 #[cfg(test)]
 pub mod test_helpers;
+#[cfg(test)]
+pub mod transaction_builder_tests;
 
 
 use blake2::{Blake2b512, Digest};

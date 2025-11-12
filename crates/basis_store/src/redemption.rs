@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 use crate::{IouNote, NoteError, PubKey, TrackerStateManager};
+use crate::transaction_builder::{RedemptionTransactionBuilder, TxContext};
 
 #[derive(Error, Debug)]
 pub enum RedemptionError {
@@ -160,11 +161,16 @@ impl RedemptionManager {
             note.timestamp
         );
 
-        // Mock transaction bytes (in real implementation, this would be actual transaction bytes)
-        let transaction_bytes = hex::encode(format!(
-            "mock_tx_{}_{}_{}",
-            request.reserve_box_id, request.amount, note.timestamp
-        ));
+        // Use real transaction builder instead of mock
+        let transaction_bytes = crate::transaction_builder::RedemptionTransactionBuilder::build_redemption_transaction(
+            &request.reserve_box_id,
+            "tracker_box_placeholder", // TODO: Get actual tracker box ID
+            &request.recipient_address,
+            request.amount,
+            1000000, // 0.001 ERG fee from config
+            1000,    // TODO: Get actual current height
+        )
+        .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
         // Required signatures: issuer and tracker
         let required_signatures = vec![
@@ -185,7 +191,92 @@ impl RedemptionManager {
             redemption_id,
             note: note.clone(),
             avl_proof: proof.avl_proof.clone(),
-            transaction_bytes,
+            transaction_bytes: hex::encode(transaction_bytes),
+            required_signatures,
+            estimated_fee,
+            redemption_time,
+        })
+    }
+
+    /// Build real redemption transaction data for blockchain integration
+    /// 
+    /// This method prepares the complete redemption transaction structure by:
+    /// 1. Validating the redemption request parameters
+    /// 2. Preparing transaction components (inputs, outputs, data inputs)
+    /// 3. Assembling context extension with contract parameters
+    /// 4. Creating transaction bytes (currently mock, will be real ergo-lib)
+    /// 
+    /// The resulting transaction follows the Basis contract specification:
+    /// - Spends the reserve box to redeem collateral
+    /// - Uses tracker box as data input for AVL proof verification
+    /// - Creates updated reserve box with reduced collateral
+    /// - Sends redeemed funds to recipient address
+    /// - Includes Schnorr signatures and AVL proofs
+    /// 
+    /// When blockchain integration is complete, this will produce actual
+    /// Ergo transactions that can be submitted to the network.
+    pub fn prepare_real_redemption_transaction(
+        &self,
+        note: &IouNote,
+        proof: &crate::NoteProof,
+        request: &RedemptionRequest,
+        reserve_box_id: &str,
+        tracker_box_id: &str,
+        issuer_sig: &[u8],
+        tracker_sig: &[u8],
+        context: &TxContext,
+    ) -> Result<RedemptionData, RedemptionError> {
+        let issuer_pubkey = parse_pubkey(&request.issuer_pubkey)?;
+
+        // Prepare complete transaction data structure
+        // This validates all parameters and assembles the transaction components
+        let transaction_data = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            reserve_box_id,
+            tracker_box_id,
+            note,
+            &issuer_pubkey,
+            &request.recipient_address,
+            &proof.avl_proof,
+            issuer_sig,
+            tracker_sig,
+            context,
+        ).map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
+
+        // Generate unique redemption ID for tracking
+        let redemption_id = format!(
+            "redeem_{}_{}_{}",
+            &request.issuer_pubkey[..16],
+            &request.recipient_pubkey[..16],
+            note.timestamp
+        );
+
+        // Create transaction bytes (currently mock, will be real ergo-lib serialization)
+        // When blockchain integration is ready, this will use:
+        // unsigned_tx.sigma_serialize_bytes() from ergo-lib
+        let transaction_bytes = hex::encode(
+            RedemptionTransactionBuilder::create_mock_transaction_bytes(&transaction_data)
+        );
+
+        // Required signatures: issuer and tracker
+        let required_signatures = vec![
+            request.issuer_pubkey.clone(),
+            "tracker_signature_key".to_string(), // Placeholder - in real implementation, this would be tracker's pubkey
+        ];
+
+        // Use configured fee
+        let estimated_fee = context.fee;
+
+        // Redemption can happen immediately since we checked the time lock
+        let redemption_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        Ok(RedemptionData {
+            redemption_id,
+            note: note.clone(),
+            avl_proof: proof.avl_proof.clone(),
+            transaction_bytes: hex::encode(transaction_bytes),
             required_signatures,
             estimated_fee,
             redemption_time,

@@ -29,6 +29,31 @@ pub fn create_test_note(amount: u64, timestamp: u64) -> IouNote {
         .expect("Failed to create test note")
 }
 
+/// Create test transaction context following chaincash-rs patterns
+pub fn create_test_tx_context() -> crate::transaction_builder::TxContext {
+    crate::transaction_builder::TxContext {
+        current_height: 1000,
+        fee: 1000000, // 0.001 ERG - same as chaincash-rs SUGGESTED_TX_FEE
+        change_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+        network_prefix: 0, // mainnet
+    }
+}
+
+/// Create test reserve box ID
+pub fn create_test_reserve_box_id() -> String {
+    "e56847ed19b3dc6b712351b2a6c8a5e3c8e8b5a3c6d8e7f4a2b9c1d3e5f7a9b1".to_string()
+}
+
+/// Create test tracker box ID
+pub fn create_test_tracker_box_id() -> String {
+    "f67858fe2ac4ed7c823462c3b7d9b6f4d9f9c6b4d7e9f8g5c3d4e2f6g8b0c2d".to_string()
+}
+
+/// Create test recipient address
+pub fn create_test_recipient_address() -> String {
+    "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string()
+}
+
 /// Create test notes with specific issuer and recipient
 pub fn create_test_note_with_keys(
     issuer_secret: &[u8; 32],
