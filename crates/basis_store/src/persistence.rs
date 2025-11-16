@@ -1,6 +1,6 @@
 //! Persistence layer for IouNote storage using fjall database
 
-use crate::{reserve_tracker::ExtendedReserveInfo, IouNote, NoteError, NoteKey, PubKey};
+use crate::{reserve_tracker::ExtendedReserveInfo, IouNote, NoteError, NoteKey, PubKey, TrackerBoxInfo};
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
 
@@ -18,6 +18,12 @@ pub struct ScannerMetadataStorage {
 /// Database storage for reserve information
 #[derive(Clone)]
 pub struct ReserveStorage {
+    partition: fjall::Partition,
+}
+
+/// Database storage for tracker information
+#[derive(Clone)]
+pub struct TrackerStorage {
     partition: fjall::Partition,
 }
 
@@ -372,6 +378,81 @@ impl ReserveStorage {
         self.partition
             .remove(box_id.as_bytes())
             .map_err(|e| NoteError::StorageError(format!("Failed to remove reserve: {}", e)))?;
+
+        Ok(())
+    }
+}
+
+impl TrackerStorage {
+    /// Open or create a new tracker storage database
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, NoteError> {
+        let keyspace = Config::new(path)
+            .open()
+            .map_err(|e| NoteError::StorageError(format!("Failed to open database: {}", e)))?;
+
+        let partition = keyspace
+            .open_partition("tracker_metadata", PartitionCreateOptions::default())
+            .map_err(|e| NoteError::StorageError(format!("Failed to open partition: {}", e)))?;
+
+        Ok(Self { partition })
+    }
+
+    /// Store tracker box information in the database
+    pub fn store_tracker_box(&self, tracker_box: &TrackerBoxInfo) -> Result<(), NoteError> {
+        let key = tracker_box.box_id.as_bytes();
+        let value = serde_json::to_vec(tracker_box)
+            .map_err(|e| NoteError::StorageError(format!("Failed to serialize tracker box: {}", e)))?;
+
+        self.partition
+            .insert(key, &value)
+            .map_err(|e| NoteError::StorageError(format!("Failed to store tracker box: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Retrieve tracker box by box ID
+    pub fn get_tracker_box(&self, box_id: &str) -> Result<Option<TrackerBoxInfo>, NoteError> {
+        match self.partition.get(box_id.as_bytes()) {
+            Ok(Some(value_bytes)) => {
+                let tracker_box: TrackerBoxInfo =
+                    serde_json::from_slice(&value_bytes).map_err(|e| {
+                        NoteError::StorageError(format!("Failed to deserialize tracker box: {}", e))
+                    })?;
+                Ok(Some(tracker_box))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get tracker box: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Get all tracker boxes from the database
+    pub fn get_all_tracker_boxes(&self) -> Result<Vec<TrackerBoxInfo>, NoteError> {
+        let mut tracker_boxes = Vec::new();
+
+        for item in self.partition.iter() {
+            let (_key_bytes, value_bytes) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate partition: {}", e))
+            })?;
+
+            let tracker_box: TrackerBoxInfo =
+                serde_json::from_slice(&value_bytes).map_err(|e| {
+                    NoteError::StorageError(format!("Failed to deserialize tracker box: {}", e))
+                })?;
+
+            tracker_boxes.push(tracker_box);
+        }
+
+        Ok(tracker_boxes)
+    }
+
+    /// Remove a tracker box from the database
+    pub fn remove_tracker_box(&self, box_id: &str) -> Result<(), NoteError> {
+        self.partition
+            .remove(box_id.as_bytes())
+            .map_err(|e| NoteError::StorageError(format!("Failed to remove tracker box: {}", e)))?;
 
         Ok(())
     }

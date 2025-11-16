@@ -30,3 +30,6 @@ server.pid
 
 # Crush context file
 .crush_context
+
+# Implementation plans (not meant for git)
+tracker_box_scan_plan.md

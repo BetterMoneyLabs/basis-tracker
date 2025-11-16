@@ -6,6 +6,7 @@ pub mod cross_verification;
 pub mod ergo_scanner;
 pub mod persistence;
 pub mod redemption;
+pub mod tracker_scanner;
 pub mod transaction_builder;
 #[cfg(test)]
 pub mod redemption_blockchain_tests;
@@ -21,6 +22,8 @@ pub mod tests;
 // Test modules
 #[cfg(test)]
 pub mod cross_verification_tests;
+#[cfg(test)]
+pub mod tracker_scanner_test;
 #[cfg(test)]
 pub mod property_tests;
 #[cfg(test)]
@@ -77,6 +80,25 @@ pub struct ReserveInfo {
     pub last_updated_height: u64,
     /// Reserve contract address
     pub contract_address: String,
+}
+
+/// Tracker box information for state commitment boxes
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TrackerBoxInfo {
+    /// Box ID (hex encoded)
+    pub box_id: String,
+    /// Tracker public key (hex encoded, from R4)
+    pub tracker_pubkey: String,
+    /// State commitment hash (hex encoded, from R5)
+    pub state_commitment: String,
+    /// Last verified height (from R6)
+    pub last_verified_height: u64,
+    /// Box value in nanoERG
+    pub value: u64,
+    /// Creation height
+    pub creation_height: u64,
+    /// Tracker NFT ID (hex encoded)
+    pub tracker_nft_id: String,
 }
 
 /// Proof for a specific note against tracker state
