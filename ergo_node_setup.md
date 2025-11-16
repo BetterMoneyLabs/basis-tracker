@@ -38,7 +38,7 @@ Configuration loaded successfully
 Initializing Ergo scanner...
 Ergo scanner started successfully
 Current blockchain height: 1000
-Server listening on 127.0.0.1:3000
+Server listening on 127.0.0.1:3048
 ```
 
 ### Test with CLI

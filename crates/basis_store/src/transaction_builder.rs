@@ -195,10 +195,10 @@ impl RedemptionTransactionBuilder {
         // This helps with testing and debugging without requiring actual blockchain integration
         let mock_data = format!(
             "redemption_tx:reserve={},tracker={},amount={},recipient={},fee={}",
-            &transaction_data.reserve_box_id[..std::cmp::min(16, transaction_data.reserve_box_id.len())], // First 16 chars of box ID
-            &transaction_data.tracker_box_id[..std::cmp::min(16, transaction_data.tracker_box_id.len())], // First 16 chars of box ID
+            &transaction_data.reserve_box_id[..std::cmp::min(16, transaction_data.reserve_box_id.len())],
+            &transaction_data.tracker_box_id[..std::cmp::min(16, transaction_data.tracker_box_id.len())],
             transaction_data.redemption_amount,
-            &transaction_data.recipient_address[..std::cmp::min(16, transaction_data.recipient_address.len())], // First 16 chars of address
+            &transaction_data.recipient_address[..std::cmp::min(16, transaction_data.recipient_address.len())],
             transaction_data.fee
         );
         
@@ -277,22 +277,25 @@ impl RedemptionTransactionBuilder {
         fee: u64,
         current_height: u32,
     ) -> Result<Vec<u8>, TransactionBuilderError> {
-        // For now, create a transaction structure that simulates real Ergo transaction format
-        // In a full implementation, this would use ergo-lib to build actual transactions
-        // following the chaincash-rs patterns:
-        // - Use TxBuilder from ergo-lib
-        // - Create proper box inputs and outputs
-        // - Set context extensions for contract parameters
-        // - Include data inputs for AVL proof verification
+        // In a real implementation, we would:
+        // 1. Fetch the reserve box and tracker box from the blockchain
+        // 2. Create updated reserve box output with reduced collateral
+        // 3. Create redemption output box for recipient
+        // 4. Set context extension with contract parameters
+        // 5. Build and serialize the transaction
+        
+        // For now, create a mock transaction that follows ergo-lib patterns
+        // This will be replaced with actual ergo-lib transaction building
+        // when blockchain integration is complete
         
         // Create a transaction structure that includes all necessary components
         // This follows chaincash-rs pattern of creating structured transaction data
         let real_tx_data = format!(
             "ergo_tx_v1:reserve={},tracker={},amount={},recipient={},fee={},height={}",
-            reserve_box_id,
-            tracker_box_id,
+            &reserve_box_id[..std::cmp::min(16, reserve_box_id.len())],
+            &tracker_box_id[..std::cmp::min(16, tracker_box_id.len())],
             redemption_amount,
-            recipient_address,
+            &recipient_address[..std::cmp::min(16, recipient_address.len())],
             fee,
             current_height
         );
@@ -303,6 +306,8 @@ impl RedemptionTransactionBuilder {
 
         Ok(tx_bytes)
     }
+
+
 }
 
 #[cfg(test)]
@@ -569,8 +574,8 @@ mod tests {
         
         let tx_string = String::from_utf8_lossy(&tx_bytes);
         assert!(tx_string.contains("ergo_tx_v1"));
-        assert!(tx_string.contains("e56847ed19b3dc6b712351b2a6c8a5e3c8e8b5a3c6d8e7f4a2b9c1d3e5f7a9b1")); // reserve box ID
-        assert!(tx_string.contains("f67858fe2ac4ed7c823462c3b7d9b6f4d9f9c6b4d7e9f8g5c3d4e2f6g8b0c2d")); // tracker box ID
+        assert!(tx_string.contains("e56847ed19b3dc6b")); // first 16 chars of reserve box ID
+        assert!(tx_string.contains("f67858fe2ac4ed7c")); // first 16 chars of tracker box ID
         assert!(tx_string.contains("100000000")); // redemption amount
     }
 }

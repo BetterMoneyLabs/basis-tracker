@@ -17,7 +17,7 @@ cd /home/kushti/bml/basis-tracker
 # Build and run the server
 cargo run -p basis_server
 
-# The server will start and display: "DEBUG basis_server: listening on 127.0.0.1:3000"
+# The server will start and display: "DEBUG basis_server: listening on 127.0.0.1:3048"
 ```
 
 ### Method 2: From the server crate directory

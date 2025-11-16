@@ -4,7 +4,7 @@
 #[test]
 fn test_cli_note_list_issuer_should_not_return_404() {
     // PROBLEM: When running "basis_cli note list --issuer", the CLI returns:
-    // Error: http://127.0.0.1:3000/notes/issuer/...: Connection Failed: Connect error: Connection refused
+    // Error: http://127.0.0.1:3048/notes/issuer/...: Connection Failed: Connect error: Connection refused
     //
     // EXPECTED BEHAVIOR:
     // - The server should be running and handle the request

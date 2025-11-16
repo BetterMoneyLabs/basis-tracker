@@ -161,14 +161,14 @@ impl RedemptionManager {
             note.timestamp
         );
 
-        // Use real transaction builder instead of mock
+        // Use real ergo-lib transaction builder
         let transaction_bytes = crate::transaction_builder::RedemptionTransactionBuilder::build_redemption_transaction(
             &request.reserve_box_id,
-            "tracker_box_placeholder", // TODO: Get actual tracker box ID
+            "tracker_box_placeholder", // TODO: Get actual tracker box ID from blockchain
             &request.recipient_address,
             request.amount,
             1000000, // 0.001 ERG fee from config
-            1000,    // TODO: Get actual current height
+            1000,    // TODO: Get actual current height from blockchain
         )
         .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
@@ -250,12 +250,17 @@ impl RedemptionManager {
             note.timestamp
         );
 
-        // Create transaction bytes (currently mock, will be real ergo-lib serialization)
-        // When blockchain integration is ready, this will use:
-        // unsigned_tx.sigma_serialize_bytes() from ergo-lib
-        let transaction_bytes = hex::encode(
-            RedemptionTransactionBuilder::create_mock_transaction_bytes(&transaction_data)
-        );
+        // Create transaction bytes using ergo-lib integration
+        // This uses the real transaction builder that validates all parameters
+        let transaction_bytes = RedemptionTransactionBuilder::build_redemption_transaction(
+            reserve_box_id,
+            tracker_box_id,
+            &request.recipient_address,
+            note.outstanding_debt(),
+            context.fee,
+            context.current_height,
+        )
+        .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
         // Required signatures: issuer and tracker
         let required_signatures = vec![

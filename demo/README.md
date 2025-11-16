@@ -90,5 +90,5 @@ You can edit the scripts to change parameters:
 
 - The demo uses simple signature generation for demonstration purposes
 - In a real implementation, proper cryptographic signing would be used
-- The scripts assume the server is running on localhost:3000
+- The scripts assume the server is running on localhost:3048
 - Adjust the reserve balance and amounts based on your testing needs

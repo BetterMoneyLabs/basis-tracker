@@ -4,7 +4,7 @@
 Complete step-by-step instructions for Alice issuing debt to Bob, creating on-chain reserves, and Bob redeeming the debt.
 
 ## Prerequisites
-- Basis Tracker server running on `http://127.0.0.1:3000`
+- Basis Tracker server running on `http://127.0.0.1:3048`
 - Basis CLI client built and available
 - Ergo node accessible for blockchain operations
 

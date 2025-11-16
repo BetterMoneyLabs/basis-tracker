@@ -152,7 +152,7 @@ use tower_http::cors::{Any, CorsLayer};
                 Request::builder()
                     .method("OPTIONS")
                     .uri("/")
-                    .header("Origin", "http://localhost:3000")
+                    .header("Origin", "http://localhost:3048")
                     .header("Access-Control-Request-Method", "GET")
                     .body(Body::empty())
                     .unwrap(),
@@ -356,7 +356,7 @@ use tower_http::cors::{Any, CorsLayer};
         let app = create_mock_app_with_cors().await;
 
         let test_origins = [
-            "http://localhost:3000",
+            "http://localhost:3048",
             "https://example.com",
             "http://127.0.0.1:8080",
             "https://app.basis-tracker.com",
