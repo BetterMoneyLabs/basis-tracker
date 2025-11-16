@@ -44,6 +44,7 @@ mod tests {
                 ergo_tree: "test_ergo_tree_1".to_string(),
                 creation_height: 1000,
                 transaction_id: "tx1".to_string(),
+                assets: vec![], // Empty assets for reserve boxes
                 additional_registers: {
                     let mut registers = std::collections::HashMap::new();
                     registers.insert("R4".to_string(), "owner_pubkey_1".to_string());
@@ -57,6 +58,7 @@ mod tests {
                 ergo_tree: "test_ergo_tree_2".to_string(),
                 creation_height: 1001,
                 transaction_id: "tx2".to_string(),
+                assets: vec![], // Empty assets for reserve boxes
                 additional_registers: {
                     let mut registers = std::collections::HashMap::new();
                     registers.insert("R4".to_string(), "owner_pubkey_2".to_string());
@@ -271,6 +273,7 @@ mod tests {
                 ergo_tree: "test_tree".to_string(),
                 creation_height: 1000,
                 transaction_id: "test_tx".to_string(),
+                assets: vec![], // Empty assets for reserve boxes
                 additional_registers: {
                     let mut registers = std::collections::HashMap::new();
                     registers.insert("R4".to_string(), owner.to_string());

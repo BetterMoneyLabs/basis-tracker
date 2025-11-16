@@ -798,6 +798,18 @@ pub struct ScanBox {
     pub creation_height: u64,
     pub transaction_id: String,
     pub additional_registers: std::collections::HashMap<String, String>,
+    /// Assets in the box (tokens)
+    #[serde(default)]
+    pub assets: Vec<BoxAsset>,
+}
+
+/// Asset in an Ergo box
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoxAsset {
+    /// Token ID
+    pub token_id: String,
+    /// Amount
+    pub amount: u64,
 }
 
 /// Events related to reserve activity
