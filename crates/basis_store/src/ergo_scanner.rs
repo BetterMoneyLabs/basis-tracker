@@ -870,6 +870,21 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
         // Update current height
         match state.get_current_height().await {
             Ok(height) => {
+                // Log height update at INFO level
+                let previous_height = {
+                    let inner = state.inner.lock().await;
+                    inner.current_height
+                };
+                
+                if height != previous_height {
+                    info!("Current Ergo blockchain height: {}", height);
+                    // Update current height in state
+                    {
+                        let mut inner = state.inner.lock().await;
+                        inner.current_height = height;
+                    }
+                }
+                
                 // Check if we have a valid scan ID before processing
                 let has_valid_scan = {
                     let inner = state.inner.lock().await;
