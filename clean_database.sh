@@ -136,14 +136,24 @@ create_backup() {
 clean_database() {
     print_info "Starting database cleanup..."
     
-    # Remove data directory
-    if [ -d "$DATA_DIR" ]; then
-        print_warning "Removing data directory: $DATA_DIR"
-        rm -rf "$DATA_DIR"
-        print_success "Data directory removed"
-    else
-        print_info "Data directory not found (already clean?)"
-    fi
+    # Define all database directories to clean
+    local db_dirs=(
+        "$DATA_DIR"
+        "$SCRIPT_DIR/crates/basis_server/data"
+        "$SCRIPT_DIR/crates/basis_server/crates/basis_server/data"
+        "$SCRIPT_DIR/crates/basis_store/crates/basis_server/data"
+    )
+    
+    # Remove all database directories
+    for db_dir in "${db_dirs[@]}"; do
+        if [ -d "$db_dir" ]; then
+            print_warning "Removing database directory: $db_dir"
+            rm -rf "$db_dir"
+            print_success "Database directory removed: $(basename "$db_dir")"
+        else
+            print_info "Database directory not found: $(basename "$db_dir") (already clean?)"
+        fi
+    done
     
     # Remove server log file
     if [ -f "$SERVER_LOG" ]; then
@@ -174,7 +184,10 @@ confirm_action() {
     echo
     print_warning "This will permanently delete all database files and server logs!"
     print_warning "Files to be removed:"
-    echo "  - $DATA_DIR/ (entire database)"
+    echo "  - $DATA_DIR/ (root database)"
+    echo "  - $SCRIPT_DIR/crates/basis_server/data/ (server database)"
+    echo "  - $SCRIPT_DIR/crates/basis_server/crates/basis_server/data/ (nested server database)"
+    echo "  - $SCRIPT_DIR/crates/basis_store/crates/basis_server/data/ (store database)"
     echo "  - $SERVER_LOG (server logs)"
     echo "  - $SERVER_PID (server process ID)"
     echo

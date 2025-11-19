@@ -384,14 +384,22 @@ impl ServerState {
             }
         }
 
-        // Create the ErgoTree and serialize it right before use (don't hold it across await)
+        // Create the ErgoTree and serialize it with ByteArrayConstant wrapper
+        // This matches the Scala pattern: ByteArrayConstant(ErgoTreeSerializer.DefaultSerializer.serializeErgoTree(script))
         let serialized_contract_bytes = {
             let tree: ErgoTree = AddressEncoder::new(NetworkPrefix::Mainnet)
                 .parse_address_from_str(reserve_contract_p2s)
                 .unwrap()
                 .script()
                 .unwrap();
-            tree.sigma_serialize_bytes()
+            
+            // Get raw ErgoTree bytes
+            let ergo_tree_bytes = tree.sigma_serialize_bytes();
+            
+            // Create ByteArrayConstant wrapper and serialize it
+            // This matches what the Ergo node expects for scan registration
+            let byte_array_constant = ergo_lib::ergotree_ir::mir::constant::Constant::from(ergo_tree_bytes);
+            byte_array_constant.sigma_serialize_bytes()
         };
 
         let contract_bytes_hex = hex::encode(&serialized_contract_bytes);
