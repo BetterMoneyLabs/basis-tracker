@@ -289,6 +289,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "basis_trees"
+version = "0.1.0"
+dependencies = [
+ "ergo_avltree_rust",
+ "fjall",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "beef"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

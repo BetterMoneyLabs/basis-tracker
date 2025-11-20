@@ -1,0 +1,16 @@
+[package]
+name = "basis_trees"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ergo_avltree_rust = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+fjall = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"
