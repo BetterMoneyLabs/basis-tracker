@@ -162,3 +162,16 @@ cargo test -p basis_store --features ergo_scanner real_scanner_integration_tests
 # Test script for real scanner
 ./test_real_scanner.sh
 ```
+
+## Documentation Requirements
+
+### Plans and Summaries
+- **All development plans, design documents, and technical summaries MUST be written into the `specs/` folder only**
+- Do not create planning documents in other directories
+- Use appropriate file naming conventions within the specs/ folder
+- Maintain consistency with existing spec documentation structure
+
+### basis_trees Crate Documentation
+- **All basis_trees crate related documentation MUST be placed in the `specs/trees/` folder**
+- This includes AVL tree implementations, storage plans, recovery mechanisms, and persistence documentation
+- Keep the main `specs/` directory for general project specifications only
