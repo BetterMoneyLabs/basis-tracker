@@ -274,6 +274,21 @@ impl FjallTreeStorage {
         Ok(latest_checkpoint)
     }
 
+    /// Get specific checkpoint by ID
+    pub fn get_checkpoint(&self, checkpoint_id: u64) -> Result<Option<TreeCheckpoint>, TreeError> {
+        let key = Self::checkpoint_key(checkpoint_id);
+        
+        match self.checkpoint_partition.get(&key) {
+            Ok(Some(value_bytes)) => {
+                let checkpoint: TreeCheckpoint = bincode::deserialize(&value_bytes)
+                    .map_err(|e| TreeError::StorageError(format!("Failed to deserialize checkpoint: {}", e)))?;
+                Ok(Some(checkpoint))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(TreeError::StorageError(format!("Failed to get checkpoint: {}", e))),
+        }
+    }
+
     /// Get all nodes in storage
     pub fn get_all_nodes(&self) -> Result<Vec<TreeNode>, TreeError> {
         let mut nodes = Vec::new();

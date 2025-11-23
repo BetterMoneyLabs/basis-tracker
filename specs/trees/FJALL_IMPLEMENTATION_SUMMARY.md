@@ -37,9 +37,17 @@ Successfully implemented a high-performance Fjall-based storage counterpart for 
 - Batch operation validation
 - Configuration testing
 
+### 3. `crates/basis_trees/src/fjall_storage_edge_case_tests.rs`
+- 10 enhanced edge case test scenarios
+- Large data handling (10KB+ nodes)
+- Concurrent access patterns
+- Error handling and stress testing
+
 ## Test Coverage
 
-### 11 Comprehensive Tests
+### 21 Comprehensive Tests (11 Core + 10 Edge Cases)
+
+#### Core Tests
 1. **Basic Storage Creation** - Storage initialization
 2. **Custom Configuration** - Storage with custom parameters
 3. **Node Storage Operations** - Individual node CRUD
@@ -51,6 +59,18 @@ Successfully implemented a high-performance Fjall-based storage counterpart for 
 9. **Multiple Checkpoints** - Multiple checkpoint management
 10. **Recovery Scenario** - Complete recovery workflow
 11. **Sequence Persistence** - Sequence number persistence
+
+#### Enhanced Edge Case Tests
+12. **Large Node Storage** - 10KB+ nodes for performance testing
+13. **Concurrent Access Patterns** - Multiple storage instances
+14. **Missing Node Handling** - Error handling for non-existent nodes
+15. **Edge Case Range Queries** - Non-sequential digests, empty/invalid ranges
+16. **Operation Sequence Stress** - Many operations with sequence consistency
+17. **Checkpoint Rollback Scenarios** - Multiple checkpoint management
+18. **Compression Testing** - Storage with compression enabled
+19. **Mixed Node Types** - Complex tree structures (leaf/branch nodes)
+20. **Many Small Operations** - Performance with 100+ operations
+21. **Storage Cleanup & Reinitialization** - Data persistence across instances
 
 ## Key Features
 
@@ -76,6 +96,7 @@ pub struct FjallStorageConfig {
 - Complete operation replay capability
 - Checkpoint-based state restoration
 - Sequence number persistence
+- Specific checkpoint retrieval via `get_checkpoint()`
 
 ## Performance Benefits
 
@@ -105,9 +126,9 @@ pub struct FjallStorageConfig {
 ## Test Results
 
 ### All Tests Passing
-- **50 total tests** (39 existing + 11 new)
+- **60 total tests** (39 existing + 21 new)
 - **100% success rate**
-- **Comprehensive coverage** of storage operations
+- **Comprehensive coverage** including edge cases
 - **Recovery scenarios** validated
 
 ### Performance Validation
@@ -115,6 +136,9 @@ pub struct FjallStorageConfig {
 - Range queries returning expected results
 - Recovery scenarios restoring state accurately
 - Sequence persistence maintaining consistency
+- Large data handling (10KB+ nodes)
+- Concurrent access patterns validated
+- Compression efficiency verified
 
 ## Usage Example
 

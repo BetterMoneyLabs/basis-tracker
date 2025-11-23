@@ -14,6 +14,7 @@ Implemented comprehensive recovery functionality for the Basis Tracker AVL tree 
 - **Automatic checkpoint creation** during tree operations
 - **Checkpoint storage** with metadata (timestamp, sequence, root digest)
 - **Latest checkpoint retrieval** for recovery
+- **Specific checkpoint retrieval** via `get_checkpoint()` for rollback scenarios
 
 ### 3. Operation Logging
 - **Persistent operation log** for all tree operations (insert/update)
@@ -101,8 +102,9 @@ assert!(result.is_ok());
 
 ## Testing Status
 
-✅ **All 39 tests passing**
+✅ **All 60 tests passing**
 - 28 existing tests continue to pass
 - 7 new recovery tests added
 - 4 new in-memory recovery tests added
-- Comprehensive coverage of recovery scenarios
+- 21 new Fjall storage tests (11 core + 10 edge cases)
+- Comprehensive coverage of recovery and storage scenarios

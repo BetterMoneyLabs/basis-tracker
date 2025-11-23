@@ -23,6 +23,9 @@ pub mod recovery_tests;
 #[cfg(test)]
 pub mod fjall_storage_tests;
 
+#[cfg(test)]
+pub mod fjall_storage_edge_case_tests;
+
 // Re-export main types for easy access
 pub use avl_tree::BasisAvlTree;
 pub use proofs::{MembershipProof, NonMembershipProof, StateProof};
