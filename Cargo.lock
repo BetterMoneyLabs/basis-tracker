@@ -269,6 +269,7 @@ dependencies = [
 name = "basis_store"
 version = "0.1.0"
 dependencies = [
+ "basis_trees",
  "blake2 0.10.6",
  "criterion",
  "ergo-lib",
@@ -294,7 +295,6 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "ergo_avltree_rust",
- "fjall",
  "serde",
  "serde_json",
  "tempfile",

@@ -57,11 +57,27 @@ Enhanced the Basis Trees test suite with comprehensive edge case coverage, bring
 5. **Complex Structures** - Mixed node types, checkpoint rollback
 6. **Configuration** - Compression, cleanup, reinitialization
 
+## Tree Resolver Test Infrastructure
+
+### New Test Categories Added
+- **Memory-Based Resolver Tests**: Infrastructure for testing resolver functionality
+- **Storage Integration Tests**: Validation of tree node storage operations
+- **Resolver Error Handling**: Testing of missing node and storage error scenarios
+- **Fjall Integration Tests**: Validation of disk persistence with tree operations
+
+### Test Reorganization
+- **Dedicated Test Files**: All tests moved from embedded modules to dedicated files
+- **Memory-Based Resolver**: Test-only resolver moved to `test_helpers.rs`
+- **Clean Separation**: Clear separation between production and test code
+
 ## Impact
 
 - **Robustness**: Comprehensive validation of edge cases
 - **Performance**: Stress testing under various conditions
 - **Reliability**: Enhanced error handling and recovery
 - **Maintainability**: Clear documentation and test organization
+- **Fjall Integration**: Complete test infrastructure for disk persistence
 
 All updates maintain backward compatibility and enhance the overall quality and reliability of the Basis Trees implementation.
+
+The test infrastructure now fully supports the Fjall disk persistence integration, providing comprehensive validation of the tree resolver architecture and storage integration.

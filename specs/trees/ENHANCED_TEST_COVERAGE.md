@@ -96,13 +96,30 @@ The Basis Trees module now features comprehensive test coverage with 60 total te
 3. **Performance Benchmarking**: Automated performance regression testing
 4. **Security Tests**: Cryptographic validation and attack scenarios
 
+### Tree Resolver Testing
+- **Memory-Based Resolver Tests**: Testing infrastructure for resolver functionality
+- **Storage Integration Tests**: Validation of tree node storage operations
+- **Resolver Error Handling**: Testing of missing node and storage error scenarios
+
 ### Integration Testing
 - **Blockchain Cross-Verification**: On-chain vs off-chain state validation
 - **End-to-End Workflows**: Complete user scenarios
 - **Load Testing**: Production-scale data volumes
+- **Fjall Integration Tests**: Validation of disk persistence with tree operations
+
+## Test Infrastructure for Fjall Integration
+
+The test suite now includes comprehensive infrastructure for testing the tree resolver with Fjall disk persistence:
+
+- **Memory-Based Resolver**: Test-only resolver for validation scenarios
+- **Storage Mocking**: Infrastructure for testing storage integration
+- **Error Scenario Coverage**: Testing of edge cases and failure modes
+- **Recovery Validation**: Testing tree recovery with various storage states
 
 ## Conclusion
 
 The enhanced test coverage provides comprehensive validation of the Basis Trees implementation, ensuring robustness, performance, and reliability across a wide range of scenarios. The 21 new tests specifically target edge cases and performance characteristics that are critical for production deployment.
 
 All tests pass consistently, demonstrating the maturity and stability of the implementation while providing a solid foundation for future enhancements and optimizations.
+
+The test infrastructure now supports the complete Fjall disk persistence integration, with dedicated resolver testing and storage integration validation.

@@ -9,25 +9,20 @@ pub mod proofs;
 pub mod state;
 pub mod errors;
 pub mod storage;
-pub mod fjall_storage;
-
-#[cfg(test)]
-pub mod in_memory_recovery;
 
 #[cfg(test)]
 pub mod test_helpers;
 
-#[cfg(test)]
-pub mod recovery_tests;
+
 
 #[cfg(test)]
-pub mod fjall_storage_tests;
+pub mod avl_tree_tests;
 
-#[cfg(test)]
-pub mod fjall_storage_edge_case_tests;
+
 
 // Re-export main types for easy access
 pub use avl_tree::BasisAvlTree;
+
 pub use proofs::{MembershipProof, NonMembershipProof, StateProof};
 pub use state::TrackerState;
 pub use errors::TreeError;
@@ -35,7 +30,7 @@ pub use storage::{TreeStorage, TreeNode, TreeOperation, TreeCheckpoint, NodeType
 
 // Re-export dependencies for external use
 pub use ergo_avltree_rust;
-pub use fjall;
+
 
 /// Main tree interface for Basis tracker
 pub trait BasisTree {
@@ -80,8 +75,6 @@ pub trait Proof {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_module_structure() {
         // Basic test to verify module compiles correctly

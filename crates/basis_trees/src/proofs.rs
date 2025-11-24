@@ -283,7 +283,7 @@ impl StateProof {
     }
 
     /// Verify this proof against a state commitment
-    pub fn verify(&self, state: &TrackerState) -> Result<bool, TreeError> {
+    pub fn verify(&self, _state: &TrackerState) -> Result<bool, TreeError> {
         // In real implementation, this would:
         // 1. Verify proof data cryptographically
         // 2. Verify height and timestamp consistency

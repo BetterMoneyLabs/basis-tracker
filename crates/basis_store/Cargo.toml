@@ -26,6 +26,8 @@ rand = "0.8"
 reqwest = { version = "0.12.23", features = ["json", "rustls-tls"], default-features = false, optional = true }
 # Ergo blockchain dependencies for scanner - using compatible version
 ergo-lib = { workspace = true }
+# Basis trees for persistent AVL tree storage
+basis_trees = { path = "../basis_trees" }
 
 # Test dependencies
 [dev-dependencies]
