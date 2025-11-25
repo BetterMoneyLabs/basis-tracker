@@ -35,6 +35,8 @@ pub struct ErgoConfig {
     pub basis_reserve_contract_p2s: String,
     /// Tracker NFT ID (hex-encoded) - identifies the tracker server for reserve contracts
     pub tracker_nft_id: Option<String>,
+    /// Tracker server's public key for the Ergo blockchain (hex-encoded, 33 bytes for compressed format)
+    pub tracker_public_key: Option<String>,
 }
 
 /// Transaction configuration
@@ -69,6 +71,8 @@ impl AppConfig {
             .set_default("ergo.node.api_key", "hello")?
             // Transaction configuration defaults
             .set_default("transaction.fee", 1000000)? // 0.001 ERG
+            // Tracker public key (optional)
+            .set_default("ergo.tracker_public_key", "")?
             // Environment variables
             .add_source(config::Environment::with_prefix("BASIS"))
             // Configuration file
@@ -106,5 +110,29 @@ impl AppConfig {
     /// Get the default transaction fee
     pub fn transaction_fee(&self) -> u64 {
         self.transaction.fee
+    }
+
+    /// Get the tracker public key bytes (if configured)
+    pub fn tracker_public_key_bytes(&self) -> Result<Option<[u8; 33]>, hex::FromHexError> {
+        match &self.ergo.tracker_public_key {
+            Some(pubkey_hex) if !pubkey_hex.is_empty() => {
+                let bytes = hex::decode(pubkey_hex)?;
+                if bytes.len() != 33 {
+                    return Err(hex::FromHexError::InvalidStringLength);
+                }
+                let mut pubkey_bytes = [0u8; 33];
+                pubkey_bytes.copy_from_slice(&bytes);
+                Ok(Some(pubkey_bytes))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Get the tracker public key as hex string (if configured)
+    pub fn tracker_public_key_hex(&self) -> Option<&str> {
+        match &self.ergo.tracker_public_key {
+            Some(pubkey_hex) if !pubkey_hex.is_empty() => Some(pubkey_hex),
+            _ => None,
+        }
     }
 }

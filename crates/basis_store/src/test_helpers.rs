@@ -30,8 +30,8 @@ pub fn create_test_note(amount: u64, timestamp: u64) -> IouNote {
 }
 
 /// Create test transaction context following chaincash-rs patterns
-pub fn create_test_tx_context() -> crate::transaction_builder::TxContext {
-    crate::transaction_builder::TxContext {
+pub fn create_test_tx_context() -> basis_offchain::transaction_builder::TxContext {
+    basis_offchain::transaction_builder::TxContext {
         current_height: 1000,
         fee: 1000000, // 0.001 ERG - same as chaincash-rs SUGGESTED_TX_FEE
         change_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),

@@ -247,6 +247,16 @@ dependencies = [
 [[package]]
 name = "basis_offchain"
 version = "0.1.0"
+dependencies = [
+ "blake2 0.10.6",
+ "ergo-lib",
+ "hex",
+ "num-bigint",
+ "rand 0.8.5",
+ "secp256k1",
+ "serde",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "basis_server"
@@ -269,6 +279,7 @@ dependencies = [
 name = "basis_store"
 version = "0.1.0"
 dependencies = [
+ "basis_offchain",
  "basis_trees",
  "blake2 0.10.6",
  "criterion",

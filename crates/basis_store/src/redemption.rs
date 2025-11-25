@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 use crate::{IouNote, NoteError, PubKey, TrackerStateManager};
-use crate::transaction_builder::{RedemptionTransactionBuilder, TxContext};
+use basis_offchain::transaction_builder::{RedemptionTransactionBuilder, TxContext};
 
 #[derive(Error, Debug)]
 pub enum RedemptionError {
@@ -162,7 +162,7 @@ impl RedemptionManager {
         );
 
         // Use real ergo-lib transaction builder
-        let transaction_bytes = crate::transaction_builder::RedemptionTransactionBuilder::build_redemption_transaction(
+        let transaction_bytes = basis_offchain::transaction_builder::RedemptionTransactionBuilder::build_redemption_transaction(
             &request.reserve_box_id,
             "tracker_box_placeholder", // TODO: Get actual tracker box ID from blockchain
             &request.recipient_address,
@@ -233,7 +233,9 @@ impl RedemptionManager {
         let transaction_data = RedemptionTransactionBuilder::prepare_redemption_transaction(
             reserve_box_id,
             tracker_box_id,
-            note,
+            note.amount_collected,
+            note.amount_redeemed,
+            note.timestamp,
             &issuer_pubkey,
             &request.recipient_address,
             &proof.avl_proof,
@@ -252,7 +254,7 @@ impl RedemptionManager {
 
         // Create transaction bytes using ergo-lib integration
         // This uses the real transaction builder that validates all parameters
-        let transaction_bytes = RedemptionTransactionBuilder::build_redemption_transaction(
+        let transaction_bytes = basis_offchain::transaction_builder::RedemptionTransactionBuilder::build_redemption_transaction(
             reserve_box_id,
             tracker_box_id,
             &request.recipient_address,

@@ -8,7 +8,6 @@ pub mod ergo_scanner;
 pub mod persistence;
 pub mod redemption;
 pub mod tracker_scanner;
-pub mod transaction_builder;
 #[cfg(test)]
 pub mod redemption_blockchain_tests;
 #[cfg(test)]
@@ -34,7 +33,6 @@ pub mod reserve_tracking_test;
 #[cfg(test)]
 pub mod test_helpers;
 #[cfg(test)]
-pub mod transaction_builder_tests;
 
 
 use basis_trees::BasisAvlTree;
