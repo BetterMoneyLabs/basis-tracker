@@ -173,21 +173,6 @@ impl NoteStorage {
         }
     }
 
-    /// Remove an IOU note by issuer and recipient public keys
-    pub fn remove_note(
-        &self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<(), NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        self.partition
-            .remove(&key_bytes)
-            .map_err(|e| NoteError::StorageError(format!("Failed to remove note: {}", e)))?;
-
-        Ok(())
-    }
 
     /// Get all notes for a specific issuer
     pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {

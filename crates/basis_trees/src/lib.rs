@@ -1,5 +1,5 @@
 //! Basis Trees Module
-//! 
+//!
 //! Cryptographic commitment structures for Basis tracker system.
 //! Implements authenticated data structures for state commitments
 //! and verifiable proofs.

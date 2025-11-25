@@ -147,6 +147,7 @@ pub enum NoteError {
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
+    UnsupportedOperation,
 }
 
 impl From<secp256k1::Error> for NoteError {
@@ -185,11 +186,6 @@ impl TrackerStateManager {
             }
         };
 
-        // Create in-memory tree storage
-        tracing::debug!("Creating in-memory tree storage...");
-        let tree_storage = basis_trees::storage::TreeStorage::new();
-        tracing::debug!("Tree storage created successfully");
-
         // Create in-memory AVL tree
         let avl_state = match BasisAvlTree::new() {
             Ok(tree) => {
@@ -216,11 +212,9 @@ impl TrackerStateManager {
 
     /// Add a new note to the tracker state
     pub fn add_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
-        // Store note in persistent storage
-        self.storage.store_note(issuer_pubkey, note)?;
-
-        // Update AVL tree state
+        // Prepare AVL tree key and value in advance
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
+        let key_bytes = key.to_bytes();
 
         // Create value bytes matching persistence format
         let mut value_bytes = Vec::new();
@@ -231,25 +225,33 @@ impl TrackerStateManager {
         value_bytes.extend_from_slice(&note.signature);
         value_bytes.extend_from_slice(&note.recipient_pubkey);
 
-        // Try to insert, if key already exists then update
-        if let Err(_e) = self.avl_state.insert(key.to_bytes(), value_bytes.clone()) {
-            // For any error, try to update instead (assuming key already exists)
-            self.avl_state
-                .update(key.to_bytes(), value_bytes)
-                .map_err(|e| NoteError::StorageError(e.to_string()))?;
-        }
+        // Update AVL tree state first to ensure consistency
+        let avl_result = if let Err(_e) = self.avl_state.insert(key_bytes.clone(), value_bytes.clone()) {
+            // If insert fails, try to update instead (assuming key already exists)
+            self.avl_state.update(key_bytes.clone(), value_bytes.clone())
+        } else {
+            Ok(())
+        };
 
-        self.update_state();
-        Ok(())
+        // Only proceed with database storage if AVL tree update succeeded
+        match avl_result {
+            Ok(()) => {
+                // Now store note in persistent storage
+                self.storage.store_note(issuer_pubkey, note)?;
+                self.update_state();
+                Ok(())
+            }
+            Err(e) => Err(NoteError::StorageError(e.to_string())),
+        }
     }
 
     /// Update an existing note
     pub fn update_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
-        // Update note in persistent storage
-        self.storage.store_note(issuer_pubkey, note)?;
-
-        // Update AVL tree state
+        // Prepare key and value in advance
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
+        let key_bytes = key.to_bytes();
+
+        // Create value bytes for AVL tree (just the essential note data)
         let value_bytes = [
             &note.amount_collected.to_be_bytes()[..],
             &note.amount_redeemed.to_be_bytes()[..],
@@ -257,34 +259,21 @@ impl TrackerStateManager {
         ]
         .concat();
 
-        self.avl_state
-            .update(key.to_bytes(), value_bytes)
-            .map_err(|e| NoteError::StorageError(e.to_string()))?;
+        // Update AVL tree state first to ensure consistency
+        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
 
-        self.update_state();
-        Ok(())
+        // Only proceed with database storage if AVL tree update succeeded
+        match avl_result {
+            Ok(()) => {
+                // Now store note in persistent storage
+                self.storage.store_note(issuer_pubkey, note)?;
+                self.update_state();
+                Ok(())
+            }
+            Err(e) => Err(NoteError::StorageError(e.to_string())),
+        }
     }
 
-    /// Remove a note from the tracker state
-    pub fn remove_note(
-        &mut self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<(), NoteError> {
-        // Remove note from persistent storage
-        self.storage.remove_note(issuer_pubkey, recipient_pubkey)?;
-
-        // Note: Remove operation not yet implemented for persistent AVL tree
-        // For now, we'll skip the AVL tree removal since the persistent tree
-        // doesn't support remove operations yet
-        // let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        // self.avl_state
-        //     .remove(key.to_bytes())
-        //     .map_err(NoteError::StorageError)?;
-
-        self.update_state();
-        Ok(())
-    }
 
     /// Generate proof for a specific note
     pub fn generate_proof(

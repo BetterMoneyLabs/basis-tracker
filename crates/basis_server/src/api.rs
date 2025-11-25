@@ -172,6 +172,7 @@ pub async fn create_note(
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -290,6 +291,7 @@ pub async fn get_notes_by_issuer(
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -394,6 +396,7 @@ pub async fn get_notes_by_recipient(
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -533,6 +536,7 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
                 StatusCode::BAD_REQUEST,
