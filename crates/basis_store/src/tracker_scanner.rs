@@ -114,6 +114,102 @@ impl TrackerServerState {
         let scan_name = self.config.scan_name.as_deref()
             .unwrap_or("tracker_boxes");
 
+        // Check if scan ID already exists in database
+        debug!(
+            "Checking for existing scan ID in database for scan name: '{}'",
+            scan_name
+        );
+        match self.metadata_storage.get_scan_id(scan_name) {
+            Ok(Some(stored_scan_id)) => {
+                info!("Found existing scan ID in database: {}", stored_scan_id);
+
+                // Verify the scan still exists on the node (only every 4 hours)
+                let should_verify = self.should_verify_scan().await;
+                if should_verify {
+                    debug!("Verifying scan ID {} exists on Ergo node", stored_scan_id);
+                    match self.verify_scan_registration().await {
+                        Ok(true) => {
+                            info!("Using existing scan ID: {}", stored_scan_id);
+                            // Update verification timestamp
+                            self.update_scan_verification_time().await;
+                            // Update inner state with the validated scan ID
+                            {
+                                let mut inner = self.inner.lock().await;
+                                inner.scan_id = Some(stored_scan_id);
+                                inner.scan_active = true;
+                            }
+                            return Ok(stored_scan_id);
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "Stored scan ID {} no longer exists on node, re-registering",
+                                stored_scan_id
+                            );
+                            self.metadata_storage
+                                .remove_scan_id(scan_name)
+                                .map_err(|e| {
+                                    TrackerScannerError::StoreError(format!(
+                                        "Failed to remove invalid scan ID: {:?}",
+                                        e
+                                    ))
+                                })?;
+                            info!(
+                                "Removed invalid scan ID {} from database, proceeding to registration",
+                                stored_scan_id
+                            );
+                        }
+                        Err(e) => {
+                            // If verification fails due to scan list endpoint being unavailable (400/404),
+                            // or JSON parsing errors, assume the scan still exists and continue using it
+                            if e.to_string().contains("400") || e.to_string().contains("404") || e.to_string().contains("Failed to parse scan list") {
+                                warn!("Scan list endpoint unavailable or JSON parsing failed ({}), assuming scan ID {} still exists", e, stored_scan_id);
+                                // Update verification timestamp
+                                self.update_scan_verification_time().await;
+                                // Update inner state with the existing scan ID
+                                {
+                                    let mut inner = self.inner.lock().await;
+                                    inner.scan_id = Some(stored_scan_id);
+                                    inner.scan_active = true;
+                                }
+                                return Ok(stored_scan_id);
+                            } else {
+                                error!(
+                                    "Failed to verify existing scan ID {}: {}",
+                                    stored_scan_id, e
+                                );
+                                warn!("Unable to verify scan ID, forcing re-registration");
+                                self.metadata_storage
+                                    .remove_scan_id(scan_name)
+                                    .map_err(|e| {
+                                        TrackerScannerError::StoreError(format!(
+                                            "Failed to remove scan ID: {:?}",
+                                            e
+                                        ))
+                                    })?;
+                                info!("Forcing scan registration due to verification failure");
+                            }
+                        }
+                    }
+                } else {
+                    debug!("Skipping scan ID verification (last verified less than 4 hours ago)");
+                    // Update inner state with the existing scan ID without verification
+                    {
+                        let mut inner = self.inner.lock().await;
+                        inner.scan_id = Some(stored_scan_id);
+                        inner.scan_active = true;
+                    }
+                    return Ok(stored_scan_id);
+                }
+            }
+            Ok(None) => {
+                info!("No existing scan ID found in database for scan name: '{}', proceeding with new registration", scan_name);
+            }
+            Err(e) => {
+                error!("Failed to get scan ID from database: {:?}", e);
+                info!("Database error, proceeding with new registration");
+            }
+        }
+
         // Register scan using containsAsset predicate with tracker NFT ID
         let scan_payload = serde_json::json!({
             "scanName": scan_name,
@@ -125,47 +221,108 @@ impl TrackerServerState {
             "removeOffchain": true
         });
 
-        let url = format!("{}/scan/register", self.config.node_url);
-        
-        info!("Registering tracker scan with NFT ID: {}", tracker_nft_id);
-        
-        let response = self
-            .request_builder(reqwest::Method::POST, &url)
-            .json(&scan_payload)
-            .send()
-            .await
-            .map_err(|e| TrackerScannerError::HttpError(format!("Failed to send request: {}", e)))?;
+        // Log scan registration (INFO level) and JSON payload (DEBUG level)
+        info!("Registering new tracker scan with name: {}", scan_name);
+        debug!("Tracker scan registration JSON payload: {}", scan_payload);
 
+        let url = format!("{}/scan/register", self.config.node_url);
+
+        // Create request builder and log request details
+        let request_builder = self
+            .request_builder(reqwest::Method::POST, &url)
+            .json(&scan_payload);
+
+        // Log exact HTTP request details
+        info!("Sending HTTP POST request to Ergo node: {}", url);
+        info!("Request headers: API key present: {}", self.config.api_key.is_some());
+        info!("Request body (JSON): {}", scan_payload);
+        debug!("Sending scan registration request to: {}", url);
+        debug!(
+            "Request headers include: {}",
+            if self.config.api_key.is_some() {
+                "API key"
+            } else {
+                "NO API key"
+            }
+        );
+
+        let response = request_builder.send().await.map_err(|e| {
+            error!("HTTP request failed: {}", e);
+            error!(
+                "Request details - URL: {}, Method: POST, Headers: API key present: {}",
+                url,
+                self.config.api_key.is_some()
+            );
+            TrackerScannerError::HttpError(format!("Failed to register scan: {}", e))
+        })?;
+
+        // Log response details
         let status = response.status();
+        debug!("Response status: {}", status);
+        debug!("Response headers: {:?}", response.headers());
+
         if !status.is_success() {
-            let error_text = response.text().await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            // Try to read response body for more details
+            let response_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read response body".to_string());
+            error!(
+                "Scan registration failed with status: {}. Response body: {}",
+                status, response_text
+            );
+            error!("Full request details:");
+            error!("  URL: {}", url);
+            error!("  Method: POST");
+            error!("  API key present: {}", self.config.api_key.is_some());
+            error!("  Payload: {}", scan_payload);
+            error!("  Response status: {}", status);
+            error!("  Response body: {}", response_text);
             return Err(TrackerScannerError::NodeError(format!(
-                "Scan registration failed with status {}: {}",
-                status,
-                error_text
+                "Scan registration failed with status: {}. Response: {}",
+                status, response_text
             )));
         }
 
-        let scan_response: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| TrackerScannerError::JsonError(format!("Failed to parse response: {}", e)))?;
+        let result: serde_json::Value = response.json().await.map_err(|e| {
+            error!("Failed to parse scan registration response JSON: {}", e);
+            TrackerScannerError::JsonError(format!("Failed to parse scan registration response: {}", e))
+        })?;
 
-        let scan_id = scan_response["scanId"]
+        debug!(
+            "Scan registration successful response: {}",
+            serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|_| "Unable to format JSON".to_string())
+        );
+
+        let scan_id = result["scanId"]
             .as_i64()
-            .ok_or_else(|| TrackerScannerError::JsonError("Missing scanId in response".to_string()))? as i32;
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or_else(|| {
+                error!(
+                    "Failed to get scan ID from registration response. Response was: {}",
+                    result
+                );
+                TrackerScannerError::Generic(
+                    "Failed to get scan ID from registration response".to_string(),
+                )
+            })?;
 
-        info!("Successfully registered tracker scan with ID: {}", scan_id);
+        // Store scan ID in database and update inner state
+        self.metadata_storage
+            .store_scan_id(scan_name, scan_id)
+            .map_err(|e| {
+                TrackerScannerError::StoreError(format!("Failed to store scan ID: {:?}", e))
+            })?;
 
-        // Store scan ID for persistence
-        self.metadata_storage.store_scan_id(scan_name, scan_id)
-            .map_err(|e| TrackerScannerError::StoreError(format!("Failed to store scan ID: {:?}", e)))?;
+        // Update inner state with the new scan ID
+        {
+            let mut inner = self.inner.lock().await;
+            inner.scan_id = Some(scan_id);
+            inner.scan_active = true;
+        }
 
-        // Update inner state
-        let mut inner = self.inner.lock().await;
-        inner.scan_id = Some(scan_id);
-        inner.scan_active = true;
+        info!("Registered and stored tracker scan with ID: {}", scan_id);
 
         Ok(scan_id)
     }
@@ -361,10 +518,16 @@ impl TrackerServerState {
         Ok(())
     }
 
+    /// Get last scanned height
+    pub async fn last_scanned_height(&self) -> u64 {
+        let inner = self.inner.lock().await;
+        inner.last_scanned_height
+    }
+
     /// Get current blockchain height
     pub async fn get_current_height(&self) -> Result<u64, TrackerScannerError> {
         let url = format!("{}/info", self.config.node_url);
-        
+
         let response = self
             .request_builder(reqwest::Method::GET, &url)
             .send()
@@ -390,6 +553,25 @@ impl TrackerServerState {
         Ok(height)
     }
 
+    /// Check if scan verification is needed (every 4 hours)
+    async fn should_verify_scan(&self) -> bool {
+        let inner = self.inner.lock().await;
+        match inner.last_scan_verification {
+            Some(last_verification) => {
+                let now = std::time::SystemTime::now();
+                let duration_since_last = now.duration_since(last_verification).unwrap_or_default();
+                duration_since_last >= std::time::Duration::from_secs(4 * 60 * 60) // 4 hours
+            }
+            None => true, // Never verified before
+        }
+    }
+
+    /// Update the last scan verification timestamp
+    async fn update_scan_verification_time(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.last_scan_verification = Some(std::time::SystemTime::now());
+    }
+
     /// Verify scan registration is still active
     pub async fn verify_scan_registration(&self) -> Result<bool, TrackerScannerError> {
         let scan_name = self.config.scan_name.as_deref()
@@ -400,32 +582,89 @@ impl TrackerServerState {
 
         if let Some(scan_id) = stored_scan_id {
             let url = format!("{}/scan/listAll", self.config.node_url);
-            
+            debug!("Verifying scan exists - URL: {}", url);
+            debug!("Looking for scan ID: {}", scan_id);
+            info!("Sending HTTP GET request to Ergo node: {}", url);
+            info!("Looking for scan ID: {}", scan_id);
+
             let response = self
                 .request_builder(reqwest::Method::GET, &url)
                 .send()
-                .await
-                .map_err(|e| TrackerScannerError::HttpError(format!("Failed to list scans: {}", e)))?;
+                .await;
 
-            if !response.status().is_success() {
-                return Ok(false);
+            let response = match response {
+                Ok(resp) => resp,
+                Err(e) => {
+                    error!("Failed to send scan list request: {}", e);
+                    // If we can't even connect, assume the scan exists to avoid re-registration
+                    warn!(
+                        "Network error connecting to scan list endpoint, assuming scan ID {} exists",
+                        scan_id
+                    );
+                    return Ok(true);
+                }
+            };
+
+            let status = response.status();
+            debug!("Scan list response status: {}", status);
+
+            // If scan list endpoint is not available (400/404), assume scan exists
+            // This handles nodes that don't support scan listing
+            if status == 400 || status == 404 {
+                info!(
+                    "Scan list endpoint not available (status: {}), assuming scan ID {} exists",
+                    status, scan_id
+                );
+                return Ok(true);
             }
 
-            let scans: Vec<serde_json::Value> = response
-                .json()
-                .await
-                .map_err(|e| TrackerScannerError::JsonError(format!("Failed to parse scans: {}", e)))?;
+            if !status.is_success() {
+                // Try to read response body for more details
+                let response_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unable to read response body".to_string());
+                // Log as warning instead of error since we're handling this gracefully
+                warn!(
+                    "Scan list request failed with status: {}. Response body: {}",
+                    status, response_text
+                );
+                // For any other non-success status, assume scan exists to prevent re-registration
+                warn!("Scan list request failed (status: {}), assuming scan ID {} exists to prevent re-registration", status, scan_id);
+                return Ok(true);
+            }
 
-            // Check if our scan ID is still in the list
-            for scan in scans {
-                if let Some(id) = scan["scanId"].as_i64() {
-                    if id == scan_id as i64 {
-                        return Ok(true);
+            let scans: serde_json::Value = response.json().await.map_err(|e| {
+                error!("Failed to parse scan list JSON: {}", e);
+                TrackerScannerError::JsonError(format!("Failed to parse scan list: {}", e))
+            })?;
+
+            debug!(
+                "Scan list response: {}",
+                serde_json::to_string_pretty(&scans)
+                    .unwrap_or_else(|_| "Unable to format JSON".to_string())
+            );
+
+            // Check if our scan ID exists in the list
+            if let Some(scans_array) = scans.as_array() {
+                debug!("Found {} scans in list", scans_array.len());
+                for scan in scans_array {
+                    if let Some(id) = scan["scanId"].as_i64() {
+                        debug!("Checking scan ID: {} against target: {}", id, scan_id);
+                        if id == scan_id as i64 {
+                            debug!("Scan ID {} found in scan list", scan_id);
+                            return Ok(true);
+                        }
+                    } else {
+                        debug!("Scan entry missing scanId: {:?}", scan);
                     }
                 }
+            } else {
+                debug!("Scan list is not an array or is empty");
             }
         }
 
+        debug!("Scan ID not found in scan list or no stored scan ID");
         Ok(false)
     }
 
@@ -442,12 +681,12 @@ impl TrackerServerState {
             // Verify the scan is still active
             if self.verify_scan_registration().await.unwrap_or(false) {
                 info!("Tracker scan {} is still active", scan_id);
-                
+
                 // Update inner state
                 let mut inner = self.inner.lock().await;
                 inner.scan_id = Some(scan_id);
                 inner.scan_active = true;
-                
+
                 return Ok(scan_id);
             } else {
                 warn!("Stored tracker scan {} is no longer active, re-registering", scan_id);
