@@ -573,4 +573,679 @@ mod tests {
         assert!(tx_string.contains("f67858fe2ac4ed7c")); // first 16 chars of tracker box ID
         assert!(tx_string.contains("100000000")); // redemption amount
     }
+
+    #[test]
+    fn test_invalid_issuer_signature() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        // Test values
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let invalid_issuer_sig = vec![0u8; 64]; // Wrong length - 64 bytes instead of 65
+        let tracker_sig = vec![0u8; 65];
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &invalid_issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::Configuration(_)));
+        assert!(error.to_string().contains("Issuer signature must be 65 bytes"));
+    }
+
+    #[test]
+    fn test_invalid_tracker_signature() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        // Test values
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let invalid_tracker_sig = vec![0u8; 64]; // Wrong length - 64 bytes instead of 65
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &invalid_tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::Configuration(_)));
+        assert!(error.to_string().contains("Tracker signature must be 65 bytes"));
+    }
+
+    #[test]
+    fn test_empty_issuer_signature() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        // Test values
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let empty_issuer_sig = vec![]; // Empty signature
+        let tracker_sig = vec![0u8; 65];
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &empty_issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::Configuration(_)));
+        assert!(error.to_string().contains("Issuer signature must be 65 bytes"));
+    }
+
+    #[test]
+    fn test_empty_tracker_signature() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        // Test values
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let empty_tracker_sig = vec![]; // Empty signature
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &empty_tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::Configuration(_)));
+        assert!(error.to_string().contains("Tracker signature must be 65 bytes"));
+    }
+
+    #[test]
+    fn test_zero_amount_redemption() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        // Test values - same collected and redeemed amounts result in zero redemption
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 100000000; // Same as collected
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_ok());
+
+        let transaction_data = result.unwrap();
+        assert_eq!(transaction_data.redemption_amount, 0); // Should be 0 since collected == redeemed
+        assert_eq!(transaction_data.fee, 1000000);
+    }
+
+    #[test]
+    fn test_overflow_amounts() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        // Test values - redeemed amount larger than collected (should result in 0 redemption)
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 200000000; // Larger than collected
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_ok());
+
+        let transaction_data = result.unwrap();
+        assert_eq!(transaction_data.redemption_amount, 0); // Should be 0 due to saturating_sub
+        assert_eq!(transaction_data.fee, 1000000);
+    }
+
+    #[test]
+    fn test_insufficient_funds_validation() {
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp (expired lock)
+
+        let context = TxContext::default();
+        let reserve_value = 50000000; // 0.05 ERG (insufficient for redemption + fee)
+
+        let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            reserve_value,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::InsufficientFunds(_)));
+        assert!(error.to_string().contains("Reserve has"));
+    }
+
+    #[test]
+    fn test_sufficient_funds_validation() {
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp (expired lock)
+
+        let context = TxContext::default();
+        let reserve_value = 200000000; // 0.2 ERG (sufficient for redemption + fee)
+
+        let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            reserve_value,
+            &context,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_exact_funds_validation() {
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp (expired lock)
+
+        let context = TxContext::default(); // Default fee is 1000000
+        let reserve_value = 101000000; // Exactly redemption + fee (0.1 ERG + 0.001 ERG)
+
+        let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            reserve_value,
+            &context,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_exact_insufficient_funds_validation() {
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp (expired lock)
+
+        let context = TxContext::default(); // Default fee is 1000000
+        let reserve_value = 99999999; // Just under redemption + fee (not enough for 0.1 ERG + 0.001 ERG)
+
+        let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            reserve_value,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::InsufficientFunds(_)));
+    }
+
+    #[test]
+    fn test_time_lock_not_expired() {
+        // Use a recent timestamp (within 1 week of current time)
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set timestamp to 1 day ago (less than 1 week, so lock not expired)
+        let timestamp = current_time - 24 * 60 * 60;
+
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let context = TxContext::default();
+        let reserve_value = 200000000; // Sufficient funds
+
+        let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            reserve_value,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::TransactionBuilding(_)));
+        assert!(error.to_string().contains("Redemption time lock not expired"));
+    }
+
+    #[test]
+    fn test_time_lock_expired() {
+        // Use an old timestamp (more than 1 week ago)
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() - (8 * 24 * 60 * 60); // 8 days ago (more than 1 week)
+
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let context = TxContext::default();
+        let reserve_value = 200000000; // Sufficient funds
+
+        let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            reserve_value,
+            &context,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_time_lock_exactly_at_boundary() {
+        // Test the exact 1 week boundary
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Set timestamp to exactly 1 week ago (should be expired)
+        let timestamp = current_time - (7 * 24 * 60 * 60);
+
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let context = TxContext::default();
+        let reserve_value = 200000000; // Sufficient funds
+
+        let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            reserve_value,
+            &context,
+        );
+
+        assert!(result.is_ok()); // Should pass since 1 week has passed
+    }
+
+    #[test]
+    fn test_various_amount_fee_combinations() {
+        let amounts_and_fees = vec![
+            (1000000, 500000),    // Small amount, low fee
+            (10000000, 1000000),  // Medium amount, standard fee
+            (100000000, 2000000), // Large amount, high fee
+            (1000000000, 500000), // Very large amount, low fee
+        ];
+
+        for (amount, fee) in amounts_and_fees {
+            let context = TxContext {
+                current_height: 1000,
+                fee,
+                change_address: "test_change_address".to_string(),
+                network_prefix: 16,
+            };
+
+            // Use appropriate reserve value for the test
+            let reserve_value = amount + fee + 1000000; // Ensure sufficient funds
+
+            // Use an old timestamp to ensure time lock is expired
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() - (8 * 24 * 60 * 60); // 8 days ago
+
+            let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+                amount, // amount_collected
+                0,      // amount_redeemed
+                timestamp,
+                reserve_value,
+                &context,
+            );
+
+            assert!(result.is_ok(), "Failed for amount: {}, fee: {}", amount, fee);
+        }
+    }
+
+    #[test]
+    fn test_very_large_amounts_and_fees() {
+        let amounts_and_fees = vec![
+            (u64::MAX - 1000000, 1000000), // Maximum amount with small fee
+            (u64::MAX / 3, u64::MAX / 3),  // One-third max for both amount and fee, allowing for overhead
+        ];
+
+        for (amount, fee) in amounts_and_fees {
+            if amount > u64::MAX - fee {
+                // Skip if amount + fee would overflow
+                continue;
+            }
+
+            let context = TxContext {
+                current_height: 1000,
+                fee,
+                change_address: "test_change_address".to_string(),
+                network_prefix: 16,
+            };
+
+            // Use appropriate reserve value for the test, but handle overflow carefully
+            let additional_reserve = 1000000; // additional for overhead
+            let reserve_value = match amount.checked_add(fee) {
+                Some(sum) => match sum.checked_add(additional_reserve) {
+                    Some(val) => val,
+                    None => {
+                        // Skip this test case if values would overflow
+                        continue;
+                    }
+                },
+                None => {
+                    // Skip this test case if values would overflow
+                    continue;
+                }
+            };
+
+            // Use an old timestamp to ensure time lock is expired
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() - (8 * 24 * 60 * 60); // 8 days ago
+
+            let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+                amount, // amount_collected
+                0,      // amount_redeemed
+                timestamp,
+                reserve_value,
+                &context,
+            );
+
+            assert!(result.is_ok(), "Failed for amount: {}, fee: {}", amount, fee);
+        }
+    }
+
+    #[test]
+    fn test_empty_reserve_box_id() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "", // Empty reserve box ID
+            "test_tracker_box_456",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::Configuration(_)));
+        assert!(error.to_string().contains("Reserve box ID is required"));
+    }
+
+    #[test]
+    fn test_empty_tracker_box_id() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "", // Empty tracker box ID
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::Configuration(_)));
+        assert!(error.to_string().contains("Tracker box ID is required"));
+    }
+
+    #[test]
+    fn test_empty_recipient_address() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "", // Empty recipient address
+            &avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::Configuration(_)));
+        assert!(error.to_string().contains("Recipient address is required"));
+    }
+
+    #[test]
+    fn test_empty_avl_proof() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let empty_avl_proof = vec![]; // Empty AVL proof
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &empty_avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(error, TransactionBuilderError::Configuration(_)));
+        assert!(error.to_string().contains("AVL proof is required"));
+    }
+
+    #[test]
+    fn test_max_u64_values() {
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_, _recipient_pubkey) = generate_keypair();
+
+        // Test with maximum u64 values where possible
+        let amount_collected = u64::MAX;
+        let amount_redeemed = 0; // To prevent overflow in saturating_sub
+        let timestamp = 1672531200; // Old timestamp
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123_max_value",
+            "test_tracker_box_456_max_value",
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_ok());
+
+        let transaction_data = result.unwrap();
+        assert_eq!(transaction_data.redemption_amount, u64::MAX); // Should be max since collected == max and redeemed == 0
+        assert_eq!(transaction_data.fee, 1000000);
+    }
+
+    #[test]
+    fn test_max_context_values() {
+        // Test with maximum context values (except fee, which would cause overflow)
+        let context = TxContext {
+            current_height: u32::MAX, // Max height
+            fee: 1000000,            // Standard fee to avoid overflow issues
+            change_address: "test_max_height_address".to_string(),
+            network_prefix: 255,      // Max network prefix
+        };
+
+        // Test parameter validation with extreme values
+        let amount_collected = 100000000; // 0.1 ERG
+        let amount_redeemed = 0; // No redemptions yet
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() - (8 * 24 * 60 * 60); // 8 days ago (expired lock)
+
+        // Use a large but safe reserve value
+        let reserve_value = 1000000000; // Large but reasonable reserve
+
+        let result = RedemptionTransactionBuilder::validate_redemption_parameters(
+            amount_collected,
+            amount_redeemed,
+            timestamp,
+            reserve_value,
+            &context,
+        );
+
+        // This should succeed since the reserve covers the redemption + fee
+        assert!(result.is_ok());
+    }
 }

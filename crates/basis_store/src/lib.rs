@@ -35,7 +35,6 @@ pub mod test_helpers;
 #[cfg(test)]
 
 
-use basis_trees::BasisAvlTree;
 use blake2::{Blake2b512, Digest};
 use secp256k1;
 
@@ -156,7 +155,7 @@ impl From<secp256k1::Error> for NoteError {
 
 /// Tracker state manager with persistent AVL tree
 pub struct TrackerStateManager {
-    avl_state: BasisAvlTree,
+    avl_state: basis_trees::BasisAvlTree,
     current_state: TrackerState,
     storage: persistence::NoteStorage,
 }
@@ -185,7 +184,7 @@ impl TrackerStateManager {
         };
 
         // Create in-memory AVL tree
-        let avl_state = match BasisAvlTree::new() {
+        let avl_state = match basis_trees::BasisAvlTree::new() {
             Ok(tree) => {
                 tracing::debug!("In-memory AVL tree created successfully");
                 tree
@@ -453,6 +452,7 @@ impl NoteKey {
 
 /// Blake2b256 hash function for cryptographic hashing
 pub fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
+    use blake2::{Blake2b512, Digest};
     let mut hasher = Blake2b512::new();
     hasher.update(data);
     let result = hasher.finalize();
