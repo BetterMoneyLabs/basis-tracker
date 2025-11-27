@@ -13,6 +13,10 @@ pub fn run_all_tests() -> Result<(), String> {
     test_roundtrip_signature()?;
     test_signature_tampering()?;
     test_multiple_signatures()?;
+    test_timestamp_validation_future_timestamp()?;
+    test_timestamp_validation_increasing_timestamps()?;
+    test_timestamp_validation_non_increasing_timestamps()?;
+    test_different_issuer_recipient_pairs_allow_same_timestamps()?;
     schnorr_tests::run_schnorr_test_vectors()?;
 
     println!("All tests passed!");
@@ -291,6 +295,137 @@ fn test_multiple_signatures() -> Result<(), String> {
     Ok(())
 }
 
+fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
+    use crate::{TrackerStateManager, IouNote, PubKey, NoteError};
+
+    let mut tracker = TrackerStateManager::new();
+    let issuer_pubkey: PubKey = [1u8; 33];
+    let recipient_pubkey: PubKey = [2u8; 33];
+
+    // Create a note with a far future timestamp
+    let note = IouNote::new(
+        recipient_pubkey,
+        1000,
+        0,
+        9999999999, // Far future timestamp
+        [0u8; 65],
+    );
+
+    // Should fail with FutureTimestamp error
+    let result = tracker.add_note(&issuer_pubkey, &note);
+    match result {
+        Err(crate::NoteError::FutureTimestamp) => Ok(()),
+        _ => Err("Expected FutureTimestamp error".to_string()),
+    }
+}
+
+fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
+    use crate::{TrackerStateManager, IouNote, PubKey, Signature};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
+    let issuer_pubkey_bytes = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize();
+
+    let mut tracker = TrackerStateManager::new();
+    let recipient_pubkey: PubKey = [2u8; 33];
+
+    // Create first signed note
+    let note1 = IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key.secret_bytes())
+        .map_err(|e| format!("Failed to create first note: {:?}", e))?;
+
+    let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1);
+    if result1.is_err() {
+        return Err(format!("First note should succeed: {:?}", result1.err()));
+    }
+
+    // Create second signed note with higher timestamp
+    let note2 = IouNote::create_and_sign(recipient_pubkey, 2000, 1000001, &secret_key.secret_bytes())
+        .map_err(|e| format!("Failed to create second note: {:?}", e))?;
+
+    let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2);
+    if result2.is_err() {
+        return Err(format!("Second note with higher timestamp should succeed: {:?}", result2.err()));
+    }
+
+    Ok(())
+}
+
+fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
+    use crate::{TrackerStateManager, IouNote, PubKey, NoteError};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
+    let issuer_pubkey_bytes = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize();
+
+    let mut tracker = TrackerStateManager::new();
+    let recipient_pubkey: PubKey = [2u8; 33];
+
+    // Add first signed note
+    let note1 = IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key.secret_bytes())
+        .map_err(|e| format!("Failed to create first note: {:?}", e))?;
+
+    let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1);
+    if result1.is_err() {
+        return Err(format!("First note should succeed: {:?}", result1.err()));
+    }
+
+    // Try to add note with same timestamp - should fail
+    let note2 = IouNote::create_and_sign(recipient_pubkey, 2000, 1000000, &secret_key.secret_bytes())
+        .map_err(|e| format!("Failed to create second note: {:?}", e))?;
+
+    let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2);
+    match result2 {
+        Err(crate::NoteError::PastTimestamp) => {}, // Expected
+        _ => return Err(format!("Expected PastTimestamp error for same timestamp, got: {:?}", result2.err())),
+    }
+
+    // Try to add note with lower timestamp - should fail
+    let note3 = IouNote::create_and_sign(recipient_pubkey, 2000, 999999, &secret_key.secret_bytes())
+        .map_err(|e| format!("Failed to create third note: {:?}", e))?;
+
+    let result3 = tracker.add_note(&issuer_pubkey_bytes, &note3);
+    match result3 {
+        Err(crate::NoteError::PastTimestamp) => Ok(()), // Expected
+        _ => Err(format!("Expected PastTimestamp error for lower timestamp, got: {:?}", result3.err())),
+    }
+}
+
+fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), String> {
+    use crate::{TrackerStateManager, IouNote, PubKey};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    let secp = Secp256k1::new();
+    let secret_key1 = SecretKey::new(&mut secp256k1::rand::thread_rng());
+    let secret_key2 = SecretKey::new(&mut secp256k1::rand::thread_rng());
+    let issuer1_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret_key1).serialize();
+    let issuer2_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret_key2).serialize();
+
+    let mut tracker = TrackerStateManager::new();
+    let recipient_pubkey: PubKey = [3u8; 33];
+
+    // Add note for first issuer
+    let note1 = IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key1.secret_bytes())
+        .map_err(|e| format!("Failed to create first note: {:?}", e))?;
+
+    let result1 = tracker.add_note(&issuer1_pubkey, &note1);
+    if result1.is_err() {
+        return Err(format!("First note should succeed: {:?}", result1.err()));
+    }
+
+    // Add note for different issuer with same timestamp - should succeed
+    let note2 = IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key2.secret_bytes())
+        .map_err(|e| format!("Failed to create second note: {:?}", e))?;
+
+    let result2 = tracker.add_note(&issuer2_pubkey, &note2);
+    if result2.is_err() {
+        return Err("Note with same timestamp but different issuer should succeed".to_string());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test_module {
     use crate::schnorr_tests;
@@ -338,5 +473,25 @@ mod test_module {
     #[test]
     fn test_multiple_signatures() {
         super::test_multiple_signatures().unwrap();
+    }
+
+    #[test]
+    fn test_timestamp_validation_future_timestamp() {
+        super::test_timestamp_validation_future_timestamp().unwrap();
+    }
+
+    #[test]
+    fn test_timestamp_validation_increasing_timestamps() {
+        super::test_timestamp_validation_increasing_timestamps().unwrap();
+    }
+
+    #[test]
+    fn test_timestamp_validation_non_increasing_timestamps() {
+        super::test_timestamp_validation_non_increasing_timestamps().unwrap();
+    }
+
+    #[test]
+    fn test_different_issuer_recipient_pairs_allow_same_timestamps() {
+        super::test_different_issuer_recipient_pairs_allow_same_timestamps().unwrap();
     }
 }

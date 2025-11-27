@@ -29,6 +29,8 @@ impl From<NoteError> for RedemptionError {
     fn from(err: NoteError) -> Self {
         match err {
             NoteError::InvalidSignature => RedemptionError::InvalidNoteSignature,
+            NoteError::FutureTimestamp => RedemptionError::StorageError("Future timestamp".to_string()),
+            NoteError::PastTimestamp => RedemptionError::StorageError("Past timestamp".to_string()),
             NoteError::RedemptionTooEarly => RedemptionError::RedemptionTooEarly(0, 0),
             NoteError::StorageError(msg) => RedemptionError::StorageError(msg),
             _ => RedemptionError::StorageError(format!("{:?}", err)),

@@ -141,6 +141,7 @@ pub enum NoteError {
     InvalidSignature,
     AmountOverflow,
     FutureTimestamp,
+    PastTimestamp,
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
@@ -209,6 +210,24 @@ impl TrackerStateManager {
 
     /// Add a new note to the tracker state
     pub fn add_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+        // Validate that timestamp is not in the future
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
+            .as_secs();
+
+        if note.timestamp > current_time {
+            return Err(NoteError::FutureTimestamp);
+        }
+
+        // Check if there is an existing note with the same issuer-recipient pair
+        // and ensure the new timestamp is greater than the existing one (ever increasing)
+        if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
+            if note.timestamp <= existing_note.timestamp {
+                return Err(NoteError::PastTimestamp);
+            }
+        }
+
         // Prepare AVL tree key and value in advance
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let key_bytes = key.to_bytes();
@@ -244,6 +263,24 @@ impl TrackerStateManager {
 
     /// Update an existing note
     pub fn update_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+        // Validate that timestamp is not in the future
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
+            .as_secs();
+
+        if note.timestamp > current_time {
+            return Err(NoteError::FutureTimestamp);
+        }
+
+        // Check if there is an existing note with the same issuer-recipient pair
+        // and ensure the new timestamp is greater than the existing one (ever increasing)
+        if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
+            if note.timestamp <= existing_note.timestamp {
+                return Err(NoteError::PastTimestamp);
+            }
+        }
+
         // Prepare key and value in advance
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let key_bytes = key.to_bytes();
