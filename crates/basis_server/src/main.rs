@@ -9,8 +9,10 @@ use basis_server::{
 };
 use basis_store::{
     ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
+    tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
     ReserveTracker,
 };
+use basis_store::persistence::{TrackerStorage, ScannerMetadataStorage};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
@@ -92,6 +94,65 @@ async fn main() {
         tracing::info!("Continuing without background scanner...");
     } else {
         tracing::info!("Ergo scanner started successfully");
+    }
+
+    // Initialize tracker scanner for monitoring tracker state commitment boxes
+    tracing::debug!("Tracker NFT ID from config: {:?}", config.ergo.tracker_nft_id);
+    if config.ergo.tracker_nft_id.is_some() && config.ergo.tracker_nft_id.as_ref().map_or(false, |id| !id.is_empty()) {
+        tracing::info!("Initializing tracker scanner with tracker NFT ID...");
+        let tracker_scanner_config = TrackerNodeConfig {
+            start_height: config.ergo.node.start_height,
+            tracker_nft_id: config.ergo.tracker_nft_id.clone(),
+            node_url: config.ergo.node.node_url.clone(),
+            scan_name: Some("Basis Tracker Scanner".to_string()),
+            api_key: config.ergo.node.api_key.clone(),
+        };
+
+        // Create tracker scanner state with persistent storage paths (similar to reserve scanner)
+        let metadata_storage_path = std::path::Path::new("data").join("tracker_scanner_metadata");
+        let tracker_storage_path = std::path::Path::new("data").join("tracker_boxes");
+
+        // Ensure data directory exists
+        std::fs::create_dir_all(&metadata_storage_path.parent().unwrap_or(std::path::Path::new("data"))).unwrap_or_else(|e| {
+            tracing::warn!("Failed to create data directory: {}", e);
+        });
+
+        match basis_store::persistence::ScannerMetadataStorage::open(metadata_storage_path.clone()) {
+            Ok(metadata_storage) => {
+                match basis_store::persistence::TrackerStorage::open(tracker_storage_path.clone()) {
+                    Ok(tracker_storage) => {
+                        let tracker_scanner = create_tracker_server_state(
+                            tracker_scanner_config,
+                            metadata_storage,
+                            tracker_storage,
+                        );
+
+                        // Ensure the tracker scan is registered on startup
+                        match tracker_scanner.ensure_scan_registered().await {
+                            Ok(scan_id) => {
+                                tracing::info!("Tracker scan registered with ID: {}", scan_id);
+                                tracing::info!("Tracker scanner initialization completed successfully");
+                            },
+                            Err(e) => {
+                                tracing::warn!("Failed to register tracker scan: {:?}", e);
+                                tracing::info!("Continuing without tracker scanner registration...");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create tracker storage for tracker scanner: {:?}", e);
+                        tracing::info!("Continuing without tracker scanner...");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create metadata storage for tracker scanner: {:?}", e);
+                tracing::info!("Continuing without tracker scanner...");
+            }
+        }
+    } else {
+        tracing::info!("Tracker NFT ID not configured, skipping tracker scanner initialization");
+        tracing::info!("To enable tracker scanner, configure 'ergo.tracker_nft_id' in your configuration");
     }
 
     // Initialize reserve tracker

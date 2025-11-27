@@ -91,6 +91,7 @@ Key configuration includes:
 - Server host/port
 - Ergo node connection details
 - Reserve contract P2S address
+- Tracker NFT ID (for tracker scanner registration and state commitment monitoring)
 - Transaction fees
 
 ## Blockchain Integration
@@ -98,8 +99,10 @@ Key configuration includes:
 The server integrates with the Ergo blockchain through:
 
 1. **Ergo Scanner**: Monitors the blockchain for reserve box events
-2. **Reserve Event Processing**: Handles reserve creation, top-ups, and redemptions
-3. **Real-time Updates**: Tracks collateralization ratios and reserve status
+2. **Tracker Scanner**: Monitors tracker state commitment boxes using the tracker NFT ID to enable cross-verification and state synchronization
+3. **Reserve Event Processing**: Handles reserve creation, top-ups, and redemptions
+4. **Real-time Updates**: Tracks collateralization ratios and reserve status
+5. **Scan Registration**: Automatically registers both reserve and tracker scans with the Ergo node using the `/scan` API
 
 ## Event Store
 
