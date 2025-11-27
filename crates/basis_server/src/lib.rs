@@ -5,6 +5,7 @@ pub mod config;
 pub mod models;
 pub mod reserve_api;
 pub mod store;
+pub mod tracker_box_updater;
 
 use tokio::sync::Mutex;
 
@@ -14,6 +15,7 @@ pub use config::*;
 pub use models::*;
 pub use reserve_api::*;
 pub use store::*;
+pub use tracker_box_updater::*;
 
 // Application state that holds a channel to communicate with the tracker thread
 #[derive(Clone)]

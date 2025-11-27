@@ -5,11 +5,13 @@ use axum::{
 use basis_server::{
     api::*, reserve_api::*, store::EventStore, AppConfig, AppState, ErgoConfig, EventType,
     ServerConfig, TrackerCommand, TrackerEvent, TransactionConfig,
+    TrackerBoxUpdateConfig, TrackerBoxUpdater, SharedTrackerState,
 };
 use basis_store::{
     ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
     ReserveTracker,
 };
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -42,6 +44,7 @@ async fn main() {
                         },
                         basis_reserve_contract_p2s: "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREnehzz21DdYTdrsuw268CxW3gkXE6D5B8748FYGg3JEVW9R6VFJe8ZDknCtiPbh56QUCJo5QDizMfXaKnJ3jbWV72baYPCw85tmiJowR2wd4AjsEuhZP4Ry4QRDcZPvGogGVbdk7ykPAB7KN2guYEhS7RU3xm23iY1YaM5TX1ditsWfxqCBsvq3U6X5EU2Y5KCrSjQxdtGcwoZsdPQhfpqcwHPcYqM5iwK33EU1cHqggeSKYtLMW263f1TY7Lfu3cKMkav1CyomR183TLnCfkRHN3vcX2e9fSaTpAhkb74yo6ZRXttHNP23JUASWs9ejCaguzGumwK3SpPCLBZY6jFMYWqeaanH7XAtTuJA6UCnxvrKko5PX1oSB435Bxd3FbvDAsEmHpUqqtP78B7SKxFNPvJeZuaN7r5p8nDLxUPZBrWwz2vtcgWPMq5RrnoJdrdqrnXMcMEQPF5AKDYuKMKbCRgn3HLvG98JXJ4bCc2wzuZhnCRQaFXTy88knEoj".to_string(),
                         tracker_nft_id: None,
+                        tracker_public_key: None,
                     },
                     transaction: TransactionConfig {
                         fee: 1000000, // 0.001 ERG
@@ -99,12 +102,22 @@ async fn main() {
     // Create channel for communicating with tracker thread
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
 
+    // Initialize tracker manager outside of the blocking task so it can be shared
+    use basis_store::{RedemptionManager, TrackerStateManager};
+    let shared_tracker_state = std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new()));
+
+    // Create shared tracker state for the updater
+    tracing::info!("Initializing shared tracker state...");
+    let shared_tracker_state_for_updater = SharedTrackerState::new();
+
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
+    let shared_tracker_state_clone = shared_tracker_state.clone();
+    let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
     tokio::task::spawn_blocking(move || {
-        use basis_store::{RedemptionManager, TrackerStateManager};
+        use basis_store::RedemptionManager;
 
         tracing::debug!("Tracker thread started");
-        let tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         while let Some(cmd) = rx.blocking_recv() {
@@ -115,10 +128,15 @@ async fn main() {
                     note,
                     response_tx,
                 } => {
+                    // Get mutable access to the tracker for adding a note
                     let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
 
-                    // Create event if successful
+                    // Update shared state for tracker box updater if successful
                     if result.is_ok() {
+                        // Update the shared AVL root digest to match the current tracker state
+                        let current_root = redemption_manager.tracker.get_state().avl_root_digest;
+                        shared_state_for_tracker.set_avl_root_digest(current_root);
+
                         // Note: In a real implementation, we'd send this back to the async context to store
                         // For now, we'll handle event storage in the async handler
                     }
@@ -136,9 +154,7 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .get_recipient_notes(&recipient_pubkey);
+                    let result = redemption_manager.tracker.get_recipient_notes(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -146,8 +162,7 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
+                    let result = redemption_manager.tracker
                         .lookup_note(&issuer_pubkey, &recipient_pubkey)
                         .map(Some);
                     let _ = response_tx.send(result);
@@ -170,11 +185,41 @@ async fn main() {
                         &recipient_pubkey,
                         redeemed_amount,
                     );
+
+                    // Update shared state for tracker box updater if successful
+                    if result.is_ok() {
+                        // Update the shared AVL root digest to match the current tracker state
+                        let current_root = redemption_manager.tracker.get_state().avl_root_digest;
+                        shared_state_for_tracker.set_avl_root_digest(current_root);
+                    }
+
                     let _ = response_tx.send(result);
                 }
             }
         }
     });
+
+    // Create tracker box updater
+    tracing::info!("Initializing tracker box updater...");
+    let tracker_box_config = TrackerBoxUpdateConfig::default(); // Uses 10-minute interval by default
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
+    // Clone the channel for the tracker updater
+    let updater_shutdown_rx = shutdown_tx.subscribe();
+
+    // Start the tracker box updater in the background
+    let updater_config = tracker_box_config.clone();
+    let shared_state_clone = shared_tracker_state_for_updater.clone();
+    tokio::spawn(async move {
+        if let Err(e) = TrackerBoxUpdater::start(
+            updater_config,
+            shared_state_clone,
+            updater_shutdown_rx,
+        ).await {
+            tracing::error!("Tracker box updater failed: {}", e);
+        }
+    });
+    tracing::info!("Tracker box updater started successfully");
 
     let event_store = match EventStore::new().await {
         Ok(store) => std::sync::Arc::new(store),
