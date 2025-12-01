@@ -96,10 +96,12 @@ The server supports configuration via:
 
 Key configuration includes:
 - Server host/port
-- Ergo node connection details
+- **Ergo node connection details** (required): The server will abort with exit code 1 if `ergo.node.node_url` is not provided in the configuration - no default localhost value is used
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)
 - Transaction fees
+
+**Critical Requirement**: The server requires a valid Ergo node URL to be provided in the configuration (`ergo.node.node_url` field). If this is missing or empty, the server will immediately exit with status code 1 during startup, preventing the tracker from running without proper blockchain connectivity.
 
 ## Blockchain Integration
 

@@ -7,4 +7,6 @@ Check following things:
 - The AVL+ tree root digest is updated whenever notes are added, modified or redeemed
 - The root digest is stored in R5 register of tracker commitment boxes on chain
 - R4 register contains the tracker's public key (33-byte compressed secp256k1 point)
+- The tracker periodically submits transactions to update R4 and R5 registers via the Ergo node API
+- Tracker will abort with exit code 1 if no Ergo node URL is provided in configuration (no localhost default)
 - make redemption with proper update of the tree etc

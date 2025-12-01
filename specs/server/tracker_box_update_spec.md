@@ -38,7 +38,14 @@ pub struct TrackerBoxUpdateConfig {
     pub enabled: bool,
     /// Flag to enable actual transaction submission (default: false for logging-only mode)
     pub submit_transaction: bool,
+    /// Ergo node URL for API requests (required, no default provided)
+    pub ergo_node_url: String,
+    /// API key for Ergo node authentication (optional)
+    pub ergo_api_key: Option<String>,
 }
+```
+
+**Critical Requirement**: The `ergo_node_url` must be explicitly provided in the configuration. If it's not provided (empty string), the tracker will abort on startup with exit code 1. No default localhost value is used. This ensures the tracker cannot operate without proper connection to an Ergo node.
 ```
 
 ### Shared State Structure
@@ -100,10 +107,13 @@ The background task executes the following algorithm in a continuous loop:
 3. **Construct Register Values**:
    - R4: Tracker public key (33 bytes, compressed secp256k1 point) - identifies the tracker server
    - R5: Hex-encoded AVL+ tree root digest (33 bytes commitment to all notes in the system) - represents the current state of all IOU notes
-4. **Log Register Values**:
-   - Construct hex-encoded strings for R4 and R5 values
-   - Log these values to the application log with INFO level
-   - Include timestamp and tracker state information in log message
+4. **Submit Transaction (if enabled)**:
+   - If `submit_transaction` is true and `ergo_node_url` is configured:
+     - Construct a wallet payment request with R4 and R5 register values
+     - Submit transaction via Ergo node API at `/wallet/payment/send` endpoint
+     - Include proper register values in R4 (tracker pubkey) and R5 (AVL root digest)
+     - Log transaction ID on successful submission
+   - Otherwise, log register values as before (for testing/development)
 5. **Error Handling**:
    - If any step fails, log an appropriate ERROR message
    - Continue with the scheduled interval regardless of failures
@@ -141,10 +151,11 @@ impl TrackerBoxUpdater {
 
 The tracker box updater is integrated into the server startup flow:
 
-1. **Shared State Creation**: Create `SharedTrackerState` instance during server initialization
-2. **Tracker Thread Integration**: Update shared state whenever tracker operations occur
-3. **Updater Service Startup**: Spawn the updater task as a background tokio task
-4. **Shutdown Handling**: Use broadcast channels for graceful shutdown coordination
+1. **Node Configuration Validation**: Verify that `ergo.node.node_url` is provided in config; abort with exit code 1 if missing
+2. **Shared State Creation**: Create `SharedTrackerState` instance during server initialization
+3. **Tracker Thread Integration**: Update shared state whenever tracker operations occur
+4. **Updater Service Startup**: Spawn the updater task as a background tokio task with proper node configuration
+5. **Shutdown Handling**: Use broadcast channels for graceful shutdown coordination
 
 ### Tracker Thread Integration
 
