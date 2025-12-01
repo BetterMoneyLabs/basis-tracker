@@ -242,12 +242,9 @@ impl TrackerStateManager {
         value_bytes.extend_from_slice(&note.recipient_pubkey);
 
         // Update AVL tree state first to ensure consistency
-        let avl_result = if let Err(_e) = self.avl_state.insert(key_bytes.clone(), value_bytes.clone()) {
-            // If insert fails, try to update instead (assuming key already exists)
-            self.avl_state.update(key_bytes.clone(), value_bytes.clone())
-        } else {
-            Ok(())
-        };
+        // Use update operation since in Basis tracker, only one note per issuer-recipient pair exists
+        // and new operations replace existing ones
+        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes.clone());
 
         // Only proceed with database storage if AVL tree update succeeded
         match avl_result {
@@ -285,13 +282,14 @@ impl TrackerStateManager {
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let key_bytes = key.to_bytes();
 
-        // Create value bytes for AVL tree (just the essential note data)
-        let value_bytes = [
-            &note.amount_collected.to_be_bytes()[..],
-            &note.amount_redeemed.to_be_bytes()[..],
-            &note.timestamp.to_be_bytes()[..],
-        ]
-        .concat();
+        // Create value bytes matching persistence format (consistent with add_note)
+        let mut value_bytes = Vec::new();
+        value_bytes.extend_from_slice(issuer_pubkey);
+        value_bytes.extend_from_slice(&note.amount_collected.to_be_bytes());
+        value_bytes.extend_from_slice(&note.amount_redeemed.to_be_bytes());
+        value_bytes.extend_from_slice(&note.timestamp.to_be_bytes());
+        value_bytes.extend_from_slice(&note.signature);
+        value_bytes.extend_from_slice(&note.recipient_pubkey);
 
         // Update AVL tree state first to ensure consistency
         let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
