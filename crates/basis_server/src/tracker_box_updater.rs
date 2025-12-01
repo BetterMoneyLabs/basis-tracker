@@ -98,8 +98,8 @@ impl Default for TrackerBoxUpdateConfig {
             update_interval_seconds: 600, // 10 minutes
             enabled: true,
             submit_transaction: false,
-            ergo_node_url: "http://localhost:9053".to_string(),
-            ergo_api_key: Some("hello".to_string()),
+            ergo_node_url: "".to_string(), // Must be provided in config
+            ergo_api_key: None,
         }
     }
 }

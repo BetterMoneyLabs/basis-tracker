@@ -272,6 +272,13 @@ async fn main() {
 
     // Create tracker box updater
     tracing::info!("Initializing tracker box updater...");
+
+    // Check if node configuration is provided, abort if not
+    if config.ergo.node.node_url.is_empty() {
+        tracing::error!("No Ergo node URL provided in configuration. Tracker box updater requires node connection.");
+        std::process::exit(1);
+    }
+
     let tracker_box_config = TrackerBoxUpdateConfig {
         update_interval_seconds: 600, // 10 minutes
         enabled: true,
