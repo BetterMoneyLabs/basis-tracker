@@ -175,3 +175,15 @@ cargo test -p basis_store --features ergo_scanner real_scanner_integration_tests
 - **All basis_trees crate related documentation MUST be placed in the `specs/trees/` folder**
 - This includes AVL tree implementations, storage plans, recovery mechanisms, and persistence documentation
 - Keep the main `specs/` directory for general project specifications only
+
+## API Documentation References
+
+The system makes use of the Ergo node API for blockchain interaction and scanning. See the [Ergo Node API specification](specs/ergo/openapi.yaml) for detailed information about the scan functionality used by the tracker to monitor blockchain boxes containing tracker NFTs and register values.
+
+The tracker uses the `/scan` endpoints to efficiently monitor relevant boxes on the Ergo blockchain without having to scan the entire blockchain. Key endpoints include:
+- `/scan/register`: Register a scan to monitor specific types of boxes
+- `/scan/listAll`: List all registered scans
+- `/scan/unspentBoxes/{scanId}`: Retrieve unspent boxes matching a scan
+- `/scan/spentBoxes/{scanId}`: Retrieve spent boxes matching a scan
+
+These scanning capabilities enable the tracker to efficiently monitor both reserve boxes and tracker commitment boxes containing R4 (tracker public key) and R5 (AVL+ tree root digest) register values.
