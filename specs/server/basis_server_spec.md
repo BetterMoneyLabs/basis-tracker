@@ -69,6 +69,13 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `Commitment`: Commitment to tracker state
 - `CollateralAlert`: When collateralization ratio falls below threshold
 
+### Tracker Box Registers
+
+The tracker box uses Ergo registers R4 and R5 to store commitment information:
+
+- `R4`: Contains the tracker's public key (33-byte compressed secp256k1 point) that identifies the tracker server
+- `R5`: Contains the AVL+ tree root digest (33-byte commitment to all notes in the system), updated whenever notes are added or modified
+
 ### IOU Note Structure
 
 The server handles IOU (I Owe You) notes that represent debt obligations:

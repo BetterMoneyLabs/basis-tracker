@@ -98,8 +98,8 @@ The background task executes the following algorithm in a continuous loop:
 1. **Wait for Interval**: Use tokio::time::interval to wait for the configured update period (10 minutes)
 2. **Access Shared State**: Read the current AVL tree root digest and tracker public key
 3. **Construct Register Values**:
-   - R4: Tracker public key (33 bytes, compressed secp256k1 point)
-   - R5: Hex-encoded AVL tree root digest (33 bytes as returned by tracker state)
+   - R4: Tracker public key (33 bytes, compressed secp256k1 point) - identifies the tracker server
+   - R5: Hex-encoded AVL+ tree root digest (33 bytes commitment to all notes in the system) - represents the current state of all IOU notes
 4. **Log Register Values**:
    - Construct hex-encoded strings for R4 and R5 values
    - Log these values to the application log with INFO level

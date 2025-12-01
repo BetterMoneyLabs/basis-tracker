@@ -140,8 +140,8 @@ The tracker scanner registers using the `containsAsset` predicate rather than re
 Tracker boxes contain different data than reserve boxes:
 1. **Asset Validation**: Verify the box contains the tracker NFT
 2. **Register Information Extraction**: Parse key registers:
-   - R4: Contains the tracker's public key
-   - R5: Contains the state commitment digest
+   - R4: Contains the tracker's public key (33-byte compressed secp256k1 point)
+   - R5: Contains the AVL+ tree root digest (33-byte commitment to all notes in the system)
    - R6: Contains the last verified height
 3. **Tracker State Updates**: Update the tracker state manager with cross-verification information
 

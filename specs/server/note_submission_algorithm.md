@@ -58,7 +58,7 @@ This document describes the complete algorithm executed when a new or updated IO
      - `InsufficientCollateral`: "Insufficient collateral"
      - `StorageError`: "Storage error: [details]"
 
-### Step 7: Event Storage
+### Step 7: Event Storage and AVL Tree Update
 1. If the note addition is successful (`Ok(())` response):
    - Create a `TrackerEvent` with type `EventType::NoteUpdated`
    - Set event fields:
@@ -70,6 +70,8 @@ This document describes the complete algorithm executed when a new or updated IO
      - `amount`: Note amount
      - Other fields set to `None`
    - Store the event in the event store using `state.event_store.add_event(event).await`
+   - Update the AVL+ tree with the new/updated note: add the note to the tree structure using a key derived from issuer and recipient public keys
+   - Update the AVL+ tree root digest which will be used for the R5 register in tracker boxes
    - If event storage fails, log a warning but continue
 
 ### Step 8: HTTP Response Generation
