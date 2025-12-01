@@ -169,7 +169,17 @@ async fn main() {
 
     // Create shared tracker state for the updater
     tracing::info!("Initializing shared tracker state...");
-    let shared_tracker_state_for_updater = SharedTrackerState::new();
+
+    // Get tracker public key from config, exit with error if not provided
+    let tracker_pubkey = if let Some(tracker_pubkey_bytes) = config.tracker_public_key_bytes().ok().flatten() {
+        tracing::info!("Using tracker public key from configuration");
+        tracker_pubkey_bytes
+    } else {
+        tracing::error!("No tracker public key found in configuration. Please set 'ergo.tracker_public_key' in your configuration file.");
+        std::process::exit(1);
+    };
+
+    let shared_tracker_state_for_updater = SharedTrackerState::new_with_tracker_key(tracker_pubkey);
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
     let shared_tracker_state_clone = shared_tracker_state.clone();

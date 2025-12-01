@@ -8,6 +8,20 @@ use tokio::sync::broadcast;
 use tokio::time::Duration;
 use tracing::{error, info};
 
+/// Create a default tracker public key that looks realistic (compressed format with proper prefix)
+fn create_default_tracker_pubkey() -> [u8; 33] {
+    // Use a realistic example of a compressed secp256k1 public key
+    // First byte is 0x02 or 0x03 (compressed format marker)
+    // Followed by 32 bytes representing x-coordinate of a point on the curve
+    // Using a pattern similar to one found in the codebase
+    [
+        0x02, 0xda, 0xda, 0x81, 0x1a, 0x88, 0x8c, 0xd0, 0xdc, 0x7a,
+        0x0a, 0x41, 0x73, 0x9a, 0x3a, 0xd9, 0xb0, 0xf4, 0x27, 0x74,
+        0x1f, 0xe6, 0xca, 0x19, 0x70, 0x0c, 0xf1, 0xa5, 0x12, 0x00,
+        0xc9, 0x6b, 0xf7
+    ]
+}
+
 /// Shared state for the tracker box updater
 #[derive(Debug, Clone)]
 pub struct SharedTrackerState {
@@ -16,25 +30,34 @@ pub struct SharedTrackerState {
 }
 
 impl SharedTrackerState {
+    /// Creates a new SharedTrackerState with a default tracker public key for testing
+    /// This should only be used in tests - production code should use new_with_tracker_key
     pub fn new() -> Self {
         Self {
             avl_root_digest: Arc::new(RwLock::new([0u8; 33])), // Initialize with zeros
-            tracker_pubkey: Arc::new(RwLock::new([0x02u8; 33])), // Initialize with compressed pubkey marker
+            tracker_pubkey: Arc::new(RwLock::new(create_default_tracker_pubkey())), // Initialize with a valid compressed pubkey
         }
     }
-    
+
+    pub fn new_with_tracker_key(tracker_pubkey: [u8; 33]) -> Self {
+        Self {
+            avl_root_digest: Arc::new(RwLock::new([0u8; 33])), // Initialize with zeros
+            tracker_pubkey: Arc::new(RwLock::new(tracker_pubkey)),
+        }
+    }
+
     pub fn set_avl_root_digest(&self, digest: [u8; 33]) {
         if let Ok(mut root_lock) = self.avl_root_digest.write() {
             *root_lock = digest;
         }
     }
-    
+
     pub fn set_tracker_pubkey(&self, pubkey: [u8; 33]) {
         if let Ok(mut pubkey_lock) = self.tracker_pubkey.write() {
             *pubkey_lock = pubkey;
         }
     }
-    
+
     pub fn get_avl_root_digest(&self) -> [u8; 33] {
         if let Ok(root_lock) = self.avl_root_digest.read() {
             *root_lock
@@ -42,7 +65,7 @@ impl SharedTrackerState {
             [0u8; 33] // fallback
         }
     }
-    
+
     pub fn get_tracker_pubkey(&self) -> [u8; 33] {
         if let Ok(pubkey_lock) = self.tracker_pubkey.read() {
             *pubkey_lock
