@@ -1,12 +1,14 @@
 //! Tracker Box Updater Service
 //!
-//! This module implements a background service that periodically logs the R4 and R5 register values
-//! of the tracker box every 10 minutes without submitting actual transactions to the Ergo blockchain.
+//! This module implements a background service that periodically updates the R4 and R5 register values
+//! of the tracker box every 10 minutes by submitting transactions to the Ergo blockchain via the wallet payment API.
 
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio::time::Duration;
 use tracing::{error, info};
+use serde_json::json;
+use basis_store::reqwest;
 
 /// Create a default tracker public key that looks realistic (compressed format with proper prefix)
 fn create_default_tracker_pubkey() -> [u8; 33] {
@@ -84,6 +86,10 @@ pub struct TrackerBoxUpdateConfig {
     pub enabled: bool,
     /// Flag to enable actual transaction submission (default: false for logging-only mode)
     pub submit_transaction: bool,
+    /// Ergo node URL for API requests
+    pub ergo_node_url: String,
+    /// API key for Ergo node authentication (if required)
+    pub ergo_api_key: Option<String>,
 }
 
 impl Default for TrackerBoxUpdateConfig {
@@ -92,6 +98,8 @@ impl Default for TrackerBoxUpdateConfig {
             update_interval_seconds: 600, // 10 minutes
             enabled: true,
             submit_transaction: false,
+            ergo_node_url: "http://localhost:9053".to_string(),
+            ergo_api_key: Some("hello".to_string()),
         }
     }
 }
@@ -121,8 +129,9 @@ impl TrackerBoxUpdater {
             config.update_interval_seconds
         );
 
+        let client = reqwest::Client::new();
         let mut interval = tokio::time::interval(Duration::from_secs(config.update_interval_seconds));
-        
+
         // Skip the first immediate tick to avoid immediate execution
         interval.tick().await;
 
@@ -137,14 +146,40 @@ impl TrackerBoxUpdater {
                     let r4_hex = hex::encode(&tracker_pubkey);
                     let r5_hex = hex::encode(&current_root);
 
-                    // Log register values (initial implementation - no transaction submission)
-                    info!(
-                        "Tracker Box Update: R4={}, R5={}, timestamp={}, root_digest={}",
-                        r4_hex,
-                        r5_hex,
-                        current_timestamp(),
-                        hex::encode(&current_root)
-                    );
+                    if config.submit_transaction {
+                        // Submit transaction to Ergo node via wallet payment API
+                        match Self::submit_tracker_box_update(
+                            &client,
+                            &config.ergo_node_url,
+                            config.ergo_api_key.as_deref(),
+                            &r4_hex,
+                            &r5_hex,
+                            tracker_pubkey
+                        ).await {
+                            Ok(tx_id) => {
+                                info!(
+                                    "Tracker Box Update Transaction Submitted: R4={}, R5={}, timestamp={}, root_digest={}, tx_id={}",
+                                    r4_hex,
+                                    r5_hex,
+                                    current_timestamp(),
+                                    hex::encode(&current_root),
+                                    tx_id
+                                );
+                            }
+                            Err(e) => {
+                                error!("Failed to submit tracker box update transaction: {}", e);
+                            }
+                        }
+                    } else {
+                        // Log register values for testing/development
+                        info!(
+                            "Tracker Box Update: R4={}, R5={}, timestamp={}, root_digest={}",
+                            r4_hex,
+                            r5_hex,
+                            current_timestamp(),
+                            hex::encode(&current_root)
+                        );
+                    }
                 }
                 _ = shutdown_rx.recv() => {
                     info!("Tracker box updater shutdown signal received");
@@ -152,9 +187,70 @@ impl TrackerBoxUpdater {
                 }
             }
         }
-        
+
         info!("Tracker box updater stopped");
         Ok(())
+    }
+
+    /// Submit a tracker box update transaction to the Ergo node
+    async fn submit_tracker_box_update(
+        client: &reqwest::Client,
+        node_url: &str,
+        api_key: Option<&str>,
+        r4_hex: &str,
+        r5_hex: &str,
+        _tracker_pubkey: [u8; 33],
+    ) -> Result<String, TrackerBoxUpdaterError> {
+        // Build the URL for the wallet payment endpoint
+        let url = format!("{}/wallet/payment/send", node_url);
+
+        // Prepare the request body with register values
+        let payload = json!({
+            "address": format!("9f{}", &r4_hex[2..]), // Convert public key to P2PK address format (9f + pubkey without 02/03 prefix)
+            "value": 100000, // Minimum ERG value for box (0.001 ERG)
+            "registers": {
+                "R4": r4_hex,  // Tracker public key
+                "R5": r5_hex,  // AVL+ tree root digest
+            },
+            "fee": 1000000, // Standard transaction fee (0.001 ERG)
+            "changeAddress": format!("9f{}", &r4_hex[2..]) // Send change back to tracker address
+        });
+
+        // Build the HTTP request
+        let mut request_builder = client.post(&url);
+
+        // Add API key if provided
+        if let Some(key) = api_key {
+            request_builder = request_builder.header("api_key", key);
+        }
+
+        // Send the request
+        let response = request_builder
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to send request: {}", e)))?;
+
+        // Check response status first before consuming the response
+        let response_status = response.status();
+
+        // Parse the response (should contain transaction ID)
+        let response_text = response.text().await.map_err(|e| {
+            TrackerBoxUpdaterError::ConfigurationError(format!("Failed to read response: {}", e))
+        })?;
+
+        // Check response status and handle errors using the text we already have
+        if !response_status.is_success() {
+            return Err(TrackerBoxUpdaterError::ConfigurationError(format!(
+                "Wallet payment API returned error: {} - {}",
+                response_status,
+                response_text
+            )));
+        }
+
+        // Extract and return transaction ID from response
+        // The response format depends on Ergo node API, typically contains transaction ID
+        Ok(response_text) // In real implementation, parse the JSON response for tx ID
     }
 }
 

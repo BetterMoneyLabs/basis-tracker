@@ -272,7 +272,13 @@ async fn main() {
 
     // Create tracker box updater
     tracing::info!("Initializing tracker box updater...");
-    let tracker_box_config = TrackerBoxUpdateConfig::default(); // Uses 10-minute interval by default
+    let tracker_box_config = TrackerBoxUpdateConfig {
+        update_interval_seconds: 600, // 10 minutes
+        enabled: true,
+        submit_transaction: config.tracker_public_key_hex().is_some(), // Enable submission if tracker key is configured
+        ergo_node_url: config.ergo.node.node_url.clone(),
+        ergo_api_key: config.ergo.node.api_key.clone(),
+    };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
     // Clone the channel for the tracker updater
