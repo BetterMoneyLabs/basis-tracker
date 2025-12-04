@@ -51,6 +51,7 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `GET /reserves` - Get all reserve information
 - `GET /reserves/issuer/{pubkey}` - Get reserves for a specific issuer
 - `GET /key-status/{pubkey}` - Get status information for a public key
+- `POST /reserves/create` - Create a reserve creation payload for Ergo node's `/wallet/payment/send` API
 
 ### Event Tracking
 
@@ -85,6 +86,28 @@ The server handles IOU (I Owe You) notes that represent debt obligations:
 - `amount_redeemed`: Amount already redeemed
 - `timestamp`: Creation timestamp
 - `signature`: Cryptographic signature
+
+### Reserve Creation Payload Structure
+
+The server provides an endpoint to generate reserve creation payloads for Ergo node's `/wallet/payment/send` API:
+
+- `POST /reserves/create` - accepts a request with:
+  - `nft_id`: String - the NFT ID to be stored in the reserve box (hex-encoded)
+  - `owner_pubkey`: String - the 33-byte compressed public key (hex-encoded) of the reserve owner
+  - `erg_amount`: u64 - the amount of ERG to lock in the reserve (in nanoERG)
+
+- Returns a JSON response compatible with Ergo's `/wallet/payment/send` API:
+  - `requests`: Array of payment requests
+    - `address`: Reserve contract P2S address (hardcoded in configuration)
+    - `value`: ERG amount from request
+    - `assets`: Array containing the NFT asset
+      - `token_id`: NFT ID from request
+      - `amount`: Always 1 for NFTs
+    - `registers`: Map of register values
+      - `R4`: Owner public key from request
+      - `R5`: Tracker NFT ID (if configured) or provided NFT ID
+  - `fee`: Transaction fee amount from configuration
+  - `change_address`: "default" placeholder (filled by wallet)
 
 ## Configuration
 

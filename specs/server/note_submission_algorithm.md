@@ -104,6 +104,18 @@ This document describes the complete algorithm executed when a new or updated IO
 - `TrackerEvent`: Event stored in the event store for audit trail
 - `ApiResponse`: Standard response wrapper
 
+## Reserve Creation Functionality
+
+In addition to note submission, the server also provides a method to generate reserve creation payloads for the Ergo node API:
+
+### Reserve Creation API Handler
+
+1. **API Handler**: `create_reserve_payload` function in `api.rs`
+2. **Input Validation**: Validates NFT ID, public key format (33 bytes), and ERG amount
+3. **Configuration Loading**: Loads the hardcoded reserve contract P2S address from server configuration
+4. **JSON Payload Generation**: Creates a response structure compatible with Ergo node's `/wallet/payment/send` API
+5. **Response Generation**: Returns properly formatted JSON with appropriate HTTP status codes
+
 ## Error Conditions
 
 - Invalid hex encoding of public keys or signatures

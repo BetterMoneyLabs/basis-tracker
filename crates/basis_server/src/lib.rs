@@ -7,6 +7,9 @@ pub mod reserve_api;
 pub mod store;
 pub mod tracker_box_updater;
 
+#[cfg(test)]
+mod create_reserve_tests;
+
 use tokio::sync::Mutex;
 
 // Re-export main types for external use
@@ -16,6 +19,14 @@ pub use models::*;
 pub use reserve_api::*;
 pub use store::*;
 pub use tracker_box_updater::*;
+
+// Re-export specific types needed by tests
+pub use models::{
+    CreateReserveRequest,
+    ReserveCreationResponse,
+    ReservePaymentRequest,
+    Asset,
+};
 
 // Application state that holds a channel to communicate with the tracker thread
 #[derive(Clone)]

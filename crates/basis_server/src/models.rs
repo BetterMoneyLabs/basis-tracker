@@ -122,6 +122,36 @@ pub struct ProofResponse {
     pub timestamp: u64,
 }
 
+// Request for creating a reserve
+#[derive(Debug, Deserialize)]
+pub struct CreateReserveRequest {
+    pub nft_id: String,
+    pub owner_pubkey: String,
+    pub erg_amount: u64,
+}
+
+// Response for reserve creation - formatted for Ergo node's /wallet/payment/send API
+#[derive(Debug, Clone, Serialize)]
+pub struct ReserveCreationResponse {
+    pub requests: Vec<ReservePaymentRequest>,
+    pub fee: u64,
+    pub change_address: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReservePaymentRequest {
+    pub address: String,
+    pub value: u64,
+    pub assets: Vec<Asset>,
+    pub registers: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Asset {
+    pub token_id: String,
+    pub amount: u64,
+}
+
 // Success response helper
 pub fn success_response<T>(data: T) -> ApiResponse<T> {
     ApiResponse {

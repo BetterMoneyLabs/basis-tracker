@@ -45,4 +45,12 @@ impl EventStore {
         let end = std::cmp::min(start + page_size, events.len());
         Ok(events[start..end].to_vec())
     }
+
+    /// Create an in-memory event store for testing
+    pub fn new_in_memory() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
 }

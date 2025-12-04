@@ -3,8 +3,10 @@ use std::collections::HashMap;
 
 use crate::{
     models::{
-        ApiResponse, CompleteRedemptionRequest, CreateNoteRequest, KeyStatusResponse,
-        ProofResponse, RedeemRequest, RedeemResponse, SerializableIouNote, TrackerEvent,
+        ApiResponse, CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest,
+        KeyStatusResponse, ProofResponse, RedeemRequest, RedeemResponse,
+        ReserveCreationResponse, ReservePaymentRequest, Asset,
+        SerializableIouNote, TrackerEvent,
     },
     AppState, TrackerCommand,
 };
@@ -1007,4 +1009,112 @@ pub async fn get_proof(
     );
 
     (StatusCode::OK, Json(crate::models::success_response(proof)))
+}
+
+// Create a reserve creation payload for Ergo node's /wallet/payment/send API
+#[axum::debug_handler]
+pub async fn create_reserve_payload(
+    State(_state): State<AppState>,
+    Json(payload): Json<CreateReserveRequest>,
+) -> (StatusCode, Json<ApiResponse<ReserveCreationResponse>>) {
+    tracing::debug!("Creating reserve payload: {:?}", payload);
+
+    // Validate the owner public key (33 bytes when hex-decoded)
+    let owner_pubkey_bytes = match hex::decode(&payload.owner_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "owner_pubkey must be hex-encoded".to_string(),
+                )),
+            );
+        }
+    };
+
+    if owner_pubkey_bytes.len() != 33 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "owner_pubkey must be 33 bytes (66 hex characters)".to_string(),
+            )),
+        );
+    }
+
+    // Validate the NFT ID (should be valid hex for token ID)
+    if payload.nft_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "nft_id cannot be empty".to_string(),
+            )),
+        );
+    }
+
+    // Validate the amount
+    if payload.erg_amount == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "erg_amount must be greater than 0".to_string(),
+            )),
+        );
+    }
+
+    // Get the hardcoded reserve contract P2S address from configuration
+    let config = match crate::config::AppConfig::load() {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("Failed to load configuration: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Failed to load server configuration".to_string(),
+                )),
+            );
+        }
+    };
+
+    let reserve_contract_address = config.ergo.basis_reserve_contract_p2s;
+
+    // Create the payment request for the reserve
+    let mut registers = std::collections::HashMap::new();
+    registers.insert("R4".to_string(), payload.owner_pubkey.clone());
+    // R5 can contain the tracker NFT ID if one is configured
+    if let Some(tracker_nft_id) = &config.ergo.tracker_nft_id {
+        registers.insert("R5".to_string(), tracker_nft_id.clone());
+    } else {
+        // If no tracker NFT ID is configured, we might still include the NFT ID
+        // or leave it empty based on the use case - for now, we'll include the provided nft_id
+        registers.insert("R5".to_string(), payload.nft_id.clone());
+    }
+
+    let payment_request = ReservePaymentRequest {
+        address: reserve_contract_address,
+        value: payload.erg_amount,
+        assets: vec![Asset {
+            token_id: payload.nft_id.clone(), // Clone to avoid moving
+            amount: 1,
+        }],
+        registers,
+    };
+
+    // Create the response following Ergo node's /wallet/payment/send format
+    let response = ReserveCreationResponse {
+        requests: vec![payment_request],
+        fee: config.transaction.fee, // Get fee from configuration
+        change_address: "default".to_string(), // This will be filled by the wallet
+    };
+
+    tracing::info!(
+        "Successfully created reserve payload for {} with {} ERG and NFT {}",
+        payload.owner_pubkey,
+        payload.erg_amount,
+        &payload.nft_id
+    );
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(response)),
+    )
 }

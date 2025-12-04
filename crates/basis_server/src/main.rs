@@ -442,6 +442,7 @@ async fn main() {
         .route("/redeem/complete", post(complete_redemption).options(handle_options))
         .route("/proof", get(get_proof))
         .route("/reserves", get(get_all_reserves))
+        .route("/reserves/create", post(create_reserve_payload).options(handle_options))
         // Most specific parameterized routes first
         .route(
             "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",
@@ -470,6 +471,7 @@ async fn main() {
     tracing::debug!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
     tracing::debug!("  GET /reserves");
     tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
+    tracing::debug!("  POST /reserves/create");
     tracing::debug!("  GET /events");
     tracing::debug!("  GET /events/paginated");
     tracing::debug!("  GET /key-status/{{pubkey}}");
