@@ -51,21 +51,29 @@ basis-cli --server-url http://localhost:3048 status
 1. Create an NFT to associate with your reserve box
 2. Record the NFT ID (token ID) - this will be used in the reserve creation
 
-### Step 2: Prepare Reserve Creation Request
-1. Prepare a POST request to `<tracker-server>/reserves/create`
-2. Request body format:
-```json
-{
-  "nft_id": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-  "owner_pubkey": "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12",
-  "erg_amount": 100000000000
-}
+### Step 2: Create Reserve Using Client (Recommended)
+1. Use the client to create a reserve (using the currently selected account as owner):
+```bash
+basis-cli reserve create --nft-id {tracker_nft_id} --amount {erg_amount}
 ```
 
-### Step 3: Execute Reserve Transaction
-1. Execute the `/wallet/payment/send` API call with the JSON response from Step 2
-2. Verify that the transaction is successful
-3. Note the reserve box ID for testing
+2. Or specify a specific owner public key:
+```bash
+basis-cli reserve create --nft-id {tracker_nft_id} --owner {owner_pubkey} --amount {erg_amount}
+```
+
+3. The client will return a payload that can be submitted to an Ergo node's `/wallet/payment/send` API
+
+### Step 3: Execute Reserve Transaction with Ergo Node
+1. Take the output from Step 2 and submit it to your Ergo node's `/wallet/payment/send` API:
+```bash
+curl -X POST "http://your-ergo-node:9053/wallet/payment/send" \
+  -H "Content-Type: application/json" \
+  -H "api_key: your_api_key" \
+  -d '{payload_from_step_2}'
+```
+
+2. Verify that the transaction is successful and note the reserve box ID for testing
 
 ### Step 4: Verify Reserve Creation with Client
 1. Use the client to check key status: `basis-cli reserve status {owner_pubkey}`
@@ -179,28 +187,68 @@ curl -X POST "$TRACKER_SERVER/redeem" \
   -d '{"issuer_pubkey": "...", "recipient_pubkey": "...", "amount": "...", "timestamp": "..."}'
 ```
 
-**Using basis_cli client:**
+**Using basis_cli client (Recommended approach):**
 ```bash
 # 1. Set up accounts
 basis-cli account create issuer_account
 basis-cli account create recipient_account
 
-# 2. Switch to issuer account and create note
+# 2. Switch to issuer account and create reserve
 basis-cli account switch issuer_account
-# (Create reserve using Ergo wallet API directly)
+# Get the public key for the issuer account
+ISSUER_PUBKEY=$(basis-cli account info | grep "Public Key" | cut -d':' -f2 | tr -d ' ')
+# Create the reserve (this creates the payload for Ergo node)
+basis-cli reserve create --nft-id {tracker_nft_id} --amount 1000000000
+# Execute the reserve creation transaction with your Ergo node
+# (See step 3 for how to submit the payload to Ergo node)
 
-# 3. Verify reserve status
-basis-cli reserve status {owner_pubkey}
-
-# 4. Create and submit note (issuer account must be selected)
+# 3. Create and submit note (issuer account must be selected)
 basis-cli note create --recipient {recipient_pubkey} --amount {amount} --timestamp {timestamp}
 
-# 5. Switch to recipient account and initiate redemption
+# 4. Switch to recipient account and initiate redemption
 basis-cli account switch recipient_account
 basis-cli note redeem --issuer {issuer_pubkey} --recipient {recipient_pubkey} --amount {amount} --timestamp {timestamp}
 
-# 6. Complete redemption
+# 5. Complete redemption
 basis-cli note complete-redemption --issuer {issuer_pubkey} --recipient {recipient_pubkey} --amount {redeemed_amount}
+```
+
+**Complete end-to-end example using client only (reserving actual Ergo transaction):**
+```bash
+# 1. Set up accounts
+basis-cli account create issuer_account
+basis-cli account create recipient_account
+
+# 2. Get account public keys
+basis-cli account switch issuer_account
+ISSUER_PUBKEY=$(basis-cli account info | grep -o "0[1-9a-fA-F]\{65\}")
+echo "Issuer pubkey: $ISSUER_PUBKEY"
+
+basis-cli account switch recipient_account
+RECIPIENT_PUBKEY=$(basis-cli account info | grep -o "0[1-9a-fA-F]\{65\}")
+echo "Recipient pubkey: $RECIPIENT_PUBKEY"
+
+# 3. Create reserve payload (without executing on chain - for testing purposes)
+# Note: In real usage, you'd submit the payload from this command to your Ergo node
+RESERVE_PAYLOAD=$(basis-cli reserve create --nft-id {tracker_nft_id} --owner $ISSUER_PUBKEY --amount 1000000000)
+
+# 4. Verify reserve status before creating notes
+basis-cli reserve status --issuer $ISSUER_PUBKEY
+
+# 5. Create and submit note
+basis-cli account switch issuer_account
+basis-cli note create --recipient $RECIPIENT_PUBKEY --amount 500000000 --timestamp $(date +%s)
+
+# 6. Verify note was created
+basis-cli note list-issuer $ISSUER_PUBKEY
+basis-cli note list-recipient $RECIPIENT_PUBKEY
+
+# 7. Verify updated reserve status (should show new debt)
+basis-cli reserve status --issuer $ISSUER_PUBKEY
+
+# 8. Initiate and complete redemption
+basis-cli account switch recipient_account
+basis-cli note redeem --issuer $ISSUER_PUBKEY --recipient $RECIPIENT_PUBKEY --amount 250000000 --timestamp $(date +%s)
 ```
 
 ### Script 2: Client-Based Validation Tests
@@ -213,6 +261,21 @@ basis-cli account list
 
 # Verify account information
 basis-cli account info
+```
+
+**Reserve Management Tests:**
+```bash
+# Create a reserve using the current account as owner
+basis-cli reserve create --nft-id {tracker_nft_id} --amount 1000000000
+
+# Create a reserve specifying a specific owner public key
+basis-cli reserve create --nft-id {tracker_nft_id} --owner {owner_pubkey} --amount 1000000000
+
+# Check reserve status and collateralization
+basis-cli reserve status --issuer {pubkey}
+
+# Check collateralization ratio details
+basis-cli reserve collateralization --issuer {pubkey}
 ```
 
 **Note Management Tests:**
@@ -272,6 +335,7 @@ basis-cli interactive
 - Use `basis-cli account list` to verify account states
 - Use `basis-cli note list-issuer` and `basis-cli note list-recipient` to track note states
 - Use `basis-cli reserve status {pubkey}` to monitor collateralization ratios
+- Use `basis-cli reserve create --nft-id <id> --amount <amount>` to generate reserve creation payloads
 - Use `basis-cli note get-proof` to retrieve redemption proofs
 
 ### Blockchain Verification

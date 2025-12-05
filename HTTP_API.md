@@ -136,10 +136,58 @@ cargo build -p basis_server
   curl http://localhost:3000/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101/recipient/020202020202020202020202020202020202020202020202020202020202020202
   ```
 
+### POST /reserves/create
+- **Description**: Create a new reserve creation payload for Ergo node's `/wallet/payment/send` API
+- **Request Body**:
+  ```json
+  {
+    "nft_id": "hex-encoded tracker NFT ID",
+    "owner_pubkey": "hex-encoded 33-byte public key",
+    "erg_amount": 1000000000
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "requests": [
+        {
+          "address": "ergo P2S address of the reserve contract",
+          "value": 1000000000,
+          "assets": [
+            {
+              "token_id": "hex-encoded NFT token ID",
+              "amount": 1
+            }
+          ],
+          "registers": {
+            "R4": "owner public key",
+            "R5": "tracker NFT ID"
+          }
+        }
+      ],
+      "fee": 1000000,
+      "change_address": "default"
+    },
+    "error": null
+  }
+  ```
+- **Example**:
+  ```bash
+  curl -X POST http://localhost:3000/reserves/create \
+    -H "Content-Type: application/json" \
+    -d '{
+      "nft_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "owner_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
+      "erg_amount": 1000000000
+    }'
+  ```
+
 ### GET /reserves/issuer/{pubkey}
 - **Description**: Get all reserves for a specific issuer
 - **Path Parameter**: `pubkey` - Hex-encoded issuer public key (66 characters)
-- **Response**: 
+- **Response**:
   ```json
   {
     "success": true,

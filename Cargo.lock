@@ -265,6 +265,7 @@ dependencies = [
  "axum",
  "basis_store",
  "config",
+ "ergo-lib",
  "hex",
  "serde",
  "serde_json",

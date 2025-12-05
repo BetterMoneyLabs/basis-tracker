@@ -8,7 +8,11 @@ basis_reserve_contract_p2s = "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREn
 # Tracker NFT ID (hex-encoded) - required for reserve creation and redemption
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
 # Example: tracker_nft_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-tracker_nft_id = "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8"
+tracker_nft_id = "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b"
+# Tracker public key - can be hex-encoded public key or P2PK address
+# Example hex: "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
+# Example P2PK: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33"
+tracker_public_key = "9g7RJLKdrmxgvDg8RzbRx7bNqsdT46vsQx3bYDKuEEVkN5D4DkH"
 
 [ergo.node]
 start_height = 0

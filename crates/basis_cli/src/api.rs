@@ -55,6 +55,34 @@ pub struct CompleteRedemptionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateReserveRequest {
+    pub nft_id: String,
+    pub owner_pubkey: String,
+    pub erg_amount: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveCreationResponse {
+    pub requests: Vec<ReservePaymentRequest>,
+    pub fee: u64,
+    pub change_address: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReservePaymentRequest {
+    pub address: String,
+    pub value: u64,
+    pub assets: Vec<Asset>,
+    pub registers: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Asset {
+    pub token_id: String,
+    pub amount: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofResponse {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
@@ -294,6 +322,24 @@ impl TrackerClient {
         } else {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to get proof: {}", error_text))
+        }
+    }
+
+    // Reserve operations
+    pub async fn create_reserve(&self, request: CreateReserveRequest) -> Result<ReserveCreationResponse> {
+        let url = format!("{}/reserves/create", self.base_url);
+        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<ReserveCreationResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("Failed to create reserve: {}", error_text))
         }
     }
 }

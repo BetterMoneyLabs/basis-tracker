@@ -28,7 +28,7 @@ database_url = "sqlite:data/basis.db"  # Database path (optional)
 ```toml
 [ergo]
 # Basis reserve contract P2S address
-basis_reserve_contract_p2s = "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREnehzz21DdYTdrsuw268CxW3gkXE6D5B8748FYGg3JEVW9R6VFJe8ZDknCtiPbh56QUCJo5QDizMfXaKnJ3jbWV72baYPCw85tmiJowR2wd4AjsEuhZP4Ry4QRDcZPvGogGVbdk7ykPAB7KN2guYEhS7RU3xm23iY1YaM5TX1ditsWfxqCBsvq3U6X5EU2Y5KCrSjQxdtGcwoZsdPQhfpqcwHPcYqM5iwK33EU1cHqggeSKYtLMW263f1TY7Lfu3cKMkav1CyomR183TLnCfkRHN3vcX2e9fSaTpAhkb74yo6ZRXttHNP23JUASWs9ejCaguzGumwK3SpPCLBZY6jFMYWqeaanH7XAtTuJA6UCnxvrKko5PX1oSB435Bxd3FbvDAsEmHpUqqtP78B7SKxFNPvJeZuaN7r5p8nDLxUPZBrWwz2vtcgWPMq5RrnoJdrdqrnXMcMEQPF5AKDYuKMKbCRgn3HLvG98JXJ4bCc2wzuZhnCRQaFXTy88knEoj"
+basis_reserve_contract_p2s = "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREnehzz21DdYTdrsuw268CxW3gkXE6D5B8748FYGg3JEVW9R6VFJe8ZDknCtiPbh56QUCJo5QDizMfXaKnJ3jbWV72baYPCw85tmiJowR2wd4AjsEuhZP4Ry4QRDcZPvGogGVbdk7ykPAB7KN2guYEhS7RU3xm23iY1YaM5TX1ditsWfxqCBsvq3U6X5EU2Y5KCrSjQxdtGcwoZsdPQhfpqcwHPcYqM5iwK33EU1cHqggeSKYtLMW263f1TY7Lfu3cKMkav1CyomR183TLnCfkRHN3vcX2e9fSaTpAhkb74yo6ZRXttHNP23JUASWs9ejCaguzGumwK3SpPCLBZY6jFMYWqeaanH7XAtTuJA6UCnxvrKko5PX1oSB435Bxd3FbvDAsEmHpUqqtP78B7SKxFNPvJeZuaN7r5p8nDLxUPBrWwz2vtcgWPMq5RrnoJdrdqrnXMcMEQPF5AKDYuKMKbCRgn3HLvG98JXJ4bCc2wzuZhnCRQaFXTy88knEoj"
 
 # Starting block height for scanning (legacy)
 start_height = 0
@@ -37,6 +37,11 @@ start_height = 0
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
 # Example: tracker_nft_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 tracker_nft_id = ""
+
+# Tracker public key - can be either:
+# 1. Hex-encoded compressed public key (33 bytes = 66 hex chars): "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
+# 2. Ergo P2PK address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33"
+tracker_public_key = ""
 
 [ergo.node]
 url = "http://159.89.116.15:11088"   # Ergo node URL
@@ -89,6 +94,35 @@ export BASIS_ERGO_BASIS_RESERVE_CONTRACT_P2S="your_reserve_contract_p2s"
 export BASIS_ERGO_TRACKER_NFT_ID="your_tracker_nft_id"
 export BASIS_ERGO_NODE_URL="http://your-node:9053"
 ```
+
+## Tracker Public Key Configuration
+
+### What is the Tracker Public Key?
+
+The Tracker Public Key is used by the tracker server to:
+
+1. **Sign and submit transactions** that update the tracker box state commitments on-chain
+2. **Identify your tracker server instance** in tracker box R4 register
+3. **Enable automated tracker box updates** every 10 minutes
+
+### How to Configure Tracker Public Key
+
+1. **Prepare a compressed secp256k1 public key** (33 bytes)
+   - Can be provided as hex string: `02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7`
+   - Can be provided as Ergo P2PK address: `9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33`
+
+2. **Configure the public key** in `config/basis.toml`
+   ```toml
+   tracker_public_key = "your_public_key_or_p2pk_address_here"
+   ```
+
+3. **The tracker will use this key** to sign transactions updating the tracker box R4 register
+
+### Format Options
+
+The tracker public key supports two formats:
+- **Hex format**: 66 hexadecimal characters representing 33 bytes (e.g., `02abcd...`)
+- **P2PK address**: Base58 encoded Ergo address starting with '9' (mainnet) or '3' (testnet)
 
 ## Default Configuration
 

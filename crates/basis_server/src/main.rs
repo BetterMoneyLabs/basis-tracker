@@ -171,11 +171,17 @@ async fn main() {
     tracing::info!("Initializing shared tracker state...");
 
     // Get tracker public key from config, exit with error if not provided
-    let tracker_pubkey = if let Some(tracker_pubkey_bytes) = config.tracker_public_key_bytes().ok().flatten() {
+    let tracker_pubkey = if let Some(tracker_pubkey_bytes) = match config.tracker_public_key_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!("Invalid tracker public key format: {}. Please set 'ergo.tracker_public_key' as either a hex-encoded public key or a P2PK address in your configuration file.", e);
+            std::process::exit(1);
+        }
+    } {
         tracing::info!("Using tracker public key from configuration");
         tracker_pubkey_bytes
     } else {
-        tracing::error!("No tracker public key found in configuration. Please set 'ergo.tracker_public_key' in your configuration file.");
+        tracing::error!("No tracker public key found in configuration. Please set 'ergo.tracker_public_key' as either a hex-encoded public key or a P2PK address in your configuration file.");
         std::process::exit(1);
     };
 
@@ -282,7 +288,7 @@ async fn main() {
     let tracker_box_config = TrackerBoxUpdateConfig {
         update_interval_seconds: 600, // 10 minutes
         enabled: true,
-        submit_transaction: config.tracker_public_key_hex().is_some(), // Enable submission if tracker key is configured
+        submit_transaction: config.tracker_public_key_bytes().ok().is_some(), // Enable submission if tracker key is configured
         ergo_node_url: config.ergo.node.node_url.clone(),
         ergo_api_key: config.ergo.node.api_key.clone(),
     };
