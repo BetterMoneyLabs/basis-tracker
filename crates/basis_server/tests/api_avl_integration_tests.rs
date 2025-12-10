@@ -25,7 +25,7 @@ mod api_avl_integration_tests {
     #[tokio::test]
     async fn test_tracker_state_manager_avl_tree_integration() {
         // Test the core integration at the TrackerStateManager level
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
 
         // Verify initial state
         let initial_state = tracker.get_state();
@@ -60,7 +60,7 @@ mod api_avl_integration_tests {
 
     #[tokio::test]
     async fn test_tracker_multiple_notes_update_avl_tree() {
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
 
         // Initial state
         let initial_state = tracker.get_state();
@@ -104,7 +104,7 @@ mod api_avl_integration_tests {
 
     #[tokio::test]
     async fn test_tracker_note_retrieval_corresponds_to_avl_storage() {
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
 
         // Generate test data
         let issuer_pubkey = generate_test_pubkey(1);
@@ -144,7 +144,7 @@ mod api_avl_integration_tests {
 
     #[tokio::test]
     async fn test_avl_tree_state_consistency_with_note_operations() {
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
 
         // Start with empty state
         let empty_state = tracker.get_state();
@@ -191,7 +191,7 @@ mod api_avl_integration_tests {
 
     #[tokio::test]
     async fn test_avl_tree_proof_generation_integration() {
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
 
         // Generate test keys
         let issuer_pubkey = generate_test_pubkey(1);
@@ -229,7 +229,7 @@ mod api_avl_integration_tests {
 
     #[tokio::test]
     async fn test_tracker_state_manager_initial_empty_state() {
-        let tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new_with_temp_storage();
 
         // Verify initial state is properly initialized
         let initial_state = tracker.get_state();

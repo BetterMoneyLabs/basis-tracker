@@ -38,7 +38,7 @@ use tower_http::cors::{Any, CorsLayer};
             use basis_store::{RedemptionManager, TrackerStateManager};
 
             tracing::debug!("Test tracker thread started");
-            let tracker = TrackerStateManager::new();
+            let tracker = TrackerStateManager::new_with_temp_storage();
             let mut redemption_manager = RedemptionManager::new(tracker);
 
             while let Some(cmd) = rx.blocking_recv() {

@@ -239,7 +239,7 @@ mod tests {
         println!("Recipient pubkey: {}", hex::encode(recipient_pubkey));
 
         // Create tracker and redemption manager
-        let tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         // Create and sign a test note (with old timestamp to pass time lock)
@@ -306,7 +306,7 @@ mod tests {
         let (_, recipient_pubkey) = generate_keypair();
 
         // Create tracker and redemption manager
-        let tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         // Create and sign a test note with recent timestamp
@@ -370,7 +370,7 @@ mod tests {
         let (_, recipient_pubkey) = generate_keypair();
 
         // Create tracker and redemption manager
-        let tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         // Create and sign a test note
@@ -456,7 +456,7 @@ mod tests {
         let (_, recipient_pubkey) = generate_keypair();
 
         // Create tracker and redemption manager
-        let tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         // Create and sign a test note
@@ -527,7 +527,7 @@ mod tests {
         let (_, recipient_pubkey) = generate_keypair();
 
         // Create tracker and redemption manager
-        let tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         // Create a note with valid signature
@@ -586,7 +586,7 @@ mod tests {
         let (_, recipient_pubkey) = generate_keypair();
 
         // Create tracker and redemption manager
-        let tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         // Create and sign a test note

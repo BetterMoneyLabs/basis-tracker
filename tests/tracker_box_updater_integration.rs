@@ -39,7 +39,7 @@ async fn test_tracker_box_updates_avl_digest() {
     let shared_state = SharedTrackerState::new();
     
     // Create a test tracker and add a note to update the AVL tree
-    let mut tracker = TrackerStateManager::new();
+    let mut tracker = TrackerStateManager::new_with_temp_storage();
     
     // Create a test note
     let recipient_pubkey: PubKey = [0x03u8; 33];

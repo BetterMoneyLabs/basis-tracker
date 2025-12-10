@@ -62,23 +62,34 @@ impl BasisAvlTree {
         Ok(())
     }
 
-    /// Update an existing key-value pair
+    /// Update an existing key-value pair (or insert if key doesn't exist)
     pub fn update(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), TreeError> {
-        let operation = Operation::Update(KeyValue {
+        // Try update first, and if it fails (e.g., key doesn't exist), try insert
+        let update_op = Operation::Update(KeyValue {
             key: key.clone().into(),
             value: value.clone().into(),
         });
 
-        // Perform the operation
-        let _ = self
-            .prover
-            .perform_one_operation(&operation)
-            .map_err(|e| TreeError::StorageError(format!("AVL tree update failed: {:?}", e)))?;
+        match self.prover.perform_one_operation(&update_op) {
+            Ok(_) => {
+                self.update_state();
+                Ok(())
+            },
+            Err(_) => {
+                // Update failed, try insert instead
+                let insert_op = Operation::Insert(KeyValue {
+                    key: key.clone().into(),
+                    value: value.clone().into(),
+                });
 
-        // Update state
-        self.update_state();
+                self.prover
+                    .perform_one_operation(&insert_op)
+                    .map_err(|e| TreeError::StorageError(format!("AVL tree operation failed: {:?}", e)))?;
 
-        Ok(())
+                self.update_state();
+                Ok(())
+            }
+        }
     }
 
 

@@ -162,18 +162,66 @@ pub struct TrackerStateManager {
 }
 
 impl TrackerStateManager {
-    /// Create a new tracker state manager
+    /// Create a new tracker state manager with default storage location
     pub fn new() -> Self {
         tracing::debug!("Creating TrackerStateManager...");
 
-        // Use a temporary directory for storage (in real implementation, this would be configurable)
+        // Use the standard storage location for production
         tracing::debug!("Opening note storage...");
         let storage_path = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
             .join("crates/basis_server/data/notes");
         let storage = match persistence::NoteStorage::open(&storage_path) {
             Ok(storage) => {
-                tracing::debug!("Note storage opened successfully");
+                tracing::debug!("Note storage opened successfully at: {:?}", storage_path);
+                storage
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize note storage: {:?}", e);
+                // Fallback to in-memory storage if file storage fails
+                // In production, this should handle errors properly
+                panic!("Failed to initialize note storage: {:?}", e);
+            }
+        };
+
+        // Create in-memory AVL tree
+        let avl_state = match basis_trees::BasisAvlTree::new() {
+            Ok(tree) => {
+                tracing::debug!("In-memory AVL tree created successfully");
+                tree
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize AVL tree: {:?}", e);
+                panic!("Failed to initialize AVL tree: {:?}", e);
+            }
+        };
+
+        tracing::debug!("TrackerStateManager created successfully");
+        Self {
+            avl_state,
+            current_state: TrackerState {
+                avl_root_digest: [0u8; 33],
+                last_commit_height: 0,
+                last_update_timestamp: 0,
+            },
+            storage,
+        }
+    }
+
+    /// Create a new tracker state manager with temporary storage (used in tests only)
+    pub fn new_with_temp_storage() -> Self {
+        tracing::debug!("Creating TrackerStateManager (test version with temporary storage)...");
+
+        // Use a temporary directory for storage to avoid test conflicts
+        tracing::debug!("Opening note storage...");
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let storage_path = std::env::temp_dir().join(format!("basis_test_{}", unique_id));
+        let storage = match persistence::NoteStorage::open(&storage_path) {
+            Ok(storage) => {
+                tracing::debug!("Note storage opened successfully at: {:?}", storage_path);
                 storage
             }
             Err(e) => {

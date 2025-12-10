@@ -298,7 +298,7 @@ fn test_multiple_signatures() -> Result<(), String> {
 fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
     use crate::{TrackerStateManager, IouNote, PubKey, NoteError};
 
-    let mut tracker = TrackerStateManager::new();
+    let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer_pubkey: PubKey = [1u8; 33];
     let recipient_pubkey: PubKey = [2u8; 33];
 
@@ -327,7 +327,7 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
     let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
     let issuer_pubkey_bytes = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize();
 
-    let mut tracker = TrackerStateManager::new();
+    let mut tracker = TrackerStateManager::new_with_temp_storage();
     let recipient_pubkey: PubKey = [2u8; 33];
 
     // Create first signed note
@@ -359,7 +359,7 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
     let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
     let issuer_pubkey_bytes = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize();
 
-    let mut tracker = TrackerStateManager::new();
+    let mut tracker = TrackerStateManager::new_with_temp_storage();
     let recipient_pubkey: PubKey = [2u8; 33];
 
     // Add first signed note
@@ -402,7 +402,7 @@ fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), S
     let issuer1_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret_key1).serialize();
     let issuer2_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret_key2).serialize();
 
-    let mut tracker = TrackerStateManager::new();
+    let mut tracker = TrackerStateManager::new_with_temp_storage();
     let recipient_pubkey: PubKey = [3u8; 33];
 
     // Add note for first issuer

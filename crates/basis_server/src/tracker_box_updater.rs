@@ -7,8 +7,11 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio::time::Duration;
 use tracing::{error, info};
-use serde_json::json;
+use serde_json::{json, to_string};
 use basis_store::reqwest;
+use hex;
+use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
 /// Create a default tracker public key that looks realistic (compressed format with proper prefix)
 fn create_default_tracker_pubkey() -> [u8; 33] {
@@ -117,6 +120,7 @@ impl TrackerBoxUpdater {
     pub async fn start(
         config: TrackerBoxUpdateConfig,
         shared_tracker_state: SharedTrackerState,
+        network_prefix: NetworkPrefix,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) -> Result<(), TrackerBoxUpdaterError> {
         if !config.enabled {
@@ -154,7 +158,7 @@ impl TrackerBoxUpdater {
                             config.ergo_api_key.as_deref(),
                             &r4_hex,
                             &r5_hex,
-                            tracker_pubkey
+                            network_prefix  // Use the network_prefix passed to the start function
                         ).await {
                             Ok(tx_id) => {
                                 info!(
@@ -193,28 +197,75 @@ impl TrackerBoxUpdater {
     }
 
     /// Submit a tracker box update transaction to the Ergo node
+    /// Uses a placeholder network prefix since we can't determine it from hex keys alone
+    /// The real network prefix must be determined elsewhere and passed in
     async fn submit_tracker_box_update(
         client: &reqwest::Client,
         node_url: &str,
         api_key: Option<&str>,
         r4_hex: &str,
         r5_hex: &str,
-        _tracker_pubkey: [u8; 33],
+        network_prefix: NetworkPrefix,  // Network prefix to use for address encoding
     ) -> Result<String, TrackerBoxUpdaterError> {
         // Build the URL for the wallet payment endpoint
         let url = format!("{}/wallet/payment/send", node_url);
 
         // Prepare the request body with register values
+        // Validate that r4_hex is a valid compressed public key format
+        if r4_hex.len() != 66 || (!r4_hex.starts_with("02") && !r4_hex.starts_with("03")) {
+            return Err(TrackerBoxUpdaterError::ConfigurationError(format!(
+                "Invalid compressed public key format for R4 register: {}", r4_hex
+            )));
+        }
+
+        // Convert hex public key back to P2PK address
+        // Validate that r4_hex is a valid compressed public key format
+        if r4_hex.len() != 66 || (!r4_hex.starts_with("02") && !r4_hex.starts_with("03")) {
+            return Err(TrackerBoxUpdaterError::ConfigurationError(format!(
+                "Invalid compressed public key format for R4 register: {}", r4_hex
+            )));
+        }
+
+        // Decode the hex public key to bytes
+        let pubkey_bytes = hex::decode(r4_hex)
+            .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to decode public key hex: {}", e)))?;
+
+        // Convert to a fixed-size array
+        let mut pubkey_array = [0u8; 33];
+        if pubkey_bytes.len() != 33 {
+            return Err(TrackerBoxUpdaterError::ConfigurationError("Public key must be 33 bytes".to_string()));
+        }
+        pubkey_array.copy_from_slice(&pubkey_bytes);
+
+        // Use the sigma serialization approach from ergo-lib to rebuild the EcPoint
+        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+        let ec_point = ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint::sigma_parse_bytes(&pubkey_array)
+            .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to parse EcPoint from public key bytes: {}", e)))?;
+
+        // Create a ProveDlog from the EcPoint
+        let prove_dlog = ProveDlog::new(ec_point);
+
+        // Create P2PK address from ProveDlog
+        let p2pk_address = Address::P2Pk(prove_dlog);
+
+        // Encode as base58 address using the provided network prefix
+        let address_encoder = ergo_lib::ergotree_ir::address::AddressEncoder::new(network_prefix);
+        let address = address_encoder
+            .address_to_str(&p2pk_address);
+
         let payload = json!({
-            "address": format!("9f{}", &r4_hex[2..]), // Convert public key to P2PK address format (9f + pubkey without 02/03 prefix)
+            "address": address, // Properly formatted P2PK address
             "value": 100000, // Minimum ERG value for box (0.001 ERG)
             "registers": {
                 "R4": r4_hex,  // Tracker public key
                 "R5": r5_hex,  // AVL+ tree root digest
             },
-            "fee": 1000000, // Standard transaction fee (0.001 ERG)
-            "changeAddress": format!("9f{}", &r4_hex[2..]) // Send change back to tracker address
-        });
+            "fee": 1000000 // Standard transaction fee (0.001 ERG)
+       });
+
+        // Log the request payload for debugging
+        let payload_str = to_string(&payload).unwrap_or_else(|_| "Invalid JSON".to_string());
+        tracing::debug!("Tracker box update payload: {}", payload_str);
 
         // Build the HTTP request
         let mut request_builder = client.post(&url);

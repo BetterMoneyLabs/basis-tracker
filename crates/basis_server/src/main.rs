@@ -285,6 +285,15 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Try to determine the network prefix from the tracker public key using the config method
+    let network_prefix = match config.network_prefix_from_tracker_key() {
+        Ok(prefix) => prefix,
+        Err(_) => {
+            // Default to mainnet if we can't determine the network prefix
+            ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet
+        }
+    };
+
     let tracker_box_config = TrackerBoxUpdateConfig {
         update_interval_seconds: 600, // 10 minutes
         enabled: true,
@@ -300,10 +309,12 @@ async fn main() {
     // Start the tracker box updater in the background
     let updater_config = tracker_box_config.clone();
     let shared_state_clone = shared_tracker_state_for_updater.clone();
+    let updater_network_prefix = network_prefix; // Use the network_prefix determined above
     tokio::spawn(async move {
         if let Err(e) = TrackerBoxUpdater::start(
             updater_config,
             shared_state_clone,
+            updater_network_prefix,
             updater_shutdown_rx,
         ).await {
             tracing::error!("Tracker box updater failed: {}", e);

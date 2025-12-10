@@ -24,7 +24,7 @@ mod avl_tree_integration_tests {
     #[tokio::test]
     async fn test_note_storage_under_avl_tree() {
         // Create a new tracker state manager
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
         
         // Generate test keys
         let issuer_pubkey = generate_test_pubkey(1);
@@ -68,7 +68,7 @@ mod avl_tree_integration_tests {
     #[tokio::test]
     async fn test_note_reading_via_tracker() {
         // Create a new tracker state manager
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
         
         // Generate test keys
         let issuer_pubkey = generate_test_pubkey(1);
@@ -101,7 +101,7 @@ mod avl_tree_integration_tests {
     #[tokio::test]
     async fn test_multiple_notes_under_avl_tree() {
         // Create a new tracker state manager
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
         
         // Generate test keys
         let issuer_pubkey = generate_test_pubkey(1);
@@ -146,7 +146,7 @@ mod avl_tree_integration_tests {
     #[tokio::test]
     async fn test_avl_tree_state_commitment_changes() {
         // Create a new tracker state manager
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
         
         // Initial state
         let initial_state = tracker.get_state();

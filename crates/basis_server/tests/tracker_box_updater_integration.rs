@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod integration_tests {
     use basis_server::{TrackerBoxUpdateConfig, TrackerBoxUpdater, SharedTrackerState};
+    use ergo_lib::ergotree_ir::address::NetworkPrefix;
 
     #[tokio::test]
     async fn test_tracker_box_updater_integration() {
@@ -21,12 +22,29 @@ mod integration_tests {
         let config = TrackerBoxUpdateConfig::default();
         let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
         let updater_shutdown_rx = shutdown_tx.subscribe();
-        
-        // Just verify that we can create the updater without errors
-        // The actual execution would require a longer test time due to intervals
-        let result = TrackerBoxUpdater::start(config, shared_state, updater_shutdown_rx).await;
-        
-        // Should return Ok(()) when shutdown signal is received immediately
+
+        // Spawn the updater in a separate task so we can send shutdown signal
+        let updater_task = tokio::spawn(TrackerBoxUpdater::start(
+            config,
+            shared_state,
+            NetworkPrefix::Mainnet,
+            updater_shutdown_rx,
+        ));
+
+        // Give the updater a moment to start, then send shutdown signal
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = shutdown_tx.send(()); // Send shutdown signal
+
+        // Wait for the updater task to complete
+        let result = match tokio::time::timeout(std::time::Duration::from_secs(2), updater_task).await {
+            Ok(task_result) => task_result.unwrap(), // Get the actual result from the task
+            Err(_) => {
+                // If timeout occurs, the function is hanging - return an error
+                Err(basis_server::TrackerBoxUpdaterError::LoggingError("Updater did not shut down in time".to_string()))
+            }
+        };
+
+        // Should return Ok(()) when shutdown signal is received
         // For this test, we're mainly validating that the types work together
         assert!(result.is_ok());
     }
@@ -41,7 +59,7 @@ mod integration_tests {
         let shared_state = SharedTrackerState::new();
         
         // Create a test tracker and add a note to update the AVL tree
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
         
         // Create a test note
         let recipient_pubkey: PubKey = [0x03u8; 33];

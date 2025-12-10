@@ -308,6 +308,12 @@ impl RedemptionManager {
         // Update the redeemed amount
         note.amount_redeemed += redeemed_amount;
 
+        // Update the timestamp to ensure it's newer than the existing one
+        note.timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| RedemptionError::StorageError("Failed to get current time".to_string()))?
+            .as_secs();
+
         // Update the note in tracker
         self.tracker
             .update_note(issuer_pubkey, &note)
@@ -348,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_redemption_validation() {
-        let mut tracker = TrackerStateManager::new();
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
         let redemption_manager = RedemptionManager::new(tracker);
 
         // Test public key parsing

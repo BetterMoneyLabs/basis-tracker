@@ -180,6 +180,44 @@ impl AppConfig {
             _ => None,
         }
     }
+
+    /// Determine the network prefix from the tracker public key string (hex or P2PK address)
+    pub fn network_prefix_from_tracker_key(&self) -> Result<NetworkPrefix, Box<dyn std::error::Error>> {
+        match &self.ergo.tracker_public_key {
+            Some(pubkey_input) if !pubkey_input.is_empty() => {
+                // First, try to parse as a P2PK address to extract the network prefix
+                let mainnet_encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
+                let testnet_encoder = AddressEncoder::new(NetworkPrefix::Testnet);
+
+                // Try parsing with mainnet encoder first
+                if mainnet_encoder.parse_address_from_str(pubkey_input).is_ok() {
+                    Ok(NetworkPrefix::Mainnet)
+                } else if testnet_encoder.parse_address_from_str(pubkey_input).is_ok() {
+                    Ok(NetworkPrefix::Testnet)
+                } else {
+                    // If it's not a valid address, check if it's a hex public key
+                    // If so, use node URL to determine default network
+                    if hex::decode(pubkey_input).is_ok() {
+                        if self.ergo.node.node_url.contains("testnet") {
+                            Ok(NetworkPrefix::Testnet)
+                        } else {
+                            Ok(NetworkPrefix::Mainnet)
+                        }
+                    } else {
+                        Err("Invalid tracker public key format - not hex nor P2PK address".into())
+                    }
+                }
+            }
+            _ => {
+                // Default to mainnet if no tracker key is configured
+                if self.ergo.node.node_url.contains("testnet") {
+                    Ok(NetworkPrefix::Testnet)
+                } else {
+                    Ok(NetworkPrefix::Mainnet)
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
