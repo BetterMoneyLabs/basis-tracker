@@ -144,6 +144,22 @@ This project uses GitHub Actions for continuous integration. On every commit to 
 
 See [.github/workflows/test.yml](.github/workflows/test.yml) for the complete workflow.
 
+## Running Examples
+
+### Agent-to-Agent Payment Showcase
+A demonstration of the Celaut payment module where agents establish credit limits and exchange payments.
+
+```bash
+cargo run -p integration_tests --example agent_payment_demo
+```
+
+### Wallet Bot API Demo
+A demonstration of how a wallet (e.g., Telegram bot) uses the Tracker API to query balances and send payments.
+
+```bash
+cargo run -p integration_tests --example wallet_bot_demo
+```
+
 ## Implementation Roadmap
 
 The following implementation plan is targeting catching micropayments in P2P networks, agentic networks, etc ASAP and then

@@ -686,6 +686,14 @@ impl ServerState {
         // Extract tracker NFT from R5 register (optional)
         let tracker_nft_id = scan_box.additional_registers.get("R5").map(|s| s.clone());
 
+        // Extract token info if available (first token is considered collateral)
+        let (token_id, token_amount) = if !scan_box.assets.is_empty() {
+            let asset = &scan_box.assets[0];
+            (Some(asset.token_id.as_bytes()), Some(asset.amount))
+        } else {
+            (None, None)
+        };
+
         // Create extended reserve info
         let reserve_info = ExtendedReserveInfo::new(
             box_id.as_bytes(),
@@ -693,6 +701,8 @@ impl ServerState {
             value,
             tracker_nft_id.as_deref().map(|s| s.as_bytes()),
             creation_height,
+            token_id,
+            token_amount,
         );
 
         Ok(reserve_info)

@@ -5,6 +5,9 @@ pub mod config;
 pub mod models;
 pub mod reserve_api;
 pub mod store;
+pub mod wallet_api;
+
+/* ... */
 pub mod tracker_box_updater;
 
 #[cfg(test)]
@@ -53,7 +56,7 @@ pub enum TrackerCommand {
     GetNotesByRecipient {
         recipient_pubkey: basis_store::PubKey,
         response_tx:
-            tokio::sync::oneshot::Sender<Result<Vec<basis_store::IouNote>, basis_store::NoteError>>,
+            tokio::sync::oneshot::Sender<Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>>,
     },
     GetNoteByIssuerAndRecipient {
         issuer_pubkey: basis_store::PubKey,

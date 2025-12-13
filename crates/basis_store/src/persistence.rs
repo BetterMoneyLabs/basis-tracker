@@ -218,11 +218,11 @@ impl NoteStorage {
         Ok(notes)
     }
 
-    /// Get all notes for a specific recipient
+    /// Get all notes for a specific recipient, including the issuer public key
     pub fn get_recipient_notes(
         &self,
         recipient_pubkey: &PubKey,
-    ) -> Result<Vec<IouNote>, NoteError> {
+    ) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
         let mut notes = Vec::new();
 
         for item in self.partition.iter() {
@@ -238,6 +238,7 @@ impl NoteStorage {
             let note_recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
 
             if note_recipient_pubkey == *recipient_pubkey {
+                let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
                 let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
                 let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
                 let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
@@ -251,7 +252,7 @@ impl NoteStorage {
                     signature,
                 };
 
-                notes.push(note);
+                notes.push((issuer_pubkey, note));
             }
         }
 
