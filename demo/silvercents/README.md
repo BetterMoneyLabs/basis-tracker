@@ -6,6 +6,17 @@ This demo showcases the Basis protocol with SilverCents - a hybrid cryptocurrenc
 
 ---
 
+## Requirements
+
+- **Bash 4.0+** (included in most Unix systems)
+- **`bc`** (calculator command for decimal arithmetic)
+  - **Linux:** `sudo apt-get install bc` or `sudo yum install bc`
+  - **Mac:** Included by default
+  - **Windows:** Use WSL (`wsl --install`) or install via [Chocolatey](https://chocolatey.org/): `choco install gnuwin32-coreutils.install`
+- **`curl`** (for API calls - usually pre-installed)
+
+---
+
 ## Quick Start
 
 ### 1. Run the Interactive Demo
