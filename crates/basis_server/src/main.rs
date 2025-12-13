@@ -5,7 +5,7 @@ use axum::{
 use basis_server::{
     api::*, reserve_api::*, store::EventStore, AppConfig, AppState, ErgoConfig, EventType,
     ServerConfig, TrackerCommand, TrackerEvent, TransactionConfig,
-    TrackerBoxUpdateConfig, TrackerBoxUpdater, SharedTrackerState,
+    TrackerBoxUpdateConfig, TrackerBoxUpdater, SharedTrackerState, wallet_api::*,
 };
 use basis_store::{
     ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
@@ -483,6 +483,16 @@ async fn main() {
     tracing::debug!("  GET /key-status/{{pubkey}}");
     tracing::debug!("  POST /redeem");
     tracing::debug!("  GET /proof");
+
+    // Wallet API Routes
+    let app = app
+        .route("/wallet/pay", post(send_payment).options(handle_options))
+        .route("/wallet/{pubkey}/summary", get(get_wallet_summary))
+        .route("/wallet/{pubkey}/history", get(get_wallet_history));
+
+    tracing::debug!("  POST /wallet/pay");
+    tracing::debug!("  GET /wallet/{{pubkey}}/summary");
+    tracing::debug!("  GET /wallet/{{pubkey}}/history");
 
     // Run our app with hyper
     let addr = config.socket_addr();
