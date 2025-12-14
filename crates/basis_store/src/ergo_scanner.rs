@@ -74,7 +74,7 @@ pub struct NodeConfig {
 
 /// Inner state for scanner that requires synchronization
 #[derive(Clone)]
-struct ServerStateInner {
+pub struct ServerStateInner {
     pub current_height: u64,
     pub last_scanned_height: u64,
     pub scan_active: bool,

@@ -157,4 +157,10 @@ impl AccountManager {
 
         current.sign_message(message)
     }
+
+    pub fn get_keypair(&self) -> Result<&KeyPair> {
+        self.get_current()
+            .map(|account| &account.keypair)
+            .ok_or_else(|| anyhow::anyhow!("No current account set"))
+    }
 }

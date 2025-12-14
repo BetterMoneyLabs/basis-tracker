@@ -154,6 +154,14 @@ impl From<secp256k1::Error> for NoteError {
     }
 }
 
+impl std::error::Error for NoteError {}
+
+impl std::fmt::Display for NoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 /// Tracker state manager with persistent AVL tree
 pub struct TrackerStateManager {
     avl_state: basis_trees::BasisAvlTree,
