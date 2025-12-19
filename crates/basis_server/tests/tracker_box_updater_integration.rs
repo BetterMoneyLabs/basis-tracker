@@ -9,11 +9,11 @@ mod integration_tests {
         let shared_state = SharedTrackerState::new();
         
         // Set some test values
-        let test_root = [0x11u8; 33]; // Test AVL root digest
-        let test_pubkey = [0x02u8; 33]; // Test compressed public key
+        let test_root = [0x11u8; 33]; // Test AVL root digest (33 bytes)
+        let test_pubkey = [0x02u8; 33]; // Test compressed public key (33 bytes)
         shared_state.set_avl_root_digest(test_root);
         shared_state.set_tracker_pubkey(test_pubkey);
-        
+
         // Verify the values were set correctly
         assert_eq!(shared_state.get_avl_root_digest(), test_root);
         assert_eq!(shared_state.get_tracker_pubkey(), test_pubkey);

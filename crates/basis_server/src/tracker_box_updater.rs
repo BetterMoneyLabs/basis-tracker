@@ -148,7 +148,16 @@ impl TrackerBoxUpdater {
 
                     // Construct register values
                     let r4_hex = hex::encode(&tracker_pubkey);
-                    let r5_hex = hex::encode(&current_root);
+
+                    // R5 should contain the AVL tree root digest encoded as a byte array constant
+                    // Following the same pattern as scan registration (R1 register)
+                    use ergo_lib::ergotree_ir::mir::constant::Constant;
+                    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+                    // Create a ByteArray Constant from the 33-byte root digest and serialize it properly
+                    let r5_constant = Constant::from(current_root.to_vec());
+                    let r5_bytes = r5_constant.sigma_serialize_bytes();
+                    let r5_hex = hex::encode(&r5_bytes);
 
                     if config.submit_transaction {
                         // Submit transaction to Ergo node via wallet payment API
@@ -258,7 +267,7 @@ impl TrackerBoxUpdater {
             "value": 100000, // Minimum ERG value for box (0.001 ERG)
             "registers": {
                 "R4": r4_hex,  // Tracker public key
-                "R5": r5_hex,  // AVL+ tree root digest
+                "R5": r5_hex,  // AVL+ tree root digest as properly serialized ByteArray constant
             },
             "fee": 1000000 // Standard transaction fee (0.001 ERG)
        });
@@ -371,19 +380,19 @@ mod tests {
     #[test]
     fn test_shared_tracker_state() {
         let shared_state = SharedTrackerState::new();
-        
+
         // Test initial values
         let initial_root = shared_state.get_avl_root_digest();
         assert_eq!(initial_root, [0u8; 33]);
-        
+
         let initial_pubkey = shared_state.get_tracker_pubkey();
         assert_eq!(initial_pubkey[0], 0x02); // Compressed format marker
-        
+
         // Test updating values
         let new_root = [0xFFu8; 33];
         shared_state.set_avl_root_digest(new_root);
         assert_eq!(shared_state.get_avl_root_digest(), new_root);
-        
+
         let mut new_pubkey = [0u8; 33];
         new_pubkey[0] = 0x03; // Different compressed format marker
         shared_state.set_tracker_pubkey(new_pubkey);
