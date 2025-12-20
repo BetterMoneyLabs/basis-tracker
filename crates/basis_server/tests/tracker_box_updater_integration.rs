@@ -28,6 +28,7 @@ mod integration_tests {
             config,
             shared_state,
             NetworkPrefix::Mainnet,
+            "test_tracker_nft_1234567890abcdef".to_string(), // tracker_nft_id - required parameter
             updater_shutdown_rx,
         ));
 

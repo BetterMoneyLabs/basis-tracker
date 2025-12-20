@@ -121,6 +121,7 @@ impl TrackerBoxUpdater {
         config: TrackerBoxUpdateConfig,
         shared_tracker_state: SharedTrackerState,
         network_prefix: NetworkPrefix,
+        tracker_nft_id: String,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) -> Result<(), TrackerBoxUpdaterError> {
         if !config.enabled {
@@ -167,7 +168,8 @@ impl TrackerBoxUpdater {
                             config.ergo_api_key.as_deref(),
                             &r4_hex,
                             &r5_hex,
-                            network_prefix  // Use the network_prefix passed to the start function
+                            network_prefix,  // Use the network_prefix passed to the start function
+                            tracker_nft_id.as_str(),  // Pass the required tracker NFT ID
                         ).await {
                             Ok(tx_id) => {
                                 info!(
@@ -215,6 +217,7 @@ impl TrackerBoxUpdater {
         r4_hex: &str,
         r5_hex: &str,
         network_prefix: NetworkPrefix,  // Network prefix to use for address encoding
+        tracker_nft_id: &str,           // Required tracker NFT ID to include in the transaction
     ) -> Result<String, TrackerBoxUpdaterError> {
         // Build the URL for the wallet payment endpoint
         let url = format!("{}/wallet/payment/send", node_url);
@@ -262,15 +265,28 @@ impl TrackerBoxUpdater {
         let address = address_encoder
             .address_to_str(&p2pk_address);
 
-        let payload = json!({
+        // Wrap the payment request in an array as required by Ergo node's /wallet/payment/send API
+        // For tracker box updates, always include the tracker NFT in the output box assets
+        // The tracker NFT is essential and always provided according to server configuration
+        // The wallet must possess the tracker NFT token to include it in the transaction
+        // If the token is not available in wallet boxes, this will cause NotEnoughTokensError
+        let assets = vec![json!({
+            "tokenId": tracker_nft_id,
+            "amount": 1
+        })];
+
+        let request_obj = json!({
             "address": address, // Properly formatted P2PK address
             "value": 100000, // Minimum ERG value for box (0.001 ERG)
             "registers": {
                 "R4": r4_hex,  // Tracker public key
                 "R5": r5_hex,  // AVL+ tree root digest as properly serialized ByteArray constant
             },
+            "assets": assets, // Include tracker NFT in output box assets when provided
             "fee": 1000000 // Standard transaction fee (0.001 ERG)
-       });
+        });
+
+        let payload = json!([request_obj]);
 
         // Log the request payload for debugging
         let payload_str = to_string(&payload).unwrap_or_else(|_| "Invalid JSON".to_string());

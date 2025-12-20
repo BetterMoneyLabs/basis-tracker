@@ -19,7 +19,7 @@ mod tests {
         // This would be the expected JSON payload
         let expected_payload = serde_json::json!({
             "scanName": "tracker_boxes",
-            "walletInteraction": "off",
+            "walletInteraction": "shared",
             "trackingRule": {
                 "predicate": "containsAsset",
                 "assetId": tracker_nft_id
@@ -29,7 +29,7 @@ mod tests {
 
         // Verify the payload structure
         assert_eq!(expected_payload["scanName"], "tracker_boxes");
-        assert_eq!(expected_payload["walletInteraction"], "off");
+        assert_eq!(expected_payload["walletInteraction"], "shared");
         assert_eq!(expected_payload["trackingRule"]["predicate"], "containsAsset");
         assert_eq!(
             expected_payload["trackingRule"]["assetId"],

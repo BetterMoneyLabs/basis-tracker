@@ -213,7 +213,7 @@ impl TrackerServerState {
         // Register scan using containsAsset predicate with tracker NFT ID
         let scan_payload = serde_json::json!({
             "scanName": scan_name,
-            "walletInteraction": "off",
+            "walletInteraction": "shared",
             "trackingRule": {
                 "predicate": "containsAsset",
                 "assetId": tracker_nft_id

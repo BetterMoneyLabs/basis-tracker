@@ -407,7 +407,7 @@ impl ServerState {
         // Register new scan
         let scan_payload = serde_json::json!({
             "scanName": scan_name,
-            "walletInteraction": "off",
+            "walletInteraction": "shared",
             "trackingRule": {
                 "predicate": "contains",
                 "register": "R1",

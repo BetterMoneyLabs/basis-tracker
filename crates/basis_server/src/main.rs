@@ -310,11 +310,14 @@ async fn main() {
     let updater_config = tracker_box_config.clone();
     let shared_state_clone = shared_tracker_state_for_updater.clone();
     let updater_network_prefix = network_prefix; // Use the network_prefix determined above
+    // Get the tracker NFT ID from config - it must be present since it's now required
+    let tracker_nft_id = config.ergo.tracker_nft_id.clone().expect("Tracker NFT ID must be configured in server configuration");
     tokio::spawn(async move {
         if let Err(e) = TrackerBoxUpdater::start(
             updater_config,
             shared_state_clone,
             updater_network_prefix,
+            tracker_nft_id, // Pass the required tracker NFT ID
             updater_shutdown_rx,
         ).await {
             tracing::error!("Tracker box updater failed: {}", e);
