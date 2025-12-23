@@ -65,10 +65,10 @@
       // Tracker box holds the debt information as key-value pairs: AB -> (amount, timestamp)
       val tracker = CONTEXT.dataInputs(0) // Data input: tracker box containing debt records
       val trackerNftId = tracker.tokens(0)._1 // NFT token ID identifying the tracker
+      val trackerPubKey = tracker.R4[GroupElement].get // Tracker's public key for signature verification
       val trackerTree = tracker.R5[AvlTree].get // AVL tree storing debt commitments from tracker
       val expectedTrackerId = SELF.R6[Coll[Byte]].get // Expected tracker ID stored in reserve contract
       val trackerIdCorrect = trackerNftId == expectedTrackerId // Verify tracker identity matches
-      val trackerPubKey = tracker.R4[GroupElement].get // Tracker's public key for signature verification
 
       val g: GroupElement = groupGenerator // Base point for elliptic curve operations
 

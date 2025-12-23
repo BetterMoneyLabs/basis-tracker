@@ -179,6 +179,23 @@ The complete algorithm for note submission with AVL tree integration is:
 
 2. **Space Complexity**: O(n) where n is the number of notes
 
+## Initial State and Empty Tree Value
+
+When the tracker system is initialized, the AVL tree starts with an empty state. The serialized representation of the empty AVL tree with insert operations enabled is:
+
+```
+644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900012000
+```
+
+This 37-byte value has the following structure:
+- `64`: AVL tree type identifier
+- `4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900`: 33-byte root digest of empty tree
+- `01`: Insert flag enabled (true)
+- `20`: Key length (32 bytes)
+- `00`: Value length (variable)
+
+This value should be used as the initial value in R5 register of the tracker box.
+
 ## Synchronization Requirements
 
 1. **Thread Safety**: All existing synchronization requirements remain the same
