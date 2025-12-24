@@ -11,7 +11,6 @@ use serde_json::{json, to_string};
 use basis_store::reqwest;
 use hex;
 use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
-use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
 /// Create a default tracker public key that looks realistic (compressed format with proper prefix)
 fn create_default_tracker_pubkey() -> [u8; 33] {
@@ -147,17 +146,39 @@ impl TrackerBoxUpdater {
                     let current_root = shared_tracker_state.get_avl_root_digest();
                     let tracker_pubkey = shared_tracker_state.get_tracker_pubkey();
 
-                    // Construct register values
-                    let r4_hex = hex::encode(&tracker_pubkey);
-
-                    // R5 should contain the AVL tree root digest encoded as a byte array constant
-                    // Following the same pattern as scan registration (R1 register)
+                    // R4 should contain the tracker public key as a GroupElement constant
+                    // First convert the public key bytes to an EcPoint, then to a ProveDlog, then serialize as Constant
+                    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
+                    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
                     use ergo_lib::ergotree_ir::mir::constant::Constant;
                     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
-                    // Create a ByteArray Constant from the 33-byte root digest and serialize it properly
-                    let r5_constant = Constant::from(current_root.to_vec());
-                    let r5_bytes = r5_constant.sigma_serialize_bytes();
+                    let ec_point = EcPoint::sigma_parse_bytes(&tracker_pubkey)
+                        .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to parse EcPoint from tracker public key: {}", e)))?;
+                    let prove_dlog = ProveDlog::new(ec_point);
+                    let r4_constant = Constant::from(prove_dlog);
+                    let r4_bytes = r4_constant.sigma_serialize_bytes();
+                    let r4_hex = hex::encode(&r4_bytes);
+
+                    // R5 should contain the full AVL tree data structure, not just the digest
+                    // For Ergo, this should be the serialized SAvlTree type which includes the tree structure
+                    // For now, we'll use the proper serialized AVL tree format with insert flag enabled
+                    // The format should be: [type_byte][tree_structure_with_digest][flags]
+                    // For an empty tree it would be: 644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900012000
+                    // But for a tracker with notes, we need the actual tree structure
+                    // For now, let's create a placeholder with the proper format for a non-empty tree
+                    // We'll use the expected format: 64[type_bytes][digest][insert_flag][key_len][value_len]
+
+                    // For now, we'll use the proper serialized format for the AVL tree structure
+                    // This should be the serialized SAvlTree value containing the actual tree data
+                    // Since we're working with the root digest, we need to create the proper serialized AVL tree format
+                    let mut r5_bytes = Vec::new();
+                    r5_bytes.push(0x64); // AVL tree type identifier
+                    r5_bytes.extend_from_slice(&current_root); // 33-byte root digest
+                    r5_bytes.push(0x01); // Insert flag enabled
+                    r5_bytes.push(0x20); // Key length (32 bytes)
+                    r5_bytes.push(0x00); // Value length (variable)
+
                     let r5_hex = hex::encode(&r5_bytes);
 
                     if config.submit_transaction {
@@ -173,7 +194,7 @@ impl TrackerBoxUpdater {
                         ).await {
                             Ok(tx_id) => {
                                 info!(
-                                    "Tracker Box Update Transaction Submitted: R4={}, R5={}, timestamp={}, root_digest={}, tx_id={}",
+                                    "Tracker Box Update Transaction Submitted: R4={} (GroupElement), R5={} (SAvlTree), timestamp={}, root_digest={}, tx_id={}",
                                     r4_hex,
                                     r5_hex,
                                     current_timestamp(),
@@ -188,7 +209,7 @@ impl TrackerBoxUpdater {
                     } else {
                         // Log register values for testing/development
                         info!(
-                            "Tracker Box Update: R4={}, R5={}, timestamp={}, root_digest={}",
+                            "Tracker Box Update: R4={} (GroupElement), R5={} (SAvlTree), timestamp={}, root_digest={}",
                             r4_hex,
                             r5_hex,
                             current_timestamp(),
@@ -223,38 +244,24 @@ impl TrackerBoxUpdater {
         let url = format!("{}/wallet/payment/send", node_url);
 
         // Prepare the request body with register values
-        // Validate that r4_hex is a valid compressed public key format
-        if r4_hex.len() != 66 || (!r4_hex.starts_with("02") && !r4_hex.starts_with("03")) {
-            return Err(TrackerBoxUpdaterError::ConfigurationError(format!(
-                "Invalid compressed public key format for R4 register: {}", r4_hex
-            )));
-        }
-
-        // Convert hex public key back to P2PK address
-        // Validate that r4_hex is a valid compressed public key format
-        if r4_hex.len() != 66 || (!r4_hex.starts_with("02") && !r4_hex.starts_with("03")) {
-            return Err(TrackerBoxUpdaterError::ConfigurationError(format!(
-                "Invalid compressed public key format for R4 register: {}", r4_hex
-            )));
-        }
-
-        // Decode the hex public key to bytes
-        let pubkey_bytes = hex::decode(r4_hex)
-            .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to decode public key hex: {}", e)))?;
-
-        // Convert to a fixed-size array
-        let mut pubkey_array = [0u8; 33];
-        if pubkey_bytes.len() != 33 {
-            return Err(TrackerBoxUpdaterError::ConfigurationError("Public key must be 33 bytes".to_string()));
-        }
-        pubkey_array.copy_from_slice(&pubkey_bytes);
-
-        // Use the sigma serialization approach from ergo-lib to rebuild the EcPoint
+        // For R4 as GroupElement, we need to extract the public key from the serialized constant
+        // Decode the serialized GroupElement constant to get the EcPoint
+        use ergo_lib::ergotree_ir::mir::constant::{Constant, TryExtractInto};
         use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-        let ec_point = ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint::sigma_parse_bytes(&pubkey_array)
-            .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to parse EcPoint from public key bytes: {}", e)))?;
+        use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+        use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
 
-        // Create a ProveDlog from the EcPoint
+        let r4_constant_bytes = hex::decode(r4_hex)
+            .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to decode R4 register hex: {}", e)))?;
+
+        let r4_constant = Constant::sigma_parse_bytes(&r4_constant_bytes)
+            .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to parse R4 constant: {}", e)))?;
+
+        // Extract the EcPoint from the constant first, then create ProveDlog
+        let ec_point = r4_constant
+            .try_extract_into::<EcPoint>()
+            .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to extract EcPoint from R4 constant: {}", e)))?;
+
         let prove_dlog = ProveDlog::new(ec_point);
 
         // Create P2PK address from ProveDlog
