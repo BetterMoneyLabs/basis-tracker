@@ -15,6 +15,55 @@ use tracing::{debug, error, info, warn};
 
 use reqwest::Client;
 
+/// Wrapper struct for the actual API response from /scan/unspentBoxes endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApiScanBox {
+    #[serde(rename = "box")]
+    inner_box: ApiInnerBox,
+    #[serde(rename = "confirmationsNum")]
+    confirmations_num: u32,
+    address: String,
+    #[serde(rename = "creationTransaction")]
+    creation_transaction: String,
+    scans: Vec<i32>,
+    onchain: bool,
+    #[serde(rename = "creationOutIndex")]
+    creation_out_index: u32,
+    #[serde(rename = "spendingTransaction")]
+    spending_transaction: Option<String>,
+    #[serde(rename = "spendingHeight")]
+    spending_height: Option<u64>,
+    #[serde(rename = "inclusionHeight")]
+    inclusion_height: u64,
+    spent: bool,
+}
+
+/// The inner box structure from the API response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApiInnerBox {
+    #[serde(rename = "boxId")]
+    box_id: String,
+    value: u64,
+    #[serde(rename = "ergoTree")]
+    ergo_tree: String,
+    #[serde(rename = "creationHeight")]
+    creation_height: u64,
+    #[serde(rename = "transactionId")]
+    transaction_id: String,
+    #[serde(rename = "additionalRegisters")]
+    additional_registers: std::collections::HashMap<String, String>,
+    assets: Vec<ApiBoxAsset>,
+    index: u32,
+}
+
+/// Asset structure from the API response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApiBoxAsset {
+    #[serde(rename = "tokenId")]
+    token_id: String,
+    amount: u64,
+}
+
 
 
 use crate::{
@@ -345,6 +394,7 @@ impl ServerState {
                                 {
                                     let mut inner = self.inner.lock().await;
                                     inner.scan_id = Some(stored_scan_id);
+                                    inner.scan_active = true;
                                 }
                                 return Ok(());
                             } else {
@@ -371,6 +421,7 @@ impl ServerState {
                     {
                         let mut inner = self.inner.lock().await;
                         inner.scan_id = Some(stored_scan_id);
+                        inner.scan_active = true;
                     }
                     return Ok(());
                 }
@@ -506,6 +557,7 @@ impl ServerState {
             {
                 let mut inner = self.inner.lock().await;
                 inner.scan_id = Some(scan_id);
+                inner.scan_active = true;
             }
 
             info!("Registered and stored reserve scan with ID: {}", scan_id);
@@ -650,19 +702,57 @@ impl ServerState {
             .await
             .map_err(|e| ScannerError::HttpError(format!("Failed to fetch scan boxes: {}", e)))?;
 
-        if !response.status().is_success() {
+        let status = response.status();
+        if !status.is_success() {
+            let response_text = response.text().await.unwrap_or_else(|_| "Unable to read response".to_string());
+            error!("Failed to get scan boxes with status: {}", status);
+            error!("Response body: {}", response_text);
             return Err(ScannerError::NodeError(format!(
                 "Failed to get scan boxes with status: {}",
-                response.status()
+                status
             )));
         }
 
-        let boxes: Vec<ScanBox> = response
-            .json()
-            .await
-            .map_err(|e| ScannerError::JsonError(format!("Failed to parse scan boxes: {}", e)))?;
+        let response_text = response.text().await.map_err(|e| {
+            error!("Failed to read response text: {}", e);
+            ScannerError::HttpError(format!("Failed to read response text: {}", e))
+        })?;
 
-        Ok(boxes)
+        // Parse the JSON response as the API format first
+        let api_boxes: Vec<ApiScanBox> = serde_json::from_str(&response_text)
+            .map_err(|e| {
+                error!("Failed to parse API scan boxes JSON: {}", e);
+                error!("Raw response was: {}", response_text);
+                ScannerError::JsonError(format!("Failed to parse API scan boxes: {}", e))
+            })?;
+
+        // Convert API boxes to our internal ScanBox format
+        let mut scan_boxes = Vec::new();
+        for api_box in api_boxes {
+            let converted_box = ScanBox {
+                box_id: api_box.inner_box.box_id,
+                value: api_box.inner_box.value,
+                ergo_tree: api_box.inner_box.ergo_tree,
+                creation_height: api_box.inner_box.creation_height,
+                transaction_id: api_box.inner_box.transaction_id,
+                additional_registers: api_box.inner_box.additional_registers,
+                assets: api_box.inner_box.assets.into_iter().map(|a| BoxAsset {
+                    token_id: a.token_id,
+                    amount: a.amount,
+                }).collect(),
+            };
+            scan_boxes.push(converted_box);
+        }
+
+        info!("Found {} boxes from scan (converted from API format)", scan_boxes.len());
+        for (i, box_data) in scan_boxes.iter().enumerate() {
+            info!("Box {}: ID={}, value={}, creation_height={}",
+                  i + 1, box_data.box_id, box_data.value, box_data.creation_height);
+            info!("  Registers: {:?}", box_data.additional_registers);
+            info!("  Assets: {:?}", box_data.assets);
+        }
+
+        Ok(scan_boxes)
     }
 
     /// Parse reserve box into ExtendedReserveInfo
@@ -700,12 +790,20 @@ impl ServerState {
 
     /// Process scan boxes and update reserve tracker
     pub async fn process_scan_boxes(&self) -> Result<(), ScannerError> {
+        info!("Starting to process scan boxes...");
         let scan_boxes = self.get_scan_boxes().await?;
+        info!("Retrieved {} scan boxes to process", scan_boxes.len());
+
         let mut current_box_ids = Vec::new();
 
         for scan_box in &scan_boxes {
+            info!("Processing scan box: ID={}, value={}, registers={:?}",
+                  scan_box.box_id, scan_box.value, scan_box.additional_registers);
+
             match self.parse_reserve_box(scan_box) {
                 Ok(reserve_info) => {
+                    info!("Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
+                          reserve_info.box_id, reserve_info.owner_pubkey, reserve_info.base_info.collateral_amount);
                     current_box_ids.push(reserve_info.box_id.clone());
 
                     // Update in-memory tracker
@@ -724,15 +822,19 @@ impl ServerState {
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to parse reserve box {}: {}", scan_box.box_id, e);
+                    warn!("Failed to parse reserve box {}: {} - registers: {:?}", scan_box.box_id, e, scan_box.additional_registers);
                 }
             }
         }
 
         // Remove reserves that are no longer in the scan
         let all_reserves = self.reserve_tracker.get_all_reserves();
+        info!("Current tracker has {} reserves, {} are still active in scan",
+              all_reserves.len(), current_box_ids.len());
+
         for reserve in all_reserves {
             if !current_box_ids.contains(&reserve.box_id) {
+                info!("Removing spent reserve: {} (not found in current scan)", reserve.box_id);
                 // Remove from in-memory tracker
                 if let Err(e) = self.reserve_tracker.remove_reserve(&reserve.box_id) {
                     warn!("Failed to remove reserve {}: {}", reserve.box_id, e);
@@ -749,6 +851,9 @@ impl ServerState {
                 }
             }
         }
+
+        info!("Finished processing scan boxes: {} processed, {} in tracker after processing",
+              scan_boxes.len(), self.reserve_tracker.get_all_reserves().len());
 
         Ok(())
     }
@@ -934,6 +1039,7 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
                                     {
                                         let mut inner = state.inner.lock().await;
                                         inner.scan_id = None;
+                                        inner.scan_active = false;
                                     }
                                 }
 

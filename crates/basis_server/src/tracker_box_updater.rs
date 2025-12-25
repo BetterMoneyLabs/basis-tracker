@@ -146,17 +146,15 @@ impl TrackerBoxUpdater {
                     let current_root = shared_tracker_state.get_avl_root_digest();
                     let tracker_pubkey = shared_tracker_state.get_tracker_pubkey();
 
-                    // R4 should contain the tracker public key as a GroupElement constant
-                    // First convert the public key bytes to an EcPoint, then to a ProveDlog, then serialize as Constant
+                    // R4 should contain the tracker public key as a GroupElement constant (EcPoint)
+                    // Convert the public key bytes directly to an EcPoint and serialize as Constant
                     use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
-                    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
                     use ergo_lib::ergotree_ir::mir::constant::Constant;
                     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
                     let ec_point = EcPoint::sigma_parse_bytes(&tracker_pubkey)
                         .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to parse EcPoint from tracker public key: {}", e)))?;
-                    let prove_dlog = ProveDlog::new(ec_point);
-                    let r4_constant = Constant::from(prove_dlog);
+                    let r4_constant = Constant::from(ec_point);
                     let r4_bytes = r4_constant.sigma_serialize_bytes();
                     let r4_hex = hex::encode(&r4_bytes);
 
@@ -244,8 +242,7 @@ impl TrackerBoxUpdater {
         let url = format!("{}/wallet/payment/send", node_url);
 
         // Prepare the request body with register values
-        // For R4 as GroupElement, we need to extract the public key from the serialized constant
-        // Decode the serialized GroupElement constant to get the EcPoint
+        // For R4 as GroupElement (EcPoint), we need to parse the serialized constant
         use ergo_lib::ergotree_ir::mir::constant::{Constant, TryExtractInto};
         use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
         use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
@@ -257,11 +254,12 @@ impl TrackerBoxUpdater {
         let r4_constant = Constant::sigma_parse_bytes(&r4_constant_bytes)
             .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to parse R4 constant: {}", e)))?;
 
-        // Extract the EcPoint from the constant first, then create ProveDlog
+        // Extract the EcPoint from the constant (GroupElement is EcPoint)
         let ec_point = r4_constant
             .try_extract_into::<EcPoint>()
             .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to extract EcPoint from R4 constant: {}", e)))?;
 
+        // Create ProveDlog from the extracted EcPoint for the P2PK address
         let prove_dlog = ProveDlog::new(ec_point);
 
         // Create P2PK address from ProveDlog
