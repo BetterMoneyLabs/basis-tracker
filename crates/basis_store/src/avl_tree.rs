@@ -26,7 +26,11 @@ impl AvlTreeState {
         // Key length: 64 bytes (issuer_hash + recipient_hash)
         // Value length: None for variable length values
         let tree = AVLTree::new(simple_resolver, 64, None);
-        let prover = BatchAVLProver::new(tree, true);
+        let mut prover = BatchAVLProver::new(tree, true);
+
+        // Generate an initial proof to establish the empty tree state
+        // This ensures the prover has an initial digest even for an empty tree
+        let _ = prover.generate_proof();
 
         Self { prover }
     }
