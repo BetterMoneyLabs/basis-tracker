@@ -55,6 +55,7 @@ struct TrackerState {
 **Postconditions**:
 - Tree contains the new note
 - Root digest is updated
+- Proof is generated to commit changes to tree state
 
 **Error Cases**:
 - Duplicate key
@@ -72,6 +73,7 @@ struct TrackerState {
 **Postconditions**:
 - Tree contains updated note
 - Root digest is updated
+- Proof is generated to commit changes to tree state
 
 **Error Cases**:
 - Key not found
@@ -108,16 +110,18 @@ struct TrackerState {
 #### Root Digest Generation
 **Purpose**: Generate cryptographic commitment to tree state
 
-**Input**: Current tree state
+**Input**: Current tree state (after proof generation)
 **Output**: 33-byte root digest
 **Complexity**: O(1)
+**Prerequisite**: Proof must be generated after each tree operation to update the root digest
 
 #### Periodic Commitment
 **Purpose**: Post state digest to blockchain
 
-**Frequency**: Configurable (e.g., every 100 blocks)
-**Trigger**: Block height or time-based
+**Frequency**: Configurable (e.g., every 10 minutes - 600 seconds)
+**Trigger**: Time-based (implemented as tracker box updater running every 10 minutes)
 **Verification**: Cross-verify with on-chain data
+**Requirements**: R4 register contains tracker public key (GroupElement), R5 register contains AVL tree root (SAvlTree)
 
 #### State Verification
 **Purpose**: Verify tree state against commitment
@@ -134,6 +138,7 @@ struct TrackerState {
 **Benefits**: Improved performance
 **Atomicity**: All operations succeed or fail together
 **Complexity**: O(k log n) for k operations
+**Postcondition**: Proof is generated after batch to commit all changes to tree state
 
 #### Batch Proof Generation
 **Purpose**: Generate multiple proofs efficiently

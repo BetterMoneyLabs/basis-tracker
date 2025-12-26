@@ -44,6 +44,10 @@ impl AvlTreeState {
             .perform_one_operation(&operation)
             .map_err(|e| format!("AVL tree insert failed: {:?}", e))?;
 
+        // Generate a proof to commit the changes to the tree state
+        // This forces the tree to update its internal state and digest
+        let _ = self.prover.generate_proof();
+
         Ok(())
     }
 
@@ -59,6 +63,10 @@ impl AvlTreeState {
             .perform_one_operation(&operation)
             .map_err(|e| format!("AVL tree update failed: {:?}", e))?;
 
+        // Generate a proof to commit the changes to the tree state
+        // This forces the tree to update its internal state and digest
+        let _ = self.prover.generate_proof();
+
         Ok(())
     }
 
@@ -70,6 +78,10 @@ impl AvlTreeState {
             .prover
             .perform_one_operation(&operation)
             .map_err(|e| format!("AVL tree remove failed: {:?}", e))?;
+
+        // Generate a proof to commit the changes to the tree state
+        // This forces the tree to update its internal state and digest
+        let _ = self.prover.generate_proof();
 
         Ok(())
     }

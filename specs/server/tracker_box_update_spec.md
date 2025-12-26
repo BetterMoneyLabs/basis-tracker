@@ -2,18 +2,18 @@
 
 ## Overview
 
-This document specifies the implementation of a periodic tracker box update mechanism that runs every 10 minutes to log the R4 and R5 register values of the tracker box. This mechanism is implemented as a background service within the Basis Tracker server without submitting actual transactions to the Ergo blockchain.
+This document specifies the implementation of a periodic tracker box update mechanism that runs every 10 minutes to update the R4 and R5 register values of the tracker box. This mechanism is implemented as a background service within the Basis Tracker server that submits actual transactions to the Ergo blockchain to update the tracker box commitment.
 
 ## Design Requirements
 
-1. **Periodic Execution**: Run every 10 minutes (600 seconds) to periodically update tracker state
-2. **Register Logging**: Log hex-encoded values of R4 and R5 registers to application logs
-3. **No Blockchain Submission**: For the initial implementation, only log values without submitting transactions
+1. **Periodic Execution**: Run every 10 minutes (600 seconds) to periodically update tracker state commitment
+2. **Register Updates**: Update R4 (tracker public key) and R5 (AVL+ tree root digest) registers in tracker box
+3. **Blockchain Submission**: Submit actual transactions to update tracker box on Ergo blockchain
 4. **Background Task**: Run as a dedicated background task to avoid blocking main server operations
 5. **Thread Safety**: Ensure safe concurrent access to shared resources
 6. **Error Handling**: Implement proper error handling and logging for failed update attempts
 7. **Configuration**: Make update interval configurable via server configuration
-8. **State Synchronization**: Maintain synchronization between tracker state changes and logging
+8. **State Synchronization**: Maintain synchronization between tracker state changes and blockchain commitment
 
 ## Component Architecture
 
@@ -36,7 +36,7 @@ pub struct TrackerBoxUpdateConfig {
     pub update_interval_seconds: u64,
     /// Flag to enable/disable the tracker box updater (default: true)
     pub enabled: bool,
-    /// Flag to enable actual transaction submission (default: false for logging-only mode)
+    /// Flag to enable actual transaction submission (default: true for active mode)
     pub submit_transaction: bool,
     /// Ergo node URL for API requests (required, no default provided)
     pub ergo_node_url: String,
@@ -45,8 +45,7 @@ pub struct TrackerBoxUpdateConfig {
 }
 ```
 
-**Critical Requirement**: The `ergo_node_url` must be explicitly provided in the configuration. If it's not provided (empty string), the tracker will abort on startup with exit code 1. No default localhost value is used. This ensures the tracker cannot operate without proper connection to an Ergo node.
-```
+**Critical Requirement**: The `ergo_node_url` must be explicitly provided in the configuration. If it's not provided (empty string), the tracker will abort on startup with exit code 1. No default localhost value is used. This ensures the tracker cannot operate without proper connection to an Ergo node.`
 
 ### Shared State Structure
 
@@ -104,16 +103,14 @@ The background task executes the following algorithm in a continuous loop:
 
 1. **Wait for Interval**: Use tokio::time::interval to wait for the configured update period (10 minutes)
 2. **Access Shared State**: Read the current AVL tree root digest and tracker public key
-3. **Construct Register Values**:
-   - R4: Tracker public key (33 bytes, compressed secp256k1 point) - identifies the tracker server
-   - R5: Hex-encoded AVL+ tree root digest (33 bytes commitment to all notes in the system) - represents the current state of all IOU notes
-4. **Submit Transaction (if enabled)**:
-   - If `submit_transaction` is true and `ergo_node_url` is configured:
-     - Construct a wallet payment request with R4 and R5 register values
-     - Submit transaction via Ergo node API at `/wallet/payment/send` endpoint
-     - Include proper register values in R4 (tracker pubkey) and R5 (AVL root digest)
-     - Log transaction ID on successful submission
-   - Otherwise, log register values as before (for testing/development)
+3. **Create Register Constants**:
+   - R4: Tracker public key as EcPoint constant (33 bytes, compressed secp256k1 point) - identifies the tracker server
+   - R5: Serialized AVL+ tree root digest as ByteArray constant - represents the current state of all IOU notes
+4. **Submit Transaction**:
+   - Construct a wallet payment request with R4 and R5 register values
+   - Submit transaction via Ergo node API at `/wallet/payment/send` endpoint
+   - Include proper register values in R4 (tracker pubkey as GroupElement) and R5 (AVL root as SAvlTree)
+   - Log transaction ID on successful submission
 5. **Error Handling**:
    - If any step fails, log an appropriate ERROR message
    - Continue with the scheduled interval regardless of failures
@@ -123,8 +120,9 @@ The background task executes the following algorithm in a continuous loop:
 The tracker thread updates the shared state when tracker changes occur:
 
 1. **Tracker Operations**: When notes are added or redeemed through the main tracker thread
-2. **State Updates**: After successful tracker operations, update the shared AVL root digest
-3. **Synchronization**: Use RwLock for thread-safe access to shared state between threads
+2. **AVL Tree Updates**: After successful tracker operations, the AVL tree is updated and root digest recalculated
+3. **State Synchronization**: The shared AVL root digest is updated to match the current AVL tree state using RwLock for thread safety
+4. **Proof Generation**: Generate AVL tree proofs after each operation to ensure state is properly updated
 
 ## Implementation Details
 
@@ -147,6 +145,64 @@ impl TrackerBoxUpdater {
 }
 ```
 
+### AVL Tree State Management
+
+The AVL tree state is properly maintained with proof generation after each operation:
+
+```rust
+impl AvlTreeState {
+    /// Insert a key-value pair into the AVL tree
+    pub fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String> {
+        let operation = Operation::Insert(KeyValue {
+            key: key.into(),
+            value: value.into(),
+        });
+
+        self.prover
+            .perform_one_operation(&operation)
+            .map_err(|e| format!("AVL tree insert failed: {:?}", e))?;
+
+        // Generate proof to commit changes to tree state and update root digest
+        let _ = self.prover.generate_proof();
+
+        Ok(())
+    }
+
+    /// Update an existing key-value pair
+    pub fn update(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String> {
+        let operation = Operation::Update(KeyValue {
+            key: key.into(),
+            value: value.into(),
+        });
+
+        self.prover
+            .perform_one_operation(&operation)
+            .map_err(|e| format!("AVL tree update failed: {:?}", e))?;
+
+        // Generate proof to commit changes to tree state and update root digest
+        let _ = self.prover.generate_proof();
+
+        Ok(())
+    }
+
+    /// Remove a key from the AVL tree
+    pub fn remove(&mut self, key: Vec<u8>) -> Result<(), String> {
+        let operation = Operation::Remove(key.into());
+
+        self.prover
+            .perform_one_operation(&operation)
+            .map_err(|e| format!("AVL tree remove failed: {:?}", e))?;
+
+        // Generate proof to commit changes to tree state and update root digest
+        let _ = self.prover.generate_proof();
+
+        Ok(())
+    }
+}
+```
+
+This ensures that the AVL tree root digest is properly updated after each operation, which is critical for the R5 register value.
+
 ### Integration with Server Startup
 
 The tracker box updater is integrated into the server startup flow:
@@ -161,9 +217,10 @@ The tracker box updater is integrated into the server startup flow:
 
 The main tracker thread is enhanced to update the shared state:
 
-1. **AddNote Command**: After successfully adding a note to the tracker, update the shared AVL root digest
-2. **CompleteRedemption Command**: After successfully completing a redemption, update the shared AVL root digest
-3. **State Consistency**: Ensure the shared state remains consistent with the main tracker state
+1. **AddNote Command**: After successfully adding a note to the tracker, update the shared AVL root digest via update_state() call
+2. **CompleteRedemption Command**: After successfully completing a redemption, update the shared AVL root digest via update_state() call
+3. **AVL Tree Operations**: Each AVL tree operation (insert/update/delete) triggers proof generation to update internal tree state
+4. **State Consistency**: Ensure the shared state remains consistent with the main tracker state and AVL tree root
 
 ## Logging Specifications
 
@@ -171,9 +228,9 @@ The main tracker thread is enhanced to update the shared state:
 
 The service outputs the following log messages:
 
-1. **Periodic Updates** (INFO level):
-   - Message: "Tracker Box Update: R4={hex_value}, R5={hex_value}, timestamp={unix_timestamp}, root_digest={digest}"
-   - Context: Current time and state values
+1. **Transaction Submission** (INFO level):
+   - Message: "Tracker Box Update Transaction Submitted: R4={hex_value} (GroupElement), R5={hex_value} (SAvlTree), timestamp={unix_timestamp}, root_digest={digest}, tx_id={transaction_id}"
+   - Context: Register values, timestamp, root digest, and transaction ID
 
 2. **Service Startup** (INFO level):
    - Message: "Starting tracker box updater with interval {interval_seconds} seconds"
@@ -184,7 +241,7 @@ The service outputs the following log messages:
    - Context: None
 
 4. **Errors** (ERROR level):
-   - Message: "Failed to update tracker box: {error_message}"
+   - Message: "Failed to submit tracker box update transaction: {error_message}"
    - Context: Error details
 
 ### Log Format

@@ -469,7 +469,7 @@ impl TrackerServerState {
             );
         }
 
-        info!("Updated tracker state with {} boxes", tracker_boxes.len());
+        debug!("Updated tracker state with {} boxes", tracker_boxes.len());
         
         Ok(())
     }

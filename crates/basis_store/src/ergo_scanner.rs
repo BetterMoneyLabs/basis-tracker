@@ -797,12 +797,12 @@ impl ServerState {
         let mut current_box_ids = Vec::new();
 
         for scan_box in &scan_boxes {
-            info!("Processing scan box: ID={}, value={}, registers={:?}",
+            debug!("Processing scan box: ID={}, value={}, registers={:?}",
                   scan_box.box_id, scan_box.value, scan_box.additional_registers);
 
             match self.parse_reserve_box(scan_box) {
                 Ok(reserve_info) => {
-                    info!("Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
+                    debug!("Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
                           reserve_info.box_id, reserve_info.owner_pubkey, reserve_info.base_info.collateral_amount);
                     current_box_ids.push(reserve_info.box_id.clone());
 
@@ -852,7 +852,7 @@ impl ServerState {
             }
         }
 
-        info!("Finished processing scan boxes: {} processed, {} in tracker after processing",
+        debug!("Finished processing scan boxes: {} processed, {} in tracker after processing",
               scan_boxes.len(), self.reserve_tracker.get_all_reserves().len());
 
         Ok(())
