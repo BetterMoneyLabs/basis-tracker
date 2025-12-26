@@ -41,6 +41,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::reserve::ReserveCommands,
     },
+    /// SilverCents demo operations
+    SilverCents {
+        #[command(subcommand)]
+        cmd: commands::silvercents::SilverCentsCommands,
+    },
     /// Interactive mode
     Interactive,
     /// Server status
@@ -65,6 +70,9 @@ async fn main() -> Result<()> {
         }
         Commands::Reserve { cmd } => {
             commands::reserve::handle_reserve_command(cmd, &account_manager, &client).await
+        }
+        Commands::SilverCents { cmd } => {
+            commands::silvercents::handle_silvercents_command(cmd, &account_manager, &client).await
         }
         Commands::Interactive => {
             let mut interactive = interactive::InteractiveMode::new(account_manager, client);
