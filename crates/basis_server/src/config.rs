@@ -120,32 +120,50 @@ impl AppConfig {
     pub fn tracker_public_key_bytes(&self) -> Result<Option<[u8; 33]>, Box<dyn std::error::Error>> {
         match &self.ergo.tracker_public_key {
             Some(pubkey_input) if !pubkey_input.is_empty() => {
+                tracing::info!("Processing tracker public key: {}", pubkey_input);
+
                 // Try hex decoding first
                 if let Ok(bytes) = hex::decode(pubkey_input) {
+                    tracing::info!("Successfully decoded hex public key, length: {}", bytes.len());
                     if bytes.len() == 33 {
                         let mut pubkey_bytes = [0u8; 33];
                         pubkey_bytes.copy_from_slice(&bytes);
+                        tracing::info!("Returning 33-byte compressed public key from hex: {}", hex::encode(&pubkey_bytes));
                         return Ok(Some(pubkey_bytes));
+                    } else {
+                        tracing::info!("Hex decoded public key has wrong length: {}, expected 33", bytes.len());
                     }
+                } else {
+                    tracing::info!("Failed to decode tracker public key as hex, attempting P2PK address parsing");
                 }
 
                 // If hex decoding failed or wrong length, try parsing as P2PK address
                 let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
                 match encoder.parse_address_from_str(pubkey_input) {
                     Ok(ergo_lib::ergotree_ir::address::Address::P2Pk(pubkey)) => {
+                        tracing::info!("Successfully parsed as P2PK address, extracting public key");
                         // Use sigma serialization to get the compressed public key bytes
                         use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
                         let pk_bytes = pubkey.h.sigma_serialize_bytes();
+                        tracing::info!("Extracted public key bytes length: {}", pk_bytes.len());
                         if pk_bytes.len() == 33 {
                             let mut result = [0u8; 33];
                             result.copy_from_slice(&pk_bytes);
+                            tracing::info!("Returning 33-byte compressed public key from P2PK: {}", hex::encode(&result));
                             Ok(Some(result))
                         } else {
+                            tracing::info!("Public key extracted from P2PK has wrong length: {}, expected 33", pk_bytes.len());
                             Err("Invalid public key length in P2PK address".into())
                         }
                     }
-                    Ok(_) => Err("Address is not P2PK format".into()), // Not a P2PK address
-                    Err(_) => Err("Invalid hex public key or P2PK address format".into())
+                    Ok(_) => {
+                        tracing::info!("Address is not P2PK format");
+                        Err("Address is not P2PK format".into())
+                    },
+                    Err(_) => {
+                        tracing::info!("Failed to parse as either hex public key or P2PK address");
+                        Err("Invalid hex public key or P2PK address format".into())
+                    }
                 }
             }
             _ => Ok(None),

@@ -152,8 +152,10 @@ impl TrackerBoxUpdater {
                     use ergo_lib::ergotree_ir::mir::constant::Constant;
                     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
+                    tracing::info!("Creating EcPoint from tracker public key bytes: {}", hex::encode(&tracker_pubkey));
                     let ec_point = EcPoint::sigma_parse_bytes(&tracker_pubkey)
                         .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to parse EcPoint from tracker public key: {}", e)))?;
+                    tracing::info!("Successfully created EcPoint from tracker public key");
                     let r4_constant = Constant::from(ec_point);
                     let r4_bytes = r4_constant.sigma_serialize_bytes();
                     let r4_hex = hex::encode(&r4_bytes);
@@ -254,10 +256,12 @@ impl TrackerBoxUpdater {
         let r4_constant = Constant::sigma_parse_bytes(&r4_constant_bytes)
             .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to parse R4 constant: {}", e)))?;
 
+        tracing::debug!("Attempting to extract EcPoint from R4 constant with type: {:?}", r4_constant.tpe);
         // Extract the EcPoint from the constant (GroupElement is EcPoint)
         let ec_point = r4_constant
             .try_extract_into::<EcPoint>()
             .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to extract EcPoint from R4 constant: {}", e)))?;
+        tracing::debug!("Successfully extracted EcPoint from R4 constant");
 
         // Create ProveDlog from the extracted EcPoint for the P2PK address
         let prove_dlog = ProveDlog::new(ec_point);
