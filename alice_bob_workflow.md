@@ -1,369 +1,105 @@
-# Alice → Bob Debt & Redemption Workflow
-
-## Overview
-Complete step-by-step instructions for Alice issuing debt to Bob, creating on-chain reserves, and Bob redeeming the debt.
+# Alice-Bob Workflow Test Plan
 
 ## Prerequisites
-- Basis Tracker server running on `http://127.0.0.1:3048`
-- Basis CLI client built and available
-- Ergo node accessible for blockchain operations
+- Basis tracker server running on localhost:3048
+- Ergo node accessible at configured URL
 
-## Step 1: Setup Accounts
+## Step-by-step Process
 
-### 1.1 Create Alice's Account
+### 1. Create Alice's keys
 ```bash
-basis-cli account create alice
-```
-**Expected Output:**
-```
-✅ Created account 'alice'
-  Public Key: 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f
-  Created at: 1759593034
+# Generate Alice's keypair and save separately
+cargo run --bin basis_cli -- generate-keypair > alice_keypair.txt
+
+# Extract secret key to secret.txt (manually extract from alice_keypair.txt)
+# Extract public key to alice.txt (manually extract from alice_keypair.txt)
 ```
 
-**Save Alice's Public Key:** `ALICE_PUBKEY=03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f`
-
-### 1.2 Create Bob's Account
+### 2. Create Alice's reserve (manual API call)
 ```bash
-basis-cli account create bob
-```
-**Expected Output:**
-```
-✅ Created account 'bob'
-  Public Key: 02e58b5f80040bbd8ef6a3416a36da1fea1eea9a3922ea2417aa24942e0814bcff
-  Created at: 1759593177
+# Use the API to create a 0.1 ERG reserve for Alice
+curl -X POST http://localhost:3048/reserves/create \
+  -H "Content-Type: application/json" \
+  -d '{
+    "owner_pubkey": "03bc58014bd741ea06d6f3b1de5d0847b71758a64c6f04e6c98639dcf3d12be273",
+    "amount": 10000000,
+    "nft_id": "1518955f0402051bdcab4b368406ed40de1c86cf8bfa0023285b94571fd72d69"
+  }'
 ```
 
-**Save Bob's Public Key:** `BOB_PUBKEY=02e58b5f80040bbd8ef6a3416a36da1fea1eea9a3922ea2417aa24942e0814bcff`
-
-### 1.3 Verify Accounts
+### 3. Create Bob's public key
 ```bash
-basis-cli account list
-```
-**Expected Output:**
-```
-Accounts:
-  alice: 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f (current)
-  bob: 02e58b5f80040bbd8ef6a3416a36da1fea1eea9a3922ea2417aa24942e0814bcff
+# Generate Bob's keypair and save public key
+cargo run --bin basis_cli -- generate-keypair > bob_keypair.txt
+
+# Extract Bob's public key to bob.txt (manually extract from bob_keypair.txt)
 ```
 
-## Step 2: Alice Issues Debt to Bob
-
-### 2.1 Switch to Alice's Account
+### 4. Create IOU note from Alice to Bob (0.01 ERG)
 ```bash
-basis-cli account switch alice
+# Switch to Alice's account
+cargo run --bin basis_cli -- account switch alice
+
+# Create and sign IOU note from Alice to Bob for 0.01 ERG (1,000,000 nanoERG)
+cargo run --bin basis_cli -- note create \
+  --recipient $(cat bob.txt) \
+  --amount 1000000
 ```
 
-### 2.2 Alice Creates First Debt Note to Bob (1000 nanoERG)
+This command automatically:
+- Uses the current account (Alice) to sign the note
+- Creates the proper signing message: recipient pubkey + amount (BE bytes) + timestamp (BE bytes)
+- Submits the signed note to the tracker server
+- Shows the reserve status before and after note creation
+
+### 5. Wait for time lock (or adjust for testing)
+
+### 6. Redemption Process
+
+#### 6.1 Get reserve box ID
 ```bash
-basis-cli note create --recipient $BOB_PUBKEY --amount 1000
-```
-**Expected Output:**
-```
-✅ Note created successfully
+# Get Alice's reserves to find the reserve box ID
+cargo run --bin basis_cli -- reserve list
+
+# Or use API to get reserve information
+curl "http://localhost:3048/reserves/issuer/$(cat alice.txt)"
 ```
 
-### 2.3 Alice Creates Second Debt Note to Bob (1500 nanoERG)
+#### 6.2 Get AVL proof for the note
 ```bash
-basis-cli note create --recipient $BOB_PUBKEY --amount 1500
+# Get proof for the specific note between Alice (issuer) and Bob (recipient)
+cargo run --bin basis_cli -- note get \
+  --issuer $(cat alice.txt) \
+  --recipient $(cat bob.txt)
+
+# Or use API directly
+curl "http://localhost:3048/proof?issuer=$(cat alice.txt)&recipient=$(cat bob.txt)"
 ```
 
-### 2.4 Alice Creates Third Debt Note to Bob (2000 nanoERG)
+#### 6.3 Prepare redemption transaction
 ```bash
-basis-cli note create --recipient $BOB_PUBKEY --amount 2000
+# Use the built-in redemption command which handles signatures automatically
+cargo run --bin basis_cli -- note redeem \
+  --issuer $(cat alice.txt) \
+  --amount 1000000
 ```
 
-### 2.5 Verify Alice's Issued Notes
-```bash
-basis-cli note list --issuer
-```
-**Expected Output:**
-```
-Notes where you are the issuer:
-  To: 02e58b5f80040bbd8ef6a3416a36da1fea1eea9a3922ea2417aa24942e0814bcff
-    Amount: 1000 nanoERG
-    Redeemed: 0 nanoERG
-    Outstanding: 1000 nanoERG
-    Created: 1759593288
-  To: 02e58b5f80040bbd8ef6a3416a36da1fea1eea9a3922ea2417aa24942e0814bcff
-    Amount: 1500 nanoERG
-    Redeemed: 0 nanoERG
-    Outstanding: 1500 nanoERG
-    Created: 1759593290
-  To: 02e58b5f80040bbd8ef6a3416a36da1fea1eea9a3922ea2417aa24942e0814bcff
-    Amount: 2000 nanoERG
-    Redeemed: 0 nanoERG
-    Outstanding: 2000 nanoERG
-    Created: 1759593292
-```
+This command automatically:
+- Gets the reserve box ID for the issuer
+- Obtains the AVL proof for the note
+- Signs the redemption with the issuer's private key (current account)
+- Requests tracker signature from the server
+- Submits the redemption transaction
 
-**Total Debt Issued:** 4500 nanoERG (4.5 ERG)
+### 7. Verification
+- Check tracker state: `curl http://localhost:3048/`
+- Check notes for Alice: `curl http://localhost:3048/notes/issuer/<ALICE_PUBKEY>`
+- Check notes for Bob: `curl http://localhost:3048/notes/recipient/<BOB_PUBKEY>`
+- Check redemption status in blockchain explorer
 
-## Step 3: Bob Views Received Debt
-
-### 3.1 Switch to Bob's Account
-```bash
-basis-cli account switch bob
-```
-
-### 3.2 Bob Views Notes Received from Alice
-```bash
-basis-cli note list --recipient
-```
-**Expected Output:**
-```
-Notes where you are the recipient:
-  From: 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f
-    Amount: 1000 nanoERG
-    Redeemed: 0 nanoERG
-    Outstanding: 1000 nanoERG
-    Created: 1759593288
-  From: 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f
-    Amount: 1500 nanoERG
-    Redeemed: 0 nanoERG
-    Outstanding: 1500 nanoERG
-    Created: 1759593290
-  From: 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f
-    Amount: 2000 nanoERG
-    Redeemed: 0 nanoERG
-    Outstanding: 2000 nanoERG
-    Created: 1759593292
-```
-
-### 3.3 Bob Checks Specific Note
-```bash
-basis-cli note get --issuer $ALICE_PUBKEY --recipient $BOB_PUBKEY
-```
-
-## Step 4: Check Reserve Status (Before Reserve Creation)
-
-### 4.1 Check Alice's Reserve Status
-```bash
-basis-cli reserve status --issuer $ALICE_PUBKEY
-```
-**Expected Output (Before Reserve):**
-```
-Reserve Status for 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f:
-  Total Debt: 4500 nanoERG
-  Collateral: 0 nanoERG
-  Collateralization Ratio: 0.00
-  Note Count: 3
-  Last Updated: 1759593292
-
-In ERG:
-  Total Debt: 0.0000045 ERG
-  Collateral: 0.0000000 ERG
-```
-
-**⚠️ WARNING:** Alice is **UNDER-COLLATERALIZED** (0% collateralization)
-
-### 4.2 Check Collateralization Status
-```bash
-basis-cli reserve collateralization --issuer $ALICE_PUBKEY
-```
-**Expected Output:**
-```
-Collateralization for 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f:
-  Ratio: 0.0000
-  Status: UNDER-COLLATERALIZED
-⚠️  WARNING: Under-collateralized!
-```
-
-## Step 5: Alice Creates On-Chain Reserve
-
-### 5.1 Deploy Basis Reserve Contract
-*(This step requires Ergo blockchain interaction - actual deployment steps depend on your setup)*
-
-**Prerequisites:**
-- Configure `tracker_nft_id` in `config/basis.toml`
-- This NFT identifies your tracker server and must be set in the reserve contract's R6 register
-
-**Example using Ergo AppKit or similar:**
-```scala
-// Deploy Basis reserve contract with 10 ERG collateral
-val reserveContract = BasisReserveContract.deploy(
-  issuerPubKey = ALICE_PUBKEY,
-  collateralAmount = 10000000000L, // 10 ERG in nanoERG
-  trackerNftId = TRACKER_NFT_ID,   // From config/basis.toml
-  minCollateralRatio = 1.5
-)
-```
-
-**Reserve Box Structure:**
-- **Value**: Collateral amount (10 ERG)
-- **Tokens**: Reserve singleton token
-- **R4**: Issuer's public key
-- **R5**: Empty AVL tree for redeemed timestamps  
-- **R6**: Tracker NFT ID (from configuration)
-
-**Expected On-Chain Events:**
-- Reserve box created with 10 ERG collateral
-- Reserve creation event emitted
-- Tracker server detects and processes the event
-
-### 5.2 Verify Reserve Creation
-```bash
-basis-cli status
-```
-**Expected Output:**
-```
-✅ Server is healthy
-
-Recent Events (last 1):
-  [1759593300] Reserve created: box1234567890abcdef (10000000000 nanoERG) - height 1500
-```
-
-### 5.3 Check Updated Reserve Status
-```bash
-basis-cli reserve status --issuer $ALICE_PUBKEY
-```
-**Expected Output (After Reserve):**
-```
-Reserve Status for 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f:
-  Total Debt: 4500 nanoERG
-  Collateral: 10000000000 nanoERG
-  Collateralization Ratio: 2222222.22
-  Note Count: 3
-  Last Updated: 1759593300
-
-In ERG:
-  Total Debt: 0.0000045 ERG
-  Collateral: 10.0000000 ERG
-```
-
-### 5.4 Check Improved Collateralization
-```bash
-basis-cli reserve collateralization --issuer $ALICE_PUBKEY
-```
-**Expected Output:**
-```
-Collateralization for 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f:
-  Ratio: 2222222.2222
-  Status: EXCELLENT
-```
-
-## Step 6: Bob Redeems Debt
-
-### 6.1 Switch to Bob's Account
-```bash
-basis-cli account switch bob
-```
-
-### 6.2 Bob Redeems First Note (500 nanoERG)
-```bash
-basis-cli note redeem --issuer $ALICE_PUBKEY --amount 500
-```
-**Expected Output:**
-```
-✅ Redemption initiated
-  Redemption ID: redemption_123456
-  Amount: 500 nanoERG
-  Proof available: true
-✅ Redemption completed
-```
-
-### 6.3 Bob Redeems Second Note (1000 nanoERG)
-```bash
-basis-cli note redeem --issuer $ALICE_PUBKEY --amount 1000
-```
-
-### 6.4 Verify Bob's Updated Notes
-```bash
-basis-cli note list --recipient
-```
-**Expected Output:**
-```
-Notes where you are the recipient:
-  From: 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f
-    Amount: 1000 nanoERG
-    Redeemed: 500 nanoERG
-    Outstanding: 500 nanoERG
-    Created: 1759593288
-  From: 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f
-    Amount: 1500 nanoERG
-    Redeemed: 1000 nanoERG
-    Outstanding: 500 nanoERG
-    Created: 1759593290
-  From: 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f
-    Amount: 2000 nanoERG
-    Redeemed: 0 nanoERG
-    Outstanding: 2000 nanoERG
-    Created: 1759593292
-```
-
-**Total Redeemed:** 1500 nanoERG
-**Remaining Debt:** 3000 nanoERG
-
-## Step 7: Final Status Check
-
-### 7.1 Check Alice's Final Reserve Status
-```bash
-basis-cli reserve status --issuer $ALICE_PUBKEY
-```
-**Expected Final Output:**
-```
-Reserve Status for 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f:
-  Total Debt: 3000 nanoERG
-  Collateral: 10000000000 nanoERG
-  Collateralization Ratio: 3333333.33
-  Note Count: 3
-  Last Updated: 1759593350
-
-In ERG:
-  Total Debt: 0.0000030 ERG
-  Collateral: 10.0000000 ERG
-```
-
-### 7.2 Check All Events
-```bash
-basis-cli status
-```
-**Expected Events Summary:**
-```
-✅ Server is healthy
-
-Recent Events (last 6):
-  [1759593350] Redemption: Alice -> Bob (500 nanoERG)
-  [1759593345] Redemption: Alice -> Bob (1000 nanoERG)
-  [1759593300] Reserve created: box1234567890abcdef (10000000000 nanoERG) - height 1500
-  [1759593292] Note: Alice -> Bob (2000 nanoERG)
-  [1759593290] Note: Alice -> Bob (1500 nanoERG)
-  [1759593288] Note: Alice -> Bob (1000 nanoERG)
-```
-
-## Step 8: Generate Proof (Optional)
-
-### 8.1 Generate Proof for Specific Note
-```bash
-basis-cli proof --issuer $ALICE_PUBKEY --recipient $BOB_PUBKEY
-```
-**Expected Output:**
-```
-Proof generated for 03f576b9aa524ed4b1eca8478489937fe84aa7314c0c73c4b73cef0a0c6c86240f -> 02e58b5f80040bbd8ef6a3416a36da1fea1eea9a3922ea2417aa24942e0814bcff
-  Proof Data: proof_03f576b9aa524e_02e58b5f80040bbd
-  Tracker State Digest: mock_digest_1234567890abcdef
-  Block Height: 1500
-  Timestamp: 1759593350
-```
-
-## Summary
-
-### ✅ Workflow Completed Successfully:
-
-1. **Account Setup** - Alice and Bob accounts created
-2. **Debt Issuance** - Alice issued 4500 nanoERG debt to Bob across 3 notes
-3. **Reserve Creation** - Alice deployed 10 ERG collateral on-chain
-4. **Redemption** - Bob redeemed 1500 nanoERG of debt
-5. **Verification** - All operations verified through CLI commands
-
-### 📊 Final State:
-- **Alice's Debt**: 3000 nanoERG outstanding
-- **Alice's Collateral**: 10 ERG (excellent collateralization)
-- **Bob's Holdings**: 1500 nanoERG redeemed, 3000 nanoERG remaining
-- **Blockchain**: Reserve contract deployed and operational
-
-### 🔄 Next Steps:
-- Bob can redeem remaining debt
-- Alice can issue more debt to other parties
-- Monitor collateralization ratios
-- Generate proofs for audit purposes
+## Expected Outcomes
+1. Alice's reserve has 0.1 ERG collateral
+2. IOU note from Alice to Bob for 0.01 ERG is recorded
+3. After time lock, Bob can redeem 0.01 ERG from Alice's reserve
+4. Tracker state is updated to reflect the redemption
+5. Alice's debt to Bob is reduced appropriately
