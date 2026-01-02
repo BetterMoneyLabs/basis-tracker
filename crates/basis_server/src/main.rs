@@ -448,6 +448,7 @@ async fn main() {
         event_store,
         ergo_scanner: std::sync::Arc::new(Mutex::new(ergo_scanner)),
         reserve_tracker: std::sync::Arc::new(Mutex::new(reserve_tracker)),
+        config: std::sync::Arc::new(config.clone()),
     };
 
     // Build our application with routes - FIXED ROUTE ORDER

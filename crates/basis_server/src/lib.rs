@@ -35,6 +35,7 @@ pub struct AppState {
     pub event_store: std::sync::Arc<EventStore>,
     pub ergo_scanner: std::sync::Arc<Mutex<basis_store::ergo_scanner::ServerState>>,
     pub reserve_tracker: std::sync::Arc<Mutex<basis_store::ReserveTracker>>,
+    pub config: std::sync::Arc<AppConfig>,
 }
 
 // Commands that can be sent to the tracker thread

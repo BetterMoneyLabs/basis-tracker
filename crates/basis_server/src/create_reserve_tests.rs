@@ -37,11 +37,33 @@ mod create_reserve_tests {
             ServerState::new(config).expect("Fallback scanner creation should succeed")
         });
 
+        // Create a minimal config for testing
+        let test_config = std::sync::Arc::new(crate::config::AppConfig {
+            server: crate::config::ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 3048,
+                database_url: Some("sqlite::memory:".to_string()),
+            },
+            ergo: crate::config::ErgoConfig {
+                node: NodeConfig {
+                    node_url: "http://example.com".to_string(),
+                    ..Default::default()
+                },
+                basis_reserve_contract_p2s: "test".to_string(),
+                tracker_nft_id: Some("69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string()),
+                tracker_public_key: Some("9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string()),
+            },
+            transaction: crate::config::TransactionConfig {
+                fee: 1000000,
+            },
+        });
+
         AppState {
             tx,
             event_store,
             ergo_scanner: Arc::new(Mutex::new(scanner)),
             reserve_tracker: Arc::new(Mutex::new(basis_store::ReserveTracker::new())),
+            config: test_config,
         }
     }
 

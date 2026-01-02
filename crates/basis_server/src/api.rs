@@ -11,6 +11,7 @@ use crate::{
     AppState, TrackerCommand,
 };
 use basis_store::{IouNote, NoteError, PubKey, Signature};
+use ergo_lib::ergotree_ir::address::AddressEncoder;
 
 // Basic handler that responds with a static string
 pub async fn root() -> &'static str {
@@ -770,6 +771,50 @@ pub async fn initiate_redemption(
 ) -> (StatusCode, Json<ApiResponse<RedeemResponse>>) {
     tracing::debug!("Initiating redemption: {:?}", payload);
 
+    // Convert recipient public key to P2PK address
+    let recipient_address = {
+        // Convert the public key to a P2PK address
+        use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+        use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
+        use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+        // Decode the hex public key
+        let pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // If hex decoding fails, abort redemption
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(
+                        "Invalid hex encoding for recipient public key".to_string(),
+                    )),
+                );
+            }
+        };
+
+        // Create an EcPoint from the public key bytes
+        match EcPoint::sigma_parse_bytes(&pubkey_bytes) {
+            Ok(ec_point) => {
+                // Create a P2PK address from the public key
+                let prove_dlog = ProveDlog::from(ec_point);
+                let address = Address::P2Pk(prove_dlog);
+                // Use mainnet prefix by default, could be configurable
+                let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
+                encoder.address_to_str(&address)
+            },
+            Err(_) => {
+                // If conversion fails, abort redemption
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(
+                        "Invalid public key format for recipient".to_string(),
+                    )),
+                );
+            }
+        }
+    };
+
     // Create redemption request
     let redemption_request = basis_store::RedemptionRequest {
         issuer_pubkey: payload.issuer_pubkey.clone(),
@@ -777,7 +822,7 @@ pub async fn initiate_redemption(
         amount: payload.amount,
         timestamp: payload.timestamp,
         reserve_box_id: "".to_string(), // Will be looked up from reserve tracker
-        recipient_address: "".to_string(), // Will be provided by client in real implementation
+        recipient_address: recipient_address.clone(), // Use derived address from public key
     };
 
     // Send command to tracker thread to initiate redemption
@@ -801,10 +846,17 @@ pub async fn initiate_redemption(
     // Wait for response from tracker thread
     match response_rx.await {
         Ok(Ok(redemption_data)) => {
+            // Get tracker NFT ID from configuration
+            let tracker_nft_id = state.config.tracker_nft_bytes()
+                .ok()
+                .and_then(|opt| opt)
+                .map(|bytes| hex::encode(bytes))
+                .unwrap_or_else(|| "0000000000000000000000000000000000000000000000000000000000000000".to_string()); // fallback
+
             // Create transaction data that can be submitted to Ergo node
             // Use the transaction data that was prepared by the redemption manager
             let transaction_data = Some(crate::models::TransactionData {
-                address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(), // Placeholder recipient address
+                address: recipient_address, // Use address derived from recipient public key
                 value: 100000, // Minimum ERG value for box (0.001 ERG)
                 registers: {
                     let mut regs = std::collections::HashMap::new();
@@ -816,7 +868,7 @@ pub async fn initiate_redemption(
                     regs
                 },
                 assets: vec![crate::models::TokenData {
-                    token_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(), // Tracker NFT ID
+                    token_id: tracker_nft_id, // Use configured tracker NFT ID
                     amount: 1,
                 }],
                 fee: redemption_data.estimated_fee, // Use actual estimated fee from redemption data
