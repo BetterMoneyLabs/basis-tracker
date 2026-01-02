@@ -56,6 +56,12 @@ async fn main() {
         }
     };
 
+    // Validate that tracker NFT ID is properly configured
+    if let Err(_) = config.tracker_nft_bytes() {
+        tracing::error!("Tracker NFT ID is not properly configured in the configuration file. The server requires a valid tracker_nft_id value.");
+        std::process::exit(1); // Exit with error code if tracker NFT ID is not configured
+    }
+
     tracing::info!("Configuration loaded successfully");
     // Initialize tracing
     tracing_subscriber::registry()
@@ -577,11 +583,19 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                         }
                     };
 
+                    let tracker_nft_bytes_option = match config.tracker_nft_bytes() {
+                        Ok(bytes) => Some(bytes),
+                        Err(_) => {
+                            tracing::error!("Tracker NFT ID is not properly configured");
+                            continue; // Skip this box update
+                        }
+                    };
+
                     let reserve_info = basis_store::ExtendedReserveInfo::new(
                         ergo_box.box_id.as_bytes(),
                         &owner_pubkey,
                         ergo_box.value,
-                        config.tracker_nft_bytes().ok().flatten().as_deref(),
+                        tracker_nft_bytes_option.as_deref(),
                         scanner.last_scanned_height().await,
                     );
 
@@ -633,12 +647,20 @@ async fn process_reserve_event(
             );
 
             // Update reserve tracker
+            let tracker_nft_bytes_option = match config.tracker_nft_bytes() {
+                Ok(bytes) => Some(bytes),
+                Err(_) => {
+                    tracing::error!("Tracker NFT ID is not properly configured");
+                    return Err("Tracker NFT ID is not properly configured".into());
+                }
+            };
+
             let tracker = state.reserve_tracker.lock().await;
             let reserve_info = basis_store::ExtendedReserveInfo::new(
                 box_id.as_bytes(),
                 owner_pubkey.as_bytes(),
                 collateral_amount,
-                config.tracker_nft_bytes().ok().flatten().as_deref(),
+                tracker_nft_bytes_option.as_deref(),
                 height,
             );
             tracker.update_reserve(reserve_info)?;

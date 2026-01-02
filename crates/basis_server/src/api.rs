@@ -847,11 +847,18 @@ pub async fn initiate_redemption(
     match response_rx.await {
         Ok(Ok(redemption_data)) => {
             // Get tracker NFT ID from configuration
-            let tracker_nft_id = state.config.tracker_nft_bytes()
-                .ok()
-                .and_then(|opt| opt)
-                .map(|bytes| hex::encode(bytes))
-                .unwrap_or_else(|| "0000000000000000000000000000000000000000000000000000000000000000".to_string()); // fallback
+            let tracker_nft_id = match state.config.tracker_nft_bytes() {
+                Ok(bytes) => hex::encode(bytes),
+                Err(_) => {
+                    tracing::error!("Tracker NFT ID is not properly configured");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(crate::models::error_response(
+                            "Tracker NFT ID is not properly configured".to_string(),
+                        )),
+                    );
+                }
+            };
 
             // Create transaction data that can be submitted to Ergo node
             // Use the transaction data that was prepared by the redemption manager

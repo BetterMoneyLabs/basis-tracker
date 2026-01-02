@@ -102,11 +102,11 @@ impl AppConfig {
         &self.ergo.basis_reserve_contract_p2s
     }
 
-    /// Get the tracker NFT ID bytes (if configured)
-    pub fn tracker_nft_bytes(&self) -> Result<Option<Vec<u8>>, hex::FromHexError> {
+    /// Get the tracker NFT ID bytes (required - server will fail if not configured)
+    pub fn tracker_nft_bytes(&self) -> Result<Vec<u8>, hex::FromHexError> {
         match &self.ergo.tracker_nft_id {
-            Some(nft_id) if !nft_id.is_empty() => hex::decode(nft_id).map(Some),
-            _ => Ok(None),
+            Some(nft_id) if !nft_id.is_empty() => hex::decode(nft_id),
+            _ => Err(hex::FromHexError::InvalidStringLength),
         }
     }
 
