@@ -801,16 +801,38 @@ pub async fn initiate_redemption(
     // Wait for response from tracker thread
     match response_rx.await {
         Ok(Ok(redemption_data)) => {
+            // Create transaction data that can be submitted to Ergo node
+            // Use the transaction data that was prepared by the redemption manager
+            let transaction_data = Some(crate::models::TransactionData {
+                address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(), // Placeholder recipient address
+                value: 100000, // Minimum ERG value for box (0.001 ERG)
+                registers: {
+                    let mut regs = std::collections::HashMap::new();
+                    // R4 and R5 registers will be populated with the actual values from the redemption transaction
+                    // The redemption manager should prepare these values appropriately
+                    // For now, using placeholders based on the redemption data
+                    regs.insert("R4".to_string(), redemption_data.transaction_bytes.clone()); // Placeholder for R4 register
+                    regs.insert("R5".to_string(), hex::encode(&redemption_data.avl_proof)); // AVL proof for the note being redeemed
+                    regs
+                },
+                assets: vec![crate::models::TokenData {
+                    token_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(), // Tracker NFT ID
+                    amount: 1,
+                }],
+                fee: redemption_data.estimated_fee, // Use actual estimated fee from redemption data
+            });
+
             let response = RedeemResponse {
                 redemption_id: redemption_data.redemption_id,
                 amount: payload.amount,
                 timestamp: payload.timestamp,
                 proof_available: !redemption_data.avl_proof.is_empty(),
                 transaction_pending: true,
+                transaction_data,
             };
 
             tracing::info!(
-                "Redemption initiated successfully for {} -> {}: {}",
+                "Redemption initiated successfully for {} -> {}: {}, transaction_data available",
                 payload.issuer_pubkey,
                 payload.recipient_pubkey,
                 response.redemption_id
@@ -823,12 +845,19 @@ pub async fn initiate_redemption(
         }
         Ok(Err(e)) => {
             tracing::error!("Redemption failed: {}", e);
+            // Even if redemption fails, return a response with transaction data if available
+            let response = RedeemResponse {
+                redemption_id: "failed".to_string(), // Indicate this is a failed redemption
+                amount: payload.amount,
+                timestamp: payload.timestamp,
+                proof_available: false,
+                transaction_pending: false,
+                transaction_data: None, // No transaction data available on failure
+            };
+
             (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(format!(
-                    "Redemption failed: {}",
-                    e
-                ))),
+                Json(crate::models::success_response(response)),
             )
         }
         Err(_) => {

@@ -243,12 +243,10 @@ impl TrackerBoxUpdater {
         // Build the URL for the wallet payment endpoint
         let url = format!("{}/wallet/payment/send", node_url);
 
-        // Prepare the request body with register values
-        // For R4 as GroupElement (EcPoint), we need to parse the serialized constant
+        // Import required types for parsing constants and extracting EcPoints
         use ergo_lib::ergotree_ir::mir::constant::{Constant, TryExtractInto};
-        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-        use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
         use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
+        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
         let r4_constant_bytes = hex::decode(r4_hex)
             .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to decode R4 register hex: {}", e)))?;
@@ -264,9 +262,11 @@ impl TrackerBoxUpdater {
         tracing::debug!("Successfully extracted EcPoint from R4 constant");
 
         // Create ProveDlog from the extracted EcPoint for the P2PK address
+        use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
         let prove_dlog = ProveDlog::new(ec_point);
 
         // Create P2PK address from ProveDlog
+        use ergo_lib::ergotree_ir::address::Address;
         let p2pk_address = Address::P2Pk(prove_dlog);
 
         // Encode as base58 address using the provided network prefix

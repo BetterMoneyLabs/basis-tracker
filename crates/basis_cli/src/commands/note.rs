@@ -172,9 +172,19 @@ pub async fn handle_note_command(
                 .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
 
             let recipient_pubkey = current_account.get_pubkey_hex();
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
+
+            // First, get the note to retrieve its original timestamp
+            let note = client.get_note(&issuer, &recipient_pubkey).await?
+                .ok_or_else(|| anyhow::anyhow!("Note not found for issuer {} and recipient {}", issuer, recipient_pubkey))?;
+
+            // Verify that the note has sufficient outstanding debt
+            if note.outstanding_debt() < amount {
+                return Err(anyhow::anyhow!("Insufficient outstanding debt: {} nanoERG available, {} nanoERG requested",
+                    note.outstanding_debt(), amount));
+            }
+
+            // Use the note's original timestamp for redemption
+            let timestamp = note.timestamp;
 
             // Initiate redemption
             let redeem_request = RedeemRequest {

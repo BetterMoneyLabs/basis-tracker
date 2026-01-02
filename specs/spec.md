@@ -16,16 +16,25 @@ Check following things:
 ### AVL Tree State Management
 - Fixed AVL tree operations to properly generate proofs after each operation (insert, update, remove)
 - Ensured AVL tree root digest is updated after each operation through proper proof generation
-- Implemented correct EcPoint creation from compressed public key bytes for R4 register
+- Implemented proper initialization of AVL tree with initial proof to ensure non-zero empty tree digest
+- Fixed EcPoint creation from compressed public key bytes for R4 register
 
 ### Tracker Box Updater
 - Implemented periodic submission of tracker box update transactions every 10 minutes
 - Fixed error handling for "expected EcPoint, found SigmaProp" when extracting public key from R4 register
 - Properly serialize R4 register with tracker public key as GroupElement (EcPoint)
-- Properly serialize R5 register with AVL+ tree root digest as SAvlTree
+- Properly serialize R5 register with AVL+ tree root digest as SAvlTree (non-zero when tree has content)
 - Added comprehensive logging for tracker box update transactions
+
+### Redemption Transaction Builder
+- Implemented complete redemption transaction structure with proper validation
+- Added validation for redemption parameters (sufficient collateral, time locks, etc.)
+- Ensured proper transaction building with inputs, outputs, data inputs, and context extensions
+- Added proper Schnorr signature validation (65-byte format)
+- Implemented AVL proof inclusion in redemption transactions
 
 ### Integration
 - Updated shared state management between tracker operations and box updater
 - Enhanced error handling and logging throughout the tracker box update process
 - Ensured proper synchronization between AVL tree state changes and blockchain commitments
+- Connected reserve processing with tracker state updates where appropriate

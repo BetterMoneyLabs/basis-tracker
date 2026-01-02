@@ -33,3 +33,9 @@ server.pid
 
 # Implementation plans (not meant for git)
 tracker_box_scan_plan.md
+
+# Alice and Bob keys/secrets
+alice.txt
+bob.txt
+secret.txt
+alice_keys_output.txt

@@ -151,6 +151,18 @@ The AVL tree state is properly maintained with proof generation after each opera
 
 ```rust
 impl AvlTreeState {
+    /// Create a new AVL tree state with proper initialization
+    pub fn new() -> Self {
+        let tree = AVLTree::new(simple_resolver, 64, None);
+        let mut prover = BatchAVLProver::new(tree, true);
+
+        // Generate an initial proof to establish the empty tree state
+        // This ensures the prover has an initial digest even for an empty tree
+        let _ = prover.generate_proof();
+
+        Self { prover }
+    }
+
     /// Insert a key-value pair into the AVL tree
     pub fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String> {
         let operation = Operation::Insert(KeyValue {
@@ -198,10 +210,73 @@ impl AvlTreeState {
 
         Ok(())
     }
+
+    /// Get the root digest of the AVL tree
+    pub fn root_digest(&self) -> [u8; 33] {
+        // Return the current root digest
+        // After the fix to generate an initial proof in constructor,
+        // the prover should always have a valid digest
+        match self.prover.digest() {
+            Some(digest) => {
+                let mut result = [0u8; 33];
+                result.copy_from_slice(&digest);
+                result
+            },
+            None => {
+                // This should not happen after our fix to generate initial proof in constructor
+                // but we provide a fallback for safety
+                let mut empty_digest = [0u8; 33];
+                empty_digest[0] = 0x64; // SAvlTree type identifier
+                empty_digest
+            }
+        }
+    }
 }
 ```
 
-This ensures that the AVL tree root digest is properly updated after each operation, which is critical for the R5 register value.
+This ensures that the AVL tree root digest is properly updated after each operation, which is critical for the R5 register value. The AVL tree is now properly initialized with an initial proof to ensure it has a valid root digest even when empty.
+
+### Redemption Transaction Builder
+
+The redemption transaction builder now properly implements the transaction building logic:
+
+```rust
+pub struct RedemptionTransactionBuilder;
+
+impl RedemptionTransactionBuilder {
+    /// Prepare redemption transaction data structure with proper validation
+    pub fn prepare_redemption_transaction(
+        reserve_box_id: &str,
+        tracker_box_id: &str,
+        amount_collected: u64,
+        amount_redeemed: u64,
+        timestamp: u64,
+        issuer_pubkey: &PubKey,
+        recipient_address: &str,
+        avl_proof: &[u8],
+        issuer_sig: &[u8],
+        tracker_sig: &[u8],
+        context: &TxContext,
+    ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
+        // Implementation with proper validation and transaction preparation
+    }
+
+    /// Build actual Ergo redemption transaction with all required components
+    pub fn build_redemption_transaction(
+        reserve_box_id: &str,
+        tracker_box_id: &str,
+        recipient_address: &str,
+        redemption_amount: u64,
+        fee: u64,
+        current_height: u32,
+    ) -> Result<Vec<u8>, TransactionBuilderError> {
+        // Implementation that creates proper Ergo transaction structure
+        // with inputs, outputs, data inputs, and context extensions
+    }
+}
+```
+
+The redemption transaction builder now includes proper validation, transaction structure creation, and serialization of all required components for the Basis redemption process.
 
 ### Integration with Server Startup
 

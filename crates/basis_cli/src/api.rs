@@ -20,6 +20,16 @@ pub struct SerializableIouNote {
     pub signature: String,
 }
 
+impl SerializableIouNote {
+    pub fn outstanding_debt(&self) -> u64 {
+        self.amount_collected.saturating_sub(self.amount_redeemed)
+    }
+
+    pub fn is_fully_redeemed(&self) -> bool {
+        self.amount_collected == self.amount_redeemed
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyStatusResponse {
     pub total_debt: u64,

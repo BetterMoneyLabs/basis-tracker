@@ -109,6 +109,31 @@ pub struct RedeemResponse {
     pub timestamp: u64,
     pub proof_available: bool,
     pub transaction_pending: bool,
+    /// Prepared transaction data that can be submitted to Ergo node
+    /// Contains all necessary fields for wallet payment API
+    pub transaction_data: Option<TransactionData>,
+}
+
+// Transaction data that can be submitted to Ergo node
+#[derive(Debug, Serialize)]
+pub struct TransactionData {
+    /// Target address for the transaction
+    pub address: String,
+    /// Value in nanoERG
+    pub value: u64,
+    /// Register values
+    pub registers: std::collections::HashMap<String, String>,
+    /// Assets to include in transaction
+    pub assets: Vec<TokenData>,
+    /// Transaction fee
+    pub fee: u64,
+}
+
+// Token/Asset data for transaction
+#[derive(Debug, Serialize)]
+pub struct TokenData {
+    pub token_id: String,
+    pub amount: u64,
 }
 
 // Proof response

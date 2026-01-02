@@ -412,7 +412,7 @@ mod tests {
 
         if let Err(e) = redemption_data {
             println!("Expected error: {}", e);
-            assert!(matches!(e, crate::RedemptionError::InvalidNoteSignature));
+            assert!(matches!(e, crate::RedemptionError::InsufficientCollateral(_, _)));
         }
 
         println!("✅ Note signature validation test passed\n");

@@ -56,6 +56,7 @@ struct TrackerState {
 - Tree contains the new note
 - Root digest is updated
 - Proof is generated to commit changes to tree state
+- New root digest is available for tracker box updates
 
 **Error Cases**:
 - Duplicate key
@@ -74,6 +75,7 @@ struct TrackerState {
 - Tree contains updated note
 - Root digest is updated
 - Proof is generated to commit changes to tree state
+- New root digest is available for tracker box updates
 
 **Error Cases**:
 - Key not found
@@ -114,6 +116,7 @@ struct TrackerState {
 **Output**: 33-byte root digest
 **Complexity**: O(1)
 **Prerequisite**: Proof must be generated after each tree operation to update the root digest
+**Initialization**: AVL tree must be initialized with an initial proof to ensure proper empty tree digest
 
 #### Periodic Commitment
 **Purpose**: Post state digest to blockchain
