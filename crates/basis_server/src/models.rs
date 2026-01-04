@@ -59,6 +59,18 @@ pub struct SerializableIouNote {
     pub signature: String,
 }
 
+// Serializable version of IouNote for API responses with age
+#[derive(Debug, Serialize)]
+pub struct SerializableIouNoteWithAge {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub amount_collected: u64,
+    pub amount_redeemed: u64,
+    pub timestamp: u64,
+    pub signature: String,
+    pub age_seconds: u64,
+}
+
 impl From<IouNote> for SerializableIouNote {
     fn from(note: IouNote) -> Self {
         Self {

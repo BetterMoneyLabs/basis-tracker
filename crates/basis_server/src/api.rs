@@ -562,6 +562,92 @@ pub async fn get_note_by_issuer_and_recipient(
     }
 }
 
+// Get all notes with their age
+#[axum::debug_handler]
+pub async fn get_all_notes(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<Vec<crate::models::SerializableIouNoteWithAge>>>) {
+    tracing::debug!("Getting all notes");
+
+    // Send command to tracker thread
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    if let Err(_) = state
+        .tx
+        .send(crate::TrackerCommand::GetNotes {
+            response_tx,
+        })
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+
+    // Wait for response from tracker thread
+    match response_rx.await {
+        Ok(Ok(notes_with_issuer)) => {
+            tracing::info!("Successfully retrieved {} notes", notes_with_issuer.len());
+
+            // Convert to serializable format with age calculation
+            let current_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let serializable_notes: Vec<crate::models::SerializableIouNoteWithAge> = notes_with_issuer
+                .into_iter()
+                .map(|(issuer_pubkey, note)| {
+                    let age_seconds = current_time.saturating_sub(note.timestamp);
+                    crate::models::SerializableIouNoteWithAge {
+                        issuer_pubkey: hex::encode(issuer_pubkey),
+                        recipient_pubkey: hex::encode(note.recipient_pubkey),
+                        amount_collected: note.amount_collected,
+                        amount_redeemed: note.amount_redeemed,
+                        timestamp: note.timestamp,
+                        signature: hex::encode(note.signature),
+                        age_seconds,
+                    }
+                })
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(crate::models::success_response(serializable_notes)),
+            )
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Failed to get all notes: {:?}", e);
+            let error_message = match e {
+                NoteError::InvalidSignature => "Invalid signature".to_string(),
+                NoteError::AmountOverflow => "Amount overflow".to_string(),
+                NoteError::FutureTimestamp => "Future timestamp".to_string(),
+                NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
+                NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
+                NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::UnsupportedOperation => "Operation not supported".to_string(),
+            };
+            (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(error_message)),
+            )
+        }
+        Err(_) => {
+            tracing::error!("Tracker thread response channel closed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
+            )
+        }
+    }
+}
+
 // Get paginated tracker events from event store
 #[axum::debug_handler]
 pub async fn get_events_paginated(

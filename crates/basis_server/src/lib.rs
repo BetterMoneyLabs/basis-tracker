@@ -63,6 +63,10 @@ pub enum TrackerCommand {
             Result<Option<basis_store::IouNote>, basis_store::NoteError>,
         >,
     },
+    GetNotes {
+        response_tx:
+            tokio::sync::oneshot::Sender<Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>>,
+    },
     InitiateRedemption {
         request: basis_store::RedemptionRequest,
         response_tx: tokio::sync::oneshot::Sender<

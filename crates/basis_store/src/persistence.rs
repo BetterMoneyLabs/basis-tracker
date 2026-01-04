@@ -272,6 +272,7 @@ impl NoteStorage {
                 continue; // Skip invalid entries
             }
 
+            let _stored_issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
             let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
             let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
             let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
@@ -290,6 +291,41 @@ impl NoteStorage {
         }
 
         Ok(notes)
+    }
+
+    /// Get all notes with issuer information
+    pub fn get_all_notes_with_issuer(&self) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
+        let mut notes_with_issuer = Vec::new();
+
+        for item in self.partition.iter() {
+            let (_key_bytes, value_bytes) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate partition: {}", e))
+            })?;
+
+            // Manual deserialization
+            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+                continue; // Skip invalid entries
+            }
+
+            let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
+            let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+            let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+            let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
+            let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
+            let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+
+            let note = IouNote {
+                recipient_pubkey,
+                amount_collected,
+                amount_redeemed,
+                timestamp,
+                signature,
+            };
+
+            notes_with_issuer.push((issuer_pubkey, note));
+        }
+
+        Ok(notes_with_issuer)
     }
 }
 

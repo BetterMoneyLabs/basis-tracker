@@ -411,6 +411,11 @@ impl TrackerStateManager {
         self.storage.get_all_notes()
     }
 
+    /// Get all notes in the tracker with issuer information
+    pub fn get_all_notes_with_issuer(&self) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
+        self.storage.get_all_notes_with_issuer()
+    }
+
     /// Update the current state with latest AVL tree root
     fn update_state(&mut self) {
         self.current_state.avl_root_digest = self.avl_state.root_digest();

@@ -278,6 +278,10 @@ async fn main() {
 
                     let _ = response_tx.send(result);
                 }
+                TrackerCommand::GetNotes { response_tx } => {
+                    let result = redemption_manager.tracker.get_all_notes_with_issuer();
+                    let _ = response_tx.send(result);
+                }
             }
         }
     });
@@ -478,6 +482,7 @@ async fn main() {
         // Parameterized routes
         .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
         .route("/notes/recipient/{pubkey}", get(get_notes_by_recipient))
+        .route("/notes", get(get_all_notes)) // Get all notes with age
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
         .with_state(app_state.clone())
@@ -496,6 +501,7 @@ async fn main() {
     tracing::debug!("  GET /notes/issuer/{{pubkey}}");
     tracing::debug!("  GET /notes/recipient/{{pubkey}}");
     tracing::debug!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
+    tracing::debug!("  GET /notes (all notes with age)");
     tracing::debug!("  GET /reserves");
     tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
     tracing::debug!("  POST /reserves/create");
