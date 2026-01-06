@@ -8,6 +8,26 @@ use crate::{
     AppState,
 };
 
+// Helper function to decode potentially double-hex-encoded strings
+fn decode_potentially_double_hex_encoded(hex_string: &str) -> String {
+    // First, try to decode as hex
+    if let Ok(decoded_bytes) = hex::decode(hex_string) {
+        // Check if the decoded bytes look like a hex string (only contains valid hex chars)
+        let decoded_as_string = String::from_utf8_lossy(&decoded_bytes);
+        if is_hex_string(&decoded_as_string) {
+            // It was double-encoded, return the single-decoded version
+            return decoded_as_string.to_string();
+        }
+    }
+    // If not double-encoded, return the original
+    hex_string.to_string()
+}
+
+// Helper function to check if a string contains only valid hex characters
+fn is_hex_string(s: &str) -> bool {
+    s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Get all reserves (regardless of issuer)
 #[axum::debug_handler]
 pub async fn get_all_reserves(
@@ -28,7 +48,7 @@ pub async fn get_all_reserves(
                     let collateralization_ratio = info.collateralization_ratio();
                     SerializableReserveInfo {
                         box_id: info.box_id,
-                        owner_pubkey: info.owner_pubkey,
+                        owner_pubkey: decode_potentially_double_hex_encoded(&info.owner_pubkey),
                         collateral_amount: info.base_info.collateral_amount,
                         total_debt: info.total_debt,
                         tracker_nft_id: info.tracker_nft_id,
@@ -78,7 +98,7 @@ pub async fn get_reserves_by_issuer(
                     let collateralization_ratio = info.collateralization_ratio();
                     SerializableReserveInfo {
                         box_id: info.box_id,
-                        owner_pubkey: info.owner_pubkey,
+                        owner_pubkey: decode_potentially_double_hex_encoded(&info.owner_pubkey),
                         collateral_amount: info.base_info.collateral_amount,
                         total_debt: info.total_debt,
                         tracker_nft_id: info.tracker_nft_id,

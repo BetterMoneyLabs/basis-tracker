@@ -662,9 +662,17 @@ async fn process_reserve_event(
             };
 
             let tracker = state.reserve_tracker.lock().await;
+            // Decode the hex-encoded owner public key to bytes before passing to ExtendedReserveInfo::new
+            let owner_pubkey_bytes = match hex::decode(&owner_pubkey) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    tracing::error!("Failed to decode owner public key: {}", owner_pubkey);
+                    return Err("Invalid owner public key format".into());
+                }
+            };
             let reserve_info = basis_store::ExtendedReserveInfo::new(
                 box_id.as_bytes(),
-                owner_pubkey.as_bytes(),
+                &owner_pubkey_bytes,
                 collateral_amount,
                 tracker_nft_bytes_option.as_deref(),
                 height,
