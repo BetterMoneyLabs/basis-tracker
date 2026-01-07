@@ -807,10 +807,16 @@ pub async fn get_key_status(
     let tracker = state.reserve_tracker.lock().await;
     let all_reserves = tracker.get_all_reserves();
 
-    // Find reserve for this issuer
+    // Normalize the public key to handle different representations (e.g., 07 prefix for GroupElement)
+    let normalized_pubkey = basis_store::normalize_public_key(&pubkey_hex);
+
+    // Find reserve for this issuer - check both original and normalized key representations
     let reserve = all_reserves
         .into_iter()
-        .find(|reserve| reserve.owner_pubkey == pubkey_hex);
+        .find(|reserve| {
+            reserve.owner_pubkey == pubkey_hex ||
+            basis_store::normalize_public_key(&reserve.owner_pubkey) == normalized_pubkey
+        });
 
     let (collateral, collateralization_ratio, last_updated) = if let Some(reserve) = reserve {
         let collateral = reserve.base_info.collateral_amount;
@@ -901,13 +907,56 @@ pub async fn initiate_redemption(
         }
     };
 
+    // Find the reserve box ID for the issuer using normalized key matching
+    let reserve_box_id = {
+        // Get the reserve tracker to look up the reserve
+        let tracker = state.reserve_tracker.lock().await;
+
+        // Get all reserves to find the matching one
+        let all_reserves = tracker.get_all_reserves();
+
+        // Normalize the issuer public key
+        let normalized_issuer_key = basis_store::normalize_public_key(&payload.issuer_pubkey);
+
+        // Find a reserve where the owner key matches (considering normalized forms)
+        let mut found_box_id = String::new();
+        for reserve in all_reserves {
+            let normalized_reserve_key = basis_store::normalize_public_key(&reserve.owner_pubkey);
+
+            if normalized_issuer_key == normalized_reserve_key {
+                found_box_id = reserve.box_id;
+                break;
+            }
+        }
+
+        if found_box_id.is_empty() {
+            tracing::warn!("No reserve found for issuer: {}", payload.issuer_pubkey);
+            // Return a failed redemption response
+            let response = crate::models::RedeemResponse {
+                redemption_id: "failed".to_string(),
+                amount: payload.amount,
+                timestamp: payload.timestamp,
+                proof_available: false,
+                transaction_pending: false,
+                transaction_data: None,
+            };
+
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::success_response(response)),
+            );
+        }
+
+        found_box_id
+    };
+
     // Create redemption request
     let redemption_request = basis_store::RedemptionRequest {
         issuer_pubkey: payload.issuer_pubkey.clone(),
         recipient_pubkey: payload.recipient_pubkey.clone(),
         amount: payload.amount,
         timestamp: payload.timestamp,
-        reserve_box_id: "".to_string(), // Will be looked up from reserve tracker
+        reserve_box_id, // Use the found reserve box ID
         recipient_address: recipient_address.clone(), // Use derived address from public key
     };
 

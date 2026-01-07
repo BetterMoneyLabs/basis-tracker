@@ -432,6 +432,29 @@ impl TrackerStateManager {
     }
 }
 
+impl TrackerStateManager {
+    /// Find the reserve box ID for an issuer using normalized key matching
+    pub fn find_reserve_box_id_for_issuer(&self, issuer_pubkey_hex: &str, reserve_tracker: &ReserveTracker) -> Result<String, NoteError> {
+        // Get all reserves from the reserve tracker
+        let all_reserves = reserve_tracker.get_all_reserves();
+
+        // Normalize the issuer public key
+        let normalized_issuer_key = normalize_public_key(issuer_pubkey_hex);
+
+        // Find a reserve where the owner key matches (considering normalized forms)
+        for reserve in all_reserves {
+            let normalized_reserve_key = normalize_public_key(&reserve.owner_pubkey);
+
+            if normalized_issuer_key == normalized_reserve_key {
+                return Ok(reserve.box_id);
+            }
+        }
+
+        // If no matching reserve is found, return an error
+        Err(NoteError::StorageError(format!("No reserve found for issuer: {}", issuer_pubkey_hex)))
+    }
+}
+
 impl IouNote {
     /// Create a new IOU note
     pub fn new(
@@ -547,6 +570,39 @@ pub fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
     result[..32]
         .try_into()
         .expect("Blake2b512 should produce at least 32 bytes")
+}
+
+/// Normalize public key representations to handle different Ergo register formats
+///
+/// Ergo uses different prefixes for public keys in different contexts:
+/// - `03` prefix for compressed public keys
+/// - `07` prefix for GroupElement (EC Point) constants in registers
+///
+/// This function normalizes these representations to enable proper correlation
+/// between notes and reserves that may use different key formats.
+pub fn normalize_public_key(pubkey_hex: &str) -> String {
+    let pubkey_bytes = match hex::decode(pubkey_hex) {
+        Ok(bytes) => bytes,
+        Err(_) => return pubkey_hex.to_string(), // Return original if invalid hex
+    };
+
+    if pubkey_bytes.len() < 1 {
+        return pubkey_hex.to_string();
+    }
+
+    // If it starts with 07 (GroupElement), it's likely a prefixed version
+    // where the actual public key starts from the 2nd byte
+    if pubkey_bytes[0] == 0x07 && pubkey_bytes.len() >= 34 {
+        // Extract the actual public key (33 bytes after the 0x07 prefix)
+        let actual_pubkey = &pubkey_bytes[1..34]; // 33 bytes after the prefix
+        hex::encode(actual_pubkey)
+    } else if (pubkey_bytes[0] == 0x02 || pubkey_bytes[0] == 0x03) && pubkey_bytes.len() == 33 {
+        // This is already a standard compressed public key
+        pubkey_hex.to_string()
+    } else {
+        // For other formats, return as is
+        pubkey_hex.to_string()
+    }
 }
 
 // Re-export reserve tracker types

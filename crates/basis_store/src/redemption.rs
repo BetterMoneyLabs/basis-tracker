@@ -132,6 +132,7 @@ impl RedemptionManager {
             .generate_proof(&issuer_pubkey, &recipient_pubkey)?;
 
         // Build redemption transaction
+        // The reserve_box_id should already be set in the request from the API layer
         let redemption_data = self.build_redemption_transaction(&note, &proof, request)?;
 
         Ok(redemption_data)
