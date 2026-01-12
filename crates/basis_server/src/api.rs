@@ -6,12 +6,15 @@ use crate::{
         ApiResponse, CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest,
         KeyStatusResponse, ProofResponse, RedeemRequest, RedeemResponse,
         ReserveCreationResponse, ReservePaymentRequest, Asset,
-        SerializableIouNote, TrackerEvent,
+        SerializableIouNote, TrackerEvent, TrackerSignatureRequest,
+        TrackerSignatureResponse, RedemptionPreparationRequest,
+        RedemptionPreparationResponse,
     },
     AppState, TrackerCommand,
 };
 use basis_store::{IouNote, NoteError, PubKey, Signature};
 use ergo_lib::ergotree_ir::address::AddressEncoder;
+use blake2::{Blake2b512, Digest};
 
 // Basic handler that responds with a static string
 pub async fn root() -> &'static str {
@@ -810,12 +813,23 @@ pub async fn get_key_status(
     // Normalize the public key to handle different representations (e.g., 07 prefix for GroupElement)
     let normalized_pubkey = basis_store::normalize_public_key(&pubkey_hex);
 
-    // Find reserve for this issuer - check both original and normalized key representations
+    // Find reserve for this issuer - check multiple key representations for comprehensive correlation
     let reserve = all_reserves
         .into_iter()
         .find(|reserve| {
-            reserve.owner_pubkey == pubkey_hex ||
-            basis_store::normalize_public_key(&reserve.owner_pubkey) == normalized_pubkey
+            let normalized_reserve_key = basis_store::normalize_public_key(&reserve.owner_pubkey);
+            let original_reserve_key = &reserve.owner_pubkey;
+
+            // Check multiple matching possibilities to ensure comprehensive key correlation:
+            // 1. Direct match between normalized keys (main case)
+            // 2. Match between original pubkey and normalized reserve key
+            // 3. Match between original pubkey and original reserve key (backup)
+            // 4. Special case: original pubkey matches the part of reserve key after '07' prefix
+            normalized_pubkey == normalized_reserve_key ||
+            pubkey_hex == normalized_reserve_key ||
+            pubkey_hex == *original_reserve_key ||
+            (original_reserve_key.starts_with("07") && original_reserve_key.len() >= 66 &&
+             &original_reserve_key[2..] == pubkey_hex.as_str())
         });
 
     let (collateral, collateralization_ratio, last_updated) = if let Some(reserve) = reserve {
@@ -922,8 +936,18 @@ pub async fn initiate_redemption(
         let mut found_box_id = String::new();
         for reserve in all_reserves {
             let normalized_reserve_key = basis_store::normalize_public_key(&reserve.owner_pubkey);
+            let original_reserve_key = &reserve.owner_pubkey;
 
-            if normalized_issuer_key == normalized_reserve_key {
+            // Check multiple matching possibilities to ensure comprehensive key correlation:
+            // 1. Direct match between normalized keys (main case)
+            // 2. Match between original issuer and normalized reserve key
+            // 3. Match between original issuer and original reserve key (backup)
+            // 4. Special case: original issuer matches the part of reserve key after '07' prefix
+            if normalized_issuer_key == normalized_reserve_key ||
+               payload.issuer_pubkey == normalized_reserve_key ||
+               payload.issuer_pubkey == *original_reserve_key ||
+               (original_reserve_key.starts_with("07") && original_reserve_key.len() >= 66 &&
+                &original_reserve_key[2..] == payload.issuer_pubkey.as_str()) {
                 found_box_id = reserve.box_id;
                 break;
             }
@@ -933,7 +957,7 @@ pub async fn initiate_redemption(
             tracing::warn!("No reserve found for issuer: {}", payload.issuer_pubkey);
             // Return a failed redemption response
             let response = crate::models::RedeemResponse {
-                redemption_id: "failed".to_string(),
+                redemption_id: "failed_no_matching_reserve".to_string(),
                 amount: payload.amount,
                 timestamp: payload.timestamp,
                 proof_available: false,
@@ -943,7 +967,7 @@ pub async fn initiate_redemption(
 
             return (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::success_response(response)),
+                Json(crate::models::error_response(format!("No matching reserve found for issuer: {}", payload.issuer_pubkey))),
             );
         }
 
@@ -1038,10 +1062,21 @@ pub async fn initiate_redemption(
             )
         }
         Ok(Err(e)) => {
-            tracing::error!("Redemption failed: {}", e);
-            // Even if redemption fails, return a response with transaction data if available
-            let response = RedeemResponse {
-                redemption_id: "failed".to_string(), // Indicate this is a failed redemption
+            tracing::error!("Redemption failed: {:?}", e);
+            // Return a more specific error response based on the error type
+            let error_msg = format!("Redemption failed: {}", e);
+            let redemption_id = match e {
+                basis_store::RedemptionError::NoteNotFound => "failed_note_not_found".to_string(),
+                basis_store::RedemptionError::InvalidNoteSignature => "failed_invalid_signature".to_string(),
+                basis_store::RedemptionError::InsufficientCollateral(_, _) => "failed_insufficient_collateral".to_string(),
+                basis_store::RedemptionError::RedemptionTooEarly(_, _) => "failed_too_early".to_string(),
+                basis_store::RedemptionError::StorageError(_) => "failed_storage_error".to_string(),
+                _ => "failed_other_error".to_string(),
+            };
+
+            // Return a response with more specific failure information
+            let failure_response = RedeemResponse {
+                redemption_id, // Use specific failure ID
                 amount: payload.amount,
                 timestamp: payload.timestamp,
                 proof_available: false,
@@ -1051,7 +1086,7 @@ pub async fn initiate_redemption(
 
             (
                 StatusCode::BAD_REQUEST,
-                Json(crate::models::success_response(response)),
+                Json(crate::models::error_response(error_msg)),
             )
         }
         Err(_) => {
@@ -1229,6 +1264,577 @@ pub async fn get_proof(
         "Proof generated for {} -> {}",
         issuer_pubkey,
         recipient_pubkey
+    );
+
+    (StatusCode::OK, Json(crate::models::success_response(proof)))
+}
+
+// Request tracker signature for redemption
+#[axum::debug_handler]
+pub async fn request_tracker_signature(
+    State(state): State<AppState>,
+    Json(payload): Json<TrackerSignatureRequest>,
+) -> (StatusCode, Json<ApiResponse<TrackerSignatureResponse>>) {
+    tracing::debug!("Requesting tracker signature for redemption: {:?}", payload);
+
+    // Validate public keys
+    if hex::decode(&payload.issuer_pubkey).is_err() || hex::decode(&payload.recipient_pubkey).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "Invalid hex encoding for public keys".to_string(),
+            )),
+        );
+    }
+
+    // Get tracker public key from configuration
+    let tracker_pubkey_bytes = match state.config.tracker_public_key_bytes() {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Tracker public key not configured".to_string(),
+                )),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Invalid tracker public key format: {}", e),
+                )),
+            );
+        }
+    };
+
+    // Create a message to be signed by the tracker following the spec
+    // According to the offchain spec: (recipient_pubkey || amount || timestamp)
+    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid hex encoding for recipient public key".to_string(),
+                )),
+            );
+        }
+    };
+
+    let message_to_sign_bytes = basis_offchain::schnorr::signing_message(
+        &recipient_pubkey_bytes.try_into().unwrap_or([0u8; 33]),
+        payload.amount,
+        payload.timestamp,
+    );
+
+    let message_to_sign = hex::encode(&message_to_sign_bytes);
+
+    // In a real implementation, the tracker would sign this message using its private key
+    // For now, we'll simulate the signature generation process
+    // The signature should be a 65-byte Schnorr signature (33 bytes for 'a' component + 32 bytes for 'z' component)
+
+    // Get the tracker's private key from configuration for real signing
+    // In a real implementation, this would use the actual tracker's private key
+    use secp256k1::{Secp256k1, SecretKey};
+    let secp = Secp256k1::new();
+
+    // Get the actual tracker private key from configuration
+    // If not configured, return an error instead of generating a temporary key
+    let (tracker_private_key, tracker_pubkey_bytes_actual) = match state.config.tracker_private_key_bytes() {
+        Ok(Some(private_key_bytes)) => {
+            match SecretKey::from_slice(&private_key_bytes) {
+                Ok(private_key) => {
+                    let public_key = secp256k1::PublicKey::from_secret_key(&secp, &private_key);
+                    let public_key_bytes = public_key.serialize();
+                    (private_key, public_key_bytes)
+                },
+                Err(e) => {
+                    tracing::error!("Invalid tracker private key format in configuration: {:?}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(crate::models::error_response(
+                            format!("Invalid tracker private key format in configuration: {:?}", e),
+                        )),
+                    );
+                }
+            }
+        },
+        Ok(None) => {
+            tracing::error!("Tracker private key not configured");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Tracker private key not configured".to_string(),
+                )),
+            );
+        },
+        Err(e) => {
+            tracing::error!("Failed to read tracker private key from configuration: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Failed to read tracker private key from configuration: {:?}", e),
+                )),
+            );
+        }
+    };
+
+    // Generate a real Schnorr signature using the offchain crate's implementation
+    let tracker_signature_bytes = match basis_offchain::schnorr::schnorr_sign(
+        &message_to_sign_bytes,
+        &tracker_private_key,
+        &tracker_pubkey_bytes_actual,
+    ) {
+        Ok(sig) => sig,
+        Err(e) => {
+            tracing::error!("Failed to generate tracker signature: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Failed to generate tracker signature: {:?}", e),
+                )),
+            );
+        }
+    };
+
+    let tracker_signature = hex::encode(&tracker_signature_bytes);
+    let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
+
+    let response = TrackerSignatureResponse {
+        success: true,
+        tracker_signature,
+        tracker_pubkey,
+        message_signed: message_to_sign,
+    };
+
+    tracing::info!(
+        "Tracker signature generated for redemption from {} to {}",
+        payload.issuer_pubkey,
+        payload.recipient_pubkey
+    );
+
+    (StatusCode::OK, Json(crate::models::success_response(response)))
+}
+
+// Prepare redemption with all necessary data
+#[axum::debug_handler]
+pub async fn prepare_redemption(
+    State(state): State<AppState>,
+    Json(payload): Json<RedemptionPreparationRequest>,
+) -> (StatusCode, Json<ApiResponse<RedemptionPreparationResponse>>) {
+    tracing::debug!("Preparing redemption: {:?}", payload);
+
+    // Validate public keys
+    if hex::decode(&payload.issuer_pubkey).is_err() || hex::decode(&payload.recipient_pubkey).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "Invalid hex encoding for public keys".to_string(),
+            )),
+        );
+    }
+
+    // Get tracker public key from configuration
+    let tracker_pubkey_bytes = match state.config.tracker_public_key_bytes() {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Tracker public key not configured".to_string(),
+                )),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Invalid tracker public key format: {}", e),
+                )),
+            );
+        }
+    };
+
+    // Generate a unique redemption ID
+    let redemption_id = format!("redemption_{}_{}_{}",
+        &payload.issuer_pubkey[..8],
+        &payload.recipient_pubkey[..8],
+        payload.timestamp
+    );
+
+    // Create a message to be signed by the tracker following the spec
+    // According to the offchain spec: (recipient_pubkey || amount || timestamp)
+    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid hex encoding for recipient public key".to_string(),
+                )),
+            );
+        }
+    };
+
+    let message_to_sign_bytes = basis_offchain::schnorr::signing_message(
+        &recipient_pubkey_bytes.try_into().unwrap_or([0u8; 33]),
+        payload.amount,
+        payload.timestamp,
+    );
+
+    let message_to_sign = hex::encode(&message_to_sign_bytes);
+
+    // Generate a proper 65-byte tracker signature using real Schnorr signing
+    use secp256k1::{Secp256k1, SecretKey};
+    let secp = Secp256k1::new();
+
+    // Get the tracker's private key from configuration for real signing
+    // In a real implementation, this would use the actual tracker's private key
+    // If not configured, return an error instead of generating a temporary key
+
+    // Get the actual tracker private key from configuration
+    // If not configured, return an error instead of generating a temporary key
+    let (tracker_private_key, tracker_pubkey_bytes_actual) = match state.config.tracker_private_key_bytes() {
+        Ok(Some(private_key_bytes)) => {
+            match SecretKey::from_slice(&private_key_bytes) {
+                Ok(private_key) => {
+                    let public_key = secp256k1::PublicKey::from_secret_key(&secp, &private_key);
+                    let public_key_bytes = public_key.serialize();
+                    (private_key, public_key_bytes)
+                },
+                Err(e) => {
+                    tracing::error!("Invalid tracker private key format in configuration: {:?}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(crate::models::error_response(
+                            format!("Invalid tracker private key format in configuration: {:?}", e),
+                        )),
+                    );
+                }
+            }
+        },
+        Ok(None) => {
+            tracing::error!("Tracker private key not configured");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Tracker private key not configured".to_string(),
+                )),
+            );
+        },
+        Err(e) => {
+            tracing::error!("Failed to read tracker private key from configuration: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Failed to read tracker private key from configuration: {:?}", e),
+                )),
+            );
+        }
+    };
+
+    // Generate a real Schnorr signature using the offchain crate's implementation
+    let tracker_signature_bytes = match basis_offchain::schnorr::schnorr_sign(
+        &message_to_sign_bytes,
+        &tracker_private_key,
+        &tracker_pubkey_bytes_actual,
+    ) {
+        Ok(sig) => sig,
+        Err(e) => {
+            tracing::error!("Failed to generate tracker signature for redemption: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Failed to generate tracker signature: {:?}", e),
+                )),
+            );
+        }
+    };
+
+    // Get the current tracker state digest from shared tracker state
+    let tracker_state_digest = {
+        // Get the current AVL root digest from shared tracker state
+        let shared_state = state.shared_tracker_state.lock().await;
+        let current_digest = shared_state.get_avl_root_digest();
+        drop(shared_state); // Release the lock early
+        hex::encode(&current_digest)
+    };
+
+    // Generate a real AVL proof for the note
+    // Send command to tracker thread to generate the proof
+    let (proof_response_tx, proof_response_rx) = tokio::sync::oneshot::channel();
+
+    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
+        Ok(bytes) => {
+            match bytes.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(crate::models::error_response(
+                            "issuer_pubkey must be 33 bytes".to_string(),
+                        )),
+                    );
+                }
+            }
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid hex encoding for issuer public key".to_string(),
+                )),
+            );
+        }
+    };
+
+    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+        Ok(bytes) => {
+            match bytes.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(crate::models::error_response(
+                            "recipient_pubkey must be 33 bytes".to_string(),
+                        )),
+                    );
+                }
+            }
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid hex encoding for recipient public key".to_string(),
+                )),
+            );
+        }
+    };
+
+    if let Err(e) = state.tx.send(TrackerCommand::GenerateProof {
+        issuer_pubkey: issuer_pubkey_bytes,
+        recipient_pubkey: recipient_pubkey_bytes,
+        response_tx: proof_response_tx,
+    }).await {
+        tracing::error!("Failed to send proof generation command to tracker thread: {:?}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+
+    // Wait for response from tracker thread
+    let proof_result = match proof_response_rx.await {
+        Ok(Ok(note_proof)) => {
+            // Convert the proof to a hex string for transmission
+            hex::encode(&note_proof.avl_proof)
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Failed to generate proof: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Failed to generate proof: {:?}", e),
+                )),
+            );
+        }
+        Err(_) => {
+            tracing::error!("Tracker thread response channel closed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
+            );
+        }
+    };
+
+    let avl_proof = proof_result;
+    let tracker_signature = hex::encode(&tracker_signature_bytes);
+    let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
+
+    let response = RedemptionPreparationResponse {
+        redemption_id,
+        avl_proof,
+        tracker_signature,
+        tracker_pubkey,
+        tracker_state_digest,
+        block_height: 1500,
+    };
+
+    tracing::info!(
+        "Redemption prepared for {} -> {} with ID {}",
+        payload.issuer_pubkey,
+        payload.recipient_pubkey,
+        response.redemption_id
+    );
+
+    (StatusCode::OK, Json(crate::models::success_response(response)))
+}
+
+// Enhanced proof endpoint specifically for redemption
+#[axum::debug_handler]
+pub async fn get_redemption_proof(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<ApiResponse<ProofResponse>>) {
+    tracing::debug!("Getting redemption proof with params: {:?}", params);
+
+    let empty_string = "".to_string();
+    let issuer_pubkey = params.get("issuer_pubkey").unwrap_or(&empty_string);
+    let recipient_pubkey = params.get("recipient_pubkey").unwrap_or(&empty_string);
+    let amount = params.get("amount").unwrap_or(&empty_string);
+
+    if issuer_pubkey.is_empty() || recipient_pubkey.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "issuer_pubkey and recipient_pubkey parameters are required".to_string(),
+            )),
+        );
+    }
+
+    // Validate hex encoding
+    if hex::decode(issuer_pubkey).is_err() || hex::decode(recipient_pubkey).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "Invalid hex encoding for public keys".to_string(),
+            )),
+        );
+    }
+
+    // Validate amount if provided
+    if !amount.is_empty() {
+        if amount.parse::<u64>().is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid amount parameter".to_string(),
+                )),
+            );
+        }
+    }
+
+    // Get the current tracker state digest from shared tracker state
+    let tracker_state_digest = {
+        // Get the current AVL root digest from shared tracker state
+        let shared_state = state.shared_tracker_state.lock().await;
+        let current_digest = shared_state.get_avl_root_digest();
+        drop(shared_state); // Release the lock early
+        hex::encode(&current_digest)
+    };
+
+    // Generate a real AVL proof for the note
+    // Send command to tracker thread to generate the proof
+    let (proof_response_tx, proof_response_rx) = tokio::sync::oneshot::channel();
+
+    let issuer_pubkey_bytes = match hex::decode(issuer_pubkey) {
+        Ok(bytes) => {
+            match bytes.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(crate::models::error_response(
+                            "issuer_pubkey must be 33 bytes".to_string(),
+                        )),
+                    )
+                }
+            }
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid hex encoding for issuer public key".to_string(),
+                )),
+            )
+        }
+    };
+
+    let recipient_pubkey_bytes = match hex::decode(recipient_pubkey) {
+        Ok(bytes) => {
+            match bytes.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(crate::models::error_response(
+                            "recipient_pubkey must be 33 bytes".to_string(),
+                        )),
+                    )
+                }
+            }
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid hex encoding for recipient public key".to_string(),
+                )),
+            )
+        }
+    };
+
+    if let Err(e) = state.tx.send(TrackerCommand::GenerateProof {
+        issuer_pubkey: issuer_pubkey_bytes,
+        recipient_pubkey: recipient_pubkey_bytes,
+        response_tx: proof_response_tx,
+    }).await {
+        tracing::error!("Failed to send proof generation command to tracker thread: {:?}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+
+    // Wait for response from tracker thread
+    let proof_result = match proof_response_rx.await {
+        Ok(Ok(note_proof)) => {
+            // Convert the proof to a hex string for transmission
+            hex::encode(&note_proof.avl_proof)
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Failed to generate proof: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Failed to generate proof: {:?}", e),
+                )),
+            );
+        }
+        Err(_) => {
+            tracing::error!("Tracker thread response channel closed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
+            );
+        }
+    };
+
+    let proof = ProofResponse {
+        issuer_pubkey: issuer_pubkey.clone(),
+        recipient_pubkey: recipient_pubkey.clone(),
+        proof_data: proof_result,
+        tracker_state_digest,
+        block_height: 1500,
+        timestamp: 1672531200,
+    };
+
+    tracing::info!(
+        "Redemption proof generated for {} -> {} with amount {}",
+        issuer_pubkey,
+        recipient_pubkey,
+        amount
     );
 
     (StatusCode::OK, Json(crate::models::success_response(proof)))

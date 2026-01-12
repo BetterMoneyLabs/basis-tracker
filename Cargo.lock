@@ -263,10 +263,13 @@ name = "basis_server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "basis_offchain",
  "basis_store",
+ "blake2 0.10.6",
  "config",
  "ergo-lib",
  "hex",
+ "secp256k1",
  "serde",
  "serde_json",
  "tokio",

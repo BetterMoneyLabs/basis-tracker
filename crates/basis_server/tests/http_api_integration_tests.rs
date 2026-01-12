@@ -94,6 +94,25 @@ mod http_api_tests {
                         );
                         let _ = response_tx.send(result);
                     }
+                    TrackerCommand::GetNotes { response_tx } => {
+                        // For testing purposes, return an empty list
+                        let result = Ok(Vec::new());
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::GenerateProof {
+                        issuer_pubkey: _,
+                        recipient_pubkey: _,
+                        response_tx,
+                    } => {
+                        // For testing purposes, return a mock proof
+                        let mock_proof = basis_store::NoteProof {
+                            note: basis_store::IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]),
+                            avl_proof: vec![1, 2, 3, 4], // Mock proof data
+                            operations: vec![],
+                        };
+                        let result = Ok(mock_proof);
+                        let _ = response_tx.send(result);
+                    }
                 }
             }
         });
@@ -125,6 +144,9 @@ mod http_api_tests {
             ergo_scanner,
             reserve_tracker,
             config: test_config,
+            shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(
+                basis_server::tracker_box_updater::SharedTrackerState::new()
+            )),
         }
     }
 

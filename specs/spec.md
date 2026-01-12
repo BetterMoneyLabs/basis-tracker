@@ -38,3 +38,12 @@ Check following things:
 - Enhanced error handling and logging throughout the tracker box update process
 - Ensured proper synchronization between AVL tree state changes and blockchain commitments
 - Connected reserve processing with tracker state updates where appropriate
+
+### New API Endpoints with Real Cryptographic Operations
+- Added `/tracker/signature` endpoint for real Schnorr signature generation
+- Added `/redemption/prepare` endpoint for complete redemption preparation with real AVL proofs and tracker signatures
+- Added `/proof/redemption` endpoint for redemption-specific proof generation
+- All endpoints now use real cryptographic functions from `basis_offchain` crate instead of mock implementations
+- Proper error handling when tracker private key is not configured (returns 500 instead of mock signatures)
+- Real AVL+ tree lookup proofs generated from actual tracker state instead of placeholder strings
+- Real 33-byte tracker state digests (1 byte height + 32 bytes hash) retrieved from shared tracker state

@@ -36,6 +36,7 @@ pub struct AppState {
     pub ergo_scanner: std::sync::Arc<Mutex<basis_store::ergo_scanner::ServerState>>,
     pub reserve_tracker: std::sync::Arc<Mutex<basis_store::ReserveTracker>>,
     pub config: std::sync::Arc<AppConfig>,
+    pub shared_tracker_state: std::sync::Arc<tokio::sync::Mutex<tracker_box_updater::SharedTrackerState>>,
 }
 
 // Commands that can be sent to the tracker thread
@@ -78,5 +79,10 @@ pub enum TrackerCommand {
         recipient_pubkey: basis_store::PubKey,
         redeemed_amount: u64,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::RedemptionError>>,
+    },
+    GenerateProof {
+        issuer_pubkey: basis_store::PubKey,
+        recipient_pubkey: basis_store::PubKey,
+        response_tx: tokio::sync::oneshot::Sender<Result<basis_store::NoteProof, basis_store::NoteError>>,
     },
 }

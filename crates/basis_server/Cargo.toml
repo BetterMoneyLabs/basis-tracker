@@ -14,9 +14,17 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 hex = "0.4"
 ergo-lib = { workspace = true }
+blake2 = "0.10"
 
 [dependencies.basis_store]
 path = "../basis_store"
+
+[dependencies.basis_offchain]
+path = "../basis_offchain"
+
+[dependencies.secp256k1]
+version = "0.27"
+features = ["rand-std"]
 
 [dependencies.config]
 version = "0.13"

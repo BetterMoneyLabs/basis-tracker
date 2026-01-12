@@ -64,6 +64,9 @@ mod create_reserve_tests {
             ergo_scanner: Arc::new(Mutex::new(scanner)),
             reserve_tracker: Arc::new(Mutex::new(basis_store::ReserveTracker::new())),
             config: test_config,
+            shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::tracker_box_updater::SharedTrackerState::new()
+            )),
         }
     }
 

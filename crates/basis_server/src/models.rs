@@ -159,6 +159,46 @@ pub struct ProofResponse {
     pub timestamp: u64,
 }
 
+// Request for tracker signature
+#[derive(Debug, Deserialize)]
+pub struct TrackerSignatureRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub amount: u64,
+    pub timestamp: u64,
+    pub recipient_address: String,
+    pub reserve_box_id: String,
+}
+
+// Response for tracker signature
+#[derive(Debug, Serialize)]
+pub struct TrackerSignatureResponse {
+    pub success: bool,
+    pub tracker_signature: String,
+    pub tracker_pubkey: String,
+    pub message_signed: String,
+}
+
+// Request for redemption preparation
+#[derive(Debug, Deserialize)]
+pub struct RedemptionPreparationRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub amount: u64,
+    pub timestamp: u64,
+}
+
+// Response for redemption preparation
+#[derive(Debug, Serialize)]
+pub struct RedemptionPreparationResponse {
+    pub redemption_id: String,
+    pub avl_proof: String,
+    pub tracker_signature: String,
+    pub tracker_pubkey: String,
+    pub tracker_state_digest: String,
+    pub block_height: u64,
+}
+
 // Request for creating a reserve
 #[derive(Debug, Deserialize)]
 pub struct CreateReserveRequest {

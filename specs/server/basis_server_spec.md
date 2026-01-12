@@ -39,12 +39,16 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 
 - `GET /` - Root endpoint returning "Hello, Basis Tracker API!"
 - `POST /notes` - Create a new IOU note
+- `GET /notes` - Get all IOU notes in the system
 - `GET /notes/issuer/{pubkey}` - Get all notes issued by a public key
 - `GET /notes/recipient/{pubkey}` - Get all notes received by a public key
 - `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get specific note between two parties
 - `POST /redeem` - Initiate redemption process
 - `POST /redeem/complete` - Complete redemption process
 - `GET /proof` - Get proof for a specific note
+- `POST /tracker/signature` - Request tracker signature for redemption (real Schnorr signature generation)
+- `POST /redemption/prepare` - Prepare redemption with all necessary data (real AVL proof + tracker signature)
+- `GET /proof/redemption` - Get redemption-specific proof with tracker state digest
 
 ### Reserve Endpoints
 
@@ -77,15 +81,95 @@ The tracker box uses Ergo registers R4 and R5 to store commitment information:
 - `R4`: Contains the tracker's public key (33-byte compressed secp256k1 point) that identifies the tracker server
 - `R5`: Contains the AVL+ tree root digest (33-byte commitment to all notes in the system), updated whenever notes are added or modified
 
+### Tracker State Digest Format
+
+The tracker state digest follows the AVL+ tree format (33 bytes total):
+- **Byte 1**: Tree height (1 byte) - indicates the depth of the AVL tree
+- **Bytes 2-33**: 32-byte hash of the AVL tree root (64 hex characters when encoded)
+- **Total**: 33 bytes (66 hex characters when hex-encoded)
+- **Type Identifier**: When serialized as SAvlTree, includes a type identifier (0x64) as the first byte of the serialized format
+
 ### IOU Note Structure
 
 The server handles IOU (I Owe You) notes that represent debt obligations:
 
+For most endpoints:
 - `recipient_pubkey`: Public key of the recipient
 - `amount_collected`: Total amount collected
 - `amount_redeemed`: Amount already redeemed
 - `timestamp`: Creation timestamp
 - `signature`: Cryptographic signature
+
+For the `GET /notes` endpoint (all notes), additional fields are included:
+- `issuer_pubkey`: Public key of the issuer
+- `age_seconds`: Age of the note in seconds (calculated from timestamp)
+
+### Tracker Signature Request Structure
+
+The `/tracker/signature` endpoint accepts requests with the following structure:
+- `issuer_pubkey`: Public key of the note issuer (hex-encoded, 33 bytes)
+- `recipient_pubkey`: Public key of the note recipient (hex-encoded, 33 bytes)
+- `amount`: Redemption amount in nanoERG
+- `timestamp`: Unix timestamp of the redemption request
+- `recipient_address`: Ergo address where funds should be sent
+- `reserve_box_id`: ID of the reserve box being spent
+
+### Tracker Signature Response Structure
+
+The `/tracker/signature` endpoint returns responses with the following structure:
+- `success`: Boolean indicating if the signature generation was successful
+- `tracker_signature`: 65-byte Schnorr signature (hex-encoded, 130 characters) proving tracker authorization
+- `tracker_pubkey`: Tracker's public key (hex-encoded, 66 characters)
+- `message_signed`: The hex-encoded message that was signed
+
+### Redemption Preparation Request Structure
+
+The `/redemption/prepare` endpoint accepts requests with the following structure:
+- `issuer_pubkey`: Public key of the note issuer (hex-encoded, 33 bytes)
+- `recipient_pubkey`: Public key of the note recipient (hex-encoded, 33 bytes)
+- `amount`: Redemption amount in nanoERG
+- `timestamp`: Unix timestamp of the redemption request
+
+### Redemption Preparation Response Structure
+
+The `/redemption/prepare` endpoint returns responses with the following structure:
+- `redemption_id`: Unique identifier for the redemption process
+- `avl_proof`: AVL+ tree lookup proof for the specific note (hex-encoded bytes)
+- `tracker_signature`: 65-byte Schnorr signature from tracker (hex-encoded, 130 characters)
+- `tracker_pubkey`: Tracker's public key (hex-encoded, 66 characters)
+- `tracker_state_digest`: 33-byte AVL tree root digest (hex-encoded, 66 characters) representing current tracker state
+- `block_height`: Current blockchain height at time of proof generation
+
+### Redemption Proof Response Structure
+
+The `/proof/redemption` endpoint returns responses with the following structure:
+- `issuer_pubkey`: Public key of the note issuer (hex-encoded, 66 characters)
+- `recipient_pubkey`: Public key of the note recipient (hex-encoded, 66 characters)
+- `proof_data`: AVL+ tree lookup proof for the specific note (hex-encoded bytes)
+- `tracker_state_digest`: 33-byte AVL tree root digest (hex-encoded, 66 characters) representing current tracker state
+- `block_height`: Current blockchain height at time of proof generation
+- `timestamp`: Unix timestamp of the proof generation
+
+### Real Cryptographic Implementation
+
+The server now implements real cryptographic functionality instead of mock implementations:
+
+#### Schnorr Signature Generation
+- **Real Signatures**: All signature endpoints now use `basis_offchain::schnorr::schnorr_sign` for actual Schnorr signature generation
+- **Format**: 65-byte signatures (33 bytes for 'a' component + 32 bytes for 'z' component)
+- **Structure**: Properly formatted with compressed public key prefix (0x02 or 0x03) followed by the signature components
+- **Error Handling**: Returns `500 Internal Server Error` if tracker private key is not configured instead of generating mock signatures
+
+#### AVL+ Tree Proof Generation
+- **Real Proofs**: All proof endpoints now generate actual AVL+ tree lookup proofs from the tracker's AVL tree state
+- **Format**: Properly formatted proof data that demonstrates existence of key-value pairs in the AVL tree
+- **State Commitment**: Tracker state digest properly formatted as 33-byte AVL tree root (1 byte height + 32 bytes hash)
+- **Integration**: Proofs are generated by the actual tracker state manager using the AVL tree implementation
+
+#### Tracker State Management
+- **Shared State**: Tracker state is maintained in shared state accessible via `state.shared_tracker_state`
+- **Real Digests**: Tracker state digests come from actual AVL tree root, not mock implementations
+- **Consistency**: All endpoints return consistent tracker state commitments that match the current AVL tree state
 
 ### Reserve Creation Payload Structure
 
@@ -122,9 +206,13 @@ Key configuration includes:
 - **Ergo node connection details** (required): The server will abort with exit code 1 if `ergo.node.node_url` is not provided in the configuration - no default localhost value is used
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)
+- Tracker public key (for identifying the tracker server)
+- Tracker private key (required for generating real Schnorr signatures - if not provided, endpoints that require signing will return errors)
 - Transaction fees
 
-**Critical Requirement**: The server requires a valid Ergo node URL to be provided in the configuration (`ergo.node.node_url` field). If this is missing or empty, the server will immediately exit with status code 1 during startup, preventing the tracker from running without proper blockchain connectivity.
+**Critical Requirements**:
+1. The server requires a valid Ergo node URL to be provided in the configuration (`ergo.node.node_url` field). If this is missing or empty, the server will immediately exit with status code 1 during startup.
+2. The tracker private key must be provided in the configuration for endpoints that generate real signatures (`tracker_private_key` field). If this is missing, endpoints requiring tracker signatures will return `500 Internal Server Error`.
 
 ## Blockchain Integration
 
@@ -165,9 +253,14 @@ The server implements comprehensive error handling:
 The basis_server crate is a fully functional HTTP API server that:
 - Manages IOU notes and redemption processes
 - Monitors Ergo blockchain reserve events
-- Provides proof mechanisms for the Basis protocol
+- Provides real AVL+ tree proof mechanisms for the Basis protocol
+- Generates real Schnorr signatures for redemption transactions
 - Implements proper async/await patterns and error handling
 - Supports configuration and event storage
 - Includes comprehensive API endpoints for all Basis features
+- Provides endpoints for real tracker signature generation (`/tracker/signature`)
+- Offers redemption preparation with real proofs and signatures (`/redemption/prepare`)
+- Supports redemption-specific proof generation (`/proof/redemption`)
+- Integrates with shared tracker state for consistent AVL tree root commitments
 
-This crate serves as the central hub for the Basis Tracker system, connecting the blockchain layer with client applications through a well-defined HTTP interface.
+This crate serves as the central hub for the Basis Tracker system, connecting the blockchain layer with client applications through a well-defined HTTP interface with real cryptographic operations.

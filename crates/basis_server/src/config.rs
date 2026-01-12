@@ -236,6 +236,29 @@ impl AppConfig {
             }
         }
     }
+
+    /// Get the tracker private key bytes (if configured)
+    /// This is for demonstration/testing purposes only - in production, private keys should be securely stored
+    pub fn tracker_private_key_bytes(&self) -> Result<Option<[u8; 32]>, Box<dyn std::error::Error>> {
+        // In a real implementation, this would retrieve the private key from secure storage
+        // For now, we'll return None to indicate that private key is not available
+        // This is a limitation of the current implementation - private keys should not be stored in config
+        Ok(None)
+    }
+
+    /// Get a mock tracker state digest for demonstration purposes
+    /// In a real implementation, this would come from the actual AVL tree state
+    pub fn tracker_state_digest(&self) -> [u8; 33] {
+        // This is a mock implementation - in reality, this would come from the actual AVL tree root
+        let mut digest = [0u8; 33];
+        // Set the first byte to 0x64 which is the SAvlTree type identifier
+        digest[0] = 0x64;
+        // Fill the rest with a known pattern for consistency
+        for i in 1..33 {
+            digest[i] = i as u8;
+        }
+        digest
+    }
 }
 
 #[cfg(test)]

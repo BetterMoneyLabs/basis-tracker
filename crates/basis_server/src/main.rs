@@ -282,6 +282,14 @@ async fn main() {
                     let result = redemption_manager.tracker.get_all_notes_with_issuer();
                     let _ = response_tx.send(result);
                 }
+                TrackerCommand::GenerateProof {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.generate_proof(&issuer_pubkey, &recipient_pubkey);
+                    let _ = response_tx.send(result);
+                }
             }
         }
     });
@@ -459,6 +467,7 @@ async fn main() {
         ergo_scanner: std::sync::Arc::new(Mutex::new(ergo_scanner)),
         reserve_tracker: std::sync::Arc::new(Mutex::new(reserve_tracker)),
         config: std::sync::Arc::new(config.clone()),
+        shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(shared_tracker_state_for_updater)),
     };
 
     // Build our application with routes - FIXED ROUTE ORDER
@@ -472,6 +481,9 @@ async fn main() {
         .route("/redeem", post(initiate_redemption).options(handle_options))
         .route("/redeem/complete", post(complete_redemption).options(handle_options))
         .route("/proof", get(get_proof))
+        .route("/proof/redemption", get(get_redemption_proof))
+        .route("/tracker/signature", post(request_tracker_signature).options(handle_options))
+        .route("/redemption/prepare", post(prepare_redemption).options(handle_options))
         .route("/reserves", get(get_all_reserves))
         .route("/reserves/create", post(create_reserve_payload).options(handle_options))
         // Most specific parameterized routes first
