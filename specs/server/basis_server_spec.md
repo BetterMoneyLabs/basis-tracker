@@ -152,13 +152,14 @@ The `/proof/redemption` endpoint returns responses with the following structure:
 
 ### Real Cryptographic Implementation
 
-The server now implements real cryptographic functionality instead of mock implementations:
+The server now implements real cryptographic functionality using the Ergo node's Schnorr signing API instead of mock implementations:
 
 #### Schnorr Signature Generation
-- **Real Signatures**: All signature endpoints now use `basis_offchain::schnorr::schnorr_sign` for actual Schnorr signature generation
+- **Remote Signatures**: All signature endpoints now use the Ergo node's `/utils/schnorrSign` API for actual Schnorr signature generation
 - **Format**: 65-byte signatures (33 bytes for 'a' component + 32 bytes for 'z' component)
 - **Structure**: Properly formatted with compressed public key prefix (0x02 or 0x03) followed by the signature components
-- **Error Handling**: Returns `500 Internal Server Error` if tracker private key is not configured instead of generating mock signatures
+- **Security**: Private keys remain secured within the Ergo node, with the tracker only requesting signatures for specific messages
+- **Authentication**: Requests to the signing API are authenticated using the tracker API key
 
 #### AVL+ Tree Proof Generation
 - **Real Proofs**: All proof endpoints now generate actual AVL+ tree lookup proofs from the tracker's AVL tree state
@@ -207,12 +208,14 @@ Key configuration includes:
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)
 - Tracker public key (for identifying the tracker server)
-- Tracker private key (required for generating real Schnorr signatures - if not provided, endpoints that require signing will return errors)
+- Tracker API key (for authenticating requests to the Ergo node's signing API)
 - Transaction fees
 
 **Critical Requirements**:
 1. The server requires a valid Ergo node URL to be provided in the configuration (`ergo.node.node_url` field). If this is missing or empty, the server will immediately exit with status code 1 during startup.
-2. The tracker private key must be provided in the configuration for endpoints that generate real signatures (`tracker_private_key` field). If this is missing, endpoints requiring tracker signatures will return `500 Internal Server Error`.
+2. The server requires access to an Ergo node with the Schnorr signing API (`/utils/schnorrSign`) enabled for endpoints that require tracker signatures.
+3. The tracker public key must be provided in the configuration for signature verification purposes.
+4. The tracker API key must be provided to authenticate requests to the Ergo node's signing API.
 
 ## Blockchain Integration
 
@@ -254,7 +257,7 @@ The basis_server crate is a fully functional HTTP API server that:
 - Manages IOU notes and redemption processes
 - Monitors Ergo blockchain reserve events
 - Provides real AVL+ tree proof mechanisms for the Basis protocol
-- Generates real Schnorr signatures for redemption transactions
+- Generates real Schnorr signatures via Ergo node's signing API for redemption transactions
 - Implements proper async/await patterns and error handling
 - Supports configuration and event storage
 - Includes comprehensive API endpoints for all Basis features
@@ -262,5 +265,6 @@ The basis_server crate is a fully functional HTTP API server that:
 - Offers redemption preparation with real proofs and signatures (`/redemption/prepare`)
 - Supports redemption-specific proof generation (`/proof/redemption`)
 - Integrates with shared tracker state for consistent AVL tree root commitments
+- Uses secure remote signing via Ergo node API to protect private keys
 
-This crate serves as the central hub for the Basis Tracker system, connecting the blockchain layer with client applications through a well-defined HTTP interface with real cryptographic operations.
+This crate serves as the central hub for the Basis Tracker system, connecting the blockchain layer with client applications through a well-defined HTTP interface with real cryptographic operations while maintaining security through remote signing.

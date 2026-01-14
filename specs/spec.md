@@ -40,10 +40,11 @@ Check following things:
 - Connected reserve processing with tracker state updates where appropriate
 
 ### New API Endpoints with Real Cryptographic Operations
-- Added `/tracker/signature` endpoint for real Schnorr signature generation
-- Added `/redemption/prepare` endpoint for complete redemption preparation with real AVL proofs and tracker signatures
+- Added `/tracker/signature` endpoint for Schnorr signature generation via Ergo node API
+- Added `/redemption/prepare` endpoint for complete redemption preparation with real AVL proofs and tracker signatures from Ergo node
 - Added `/proof/redemption` endpoint for redemption-specific proof generation
-- All endpoints now use real cryptographic functions from `basis_offchain` crate instead of mock implementations
-- Proper error handling when tracker private key is not configured (returns 500 instead of mock signatures)
+- All endpoints now use the Ergo node's `/utils/schnorrSign` API for real Schnorr signature generation instead of local signing
+- Proper error handling when Ergo node signing API is unavailable (returns appropriate errors)
 - Real AVL+ tree lookup proofs generated from actual tracker state instead of placeholder strings
 - Real 33-byte tracker state digests (1 byte height + 32 bytes hash) retrieved from shared tracker state
+- Enhanced security by keeping private keys in the Ergo node and only requesting signatures remotely
