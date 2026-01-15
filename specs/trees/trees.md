@@ -44,85 +44,116 @@ struct TrackerState {
 
 ### 1. Note Management Operations
 
-#### Insert Operation
+#### Insert Operation (via add_note)
 **Purpose**: Add a new IOU note to the tree
 
 **Preconditions**:
-- Note key must not exist in tree
 - Note signature must be valid
-- Timestamp must be increasing
+- Timestamp must be increasing (compared to any existing note with same issuer/recipient pair)
+- Current time must not be in the future compared to note timestamp
+
+**Process**:
+- Create a NoteKey from issuer and recipient public keys (hashed with Blake2b256)
+- Convert note data to bytes for AVL tree storage
+- Call `BasisAvlTree::update()` to insert the key-value pair into the AVL tree
+- Update the tracker state with the new AVL root digest
+- Store the note in persistent storage
 
 **Postconditions**:
 - Tree contains the new note
 - Root digest is updated
-- Proof is generated to commit changes to tree state
+- Proof can be generated for the new state
 - New root digest is available for tracker box updates
 
 **Error Cases**:
-- Duplicate key
 - Invalid signature
-- Timestamp violation
+- Timestamp violation (future timestamp or not increasing compared to existing note)
+- AVL tree storage error
+- Persistent storage error
 
-#### Update Operation
+#### Update Operation (via update_note)
 **Purpose**: Modify an existing IOU note
 
 **Preconditions**:
-- Note key must exist in tree
-- New timestamp > old timestamp
+- Note signature must be valid
+- New timestamp > old timestamp (for same issuer/recipient pair)
 - Amount changes must be valid
+- Current time must not be in the future compared to note timestamp
+
+**Process**:
+- Create a NoteKey from issuer and recipient public keys (hashed with Blake2b256)
+- Convert updated note data to bytes for AVL tree storage
+- Call `BasisAvlTree::update()` to update the key-value pair in the AVL tree
+- Update the tracker state with the new AVL root digest
+- Store the updated note in persistent storage
 
 **Postconditions**:
 - Tree contains updated note
 - Root digest is updated
-- Proof is generated to commit changes to tree state
+- Proof can be generated for the new state
 - New root digest is available for tracker box updates
 
 **Error Cases**:
-- Key not found
+- Invalid signature
 - Timestamp violation
 - Invalid amount change
+- AVL tree storage error
+- Persistent storage error
 
 
 
 ### 2. Proof Generation Operations
 
-#### Membership Proof Generation
-**Purpose**: Generate proof that a note exists
+#### Note Proof Generation (via generate_proof)
+**Purpose**: Generate proof that a specific note exists in the current tree state
 
 **Input**: Issuer and recipient public keys
-**Output**: Membership proof structure
+**Output**: NoteProof structure containing the IOU note and AVL tree proof
+**Process**:
+- Creates a NoteKey from the issuer and recipient public keys
+- Calls the underlying AVL tree's generate_proof() method to create the authentication path
+- Combines the note data with the AVL proof and operations data
 **Complexity**: O(log n)
 
-#### Non-Membership Proof Generation
-**Purpose**: Generate proof that a note doesn't exist
+**Note**: The actual implementation generates proofs using the underlying `BasisAvlTree::generate_proof()` method, but the full verification process is handled by the Ergo blockchain's AVL tree verification mechanisms.
 
-**Input**: Issuer and recipient public keys
-**Output**: Non-membership proof structure
-**Complexity**: O(log n)
+#### Legacy Proof Operations (Defined but Not Used)
+The following proof generation operations are defined in the codebase but not currently used in the main tracker flow:
 
-#### State Proof Generation
-**Purpose**: Generate proof for current tree state
+**Membership Proof Generation**:
+- Defined in the `proofs.rs` module but not actively called in the current implementation
 
-**Input**: None
-**Output**: State proof structure
-**Complexity**: O(1)
+**Non-Membership Proof Generation**:
+- Defined in the `proofs.rs` module but not actively called in the current implementation
+
+**State Proof Generation**:
+- Defined in the `proofs.rs` module but not actively called in the current implementation
 
 ### 3. State Commitment Operations
 
 #### Root Digest Generation
 **Purpose**: Generate cryptographic commitment to tree state
 
-**Input**: Current tree state (after proof generation)
+**Input**: Current tree state (after each tree operation)
 **Output**: 33-byte root digest
+**Process**:
+- Called internally after each insert/update operation via `BasisAvlTree::root_digest()`
+- Returns the current AVL tree root digest as a 33-byte array
+- The digest includes 32 bytes of hash plus 1 byte of height information
 **Complexity**: O(1)
-**Prerequisite**: Proof must be generated after each tree operation to update the root digest
-**Initialization**: AVL tree must be initialized with an initial proof to ensure proper empty tree digest
+**Prerequisite**: Tree operations must be completed successfully to update the root
+**Initialization**: AVL tree starts with an empty state that has a default zero digest
 
 #### Periodic Commitment
 **Purpose**: Post state digest to blockchain
 
 **Frequency**: Configurable (e.g., every 10 minutes - 600 seconds)
 **Trigger**: Time-based (implemented as tracker box updater running every 10 minutes)
+**Process**:
+- The `TrackerBoxUpdater` retrieves the current AVL root digest from shared state
+- Serializes the tracker public key as GroupElement in R4 register
+- Serializes the AVL tree root as SAvlTree in R5 register
+- Submits a transaction to update the tracker commitment box on-chain
 **Verification**: Cross-verify with on-chain data
 **Requirements**: R4 register contains tracker public key (GroupElement), R5 register contains AVL tree root (SAvlTree)
 
@@ -131,7 +162,11 @@ struct TrackerState {
 
 **Input**: Tree state and commitment
 **Output**: Boolean (valid/invalid)
-**Complexity**: O(1)
+**Process**:
+- In the actual implementation, verification happens through the underlying AVL tree verification mechanisms
+- The Ergo blockchain verifies AVL proofs against the committed root digest
+- Verification is performed by the Ergo node when validating redemption transactions
+**Complexity**: O(log n) for individual proof verification
 
 ### 4. Batch Operations
 
@@ -139,16 +174,23 @@ struct TrackerState {
 **Purpose**: Process multiple operations atomically
 
 **Benefits**: Improved performance
-**Atomicity**: All operations succeed or fail together
+**Process**:
+- Individual operations are processed one at a time using the `update()` method
+- Each operation updates both the AVL tree and persistent storage
+- The root digest is updated after each operation
+- No true batching is implemented in the current version - operations are sequential
 **Complexity**: O(k log n) for k operations
-**Postcondition**: Proof is generated after batch to commit all changes to tree state
+**Postcondition**: Root digest is updated after each operation to reflect the current tree state
 
 #### Batch Proof Generation
 **Purpose**: Generate multiple proofs efficiently
 
 **Benefits**: Reduced overhead
-**Optimization**: Shared tree traversal
-**Complexity**: O(k log n) for k proofs
+**Process**:
+- Not currently implemented in the main tracker flow
+- Each proof is generated individually when requested
+- The underlying AVL tree implementation supports batch operations but they are not utilized in the current tracker
+**Complexity**: O(k log n) for k proofs if implemented
 
 ## Tree Invariants
 
@@ -173,16 +215,16 @@ struct TrackerState {
 ## Integration Patterns
 
 ### With Basis Store
-- **Data Consistency**: Tree state must match persistent note storage
-- **Atomic Operations**: Tree updates and storage updates must be atomic
-- **Recovery**: Tree can be rebuilt from persistent storage if needed
-- **Synchronization**: Tree operations synchronized with storage operations
+- **Data Consistency**: Tree state is updated in-memory and then persistent storage is updated (failures in AVL tree prevent storage updates)
+- **Sequential Operations**: Tree updates and storage updates are sequential (not atomic in the strictest sense, but AVL tree updates happen first)
+- **Recovery**: Tree state is in-memory with operation logging for recovery (not rebuilt from persistent storage)
+- **Synchronization**: Tree operations are followed by storage operations in the TrackerStateManager
 
 ### With Blockchain
-- **State Commitment**: Periodically post tree root digest to blockchain
+- **State Commitment**: Periodically post tree root digest to blockchain via TrackerBoxUpdater
 - **Cross-Verification**: Allow verification of off-chain state against on-chain commitments
-- **Redemption Proofs**: Generate proofs for redemption operations
-- **Audit Trail**: Maintain audit trail of state commitments
+- **Redemption Proofs**: Generate AVL tree proofs for redemption operations that can be verified on-chain
+- **Audit Trail**: Maintain audit trail of state commitments through tracker commitment boxes on-chain
 
 ### Migration Strategy
 - **Versioning**: Support for tree state version upgrades
@@ -207,81 +249,122 @@ struct TrackerState {
 
 ### Core Tree Interface
 
-```rust
-pub trait BasisTree {
-    /// Insert a new note into the tree
-    fn insert_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), TreeError>;
-    
-    /// Update an existing note
-    fn update_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), TreeError>;
-    
+The actual implementation uses a simpler interface that focuses on key-value operations rather than the trait described above:
 
-    
-    /// Generate membership proof for a note
-    fn generate_membership_proof(
+```rust
+pub struct BasisAvlTree {
+    prover: BatchAVLProver,
+    current_state: TrackerState,
+}
+
+impl BasisAvlTree {
+    /// Create a new in-memory AVL tree
+    pub fn new() -> Result<Self, TreeError>;
+
+    /// Insert a key-value pair into the AVL tree
+    pub fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), TreeError>;
+
+    /// Update an existing key-value pair (or insert if key doesn't exist)
+    pub fn update(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), TreeError>;
+
+    /// Generate a proof for the current tree state
+    pub fn generate_proof(&mut self) -> Vec<u8>;
+
+    /// Get the root digest of the AVL tree
+    pub fn root_digest(&self) -> [u8; 33];
+
+    /// Get the current tracker state
+    pub fn get_state(&self) -> &TrackerState;
+}
+```
+
+The actual usage in the TrackerStateManager combines this with note storage:
+
+```rust
+impl TrackerStateManager {
+    /// Add a new note to the tracker state
+    pub fn add_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError>;
+
+    /// Update an existing note
+    pub fn update_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError>;
+
+    /// Generate proof for a specific note
+    pub fn generate_proof(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<NoteProof, NoteError>;
+
+    /// Lookup a note by issuer and recipient
+    pub fn lookup_note(
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
-    ) -> Result<MembershipProof, TreeError>;
-    
-    /// Generate non-membership proof
-    fn generate_non_membership_proof(
-        &self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<NonMembershipProof, TreeError>;
-    
-    /// Get current state commitment
-    fn get_state_commitment(&self) -> TrackerState;
-    
-    /// Verify a proof against current state
-    fn verify_proof(&self, proof: &Proof) -> Result<bool, TreeError>;
+    ) -> Result<IouNote, NoteError>;
+
+    /// Get all notes for a specific issuer
+    pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError>;
+
+    /// Get all notes for a specific recipient
+    pub fn get_recipient_notes(&self, recipient_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError>;
+
+    /// Get all notes in the tracker
+    pub fn get_all_notes(&self) -> Result<Vec<IouNote>, NoteError>;
+
+    /// Get all notes in the tracker with issuer information
+    pub fn get_all_notes_with_issuer(&self) -> Result<Vec<(PubKey, IouNote)>, NoteError>;
+
+    /// Get the current tracker state
+    pub fn get_state(&self) -> &TrackerState;
 }
 ```
 
 ### Proof Types
 
-#### Membership Proof
-Proves that a specific note exists in the current tree state.
+#### Note Proof (Actual Implementation)
+The actual implementation uses a NoteProof structure that proves a specific note exists in the current tree state.
 
 **Components**:
 - **Note Data**: The complete IOU note being proven
-- **AVL Proof**: Authentication path from leaf to root
-- **Operations**: Sequence of operations that led to current state
-- **Root Digest**: Current tree root for verification
+- **AVL Proof**: Authentication path from leaf to root (raw bytes)
+- **Operations**: Sequence of operations that led to current state (placeholder in current implementation)
+
+**Structure**:
+```rust
+pub struct NoteProof {
+    /// The IOU note being proven
+    pub note: IouNote,
+    /// AVL tree proof bytes
+    pub avl_proof: Vec<u8>,
+    /// Operations performed to generate the proof
+    pub operations: Vec<u8>,
+}
+```
+
+**Generation**:
+- Generated by the `TrackerStateManager::generate_proof()` method
+- Uses the underlying `BasisAvlTree::generate_proof()` method to create the AVL proof
+- Includes the actual note data for verification
 
 **Verification**:
-- Verify AVL proof against claimed root
+- Verify AVL proof against current tree root
 - Verify note signature and validity
-- Verify operations sequence consistency
+- In the actual implementation, verification happens through the underlying AVL tree verification mechanisms
 
-#### Non-Membership Proof
-Proves that a specific key does not exist in the current tree state.
+#### Legacy Proof Types (Defined but Not Yet Implemented)
+The following proof types are defined in the `basis_trees` crate but not yet fully implemented in the main tracker flow:
 
-**Components**:
-- **Key**: The note key being proven non-existent
-- **AVL Proof**: Authentication path showing key absence
-- **Neighbors**: Closest existing keys (predecessor/successor)
-- **Root Digest**: Current tree root for verification
+**Membership Proof**:
+- Defined in `proofs.rs` but not actively used in the current implementation
+- Would prove that a specific note exists in the tree
 
-**Verification**:
-- Verify AVL proof shows key absence
-- Verify neighbor keys are valid
-- Verify proof against current root
+**Non-Membership Proof**:
+- Defined in `proofs.rs` but not actively used in the current implementation
+- Would prove that a specific key does not exist in the tree
 
-#### State Proof
-Proves that a specific root digest represents a valid tree state.
-
-**Components**:
-- **Root Digest**: The claimed tree root
-- **Proof Data**: Cryptographic proof of root validity
-- **Height**: Tree height at time of commitment
-- **Timestamp**: When the state was committed
-
-**Verification**:
-- Verify proof data cryptographically
-- Verify height and timestamp consistency
-- Cross-verify with on-chain commitments
+**State Proof**:
+- Defined in `proofs.rs` but not actively used in the current implementation
+- Would prove the validity of a tree state commitment
 
 ### Cryptographic Properties
 
@@ -316,9 +399,10 @@ enum TreeError {
 ## Implementation Details
 
 ### Dependencies
-- `ergo_avltree_rust`: Core AVL+ tree implementation
-- `fjall`: Persistent storage backend
-- `blake2`: Cryptographic hashing
+- `ergo_avltree_rust`: Core AVL+ tree implementation (used for BatchAVLProver and tree operations)
+- `fjall`: Persistent storage backend (used in basis_store's persistence module, not directly in trees)
+- `blake2`: Cryptographic hashing (used for key generation via blake2b256_hash)
+- `secp256k1`: Cryptographic operations (used in basis_store for signature verification)
 
 ### Error Handling
 - Tree operation failures
@@ -348,10 +432,10 @@ enum TreeError {
 - **Forward Security**: Old proofs remain valid even after tree updates
 
 ### Persistence Requirements
-- **Crash Recovery**: Tree state can be recovered after crashes
-- **Checkpointing**: Periodic state snapshots
-- **Backup**: Support for tree state backups
-- **Versioning**: Support for multiple tree versions
+- **Crash Recovery**: Tree state is in-memory with operation logging for recovery (actual recovery implementation uses operation replay)
+- **Checkpointing**: Periodic state snapshots (implemented in the recovery system)
+- **Backup**: Support for tree state backups (through operation logs)
+- **Versioning**: Support for tree state version upgrades
 - **Migration**: Tools for state migration between versions
 
 ### Reliability Requirements
@@ -442,15 +526,16 @@ fn tree_resolver(_digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
 
 ## Next Steps
 
-1. Define detailed API for tree operations ✅
-2. Specify proof formats and verification ✅
-3. [Design persistence strategy](./persistence.md) ✅
-4. Create integration tests ✅
-5. Implement cross-verification with blockchain
-6. Define performance benchmarks ✅
-7. Create monitoring and logging strategy
-8. Design backup and recovery procedures ✅
-9. Complete in-memory implementation with operation logging
+1. Align specification with actual implementation ✅
+2. Document the actual API for tree operations ✅
+3. Specify actual proof formats and verification ✅
+4. [Design persistence strategy](./persistence.md) ✅
+5. Create integration tests ✅
+6. Implement cross-verification with blockchain
+7. Define performance benchmarks ✅
+8. Create monitoring and logging strategy
+9. Design backup and recovery procedures ✅
+10. Complete in-memory implementation with operation logging ✅
 
 ## Implementation Status
 
@@ -462,6 +547,7 @@ fn tree_resolver(_digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
 - **Performance Benchmarks** for large data and concurrent access
 - **Tree Resolver Architecture** with in-memory implementation
 - **Test Infrastructure** with dedicated test files for in-memory operations
+- **Specification alignment** with actual implementation
 
 ### 🔄 In Progress
 - Cross-verification with blockchain
