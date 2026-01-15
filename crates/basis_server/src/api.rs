@@ -15,6 +15,87 @@ use crate::{
 use basis_store::{IouNote, NoteError, PubKey, Signature};
 use ergo_lib::ergotree_ir::address::AddressEncoder;
 use blake2::{Blake2b512, Digest};
+use basis_store::reqwest;
+use serde::{Deserialize, Serialize};
+
+// Structs for the Schnorr signing API
+#[derive(Serialize, Deserialize)]
+struct SchnorrSignRequest {
+    address: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct SchnorrSignResponse {
+    signed_message: String,
+    signature: String,
+    public_key: String,
+}
+
+#[derive(Deserialize)]
+struct ErrorResponse {
+    error: Option<ErrorMessage>,
+}
+
+#[derive(Deserialize)]
+struct ErrorMessage {
+    code: String,
+    message: String,
+}
+
+/// Call the Ergo node's schnorrSign API to generate a tracker signature
+async fn call_schnorr_sign_api(
+    node_url: &str,
+    api_key: Option<&str>,
+    address: &str,
+    message: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    let request_body = SchnorrSignRequest {
+        address: address.to_string(),
+        message: message.to_string(),
+    };
+
+    let url = format!("{}/utils/schnorrSign", node_url.trim_end_matches('/'));
+    let mut request_builder = client.post(&url);
+
+    // Add API key if provided
+    if let Some(key) = api_key {
+        request_builder = request_builder.header("api_key", key);
+    }
+
+    let response = request_builder
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+
+    let status = response.status();
+    let response_text = response.text().await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    if status.is_success() {
+        let sign_response: SchnorrSignResponse = serde_json::from_str(&response_text)
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+        Ok(sign_response.signature)
+    } else {
+        // Try to parse error response
+        let error_response: Result<ErrorResponse, _> = serde_json::from_str(&response_text);
+        let error_msg = match error_response {
+            Ok(err_resp) => {
+                if let Some(err) = err_resp.error {
+                    format!("{}: {}", err.code, err.message)
+                } else {
+                    response_text
+                }
+            }
+            Err(_) => response_text,
+        };
+        Err(format!("API error {}: {}", status.as_u16(), error_msg))
+    }
+}
 
 // Basic handler that responds with a static string
 pub async fn root() -> &'static str {
@@ -1330,75 +1411,53 @@ pub async fn request_tracker_signature(
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
 
-    // In a real implementation, the tracker would sign this message using its private key
-    // For now, we'll simulate the signature generation process
-    // The signature should be a 65-byte Schnorr signature (33 bytes for 'a' component + 32 bytes for 'z' component)
+    // Convert tracker public key to P2PK address format for the Ergo node API
+    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
+    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
-    // Get the tracker's private key from configuration for real signing
-    // In a real implementation, this would use the actual tracker's private key
-    use secp256k1::{Secp256k1, SecretKey};
-    let secp = Secp256k1::new();
-
-    // Get the actual tracker private key from configuration
-    // If not configured, return an error instead of generating a temporary key
-    let (tracker_private_key, tracker_pubkey_bytes_actual) = match state.config.tracker_private_key_bytes() {
-        Ok(Some(private_key_bytes)) => {
-            match SecretKey::from_slice(&private_key_bytes) {
-                Ok(private_key) => {
-                    let public_key = secp256k1::PublicKey::from_secret_key(&secp, &private_key);
-                    let public_key_bytes = public_key.serialize();
-                    (private_key, public_key_bytes)
-                },
-                Err(e) => {
-                    tracing::error!("Invalid tracker private key format in configuration: {:?}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(crate::models::error_response(
-                            format!("Invalid tracker private key format in configuration: {:?}", e),
-                        )),
-                    );
-                }
-            }
-        },
-        Ok(None) => {
-            tracing::error!("Tracker private key not configured");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Tracker private key not configured".to_string(),
-                )),
-            );
-        },
+    let tracker_ec_point = match EcPoint::sigma_parse_bytes(&tracker_pubkey_bytes) {
+        Ok(point) => point,
         Err(e) => {
-            tracing::error!("Failed to read tracker private key from configuration: {:?}", e);
+            tracing::error!("Failed to parse tracker public key as EcPoint: {:?}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(crate::models::error_response(
-                    format!("Failed to read tracker private key from configuration: {:?}", e),
+                    format!("Failed to parse tracker public key: {}", e),
                 )),
             );
         }
     };
 
-    // Generate a real Schnorr signature using the offchain crate's implementation
-    let tracker_signature_bytes = match basis_offchain::schnorr::schnorr_sign(
-        &message_to_sign_bytes,
-        &tracker_private_key,
-        &tracker_pubkey_bytes_actual,
-    ) {
-        Ok(sig) => sig,
+    let prove_dlog = ProveDlog::from(tracker_ec_point);
+    let tracker_address = Address::P2Pk(prove_dlog);
+    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet); // Use appropriate network prefix
+    let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
+
+    // Get node URL and API key from configuration
+    let node_url = &state.config.ergo.node.node_url;
+    let api_key = state.config.ergo.node.api_key.as_deref();
+
+    // Call the Ergo node's schnorrSign API to generate the tracker signature
+    let tracker_signature = match call_schnorr_sign_api(
+        node_url,
+        api_key,
+        &tracker_p2pk_address,
+        &message_to_sign,
+    ).await {
+        Ok(signature) => signature,
         Err(e) => {
-            tracing::error!("Failed to generate tracker signature: {:?}", e);
+            tracing::error!("Failed to generate tracker signature via Ergo node API: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(crate::models::error_response(
-                    format!("Failed to generate tracker signature: {:?}", e),
+                    format!("Failed to generate tracker signature: {}", e),
                 )),
             );
         }
     };
 
-    let tracker_signature = hex::encode(&tracker_signature_bytes);
     let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
 
     let response = TrackerSignatureResponse {
@@ -1485,68 +1544,48 @@ pub async fn prepare_redemption(
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
 
-    // Generate a proper 65-byte tracker signature using real Schnorr signing
-    use secp256k1::{Secp256k1, SecretKey};
-    let secp = Secp256k1::new();
+    // Convert tracker public key to P2PK address format for the Ergo node API
+    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
+    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
-    // Get the tracker's private key from configuration for real signing
-    // In a real implementation, this would use the actual tracker's private key
-    // If not configured, return an error instead of generating a temporary key
-
-    // Get the actual tracker private key from configuration
-    // If not configured, return an error instead of generating a temporary key
-    let (tracker_private_key, tracker_pubkey_bytes_actual) = match state.config.tracker_private_key_bytes() {
-        Ok(Some(private_key_bytes)) => {
-            match SecretKey::from_slice(&private_key_bytes) {
-                Ok(private_key) => {
-                    let public_key = secp256k1::PublicKey::from_secret_key(&secp, &private_key);
-                    let public_key_bytes = public_key.serialize();
-                    (private_key, public_key_bytes)
-                },
-                Err(e) => {
-                    tracing::error!("Invalid tracker private key format in configuration: {:?}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(crate::models::error_response(
-                            format!("Invalid tracker private key format in configuration: {:?}", e),
-                        )),
-                    );
-                }
-            }
-        },
-        Ok(None) => {
-            tracing::error!("Tracker private key not configured");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Tracker private key not configured".to_string(),
-                )),
-            );
-        },
+    let tracker_ec_point = match EcPoint::sigma_parse_bytes(&tracker_pubkey_bytes) {
+        Ok(point) => point,
         Err(e) => {
-            tracing::error!("Failed to read tracker private key from configuration: {:?}", e);
+            tracing::error!("Failed to parse tracker public key as EcPoint: {:?}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(crate::models::error_response(
-                    format!("Failed to read tracker private key from configuration: {:?}", e),
+                    format!("Failed to parse tracker public key: {}", e),
                 )),
             );
         }
     };
 
-    // Generate a real Schnorr signature using the offchain crate's implementation
-    let tracker_signature_bytes = match basis_offchain::schnorr::schnorr_sign(
-        &message_to_sign_bytes,
-        &tracker_private_key,
-        &tracker_pubkey_bytes_actual,
-    ) {
-        Ok(sig) => sig,
+    let prove_dlog = ProveDlog::from(tracker_ec_point);
+    let tracker_address = Address::P2Pk(prove_dlog);
+    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet); // Use appropriate network prefix
+    let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
+
+    // Get node URL and API key from configuration
+    let node_url = &state.config.ergo.node.node_url;
+    let api_key = state.config.ergo.node.api_key.as_deref();
+
+    // Call the Ergo node's schnorrSign API to generate the tracker signature
+    let tracker_signature = match call_schnorr_sign_api(
+        node_url,
+        api_key,
+        &tracker_p2pk_address,
+        &message_to_sign,
+    ).await {
+        Ok(signature) => signature,
         Err(e) => {
-            tracing::error!("Failed to generate tracker signature for redemption: {:?}", e);
+            tracing::error!("Failed to generate tracker signature via Ergo node API: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(crate::models::error_response(
-                    format!("Failed to generate tracker signature: {:?}", e),
+                    format!("Failed to generate tracker signature: {}", e),
                 )),
             );
         }
@@ -1654,7 +1693,6 @@ pub async fn prepare_redemption(
     };
 
     let avl_proof = proof_result;
-    let tracker_signature = hex::encode(&tracker_signature_bytes);
     let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
 
     let response = RedemptionPreparationResponse {
