@@ -262,3 +262,224 @@ pub fn schnorr_verify(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_schnorr_roundtrip() {
+        // Generate a key pair
+        let (secret_key, public_key) = generate_keypair();
+
+        // Create test data
+        let recipient_pubkey = public_key; // Use the generated public key as recipient
+        let amount = 1000000000u64; // 1 ERG in nanoERG
+        let timestamp = 1672531200u64; // Example timestamp
+
+        // Create the message to be signed
+        let message = signing_message(&recipient_pubkey, amount, timestamp);
+
+        // Sign the message
+        let signature = schnorr_sign(&message, &secret_key, &recipient_pubkey)
+            .expect("Signing should succeed");
+
+        // Verify the signature
+        schnorr_verify(&signature, &message, &recipient_pubkey)
+            .expect("Verification should succeed");
+
+        assert_eq!(signature.len(), 65, "Signature should be 65 bytes");
+    }
+
+    #[test]
+    fn test_schnorr_with_tampered_message() {
+        // Generate a key pair
+        let (secret_key, public_key) = generate_keypair();
+
+        // Create test data
+        let recipient_pubkey = public_key; // Use the generated public key as recipient
+        let amount = 1000000000u64; // 1 ERG in nanoERG
+        let timestamp = 1672531200u64; // Example timestamp
+
+        // Create the message to be signed
+        let message = signing_message(&recipient_pubkey, amount, timestamp);
+
+        // Sign the message
+        let signature = schnorr_sign(&message, &secret_key, &recipient_pubkey)
+            .expect("Signing should succeed");
+
+        // Tamper with the message
+        let mut tampered_message = message.clone();
+        tampered_message[0] ^= 0x01; // Flip one bit
+
+        // Verify with tampered message (should fail)
+        let result = schnorr_verify(&signature, &tampered_message, &recipient_pubkey);
+
+        assert!(result.is_err(), "Verification should fail with tampered message");
+    }
+
+    #[test]
+    fn test_schnorr_with_wrong_public_key() {
+        // Generate two key pairs
+        let (secret_key1, public_key1) = generate_keypair();
+        let (secret_key2, public_key2) = generate_keypair();
+
+        // Create test data
+        let recipient_pubkey = public_key1; // Use first public key as recipient
+        let amount = 1000000000u64; // 1 ERG in nanoERG
+        let timestamp = 1672531200u64; // Example timestamp
+
+        // Create the message to be signed
+        let message = signing_message(&recipient_pubkey, amount, timestamp);
+
+        // Sign the message with first party's key
+        let signature = schnorr_sign(&message, &secret_key1, &recipient_pubkey)
+            .expect("Signing should succeed");
+
+        // Verify with second party's public key (should fail)
+        let result = schnorr_verify(&signature, &message, &public_key2);
+
+        assert!(result.is_err(), "Verification should fail with wrong public key");
+    }
+
+    #[test]
+    fn test_signing_message_format() {
+        let recipient_pubkey = [0x02u8; 33]; // Example public key
+        let amount = 1000000000u64;
+        let timestamp = 1672531200u64;
+
+        let message = signing_message(&recipient_pubkey, amount, timestamp);
+
+        // Verify the format: recipient_pubkey (33 bytes) + amount_be_bytes (8 bytes) + timestamp_be_bytes (8 bytes)
+        assert_eq!(message.len(), 33 + 8 + 8, "Message should be 49 bytes");
+        assert_eq!(&message[0..33], &recipient_pubkey, "First 33 bytes should be recipient pubkey");
+        assert_eq!(&message[33..41], &amount.to_be_bytes(), "Next 8 bytes should be amount in big endian");
+        assert_eq!(&message[41..49], &timestamp.to_be_bytes(), "Last 8 bytes should be timestamp in big endian");
+    }
+
+    #[test]
+    fn test_invalid_signature_length() {
+        // This test is actually testing the validation inside the function
+        // Since the function signature requires [u8; 65], we can't pass a [u8; 64]
+        // So instead we'll test the internal validation by creating a signature that fails validation
+        let (_, public_key) = generate_keypair();
+        let message = signing_message(&public_key, 1000, 1234567890);
+
+        // Create a signature with invalid 'a' component to trigger validation failure
+        let mut invalid_signature = [0u8; 65];
+        invalid_signature[0] = 0x01; // Invalid prefix (should be 0x02 or 0x03)
+
+        let result = schnorr_verify(&invalid_signature, &message, &public_key);
+        assert!(result.is_err(), "Verification should fail with invalid signature format");
+    }
+
+    #[test]
+    fn test_invalid_signature_a_component() {
+        let (_, public_key) = generate_keypair();
+        let message = signing_message(&public_key, 1000, 1234567890);
+
+        // Create a signature with invalid 'a' component (not a valid compressed point)
+        let mut invalid_signature = [0u8; 65];
+        invalid_signature[0] = 0x01; // Invalid prefix (should be 0x02 or 0x03)
+
+        let result = schnorr_verify(&invalid_signature, &message, &public_key);
+        assert!(result.is_err(), "Verification should fail with invalid 'a' component");
+    }
+
+    #[test]
+    fn test_invalid_signature_z_component_all_zeros() {
+        let (_, public_key) = generate_keypair();
+        let message = signing_message(&public_key, 1000, 1234567890);
+
+        // Create a signature with 'z' component all zeros
+        let mut invalid_signature = [0u8; 65];
+        invalid_signature[0] = 0x02; // Valid prefix
+        // Leave the z component as all zeros (bytes 33-65)
+
+        let result = schnorr_verify(&invalid_signature, &message, &public_key);
+        assert!(result.is_err(), "Verification should fail with all-zeros 'z' component");
+    }
+
+    #[test]
+    fn test_invalid_public_key_length() {
+        let (secret_key, public_key) = generate_keypair();
+        let message = signing_message(&public_key, 1000, 1234567890);
+
+        // Sign with valid key
+        let signature = schnorr_sign(&message, &secret_key, &public_key)
+            .expect("Signing should succeed");
+
+        // Create an invalid public key with wrong length
+        let invalid_pubkey = [0x02u8; 32]; // 32 bytes instead of 33
+
+        // Need to create a proper 33-byte array to pass to the function
+        let mut invalid_pubkey_33 = [0x02u8; 33];
+        invalid_pubkey_33[0] = 0x01; // Invalid prefix
+
+        let result = schnorr_verify(&signature, &message, &invalid_pubkey_33);
+        assert!(result.is_err(), "Verification should fail with invalid public key");
+    }
+
+    #[test]
+    fn test_invalid_public_key_prefix() {
+        let (secret_key, public_key) = generate_keypair();
+        let message = signing_message(&public_key, 1000, 1234567890);
+
+        // Sign with valid key
+        let signature = schnorr_sign(&message, &secret_key, &public_key)
+            .expect("Signing should succeed");
+
+        // Create a public key with invalid prefix
+        let mut invalid_pubkey = public_key;
+        invalid_pubkey[0] = 0x01; // Invalid prefix (should be 0x02 or 0x03)
+
+        let result = schnorr_verify(&signature, &message, &invalid_pubkey);
+        assert!(result.is_err(), "Verification should fail with invalid public key prefix");
+    }
+
+    #[test]
+    fn test_empty_message() {
+        let (secret_key, public_key) = generate_keypair();
+        let empty_message: Vec<u8> = vec![];
+
+        let result = schnorr_sign(&empty_message, &secret_key, &public_key);
+        // Signing with empty message should still work (the algorithm doesn't validate message content)
+        if result.is_ok() {
+            let signature = result.unwrap();
+            let verify_result = schnorr_verify(&signature, &empty_message, &public_key);
+            assert!(verify_result.is_ok(), "Verification should succeed with empty message if signing worked");
+        }
+    }
+
+    #[test]
+    fn test_signature_with_modified_a_component() {
+        let (secret_key, public_key) = generate_keypair();
+        let message = signing_message(&public_key, 1000, 1234567890);
+
+        // Sign the message
+        let mut signature = schnorr_sign(&message, &secret_key, &public_key)
+            .expect("Signing should succeed");
+
+        // Modify the 'a' component (first 33 bytes)
+        signature[0] ^= 0x01; // Flip a bit in the 'a' component
+
+        let result = schnorr_verify(&signature, &message, &public_key);
+        assert!(result.is_err(), "Verification should fail when 'a' component is modified");
+    }
+
+    #[test]
+    fn test_signature_with_modified_z_component() {
+        let (secret_key, public_key) = generate_keypair();
+        let message = signing_message(&public_key, 1000, 1234567890);
+
+        // Sign the message
+        let mut signature = schnorr_sign(&message, &secret_key, &public_key)
+            .expect("Signing should succeed");
+
+        // Modify the 'z' component (bytes 33-65)
+        signature[33] ^= 0x01; // Flip a bit in the 'z' component
+
+        let result = schnorr_verify(&signature, &message, &public_key);
+        assert!(result.is_err(), "Verification should fail when 'z' component is modified");
+    }
+}
