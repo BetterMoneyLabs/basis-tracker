@@ -432,11 +432,12 @@ enum TreeError {
 - **Forward Security**: Old proofs remain valid even after tree updates
 
 ### Persistence Requirements
-- **Crash Recovery**: Tree state is in-memory with operation logging for recovery (actual recovery implementation uses operation replay)
-- **Checkpointing**: Periodic state snapshots (implemented in the recovery system)
-- **Backup**: Support for tree state backups (through operation logs)
-- **Versioning**: Support for tree state version upgrades
-- **Migration**: Tools for state migration between versions
+- **Crash Recovery**: Tree state is in-memory with operation logging for recovery (actual recovery implementation uses operation replay) - IMPLEMENTED
+- **Checkpointing**: Periodic state snapshots (implemented in the recovery system) - IMPLEMENTED
+- **Backup**: Support for tree state backups (through operation logs) - IMPLEMENTED
+- **Versioning**: Support for tree state version upgrades - PARTIALLY IMPLEMENTED
+- **Migration**: Tools for state migration between versions - PARTIALLY IMPLEMENTED
+- **Actual Persistence**: The trees module uses in-memory storage with operation logging for recovery, while the basis_store module handles persistent storage of notes using fjall database - CURRENT APPROACH
 
 ### Reliability Requirements
 - **Atomic Operations**: All tree operations are atomic
@@ -510,6 +511,7 @@ fn tree_resolver(_digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
 - **Operation Logging**: All tree operations (insert/update) are logged to in-memory storage
 - **Checkpoint Management**: Tree state snapshots stored in in-memory storage for recovery
 - **Node Storage**: Tree nodes kept in-memory (no persistent storage due to resolver limitations)
+- **Persistence Separation**: Actual note persistence handled by basis_store module using fjall database
 
 ### Implementation Status
 
@@ -518,24 +520,18 @@ fn tree_resolver(_digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
 - **Storage Interface**: Integration with TreeStorage for operation logging
 - **Test Infrastructure**: Memory-based resolver for testing scenarios
 - **Operation Persistence**: All tree operations logged in-memory for recovery
+- **Separation of Concerns**: AVL tree state management separated from note persistence (handled by basis_store)
 
 #### 🔄 Implementation Challenges (Resolved by Design Choice)
 - **Static Resolver Constraint**: ergo_avltree_rust requires static resolver function
 - **Node Extraction**: Tree nodes stored in-memory rather than extracted for persistent storage
 - **Persistence Limitation**: Switched to operation-logging approach due to architectural mismatch
+- **Solution**: Note persistence handled separately in basis_store module using fjall database
 
 ## Next Steps
 
-1. Align specification with actual implementation ✅
-2. Document the actual API for tree operations ✅
-3. Specify actual proof formats and verification ✅
-4. [Design persistence strategy](./persistence.md) ✅
-5. Create integration tests ✅
 6. Implement cross-verification with blockchain
-7. Define performance benchmarks ✅
 8. Create monitoring and logging strategy
-9. Design backup and recovery procedures ✅
-10. Complete in-memory implementation with operation logging ✅
 
 ## Implementation Status
 
@@ -548,13 +544,16 @@ fn tree_resolver(_digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
 - **Tree Resolver Architecture** with in-memory implementation
 - **Test Infrastructure** with dedicated test files for in-memory operations
 - **Specification alignment** with actual implementation
+- **Partial Persistence Implementation** - in-memory with operation logging in trees module, full persistence in basis_store module
 
 ### 🔄 In Progress
 - Cross-verification with blockchain
 - Advanced monitoring and logging
+- Full persistence integration between trees and store modules
 
 ### 📋 Future Enhancements
 - **Optimized Operation Recovery**: Improve recovery performance from operation logs
 - **Distributed storage support** (if architectural constraints change)
 - **Advanced compression algorithms** for operation logs
 - **Incremental checkpointing** to reduce operation replay time
+- **Full AVL tree persistence**: Move from in-memory to persistent storage for the AVL tree itself (currently uses operation logging approach due to ergo_avltree_rust resolver limitations)
