@@ -13,6 +13,7 @@ ergo-lib = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 blake2 = { workspace = true }
+generic-array = "0.14"
 secp256k1 = { version = "0.27", features = ["rand-std"] }
 num-bigint = "0.4.6"
 rand = "0.8"

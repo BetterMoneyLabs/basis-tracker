@@ -250,6 +250,7 @@ version = "0.1.0"
 dependencies = [
  "blake2 0.10.6",
  "ergo-lib",
+ "generic-array",
  "hex",
  "num-bigint",
  "rand 0.8.5",
@@ -268,6 +269,7 @@ dependencies = [
  "blake2 0.10.6",
  "config",
  "ergo-lib",
+ "generic-array",
  "hex",
  "secp256k1",
  "serde",
@@ -290,6 +292,7 @@ dependencies = [
  "ergo-lib",
  "ergo_avltree_rust",
  "fjall",
+ "generic-array",
  "hex",
  "num-bigint",
  "proptest",

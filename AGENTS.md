@@ -82,7 +82,7 @@
 ### Chaincash-rs Integration
 - **Signature format**: 65 bytes total (33-byte a + 32-byte z)
 - **Signing algorithm**: Following chaincash-rs Schnorr signature approach
-- **Challenge computation**: `e = H(a || message || issuer_pubkey)` using Blake2b512
+- **Challenge computation**: `e = H(a || message || issuer_pubkey)` using Blake2b256
 - **Response computation**: `z = k + e * s (mod n)` using proper modular arithmetic
 - **Verification**: Verify `g^z = a * x^e` using secp256k1 point operations
 

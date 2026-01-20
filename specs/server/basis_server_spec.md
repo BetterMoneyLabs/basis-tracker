@@ -160,6 +160,8 @@ The server now implements real cryptographic functionality using the Ergo node's
 - **Structure**: Properly formatted with compressed public key prefix (0x02 or 0x03) followed by the signature components
 - **Security**: Private keys remain secured within the Ergo node, with the tracker only requesting signatures for specific messages
 - **Authentication**: Requests to the signing API are authenticated using the tracker API key
+- **Implementation**: Tracker signature endpoints (`/tracker/signature` and `/redemption/prepare`) now make HTTP requests to the Ergo node API instead of performing local signing
+- **Message Format**: Signing messages follow the format `recipient_pubkey || amount_be_bytes || timestamp_be_bytes` as specified in the Schnorr signature specification
 
 #### AVL+ Tree Proof Generation
 - **Real Proofs**: All proof endpoints now generate actual AVL+ tree lookup proofs from the tracker's AVL tree state
@@ -213,7 +215,7 @@ Key configuration includes:
 
 **Critical Requirements**:
 1. The server requires a valid Ergo node URL to be provided in the configuration (`ergo.node.node_url` field). If this is missing or empty, the server will immediately exit with status code 1 during startup.
-2. The server requires access to an Ergo node with the Schnorr signing API (`/utils/schnorrSign`) enabled for endpoints that require tracker signatures.
+2. The server requires access to an Ergo node with the Schnorr signing API (`/utils/schnorrSign`) enabled for endpoints that require tracker signatures. The tracker private key must be available in the Ergo node's wallet for signature generation.
 3. The tracker public key must be provided in the configuration for signature verification purposes.
 4. The tracker API key must be provided to authenticate requests to the Ergo node's signing API.
 

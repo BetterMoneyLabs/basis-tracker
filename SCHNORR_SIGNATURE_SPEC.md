@@ -60,7 +60,7 @@ Where:
    - This becomes the 'a' component of the signature
 
 5. **Challenge Computation**:
-   - Compute `e = H(R || message || public_key)` using Blake2b512
+   - Compute `e = H(R || message || public_key)` using Blake2b256
    - Reduce `e` modulo the secp256k1 order `n` to get scalar
 
 6. **Response Calculation**:
@@ -83,7 +83,7 @@ function schnorr_sign(message_bytes, private_key_scalar, public_key_bytes):
     
     // Calculate challenge e = H(R || message || public_key)
     challenge_input = R_compressed || message_bytes || public_key_bytes
-    e_full = blake2b512(challenge_input)
+    e_full = blake2b256(challenge_input)
     e = reduce_mod_n(e_full)  // Reduce to field range
     
     // Calculate response z = k + e*s (mod n)
@@ -110,7 +110,7 @@ function schnorr_sign(message_bytes, private_key_scalar, public_key_bytes):
    - Verify 'z' component is within field range
 
 3. **Challenge Recomputation**:
-   - Compute `e = H(A || message || public_key)` using Blake2b512
+   - Compute `e = H(A || message || public_key)` using Blake2b256
    - Reduce `e` modulo the secp256k1 order `n`
 
 4. **Verification Equation**:
@@ -155,7 +155,7 @@ function schnorr_verify(signature, message_bytes, public_key_bytes):
     
     // Recompute challenge
     challenge_input = A_bytes || message_bytes || public_key_bytes
-    e_full = blake2b512(challenge_input)
+    e_full = blake2b256(challenge_input)
     e = reduce_mod_n(e_full)
     
     // Verify g^z = A * x^e by checking if z*G = A + e*X
@@ -168,8 +168,8 @@ function schnorr_verify(signature, message_bytes, public_key_bytes):
 ## Cryptographic Primitives
 
 ### Hash Function
-- **Algorithm**: Blake2b-512
-- **Output**: 64-byte hash
+- **Algorithm**: Blake2b-256
+- **Output**: 32-byte hash
 - **Usage**: Challenge computation in Schnorr signature scheme
 - **Security**: Collision resistance, preimage resistance
 

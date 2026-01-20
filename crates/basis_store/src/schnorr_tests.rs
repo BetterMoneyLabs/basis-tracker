@@ -2,7 +2,8 @@
 //! These test vectors can be used to verify compatibility with the ErgoScript implementation
 
 use crate::{IouNote, PubKey};
-use blake2::{Blake2b512, Digest};
+use blake2::{Blake2b, Digest};
+use generic_array::typenum::U32;
 
 /// Detailed test vector with all intermediate values
 #[derive(Debug, Clone)]
@@ -47,7 +48,7 @@ impl SchnorrVerificationVector {
 
         // Compute challenge: H(a || message || issuer_pubkey)
         let a_bytes = &signature[0..33];
-        let mut hasher = Blake2b512::new();
+        let mut hasher = Blake2b::<U32>::new();
         hasher.update(a_bytes);
         hasher.update(&signing_message);
         hasher.update(&issuer_pubkey);
@@ -320,7 +321,7 @@ fn test_challenge_computation() {
     let issuer_pubkey = [0x03u8; 33];
 
     // Compute challenge e = H(a || message || issuer_pubkey)
-    let mut hasher = Blake2b512::new();
+    let mut hasher = Blake2b::<U32>::new();
     hasher.update(a_bytes);
     hasher.update(message_bytes);
     hasher.update(issuer_pubkey);
@@ -331,7 +332,7 @@ fn test_challenge_computation() {
     assert_eq!(e_bytes_256.len(), 32);
 
     // Verify deterministic output
-    let mut hasher2 = Blake2b512::new();
+    let mut hasher2 = Blake2b::<U32>::new();
     hasher2.update(a_bytes);
     hasher2.update(message_bytes);
     hasher2.update(issuer_pubkey);

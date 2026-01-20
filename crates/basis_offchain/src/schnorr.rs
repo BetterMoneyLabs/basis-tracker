@@ -1,6 +1,7 @@
 //! Schnorr signature implementation following chaincash-rs approach
 
-use blake2::{Blake2b512, Digest};
+use blake2::{Blake2b, Digest};
+use generic_array::typenum::U32;
 use secp256k1::{self, PublicKey, Scalar, SecretKey};
 use std::convert::TryInto;
 
@@ -80,7 +81,7 @@ fn compute_challenge(
     message: &[u8],
     issuer_pubkey: &PubKey,
 ) -> Result<Scalar, NoteError> {
-    let mut hasher = Blake2b512::new();
+    let mut hasher = Blake2b::<U32>::new();
     hasher.update(a_bytes);
     hasher.update(message);
     hasher.update(issuer_pubkey);

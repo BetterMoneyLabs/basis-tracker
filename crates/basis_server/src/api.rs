@@ -14,7 +14,8 @@ use crate::{
 };
 use basis_store::{IouNote, NoteError, PubKey, Signature};
 use ergo_lib::ergotree_ir::address::AddressEncoder;
-use blake2::{Blake2b512, Digest};
+use blake2::{Blake2b, Digest};
+use generic_array::typenum::U32;
 use basis_store::reqwest;
 use serde::{Deserialize, Serialize};
 
@@ -27,8 +28,10 @@ struct SchnorrSignRequest {
 
 #[derive(Deserialize)]
 struct SchnorrSignResponse {
+    #[serde(rename = "signedMessage")]
     signed_message: String,
     signature: String,
+    #[serde(rename = "publicKey")]
     public_key: String,
 }
 
@@ -94,6 +97,43 @@ async fn call_schnorr_sign_api(
             Err(_) => response_text,
         };
         Err(format!("API error {}: {}", status.as_u16(), error_msg))
+    }
+}
+
+/// Verify that a signature from the Ergo node is compatible with the Basis server's verification algorithm
+/// This is needed because the Ergo node's Schnorr implementation has been found to be incompatible
+/// with the Basis server's verification algorithm
+async fn verify_ergo_node_signature_compatibility(
+    signature_hex: &str,
+    message_hex: &str,
+    public_key_bytes: &[u8; 33],
+) -> Result<(), String> {
+    // Decode the signature and message
+    let signature_bytes = hex::decode(signature_hex)
+        .map_err(|e| format!("Failed to decode signature: {}", e))?;
+    let message_bytes = hex::decode(message_hex)
+        .map_err(|e| format!("Failed to decode message: {}", e))?;
+
+    // Check signature length
+    if signature_bytes.len() != 65 {
+        return Err(format!("Signature is not 65 bytes: {}", signature_bytes.len()));
+    }
+
+    // Convert to fixed-size arrays
+    let mut signature_array = [0u8; 65];
+    signature_array.copy_from_slice(&signature_bytes);
+
+    // Try to verify using the same algorithm as basis_offchain
+    // This will help detect compatibility issues
+    match basis_offchain::schnorr::schnorr_verify(&signature_array, &message_bytes, public_key_bytes) {
+        Ok(()) => {
+            // Verification succeeded
+            Ok(())
+        },
+        Err(_) => {
+            // Verification failed - this indicates the signature is not compatible
+            Err("Signature verification failed with Basis server algorithm".to_string())
+        }
     }
 }
 
@@ -1458,6 +1498,18 @@ pub async fn request_tracker_signature(
         }
     };
 
+    // Verify that the signature from the Ergo node is compatible with our verification algorithm
+    // Due to compatibility issues discovered between Ergo node and Basis server Schnorr implementations
+    if let Err(verification_error) = verify_ergo_node_signature_compatibility(
+        &tracker_signature,
+        &message_to_sign,
+        &tracker_pubkey_bytes,
+    ).await {
+        tracing::warn!("Ergo node signature is not compatible with Basis verification: {}. This may cause verification issues later.", verification_error);
+        // Note: We still return the signature but log the compatibility issue
+        // In a production environment, you might want to handle this differently
+    }
+
     let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
 
     let response = TrackerSignatureResponse {
@@ -1590,6 +1642,18 @@ pub async fn prepare_redemption(
             );
         }
     };
+
+    // Verify that the signature from the Ergo node is compatible with our verification algorithm
+    // Due to compatibility issues discovered between Ergo node and Basis server Schnorr implementations
+    if let Err(verification_error) = verify_ergo_node_signature_compatibility(
+        &tracker_signature,
+        &message_to_sign,
+        &tracker_pubkey_bytes,
+    ).await {
+        tracing::warn!("Ergo node signature is not compatible with Basis verification: {}. This may cause verification issues later.", verification_error);
+        // Note: We still return the signature but log the compatibility issue
+        // In a production environment, you might want to handle this differently
+    }
 
     // Get the current tracker state digest from shared tracker state
     let tracker_state_digest = {

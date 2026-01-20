@@ -50,11 +50,12 @@ fn test_basic_cryptography() -> Result<(), String> {
 
 /// Test hash function compatibility
 fn test_hash_compatibility() -> Result<(), String> {
-    use blake2::{Blake2b512, Digest};
+    use blake2::{Blake2b, Digest};
+    use generic_array::typenum::U32;
 
     // Test that Blake2b256 produces consistent results
     let test_data = b"test message";
-    let mut hasher = Blake2b512::new();
+    let mut hasher = Blake2b::<U32>::new();
     hasher.update(test_data);
     let hash = hasher.finalize();
     let hash_256 = &hash[..32];
@@ -62,7 +63,7 @@ fn test_hash_compatibility() -> Result<(), String> {
     assert_eq!(hash_256.len(), 32);
 
     // Test determinism
-    let mut hasher2 = Blake2b512::new();
+    let mut hasher2 = Blake2b::<U32>::new();
     hasher2.update(test_data);
     let hash2 = hasher2.finalize();
     assert_eq!(hash, hash2);
@@ -72,13 +73,14 @@ fn test_hash_compatibility() -> Result<(), String> {
 
 /// Test edge cases that should behave identically in Rust and ErgoScript
 fn test_edge_cases() -> Result<(), String> {
-    use blake2::{Blake2b512, Digest};
+    use blake2::{Blake2b, Digest};
+    use generic_array::typenum::U32;
 
     // Test 1: Empty message (should still compute valid hash)
-    let mut hasher = Blake2b512::new();
+    let mut hasher = Blake2b::<U32>::new();
     hasher.update([]);
     let hash = hasher.finalize();
-    assert_eq!(hash.len(), 64);
+    assert_eq!(hash.len(), 32);
 
     // Test 2: Maximum length values
     let max_amount = u64::MAX;

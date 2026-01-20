@@ -35,7 +35,8 @@ pub mod test_helpers;
 #[cfg(test)]
 
 
-use blake2::{Blake2b512, Digest};
+use blake2::{Blake2b, Digest};
+use generic_array::typenum::U32;
 use secp256k1;
 
 /// Public key type (Secp256k1)
@@ -563,13 +564,14 @@ impl NoteKey {
 
 /// Blake2b256 hash function for cryptographic hashing
 pub fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
-    use blake2::{Blake2b512, Digest};
-    let mut hasher = Blake2b512::new();
+    use blake2::{Blake2b, Digest};
+    use generic_array::typenum::U32;
+    let mut hasher = Blake2b::<U32>::new();
     hasher.update(data);
     let result = hasher.finalize();
     result[..32]
         .try_into()
-        .expect("Blake2b512 should produce at least 32 bytes")
+        .expect("Blake2b should produce at least 32 bytes")
 }
 
 /// Normalize public key representations to handle different Ergo register formats
