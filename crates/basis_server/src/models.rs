@@ -89,6 +89,8 @@ impl From<IouNote> for SerializableIouNote {
 pub struct KeyStatusResponse {
     pub total_debt: u64,
     pub collateral: u64,
+    pub token_id: Option<String>,
+    pub token_amount: Option<u64>,
     pub collateralization_ratio: f64,
     pub note_count: usize,
     pub last_updated: u64,

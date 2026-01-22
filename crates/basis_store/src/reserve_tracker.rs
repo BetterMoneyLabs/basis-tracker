@@ -16,6 +16,8 @@ pub enum ReserveTrackerError {
     ReserveNotFound(String),
     #[error("Insufficient collateral: {0} < {1}")]
     InsufficientCollateral(u64, u64),
+    #[error("Lock acquisition failed")]
+    LockError,
 }
 
 /// Extended reserve information with debt tracking
@@ -41,14 +43,26 @@ impl ExtendedReserveInfo {
         if self.total_debt == 0 {
             f64::INFINITY
         } else {
-            self.base_info.collateral_amount as f64 / self.total_debt as f64
+        } else {
+            let collateral = if let Some(amount) = self.base_info.token_amount {
+                amount
+            } else {
+                self.base_info.collateral_amount
+            };
+            collateral as f64 / self.total_debt as f64
+        }
         }
     }
 
     /// Check if reserve is sufficiently collateralized
     pub fn is_sufficiently_collateralized(&self, amount: u64) -> bool {
         let new_debt = self.total_debt + amount;
-        new_debt <= self.base_info.collateral_amount
+        let collateral = if let Some(amt) = self.base_info.token_amount {
+            amt
+        } else {
+            self.base_info.collateral_amount
+        };
+        new_debt <= collateral
     }
 
     /// Check if reserve is at warning level (80% utilization)
@@ -78,14 +92,14 @@ impl ReserveTracker {
 
     /// Add or update a reserve
     pub fn update_reserve(&self, info: ExtendedReserveInfo) -> Result<(), ReserveTrackerError> {
-        let mut reserves = self.reserves.write().unwrap();
+        let mut reserves = self.reserves.write().map_err(|_| ReserveTrackerError::LockError)?;
         reserves.insert(info.box_id.clone(), info);
         Ok(())
     }
 
     /// Get reserve information by box ID
     pub fn get_reserve(&self, box_id: &str) -> Result<ExtendedReserveInfo, ReserveTrackerError> {
-        let reserves = self.reserves.read().unwrap();
+        let reserves = self.reserves.read().map_err(|_| ReserveTrackerError::LockError)?;
         reserves
             .get(box_id)
             .cloned()
@@ -97,7 +111,7 @@ impl ReserveTracker {
         &self,
         owner_pubkey: &str,
     ) -> Result<ExtendedReserveInfo, ReserveTrackerError> {
-        let reserves = self.reserves.read().unwrap();
+        let reserves = self.reserves.read().map_err(|_| ReserveTrackerError::LockError)?;
         reserves
             .values()
             .find(|reserve| reserve.owner_pubkey == owner_pubkey)
@@ -107,13 +121,16 @@ impl ReserveTracker {
 
     /// Get all reserves
     pub fn get_all_reserves(&self) -> Vec<ExtendedReserveInfo> {
-        let reserves = self.reserves.read().unwrap();
-        reserves.values().cloned().collect()
+        if let Ok(reserves) = self.reserves.read() {
+            reserves.values().cloned().collect()
+        } else {
+            vec![] // Return empty on lock failure for infallible signature (or change signature)
+        }
     }
 
     /// Remove a reserve
     pub fn remove_reserve(&self, box_id: &str) -> Result<(), ReserveTrackerError> {
-        let mut reserves = self.reserves.write().unwrap();
+        let mut reserves = self.reserves.write().map_err(|_| ReserveTrackerError::LockError)?;
         reserves
             .remove(box_id)
             .map(|_| ())
@@ -122,7 +139,7 @@ impl ReserveTracker {
 
     /// Add debt to a reserve
     pub fn add_debt(&self, box_id: &str, amount: u64) -> Result<(), ReserveTrackerError> {
-        let mut reserves = self.reserves.write().unwrap();
+        let mut reserves = self.reserves.write().map_err(|_| ReserveTrackerError::LockError)?;
         let reserve = reserves
             .get_mut(box_id)
             .ok_or_else(|| ReserveTrackerError::ReserveNotFound(box_id.to_string()))?;
@@ -140,7 +157,7 @@ impl ReserveTracker {
 
     /// Remove debt from a reserve (when notes are redeemed)
     pub fn remove_debt(&self, box_id: &str, amount: u64) -> Result<(), ReserveTrackerError> {
-        let mut reserves = self.reserves.write().unwrap();
+        let mut reserves = self.reserves.write().map_err(|_| ReserveTrackerError::LockError)?;
         let reserve = reserves
             .get_mut(box_id)
             .ok_or_else(|| ReserveTrackerError::ReserveNotFound(box_id.to_string()))?;
@@ -160,7 +177,7 @@ impl ReserveTracker {
         box_id: &str,
         new_collateral: u64,
     ) -> Result<(), ReserveTrackerError> {
-        let mut reserves = self.reserves.write().unwrap();
+        let mut reserves = self.reserves.write().map_err(|_| ReserveTrackerError::LockError)?;
         let reserve = reserves
             .get_mut(box_id)
             .ok_or_else(|| ReserveTrackerError::ReserveNotFound(box_id.to_string()))?;
@@ -171,7 +188,7 @@ impl ReserveTracker {
 
     /// Check if a reserve can support additional debt
     pub fn can_support_debt(&self, box_id: &str, amount: u64) -> Result<bool, ReserveTrackerError> {
-        let reserves = self.reserves.read().unwrap();
+        let reserves = self.reserves.read().map_err(|_| ReserveTrackerError::LockError)?;
         let reserve = reserves
             .get(box_id)
             .ok_or_else(|| ReserveTrackerError::ReserveNotFound(box_id.to_string()))?;
@@ -181,33 +198,42 @@ impl ReserveTracker {
 
     /// Get reserves at warning level (<= 125% collateralization)
     pub fn get_warning_reserves(&self) -> Vec<ExtendedReserveInfo> {
-        let reserves = self.reserves.read().unwrap();
-        reserves
-            .values()
-            .filter(|reserve| reserve.is_warning_level())
-            .cloned()
-            .collect()
+        if let Ok(reserves) = self.reserves.read() {
+            reserves
+                .values()
+                .filter(|reserve| reserve.is_warning_level())
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        }
     }
 
     /// Get reserves at critical level (<= 100% collateralization)
     pub fn get_critical_reserves(&self) -> Vec<ExtendedReserveInfo> {
-        let reserves = self.reserves.read().unwrap();
-        reserves
-            .values()
-            .filter(|reserve| reserve.is_critical_level())
-            .cloned()
-            .collect()
+        if let Ok(reserves) = self.reserves.read() {
+            reserves
+                .values()
+                .filter(|reserve| reserve.is_critical_level())
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        }
     }
 
     /// Get total system collateral and debt
     pub fn get_system_totals(&self) -> (u64, u64) {
-        let reserves = self.reserves.read().unwrap();
-        let total_collateral = reserves
-            .values()
-            .map(|r| r.base_info.collateral_amount)
-            .sum();
-        let total_debt = reserves.values().map(|r| r.total_debt).sum();
-        (total_collateral, total_debt)
+        if let Ok(reserves) = self.reserves.read() {
+            let total_collateral = reserves
+                .values()
+                .map(|r| r.base_info.collateral_amount)
+                .sum();
+            let total_debt = reserves.values().map(|r| r.total_debt).sum();
+            (total_collateral, total_debt)
+        } else {
+            (0, 0)
+        }
     }
 }
 
@@ -220,12 +246,16 @@ impl ExtendedReserveInfo {
         collateral_amount: u64,
         tracker_nft_id: Option<&[u8]>,
         last_updated_height: u64,
+        token_id: Option<&[u8]>,
+        token_amount: Option<u64>,
     ) -> Self {
         Self {
             base_info: ReserveInfo {
                 collateral_amount,
                 last_updated_height,
                 contract_address: "".to_string(), // Placeholder
+                token_id: token_id.map(hex::encode),
+                token_amount,
             },
             total_debt: 0,
             box_id: hex::encode(box_id),
@@ -254,6 +284,8 @@ mod tests {
             1000000000, // 1 ERG
             Some(b"test_tracker_nft_1234567890"),
             1000,
+            None,
+            None,
         );
 
         // Add reserve
@@ -311,6 +343,8 @@ mod tests {
             owner_pubkey: "test".to_string(),
             tracker_nft_id: None,
             last_updated_timestamp: 0,
+            token_id: None,
+            token_amount: None,
         };
 
         // Infinite ratio when no debt

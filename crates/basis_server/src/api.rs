@@ -953,23 +953,24 @@ pub async fn get_key_status(
              &original_reserve_key[2..] == pubkey_hex.as_str())
         });
 
-    let (collateral, collateralization_ratio, last_updated) = if let Some(reserve) = reserve {
-        let collateral = reserve.base_info.collateral_amount;
-        let ratio = if total_debt > 0 {
-            collateral as f64 / total_debt as f64
-        } else {
-            // Use a very high ratio when there's no debt
-            999999.0
-        };
-        (collateral, ratio, reserve.last_updated_timestamp)
+    let (collateral, collateralization_ratio, last_updated, token_id, token_amount) = if let Some(reserve) = reserve {
+        (
+            reserve.base_info.collateral_amount,
+            reserve.collateralization_ratio(),
+            reserve.last_updated_timestamp,
+            reserve.base_info.token_id.clone(),
+            reserve.base_info.token_amount,
+        )
     } else {
         // No reserve found - use zero collateral
-        (0, if total_debt > 0 { 0.0 } else { 999999.0 }, 0)
+        (0, if total_debt > 0 { 0.0 } else { 999999.0 }, 0, None, None)
     };
 
     let status = KeyStatusResponse {
         total_debt,
         collateral,
+        token_id,
+        token_amount,
         collateralization_ratio,
         note_count,
         last_updated,

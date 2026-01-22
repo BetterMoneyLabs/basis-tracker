@@ -55,6 +55,7 @@ jobs:
         cargo test -p basis_server -- --nocapture
         cargo test -p basis_offchain -- --nocapture
         cargo test -p basis_app -- --nocapture
+        cargo test -p integration_tests -- --nocapture
 
     - name: Run specific module tests
       run: |

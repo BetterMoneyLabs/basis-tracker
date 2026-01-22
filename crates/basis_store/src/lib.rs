@@ -80,6 +80,10 @@ pub struct ReserveInfo {
     pub last_updated_height: u64,
     /// Reserve contract address
     pub contract_address: String,
+    /// Token ID (if token-based reserve)
+    pub token_id: Option<String>,
+    /// Token amount (if token-based reserve)
+    pub token_amount: Option<u64>,
 }
 
 /// Tracker box information for state commitment boxes
@@ -399,11 +403,11 @@ impl TrackerStateManager {
         self.storage.get_issuer_notes(issuer_pubkey)
     }
 
-    /// Get all notes for a specific recipient
+    /// Get all notes for a specific recipient, including issuer info
     pub fn get_recipient_notes(
         &self,
         recipient_pubkey: &PubKey,
-    ) -> Result<Vec<IouNote>, NoteError> {
+    ) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
         self.storage.get_recipient_notes(recipient_pubkey)
     }
 
