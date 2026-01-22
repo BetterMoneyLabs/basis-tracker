@@ -461,11 +461,14 @@ async fn main() {
         }
     }
 
+    // Extract the reserve tracker from the scanner before wrapping in Arc/Mutex
+    let scanner_reserve_tracker = ergo_scanner.reserve_tracker.clone();
+
     let app_state = AppState {
         tx,
         event_store,
         ergo_scanner: std::sync::Arc::new(Mutex::new(ergo_scanner)),
-        reserve_tracker: std::sync::Arc::new(Mutex::new(reserve_tracker)),
+        reserve_tracker: std::sync::Arc::new(Mutex::new(scanner_reserve_tracker)),
         config: std::sync::Arc::new(config.clone()),
         shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(shared_tracker_state_for_updater)),
     };

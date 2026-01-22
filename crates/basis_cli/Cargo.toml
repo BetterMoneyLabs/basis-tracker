@@ -19,6 +19,8 @@ dirs = "5.0"
 blake2 = "0.10"
 rand = "0.8"
 toml = "0.8"
+num-bigint = "0.4"
+generic-array = "0.14"
 
 # Workspace dependencies
 basis_store = { path = "../basis_store" }

@@ -277,6 +277,13 @@ impl TrackerStateManager {
             }
         }
 
+        // Verify the note signature before storing it
+        note.verify_signature(issuer_pubkey)
+            .map_err(|e| {
+                tracing::error!("Invalid note signature when adding note: {:?}", e);
+                NoteError::InvalidSignature
+            })?;
+
         // Prepare AVL tree key and value in advance
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let key_bytes = key.to_bytes();

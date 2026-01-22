@@ -1055,27 +1055,61 @@ pub async fn initiate_redemption(
 
         // Find a reserve where the owner key matches (considering normalized forms)
         let mut found_box_id = String::new();
-        for reserve in all_reserves {
-            let normalized_reserve_key = basis_store::normalize_public_key(&reserve.owner_pubkey);
+        for reserve in &all_reserves {
+            // Handle the case where the owner key might be double-encoded
+            // The database might store the hex string as ASCII characters, which are hex-encoded again
+            let actual_owner_key = {
+                // Try to decode the stored key as hex to get the original hex string
+                if let Ok(decoded_bytes) = hex::decode(&reserve.owner_pubkey) {
+                    // If successful, try to interpret as ASCII string
+                    if let Ok(decoded_string) = String::from_utf8(decoded_bytes) {
+                        // Check if this looks like a valid hex string (all valid hex chars)
+                        if decoded_string.chars().all(|c| c.is_ascii_hexdigit()) {
+                            decoded_string
+                        } else {
+                            // If not a valid hex string, use the original
+                            reserve.owner_pubkey.clone()
+                        }
+                    } else {
+                        // If not valid UTF-8, use the original
+                        reserve.owner_pubkey.clone()
+                    }
+                } else {
+                    // If hex decoding fails, use the original
+                    reserve.owner_pubkey.clone()
+                }
+            };
+
+            let normalized_actual_key = basis_store::normalize_public_key(&actual_owner_key);
             let original_reserve_key = &reserve.owner_pubkey;
 
+            // Debug: Print the values being compared
+            tracing::debug!("Comparing keys - Issuer: {}, Normalized Issuer: {}, Actual Owner Key: {}, Normalized Actual: {}, Stored: {}",
+                           payload.issuer_pubkey, normalized_issuer_key, actual_owner_key, normalized_actual_key, original_reserve_key);
+
             // Check multiple matching possibilities to ensure comprehensive key correlation:
-            // 1. Direct match between normalized keys (main case)
-            // 2. Match between original issuer and normalized reserve key
-            // 3. Match between original issuer and original reserve key (backup)
-            // 4. Special case: original issuer matches the part of reserve key after '07' prefix
-            if normalized_issuer_key == normalized_reserve_key ||
-               payload.issuer_pubkey == normalized_reserve_key ||
-               payload.issuer_pubkey == *original_reserve_key ||
-               (original_reserve_key.starts_with("07") && original_reserve_key.len() >= 66 &&
-                &original_reserve_key[2..] == payload.issuer_pubkey.as_str()) {
-                found_box_id = reserve.box_id;
+            // 1. Direct match between normalized issuer and normalized actual key
+            // 2. Direct match between issuer and actual owner key
+            // 3. Special case: actual owner key starts with '07' and matches after prefix
+            let matches = normalized_issuer_key == normalized_actual_key ||
+                         payload.issuer_pubkey == actual_owner_key ||
+                         (actual_owner_key.starts_with("07") && actual_owner_key.len() >= 66 &&
+                          &actual_owner_key[2..] == payload.issuer_pubkey.as_str());
+
+            if matches {
+                tracing::debug!("Key match found! Reserve box ID: {}", reserve.box_id);
+                found_box_id = reserve.box_id.clone();
                 break;
             }
         }
 
         if found_box_id.is_empty() {
             tracing::warn!("No reserve found for issuer: {}", payload.issuer_pubkey);
+            tracing::debug!("Available reserves for debugging:");
+            for reserve in &all_reserves {
+                tracing::debug!("  Reserve box: {}, owner key: {}", reserve.box_id, reserve.owner_pubkey);
+            }
+
             // Return a failed redemption response
             let response = crate::models::RedeemResponse {
                 redemption_id: "failed_no_matching_reserve".to_string(),

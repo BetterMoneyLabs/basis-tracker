@@ -25,19 +25,77 @@ impl KeyPair {
     }
 
     pub fn sign_message(&self, message: &[u8]) -> Result<Signature> {
+        use secp256k1::{Secp256k1, SecretKey};
+        use blake2::{Blake2b, Digest};
+        use generic_array::typenum::U32;
+
         let secp = Secp256k1::new();
-        let message_hash = blake2b_hash(message);
-        let message = Message::from_slice(&message_hash)?;
 
-        // Create Schnorr signature (following chaincash-rs approach)
-        let signature = secp.sign_schnorr(&message, &self.keypair);
-        let sig_bytes = signature.as_ref();
+        // Generate a random nonce for the Schnorr signature
+        let nonce_secret = SecretKey::new(&mut secp256k1::rand::thread_rng());
+        let a_point = secp256k1::PublicKey::from_secret_key(&secp, &nonce_secret);
+        let a_bytes = a_point.serialize();
 
-        // Convert to 65-byte format (33-byte a + 32-byte z)
-        let mut schnorr_sig = [0u8; 65];
-        schnorr_sig[..64].copy_from_slice(sig_bytes);
+        // Compute challenge e = H(a || message || issuer_pubkey)
+        let issuer_pubkey_bytes = self.get_public_key_bytes();
+        let mut hasher = Blake2b::<U32>::new();
+        hasher.update(&a_bytes);
+        hasher.update(message);
+        hasher.update(&issuer_pubkey_bytes);
+        let e_bytes = hasher.finalize();
 
-        Ok(schnorr_sig)
+        // Take first 32 bytes for the scalar
+        let e_bytes_32: [u8; 32] = e_bytes[..32]
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to convert challenge to 32 bytes"))?;
+
+        // Convert to Scalar using the same approach as in basis_store
+        let e_scalar = secp256k1::Scalar::from_be_bytes(e_bytes_32)
+            .map_err(|_| anyhow::anyhow!("Failed to create scalar from challenge"))?;
+
+        // Get the secret key scalar
+        let secret_key_scalar = secp256k1::Scalar::from_be_bytes(self.keypair.secret_bytes())
+            .map_err(|_| anyhow::anyhow!("Failed to create scalar from secret key"))?;
+
+        // Convert scalars to their big integer representations for modular arithmetic
+        let k_big = num_bigint::BigUint::from_bytes_be(&nonce_secret.secret_bytes());
+        let s_big = num_bigint::BigUint::from_bytes_be(&self.keypair.secret_bytes());
+        let e_big = num_bigint::BigUint::from_bytes_be(&e_scalar.to_be_bytes());
+
+        // Curve order for secp256k1
+        let n = num_bigint::BigUint::from_bytes_be(&[
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
+            0x41, 0x41,
+        ]);
+
+        // Compute z = k + e * s (mod n)
+        let e_times_s = (&e_big * &s_big) % &n;
+        let z_big = (&k_big + &e_times_s) % &n;
+
+        // Ensure z is in the valid range [1, n-1]
+        if z_big == num_bigint::BigUint::from(0u32) || z_big >= n {
+            return Err(anyhow::anyhow!("Invalid signature"));
+        }
+
+        // Convert back to bytes
+        let z_vec = z_big.to_bytes_be();
+        let mut z_bytes = [0u8; 32];
+        if z_vec.len() > 32 {
+            z_bytes.copy_from_slice(&z_vec[z_vec.len() - 32..]);
+        } else if z_vec.len() < 32 {
+            let start_idx = 32 - z_vec.len();
+            z_bytes[start_idx..].copy_from_slice(&z_vec);
+        } else {
+            z_bytes.copy_from_slice(&z_vec);
+        }
+
+        // Create the signature (a || z) - 33 bytes for a, 32 bytes for z
+        let mut signature = [0u8; 65];
+        signature[0..33].copy_from_slice(&a_bytes);
+        signature[33..65].copy_from_slice(&z_bytes);
+
+        Ok(signature)
     }
 
     pub fn verify_signature(
