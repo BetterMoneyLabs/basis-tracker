@@ -24,6 +24,8 @@ generic-array = "0.14"
 
 # Workspace dependencies
 basis_store = { path = "../basis_store" }
+# Core functionality
+basis_core = { path = "../basis_core" }
 
 [features]
 default = ["bin"]

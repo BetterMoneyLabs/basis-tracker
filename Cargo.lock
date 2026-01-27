@@ -228,6 +228,7 @@ name = "basis_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "basis_core",
  "basis_store",
  "blake2 0.10.6",
  "clap",
@@ -247,9 +248,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "basis_core"
+version = "0.1.0"
+dependencies = [
+ "blake2 0.10.6",
+ "ergo_avltree_rust",
+ "generic-array",
+ "hex",
+ "num-bigint",
+ "rand 0.8.5",
+ "secp256k1",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "basis_offchain"
 version = "0.1.0"
 dependencies = [
+ "basis_core",
  "blake2 0.10.6",
  "ergo-lib",
  "generic-array",
@@ -287,6 +303,7 @@ dependencies = [
 name = "basis_store"
 version = "0.1.0"
 dependencies = [
+ "basis_core",
  "basis_offchain",
  "basis_trees",
  "blake2 0.10.6",

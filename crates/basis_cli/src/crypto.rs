@@ -1,5 +1,7 @@
 use anyhow::Result;
-use secp256k1::{KeyPair as SecpKeyPair, Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{KeyPair as SecpKeyPair, Secp256k1, SecretKey};
+use basis_core::impls::SchnorrVerifier;
+use basis_core::traits::SignatureVerifier;
 
 pub type PubKey = [u8; 33];
 pub type Signature = [u8; 65];
@@ -103,18 +105,12 @@ impl KeyPair {
         signature: &Signature,
         public_key: &PubKey,
     ) -> Result<bool> {
-        let secp = Secp256k1::new();
-        let message_hash = blake2b_hash(message);
-        let message = Message::from_slice(&message_hash)?;
-
-        let public_key = PublicKey::from_slice(public_key)?;
-
-        // Convert 65-byte signature to 64-byte Schnorr
-        let schnorr_sig = secp256k1::schnorr::Signature::from_slice(&signature[..64])?;
-
-        Ok(secp
-            .verify_schnorr(&schnorr_sig, &message, &public_key.x_only_public_key().0)
-            .is_ok())
+        // Delegate to the shared schnorr_verify function from basis_core
+        let verifier = basis_core::impls::SchnorrVerifier;
+        match verifier.verify_signature(signature, message, public_key) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
     }
 
     pub fn get_public_key_bytes(&self) -> PubKey {

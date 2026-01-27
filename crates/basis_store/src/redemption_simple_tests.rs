@@ -25,7 +25,7 @@ fn test_basic_redemption_validation() {
         recipient_pubkey,
         amount_collected,
         timestamp,
-        &issuer_secret.secret_bytes(),
+        &issuer_secret,
     )
     .unwrap();
 
@@ -60,7 +60,7 @@ fn test_time_lock_validation() {
         recipient_pubkey,
         amount_collected,
         recent_timestamp,
-        &issuer_secret.secret_bytes(),
+        &issuer_secret,
     )
     .unwrap();
 
@@ -70,7 +70,7 @@ fn test_time_lock_validation() {
         recipient_pubkey,
         amount_collected,
         old_timestamp,
-        &issuer_secret.secret_bytes(),
+        &issuer_secret,
     )
     .unwrap();
 
@@ -118,7 +118,7 @@ fn test_signature_verification() {
         recipient_pubkey,
         amount_collected,
         timestamp,
-        &issuer_secret.secret_bytes(),
+        &issuer_secret,
     )
     .unwrap();
 
@@ -127,7 +127,7 @@ fn test_signature_verification() {
         recipient_pubkey,
         amount_collected,
         timestamp,
-        &wrong_issuer_secret.secret_bytes(),
+        &wrong_issuer_secret,
     )
     .unwrap();
 
@@ -212,8 +212,8 @@ fn test_simulated_blockchain_data() {
     // Generate signatures
     use secp256k1::SecretKey;
 
-    let issuer_secret_key = SecretKey::from_slice(&issuer_secret.secret_bytes()).unwrap();
-    let tracker_secret_key = SecretKey::from_slice(&tracker_secret.secret_bytes()).unwrap();
+    let issuer_secret_key = SecretKey::from_slice(&issuer_secret,).unwrap();
+    let tracker_secret_key = SecretKey::from_slice(&tracker_secret,).unwrap();
 
     // Generate public keys
     let secp = secp256k1::Secp256k1::new();
@@ -223,9 +223,9 @@ fn test_simulated_blockchain_data() {
         secp256k1::PublicKey::from_secret_key(&secp, &tracker_secret_key).serialize();
 
     let issuer_sig =
-        schnorr::schnorr_sign(&message, &issuer_secret_key, &issuer_pubkey_bytes).unwrap();
+        schnorr::schnorr_sign(&message, &issuer_secret_key.secret_bytes(), &issuer_pubkey_bytes).unwrap();
     let tracker_sig =
-        schnorr::schnorr_sign(&message, &tracker_secret_key, &tracker_pubkey_bytes).unwrap();
+        schnorr::schnorr_sign(&message, &tracker_secret_key.secret_bytes(), &tracker_pubkey_bytes).unwrap();
 
     // Verify signatures
     let issuer_valid = schnorr::schnorr_verify(&issuer_sig, &message, &issuer_pubkey_bytes).is_ok();

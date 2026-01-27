@@ -7,7 +7,7 @@ use crate::{
 pub fn generate_test_keypair() -> ([u8; 32], [u8; 33]) {
     // Use a fixed seed for deterministic testing
     let (secret, pubkey) = generate_keypair();
-    (secret.secret_bytes(), pubkey)
+    (secret, pubkey)
 }
 
 /// Generate multiple test keypairs with different patterns
@@ -15,7 +15,7 @@ pub fn generate_test_keypairs(count: usize) -> Vec<([u8; 32], [u8; 33])> {
     (0..count)
         .map(|i| {
             let (secret, pubkey) = generate_keypair();
-            (secret.secret_bytes(), pubkey)
+            (secret, pubkey)
         })
         .collect()
 }
@@ -127,7 +127,7 @@ pub fn generate_test_signature(message: &[u8]) -> [u8; 65] {
     let (secret, pubkey) = generate_test_keypair();
 
     let secret_key = secp256k1::SecretKey::from_slice(&secret).unwrap();
-    schnorr::schnorr_sign(message, &secret_key, &pubkey).expect("Failed to generate test signature")
+    schnorr::schnorr_sign(message, &secret_key.secret_bytes(), &pubkey).expect("Failed to generate test signature")
 }
 
 /// Verify test signature
@@ -234,7 +234,7 @@ mod tests {
         let (secret, pubkey) = generate_test_keypair();
 
         let secret_key = secp256k1::SecretKey::from_slice(&secret).unwrap();
-        let signature = schnorr::schnorr_sign(message, &secret_key, &pubkey).unwrap();
+        let signature = schnorr::schnorr_sign(message, &secret_key.secret_bytes(), &pubkey).unwrap();
 
         let is_valid = schnorr::schnorr_verify(&signature, message, &pubkey).is_ok();
 

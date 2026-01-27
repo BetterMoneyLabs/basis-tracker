@@ -38,6 +38,9 @@ pub mod test_helpers;
 use blake2::{Blake2b, Digest};
 use generic_array::typenum::U32;
 use secp256k1;
+use basis_core;
+use basis_core::impls::SchnorrVerifier;
+use basis_core::traits::SignatureVerifier;
 
 /// Public key type (Secp256k1)
 pub type PubKey = [u8; 33];
@@ -511,7 +514,7 @@ impl IouNote {
         let message = schnorr::signing_message(&recipient_pubkey, amount_collected, timestamp);
 
         // Use the chaincash-rs approach for Schnorr signing
-        let signature = schnorr::schnorr_sign(&message, &secret_key, &issuer_pubkey)?;
+        let signature = schnorr::schnorr_sign(&message, &secret_key.secret_bytes(), &issuer_pubkey)?;
 
         Ok(Self {
             recipient_pubkey,
@@ -534,17 +537,18 @@ impl IouNote {
     /// Verify the signature against an issuer public key using Schnorr signature verification
     /// This follows the chaincash-rs approach for Schnorr signature verification
     pub fn verify_signature(&self, issuer_pubkey: &PubKey) -> Result<(), NoteError> {
-        // Validate the issuer public key first
-        schnorr::validate_public_key(issuer_pubkey)?;
-
-        // Validate the signature format
-        schnorr::validate_signature_format(&self.signature)?;
-
         // Generate the signing message
         let message = self.signing_message();
 
-        // Use the chaincash-rs approach for Schnorr verification
-        schnorr::schnorr_verify(&self.signature, &message, issuer_pubkey)
+        // Use the canonical Schnorr verification from basis_core
+        let verifier = SchnorrVerifier;
+        match verifier.verify_signature(&self.signature, &message, issuer_pubkey) {
+            Ok(()) => Ok(()),
+            Err(basis_core::traits::CryptoError::InvalidSignature) => Err(NoteError::InvalidSignature),
+            Err(basis_core::traits::CryptoError::InvalidPublicKey) => Err(NoteError::InvalidSignature),
+            Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => Err(NoteError::InvalidSignature),
+            Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
+        }
     }
 }
 

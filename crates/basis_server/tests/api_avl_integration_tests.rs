@@ -2,6 +2,7 @@
 mod api_avl_integration_tests {
     use basis_store::{TrackerStateManager, IouNote, PubKey, Signature};
     use std::sync::Arc;
+    use secp256k1;
 
     /// Helper to generate a test public key
     fn generate_test_pubkey(seed: u8) -> PubKey {
@@ -13,13 +14,14 @@ mod api_avl_integration_tests {
         key
     }
 
-    /// Helper to generate a test signature
-    fn generate_test_signature(seed: u8) -> Signature {
-        let mut sig = [0u8; 65];
-        for i in 0..65 {
-            sig[i] = seed * (i as u8 + 1);
-        }
-        sig
+    /// Helper to generate a properly signed note
+    fn create_signed_note(
+        recipient_pubkey: PubKey,
+        amount_collected: u64,
+        timestamp: u64,
+        secret_key_bytes: &[u8; 32],
+    ) -> IouNote {
+        IouNote::create_and_sign(recipient_pubkey, amount_collected, timestamp, secret_key_bytes).unwrap()
     }
 
     #[tokio::test]
@@ -32,16 +34,20 @@ mod api_avl_integration_tests {
         let initial_root = initial_state.avl_root_digest.clone();
 
         // Generate test data
-        let issuer_pubkey = generate_test_pubkey(1);
+        let issuer_secret_key = [1u8; 32]; // Use a fixed secret key for testing
+        let secp = secp256k1::Secp256k1::new();
+        let secret_key = secp256k1::SecretKey::from_slice(&issuer_secret_key).unwrap();
+        let issuer_pubkey_obj = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let issuer_pubkey = issuer_pubkey_obj.serialize();
+
         let recipient_pubkey = generate_test_pubkey(2);
 
-        // Create a test note
-        let note = IouNote::new(
+        // Create a properly signed test note
+        let note = create_signed_note(
             recipient_pubkey,
             1000, // amount collected
-            0,    // amount redeemed
             1000000, // timestamp
-            generate_test_signature(1),
+            &issuer_secret_key,
         );
 
         // Add note and verify AVL tree state changed
@@ -67,17 +73,20 @@ mod api_avl_integration_tests {
         let initial_root = initial_state.avl_root_digest.clone();
 
         // Generate test data
-        let issuer_pubkey = generate_test_pubkey(1);
+        let issuer_secret_key = [2u8; 32]; // Use a different secret key for this test
+        let secp = secp256k1::Secp256k1::new();
+        let secret_key = secp256k1::SecretKey::from_slice(&issuer_secret_key).unwrap();
+        let issuer_pubkey_obj = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let issuer_pubkey = issuer_pubkey_obj.serialize();
 
         // Add multiple notes and verify AVL tree updates each time
         for i in 1..=3 {
             let recipient_pubkey = generate_test_pubkey(i + 1);
-            let note = IouNote::new(
+            let note = create_signed_note(
                 recipient_pubkey,
                 1000 * (i as u64), // different amounts
-                0,
                 1000000 + (i as u64),
-                generate_test_signature(i as u8),
+                &issuer_secret_key,
             );
 
             let result = tracker.add_note(&issuer_pubkey, &note);
@@ -107,16 +116,20 @@ mod api_avl_integration_tests {
         let mut tracker = TrackerStateManager::new_with_temp_storage();
 
         // Generate test data
-        let issuer_pubkey = generate_test_pubkey(1);
+        let issuer_secret_key = [3u8; 32]; // Use a different secret key for this test
+        let secp = secp256k1::Secp256k1::new();
+        let secret_key = secp256k1::SecretKey::from_slice(&issuer_secret_key).unwrap();
+        let issuer_pubkey_obj = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let issuer_pubkey = issuer_pubkey_obj.serialize();
+
         let recipient_pubkey = generate_test_pubkey(2);
 
         // Create and store note
-        let original_note = IouNote::new(
+        let original_note = create_signed_note(
             recipient_pubkey,
             1500,
-            0,
             1000000,
-            generate_test_signature(1),
+            &issuer_secret_key,
         );
 
         // Store the note and update AVL tree
@@ -151,16 +164,20 @@ mod api_avl_integration_tests {
         let empty_root = empty_state.avl_root_digest.clone();
 
         // Generate test keys
-        let issuer_pubkey = generate_test_pubkey(1);
+        let issuer_secret_key = [4u8; 32]; // Use a different secret key for this test
+        let secp = secp256k1::Secp256k1::new();
+        let secret_key = secp256k1::SecretKey::from_slice(&issuer_secret_key).unwrap();
+        let issuer_pubkey_obj = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let issuer_pubkey = issuer_pubkey_obj.serialize();
+
         let recipient_pubkey = generate_test_pubkey(2);
 
         // Add a note
-        let note1 = IouNote::new(
+        let note1 = create_signed_note(
             recipient_pubkey,
             1000,
-            0,
             1000000,
-            generate_test_signature(1),
+            &issuer_secret_key,
         );
 
         tracker.add_note(&issuer_pubkey, &note1).unwrap();
@@ -168,12 +185,11 @@ mod api_avl_integration_tests {
         let root_after_add = state_after_add.avl_root_digest.clone();
 
         // Update the same note
-        let note2 = IouNote::new(
+        let note2 = create_signed_note(
             recipient_pubkey,
             2000, // increased amount
-            0,
             1000001, // updated timestamp
-            generate_test_signature(2),
+            &issuer_secret_key,
         );
 
         tracker.add_note(&issuer_pubkey, &note2).unwrap(); // add_note actually updates
@@ -194,16 +210,20 @@ mod api_avl_integration_tests {
         let mut tracker = TrackerStateManager::new_with_temp_storage();
 
         // Generate test keys
-        let issuer_pubkey = generate_test_pubkey(1);
+        let issuer_secret_key = [5u8; 32]; // Use a different secret key for this test
+        let secp = secp256k1::Secp256k1::new();
+        let secret_key = secp256k1::SecretKey::from_slice(&issuer_secret_key).unwrap();
+        let issuer_pubkey_obj = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let issuer_pubkey = issuer_pubkey_obj.serialize();
+
         let recipient_pubkey = generate_test_pubkey(2);
 
         // Create and store a note
-        let note = IouNote::new(
+        let note = create_signed_note(
             recipient_pubkey,
             1000,
-            0,
             1000000,
-            generate_test_signature(1),
+            &issuer_secret_key,
         );
 
         let add_result = tracker.add_note(&issuer_pubkey, &note);

@@ -325,7 +325,7 @@ mod tests {
             recipient_pubkey,
             100000000, // 0.1 ERG
             1672531200, // Old timestamp
-            &issuer_secret.secret_bytes(),
+            &issuer_secret.as_bytes(),
         )
         .unwrap();
 
@@ -363,7 +363,7 @@ mod tests {
             recipient_pubkey,
             100000000, // 0.1 ERG
             1672531200, // Jan 1, 2023 (old)
-            &issuer_secret.secret_bytes(),
+            &issuer_secret.as_bytes(),
         )
         .unwrap();
 

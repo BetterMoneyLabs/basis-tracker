@@ -44,8 +44,8 @@ mod property_tests {
             let (secret, _) = generate_keypair();
             let (_, recipient_pubkey) = generate_keypair();
 
-            let note1 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret.secret_bytes()).unwrap();
-            let note2 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret.secret_bytes()).unwrap();
+            let note1 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret).unwrap();
+            let note2 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret).unwrap();
 
             // Same inputs should produce same note structure
             prop_assert_eq!(note1.recipient_pubkey, note2.recipient_pubkey);
@@ -53,7 +53,7 @@ mod property_tests {
             prop_assert_eq!(note1.timestamp, note2.timestamp);
 
             // Different inputs should produce different notes
-            let note3 = IouNote::create_and_sign(recipient_pubkey, amount2, timestamp2, &secret.secret_bytes()).unwrap();
+            let note3 = IouNote::create_and_sign(recipient_pubkey, amount2, timestamp2, &secret).unwrap();
             prop_assert_ne!(note1.amount_collected, note3.amount_collected);
         }
 
@@ -92,7 +92,7 @@ mod property_tests {
             let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize();
 
             // Generate signature
-            let signature = schnorr::schnorr_sign(&message, &secret_key, &public_key);
+            let signature = schnorr::schnorr_sign(&message, &secret_key.secret_bytes(), &public_key);
             prop_assume!(signature.is_ok());
             let signature = signature.unwrap();
 
@@ -117,7 +117,7 @@ mod property_tests {
             // Test that note serialization preserves all fields
             let (secret, _) = generate_keypair();
             let (_, recipient_pubkey) = generate_keypair();
-            let original_note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret.secret_bytes()).unwrap();
+            let original_note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret).unwrap();
 
             // Simulate serialization by checking field access
             let reconstructed_note = IouNote::new(

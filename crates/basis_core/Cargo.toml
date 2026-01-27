@@ -1,21 +1,19 @@
 [package]
-name = "basis_offchain"
+name = "basis_core"
 version = "0.1.0"
 edition = "2021"
 license = "CC0-1.0"
 
 [lib]
-name = "basis_offchain"
+name = "basis_core"
 path = "src/lib.rs"
 
 [dependencies]
-ergo-lib = { workspace = true }
-thiserror = { workspace = true }
-serde = { workspace = true }
 blake2 = { workspace = true }
 generic-array = "0.14"
 secp256k1 = { version = "0.27", features = ["rand-std"] }
 num-bigint = "0.4.6"
 rand = "0.8"
 hex = "0.4"
-basis_core = { path = "../basis_core" }
+thiserror = { workspace = true }
+ergo_avltree_rust = { workspace = true }

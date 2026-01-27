@@ -142,8 +142,8 @@ pub fn generate_test_signatures(
     let tracker_pubkey =
         secp256k1::PublicKey::from_secret_key(&secp, &tracker_secret_key).serialize();
 
-    let issuer_sig = schnorr::schnorr_sign(message, &issuer_secret_key, &issuer_pubkey).unwrap();
-    let tracker_sig = schnorr::schnorr_sign(message, &tracker_secret_key, &tracker_pubkey).unwrap();
+    let issuer_sig = schnorr::schnorr_sign(message, &issuer_secret_key.secret_bytes(), &issuer_pubkey).unwrap();
+    let tracker_sig = schnorr::schnorr_sign(message, &tracker_secret_key.secret_bytes(), &tracker_pubkey).unwrap();
     (issuer_sig.to_vec(), tracker_sig.to_vec())
 }
 
@@ -195,8 +195,8 @@ pub fn create_complete_blockchain_data(
     .into_bytes();
 
     let (issuer_sig, tracker_sig) = generate_test_signatures(
-        &issuer_secret.secret_bytes(),
-        &tracker_secret.secret_bytes(),
+        &issuer_secret,
+        &tracker_secret,
         &message,
     );
 
@@ -250,7 +250,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            &issuer_secret.secret_bytes(),
+            SecretKey::from_slice(&issuer_secret).unwrap(),
         )
         .unwrap();
 
@@ -320,7 +320,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            &issuer_secret.secret_bytes(),
+            SecretKey::from_slice(&issuer_secret).unwrap(),
         )
         .unwrap();
 
@@ -381,7 +381,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            &issuer_secret.secret_bytes(),
+            SecretKey::from_slice(&issuer_secret).unwrap(),
         )
         .unwrap();
 
@@ -467,7 +467,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            &issuer_secret.secret_bytes(),
+            SecretKey::from_slice(&issuer_secret).unwrap(),
         )
         .unwrap();
 
@@ -538,7 +538,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            &issuer_secret.secret_bytes(),
+            SecretKey::from_slice(&issuer_secret).unwrap(),
         )
         .unwrap();
 
@@ -597,7 +597,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            &issuer_secret.secret_bytes(),
+            SecretKey::from_slice(&issuer_secret).unwrap(),
         )
         .unwrap();
 

@@ -36,7 +36,7 @@ fn test_redemption_transaction_preparation() {
         recipient_pubkey,
         amount_collected,
         timestamp,
-        &issuer_secret.secret_bytes(),
+        &issuer_secret.as_bytes(),
     )
     .unwrap();
 
@@ -146,7 +146,7 @@ fn test_parameter_validation() {
         recipient_pubkey,
         100000000, // 0.1 ERG
         1672531200, // Jan 1, 2023 (old)
-        &issuer_secret.secret_bytes(),
+        &issuer_secret.as_bytes(),
     )
     .unwrap();
 
@@ -250,7 +250,7 @@ fn test_transaction_builder_error_handling() {
         recipient_pubkey,
         100000000,
         1672531200,
-        &issuer_secret.secret_bytes(),
+        &issuer_secret.as_bytes(),
     )
     .unwrap();
 

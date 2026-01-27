@@ -31,6 +31,8 @@ ergo-lib = { workspace = true }
 basis_trees = { path = "../basis_trees" }
 # Offchain functionality
 basis_offchain = { path = "../basis_offchain" }
+# Core functionality
+basis_core = { path = "../basis_core" }
 
 # Test dependencies
 [dev-dependencies]
