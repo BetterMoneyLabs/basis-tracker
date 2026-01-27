@@ -765,7 +765,7 @@ impl ServerState {
         let creation_height = scan_box.creation_height;
 
         // Extract owner public key from R4 register
-        let owner_pubkey = scan_box
+        let owner_pubkey_raw = scan_box
             .additional_registers
             .get("R4")
             .ok_or_else(|| {
@@ -773,13 +773,26 @@ impl ServerState {
             })?
             .clone();
 
+        // Strip the 0x07 prefix if present (GroupElement type identifier from Ergo registers)
+        let owner_pubkey = if owner_pubkey_raw.starts_with("07") && owner_pubkey_raw.len() >= 66 {
+            // Extract the actual 33-byte public key (66 hex chars) after the 0x07 prefix
+            owner_pubkey_raw[2..].to_string()
+        } else {
+            // Use as-is if no prefix or wrong length
+            owner_pubkey_raw
+        };
+
         // Extract tracker NFT from R5 register (optional)
         let tracker_nft_id = scan_box.additional_registers.get("R5").map(|s| s.clone());
 
         // Create extended reserve info
+        // Decode the hex-encoded public key to actual bytes
+        let owner_pubkey_bytes = hex::decode(&owner_pubkey)
+            .map_err(|_| ScannerError::InvalidReserveBox(format!("Invalid hex in owner pubkey for box {}", box_id)))?;
+
         let reserve_info = ExtendedReserveInfo::new(
             box_id.as_bytes(),
-            owner_pubkey.as_bytes(),
+            &owner_pubkey_bytes,
             value,
             tracker_nft_id.as_deref().map(|s| s.as_bytes()),
             creation_height,
@@ -1076,5 +1089,89 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
             Duration::from_secs(30) // Normal wait
         };
         tokio::time::sleep(wait_time).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_parse_reserve_box_with_prefix_stripping() {
+        // Create a mock scan box with a public key that has the 0x07 prefix
+        let mut registers = HashMap::new();
+        // This is a 33-byte public key with 0x07 prefix (GroupElement format)
+        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        registers.insert("R4".to_string(), prefixed_pubkey.to_string());
+        registers.insert("R5".to_string(), "some_tracker_nft_id".to_string());
+
+        let scan_box = ScanBox {
+            box_id: "test_box_id".to_string(),
+            value: 1000000000, // 1 ERG
+            creation_height: 1000,
+            ergo_tree: "test_ergo_tree".to_string(),
+            transaction_id: "test_tx_id".to_string(),
+            additional_registers: registers,
+            assets: vec![],
+        };
+
+        // Create a dummy server state for testing
+        let config = NodeConfig::default();
+        let server_state = ServerState::new(config).expect("Failed to create server state");
+
+        // Test the parse_reserve_box function
+        let result = server_state.parse_reserve_box(&scan_box);
+
+        match result {
+            Ok(reserve_info) => {
+                // The owner_pubkey should have the 0x07 prefix stripped
+                let expected_pubkey = &prefixed_pubkey[2..]; // Remove first 2 characters (07)
+
+                assert_eq!(reserve_info.owner_pubkey, expected_pubkey);
+                println!("SUCCESS: Prefix was correctly stripped. Original: {}, Stripped: {}", prefixed_pubkey, reserve_info.owner_pubkey);
+            },
+            Err(e) => {
+                panic!("Failed to parse reserve box: {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_reserve_box_without_prefix() {
+        // Create a mock scan box with a public key that doesn't have the 0x07 prefix
+        let mut registers = HashMap::new();
+        // This is a standard 33-byte compressed public key (02 prefix)
+        let unprefixed_pubkey = "02c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        registers.insert("R4".to_string(), unprefixed_pubkey.to_string());
+        registers.insert("R5".to_string(), "some_tracker_nft_id".to_string());
+
+        let scan_box = ScanBox {
+            box_id: "test_box_id_2".to_string(),
+            value: 1000000000, // 1 ERG
+            creation_height: 1000,
+            ergo_tree: "test_ergo_tree".to_string(),
+            transaction_id: "test_tx_id".to_string(),
+            additional_registers: registers,
+            assets: vec![],
+        };
+
+        // Create a dummy server state for testing
+        let config = NodeConfig::default();
+        let server_state = ServerState::new(config).expect("Failed to create server state");
+
+        // Test the parse_reserve_box function
+        let result = server_state.parse_reserve_box(&scan_box);
+
+        match result {
+            Ok(reserve_info) => {
+                // The owner_pubkey should remain unchanged
+                assert_eq!(reserve_info.owner_pubkey, unprefixed_pubkey);
+                println!("SUCCESS: Unprefixed key remained unchanged: {}", reserve_info.owner_pubkey);
+            },
+            Err(e) => {
+                panic!("Failed to parse reserve box: {:?}", e);
+            }
+        }
     }
 }

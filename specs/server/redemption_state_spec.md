@@ -12,12 +12,16 @@ The redemption request contains the parameters needed to initiate a redemption:
 pub struct RedemptionRequest {
     /// Issuer's public key (hex encoded)
     pub issuer_pubkey: String,
-    /// Recipient's public key (hex encoded) 
+    /// Recipient's public key (hex encoded)
     pub recipient_pubkey: String,
     /// Amount to redeem
     pub amount: u64,
     /// Timestamp of the note being redeemed
     pub timestamp: u64,
+    /// Reserve contract box ID (hex encoded)
+    pub reserve_box_id: String,
+    /// Recipient's address for redemption output
+    pub recipient_address: String,
 }
 ```
 
@@ -189,7 +193,7 @@ Initiates a redemption process for an IOU note.
 ```json
 {
   "issuer_pubkey": "hex_encoded_public_key",
-  "recipient_pubkey": "hex_encoded_public_key", 
+  "recipient_pubkey": "hex_encoded_public_key",
   "amount": 1000,
   "timestamp": 1672531200
 }
@@ -219,6 +223,63 @@ Initiates a redemption process for an IOU note.
 }
 ```
 
+### POST /redemption/prepare
+Prepare a complete redemption with real AVL proofs and tracker signatures from Ergo node.
+
+**Request Body:**
+```json
+{
+  "issuer_pubkey": "hex_encoded_public_key",
+  "recipient_pubkey": "hex_encoded_public_key",
+  "amount": 1000,
+  "timestamp": 1672531200
+}
+```
+
+**Response:**
+- Success: `200 OK` with complete redemption preparation data
+- Failure: `400 Bad Request` or `500 Internal Server Error` with error message
+
+**Success Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "redemption_id": "redemption_unique_id",
+    "avl_proof": "hex_encoded_avl_proof",
+    "tracker_signature": "hex_encoded_tracker_signature_from_ergo_node",
+    "tracker_pubkey": "hex_encoded_tracker_public_key",
+    "tracker_state_digest": "hex_encoded_tracker_state_digest",
+    "block_height": 1500
+  },
+  "error": null
+}
+```
+
+### GET /proof/redemption
+Get redemption-specific proof with tracker state digest.
+
+**Query Parameters:**
+- `issuer_pubkey`: Issuer's public key (hex encoded)
+- `recipient_pubkey`: Recipient's public key (hex encoded)
+
+**Response:**
+- Success: `200 OK` with redemption proof
+- Failure: `400 Bad Request` with error message
+
+**Success Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "avl_proof": "hex_encoded_avl_proof",
+    "tracker_state_digest": "hex_encoded_tracker_state_digest",
+    "proof_valid": true
+  },
+  "error": null
+}
+```
+
 ## Integration with Blockchain Scanner
 
 The redemption process integrates with the blockchain scanner to:
@@ -228,6 +289,14 @@ The redemption process integrates with the blockchain scanner to:
 3. **Update State**: Reflect blockchain state changes in the local tracker
 4. **Detect Double Spending**: Prevent multiple redemptions of the same note
 
+## Integration with Ergo Node API
+
+The redemption process integrates with the Ergo node API to:
+
+1. **Real Schnorr Signatures**: Use the `/utils/schnorrSign` endpoint to generate tracker signatures securely
+2. **Transaction Submission**: Prepare transactions that can be submitted to the Ergo node for blockchain inclusion
+3. **State Verification**: Access current blockchain state for redemption validation
+
 ## Security Considerations
 
 1. **Signature Verification**: All notes must have valid signatures from the issuer
@@ -235,3 +304,5 @@ The redemption process integrates with the blockchain scanner to:
 3. **Collateral Checks**: Verify sufficient collateral exists before redemption
 4. **Rate Limiting**: Prevent abuse through rate limiting mechanisms
 5. **Access Control**: Restrict redemption to legitimate note holders only
+6. **Real Schnorr Signature Integration**: Tracker signatures are generated via Ergo node's `/utils/schnorrSign` API to keep private keys secure in the node
+7. **AVL Proof Verification**: Redemption transactions include AVL tree proofs that can be verified against on-chain commitments

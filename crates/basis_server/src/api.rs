@@ -1087,14 +1087,9 @@ pub async fn initiate_redemption(
             tracing::debug!("Comparing keys - Issuer: {}, Normalized Issuer: {}, Actual Owner Key: {}, Normalized Actual: {}, Stored: {}",
                            payload.issuer_pubkey, normalized_issuer_key, actual_owner_key, normalized_actual_key, original_reserve_key);
 
-            // Check multiple matching possibilities to ensure comprehensive key correlation:
-            // 1. Direct match between normalized issuer and normalized actual key
-            // 2. Direct match between issuer and actual owner key
-            // 3. Special case: actual owner key starts with '07' and matches after prefix
-            let matches = normalized_issuer_key == normalized_actual_key ||
-                         payload.issuer_pubkey == actual_owner_key ||
-                         (actual_owner_key.starts_with("07") && actual_owner_key.len() >= 66 &&
-                          &actual_owner_key[2..] == payload.issuer_pubkey.as_str());
+            // Since we now strip the 0x07 prefix when reading from registers,
+            // we only need to match normalized keys (handles any remaining edge cases)
+            let matches = normalized_issuer_key == normalized_actual_key;
 
             if matches {
                 tracing::debug!("Key match found! Reserve box ID: {}", reserve.box_id);

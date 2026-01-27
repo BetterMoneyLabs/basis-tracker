@@ -382,9 +382,18 @@ impl TrackerServerState {
         }
 
         // Extract data from registers
-        let tracker_pubkey = scan_box.additional_registers.get("R4")
+        let tracker_pubkey_raw = scan_box.additional_registers.get("R4")
             .ok_or_else(|| TrackerScannerError::MissingRegister("R4".to_string()))?
             .clone();
+
+        // Strip the 0x07 prefix if present (GroupElement type identifier from Ergo registers)
+        let tracker_pubkey = if tracker_pubkey_raw.starts_with("07") && tracker_pubkey_raw.len() >= 68 {
+            // Extract the actual 33-byte public key (66 hex chars) after the 0x07 prefix
+            tracker_pubkey_raw[2..].to_string()
+        } else {
+            // Use as-is if no prefix or wrong length
+            tracker_pubkey_raw
+        };
 
         let state_commitment = scan_box.additional_registers.get("R5")
             .ok_or_else(|| TrackerScannerError::MissingRegister("R5".to_string()))?
@@ -397,7 +406,7 @@ impl TrackerServerState {
             .map_err(|e| TrackerScannerError::InvalidRegisterData(format!("Invalid R6 register: {}", e)))?;
 
         // Validate register data (basic sanity checks)
-        if tracker_pubkey.len() != 66 { // 33 bytes hex encoded
+        if tracker_pubkey.len() != 66 { // 33 bytes hex encoded (after stripping 0x07 prefix if present)
             return Err(TrackerScannerError::InvalidRegisterData(
                 format!("Invalid tracker pubkey length: {} (expected 66 hex chars)", tracker_pubkey.len())
             ));
