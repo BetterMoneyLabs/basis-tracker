@@ -1,8 +1,6 @@
 //! Schnorr signature implementation using the basis_core crate
 
 use crate::{NoteError, PubKey, Signature};
-use basis_core::impls::SchnorrVerifier;
-use basis_core::traits::SignatureVerifier;
 
 /// Generate the signing message in the same format as chaincash-rs
 pub fn signing_message(recipient_pubkey: &PubKey, amount: u64, timestamp: u64) -> Vec<u8> {

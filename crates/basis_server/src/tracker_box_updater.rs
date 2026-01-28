@@ -10,7 +10,7 @@ use tracing::{error, info};
 use serde_json::{json, to_string};
 use basis_store::reqwest;
 use hex;
-use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+use ergo_lib::ergotree_ir::address::NetworkPrefix;
 
 /// Create a default tracker public key that looks realistic (compressed format with proper prefix)
 fn create_default_tracker_pubkey() -> [u8; 33] {

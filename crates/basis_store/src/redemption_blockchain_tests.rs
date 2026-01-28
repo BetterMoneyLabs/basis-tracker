@@ -4,6 +4,7 @@ use crate::{
     schnorr::{self, generate_keypair},
     IouNote, PubKey, RedemptionManager, RedemptionRequest, TrackerStateManager,
 };
+use secp256k1::SecretKey;
 use serde_json::{json, Value};
 
 /// Simulated blockchain data for redemption tests
@@ -130,8 +131,6 @@ pub fn generate_test_signatures(
     tracker_secret: &[u8; 32],
     message: &[u8],
 ) -> (Vec<u8>, Vec<u8>) {
-    use secp256k1::SecretKey;
-
     let issuer_secret_key = SecretKey::from_slice(issuer_secret).unwrap();
     let tracker_secret_key = SecretKey::from_slice(tracker_secret).unwrap();
 
@@ -250,7 +249,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            SecretKey::from_slice(&issuer_secret).unwrap(),
+            &issuer_secret,
         )
         .unwrap();
 
@@ -320,7 +319,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            SecretKey::from_slice(&issuer_secret).unwrap(),
+            &issuer_secret,
         )
         .unwrap();
 
@@ -381,7 +380,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            SecretKey::from_slice(&issuer_secret).unwrap(),
+            &issuer_secret,
         )
         .unwrap();
 
@@ -467,7 +466,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            SecretKey::from_slice(&issuer_secret).unwrap(),
+            &issuer_secret,
         )
         .unwrap();
 
@@ -538,7 +537,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            SecretKey::from_slice(&issuer_secret).unwrap(),
+            &issuer_secret,
         )
         .unwrap();
 
@@ -597,7 +596,7 @@ mod tests {
             recipient_pubkey,
             amount_collected,
             timestamp,
-            SecretKey::from_slice(&issuer_secret).unwrap(),
+            &issuer_secret,
         )
         .unwrap();
 

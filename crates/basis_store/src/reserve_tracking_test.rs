@@ -47,7 +47,8 @@ mod tests {
                 assets: vec![], // Empty assets for reserve boxes
                 additional_registers: {
                     let mut registers = std::collections::HashMap::new();
-                    registers.insert("R4".to_string(), "owner_pubkey_1".to_string());
+                    // Use a valid hex-encoded compressed public key (33 bytes = 66 hex chars)
+                    registers.insert("R4".to_string(), "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb".to_string());
                     registers.insert("R5".to_string(), "tracker_nft_1".to_string());
                     registers
                 },
@@ -61,7 +62,8 @@ mod tests {
                 assets: vec![], // Empty assets for reserve boxes
                 additional_registers: {
                     let mut registers = std::collections::HashMap::new();
-                    registers.insert("R4".to_string(), "owner_pubkey_2".to_string());
+                    // Use a valid hex-encoded compressed public key (33 bytes = 66 hex chars)
+                    registers.insert("R4".to_string(), "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc".to_string());
                     // No R5 for this one (optional tracker NFT)
                     registers
                 },
@@ -93,7 +95,7 @@ mod tests {
                         .expect("R4 register should be present");
                     assert_eq!(
                         reserve_info.owner_pubkey,
-                        hex::encode(expected_owner_pubkey.as_bytes())
+                        *expected_owner_pubkey  // Already hex-encoded
                     );
 
                     // Check tracker NFT extraction (if present)
@@ -153,11 +155,12 @@ mod tests {
         assert_eq!(reserve1.base_info.collateral_amount, 1000000000);
         assert_eq!(
             reserve1.owner_pubkey,
-            hex::encode("owner_pubkey_1".as_bytes())
+            "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb"
         );
+        let expected_tracker_nft_hex = hex::encode("tracker_nft_1".as_bytes());
         assert_eq!(
             reserve1.tracker_nft_id,
-            Some(hex::encode("tracker_nft_1".as_bytes()))
+            Some(expected_tracker_nft_hex)
         );
 
         let reserve2 = state
@@ -167,7 +170,7 @@ mod tests {
         assert_eq!(reserve2.base_info.collateral_amount, 2000000000);
         assert_eq!(
             reserve2.owner_pubkey,
-            hex::encode("owner_pubkey_2".as_bytes())
+            "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc"
         );
         assert!(reserve2.tracker_nft_id.is_none());
 
@@ -276,9 +279,16 @@ mod tests {
                 assets: vec![], // Empty assets for reserve boxes
                 additional_registers: {
                     let mut registers = std::collections::HashMap::new();
-                    registers.insert("R4".to_string(), owner.to_string());
+                    // Use valid hex-encoded compressed public keys for each owner
+                    let owner_key = match owner {
+                        "owner_a" => "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb",
+                        "owner_b" => "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc",
+                        "owner_c" => "028d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cd",
+                        _ => "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb", // default
+                    };
+                    registers.insert("R4".to_string(), owner_key.to_string());
                     if let Some(nft_id) = nft {
-                        registers.insert("R5".to_string(), nft_id.to_string());
+                        registers.insert("R5".to_string(), hex::encode(nft_id.as_bytes()));
                     }
                     registers
                 },

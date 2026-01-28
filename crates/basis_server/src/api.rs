@@ -14,8 +14,6 @@ use crate::{
 };
 use basis_store::{IouNote, NoteError, PubKey, Signature};
 use ergo_lib::ergotree_ir::address::AddressEncoder;
-use blake2::{Blake2b, Digest};
-use generic_array::typenum::U32;
 use basis_store::reqwest;
 use serde::{Deserialize, Serialize};
 

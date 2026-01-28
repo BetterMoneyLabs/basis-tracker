@@ -293,12 +293,6 @@ impl RedemptionTransactionBuilder {
 
         // Create the actual Ergo transaction using ergo-lib
         // This follows the proper transaction structure for Ergo blockchain
-        use ergo_lib::ergotree_ir::address::AddressEncoder;
-        use ergo_lib::ergotree_ir::address::NetworkPrefix;
-        use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
-        use ergo_lib::ergotree_ir::mir::constant::Constant;
-        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-        use std::rc::Rc;
 
         // In a real implementation, we would create an actual Ergo transaction
         // This is a placeholder implementation that follows the structure
@@ -339,7 +333,7 @@ impl RedemptionTransactionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schnorr::generate_keypair;
+    use basis_core::generate_keypair;
 
     #[test]
     fn test_transaction_preparation() {

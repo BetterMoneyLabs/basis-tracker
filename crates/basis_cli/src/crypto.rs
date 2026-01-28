@@ -1,6 +1,5 @@
 use anyhow::Result;
 use secp256k1::{KeyPair as SecpKeyPair, Secp256k1, SecretKey};
-use basis_core::impls::SchnorrVerifier;
 use basis_core::traits::SignatureVerifier;
 
 pub type PubKey = [u8; 33];

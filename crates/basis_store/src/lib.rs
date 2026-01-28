@@ -35,8 +35,6 @@ pub mod test_helpers;
 #[cfg(test)]
 
 
-use blake2::{Blake2b, Digest};
-use generic_array::typenum::U32;
 use secp256k1;
 use basis_core;
 use basis_core::impls::SchnorrVerifier;
@@ -222,17 +220,42 @@ impl TrackerStateManager {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let storage_path = std::env::temp_dir().join(format!("basis_test_{}", unique_id));
+        let storage_path = std::env::temp_dir().join(format!("basis_test_{}_{}_{}", unique_id, std::process::id(), rand::random::<u64>()));
+
+        // Try to clean up any existing storage at this path first
+        let _ = std::fs::remove_dir_all(&storage_path);
+
         let storage = match persistence::NoteStorage::open(&storage_path) {
             Ok(storage) => {
                 tracing::debug!("Note storage opened successfully at: {:?}", storage_path);
                 storage
             }
             Err(e) => {
-                tracing::error!("Failed to initialize note storage: {:?}", e);
-                // Fallback to in-memory storage if file storage fails
-                // In production, this should handle errors properly
-                panic!("Failed to initialize note storage: {:?}", e);
+                tracing::error!("Failed to initialize note storage: {:?}. Retrying with new path...", e);
+
+                // Create a new unique path if the first one failed
+                let unique_id_retry = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+                    + rand::random::<u128>();
+                let storage_path_retry = std::env::temp_dir().join(format!("basis_test_retry_{}_{}_{}", unique_id_retry, std::process::id(), rand::random::<u64>()));
+
+                // Try to clean up the retry path as well
+                let _ = std::fs::remove_dir_all(&storage_path_retry);
+
+                match persistence::NoteStorage::open(&storage_path_retry) {
+                    Ok(storage) => {
+                        tracing::debug!("Note storage opened successfully at retry path: {:?}", storage_path_retry);
+                        storage
+                    }
+                    Err(e2) => {
+                        tracing::error!("Failed to initialize note storage on retry: {:?}", e2);
+                        // Fallback to in-memory storage if file storage fails
+                        // In production, this should handle errors properly
+                        panic!("Failed to initialize note storage: {:?}", e);
+                    }
+                }
             }
         };
 
