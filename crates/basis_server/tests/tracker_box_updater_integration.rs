@@ -55,31 +55,41 @@ mod integration_tests {
         use std::sync::Arc;
         use tokio::sync::Mutex;
         use basis_store::{TrackerStateManager, IouNote, PubKey, Signature};
-        
+        use secp256k1::{Secp256k1, SecretKey};
+
         // Create shared state
         let shared_state = SharedTrackerState::new();
-        
+
         // Create a test tracker and add a note to update the AVL tree
         let mut tracker = TrackerStateManager::new_with_temp_storage();
-        
-        // Create a test note
-        let recipient_pubkey: PubKey = [0x03u8; 33];
-        let mut issuer_pubkey: PubKey = [0x02u8; 33];
-        issuer_pubkey[0] = 0x02; // Ensure it's a valid compressed key
-        let signature: Signature = [0x00u8; 65]; // Placeholder signature
-        
-        let note = IouNote::new(recipient_pubkey, 1000, 0, 1234567890, signature);
-        
+
+        // Generate a valid keypair for testing
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
+        let issuer_pubkey_obj = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let issuer_pubkey: PubKey = issuer_pubkey_obj.serialize();
+
+        // Create a test recipient pubkey
+        let recipient_pubkey: PubKey = [0x03u8; 33]; // Valid compressed public key
+
+        // Create a properly signed test note
+        let note = IouNote::create_and_sign(
+            recipient_pubkey,
+            1000, // amount collected
+            1234567890, // timestamp
+            &secret_key.secret_bytes(),
+        ).expect("Should be able to create a valid signed note");
+
         // Add the note to the tracker
         let result = tracker.add_note(&issuer_pubkey, &note);
-        assert!(result.is_ok());
-        
+        assert!(result.is_ok(), "Adding note to tracker should succeed: {:?}", result.err());
+
         // Get the new AVL root digest after the update
         let new_root = tracker.get_state().avl_root_digest;
-        
+
         // Update the shared state to match
         shared_state.set_avl_root_digest(new_root);
-        
+
         // Verify that the shared state was updated
         assert_eq!(shared_state.get_avl_root_digest(), new_root);
         assert_ne!(shared_state.get_avl_root_digest(), [0u8; 33]); // Should not be all zeros
