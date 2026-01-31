@@ -53,7 +53,7 @@ As a simple but pretty secure solution, the following design is proposed, which 
 
 ## Basis Contract
 
-A basic contract corresponding to the design outlined in the previous section, is available @ [basis.es](basis.es).
+A basic contract corresponding to the design outlined in the previous section, is available @ [basis.es](contract/basis.es).
 
 ## Offchain Logic
 
