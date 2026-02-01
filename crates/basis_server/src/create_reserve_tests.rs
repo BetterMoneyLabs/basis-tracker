@@ -58,6 +58,17 @@ mod create_reserve_tests {
             },
         });
 
+        // Initialize tracker storage for testing
+        let tracker_storage_path = std::path::Path::new("data").join("tracker_boxes_test");
+        let tracker_storage = match basis_store::persistence::TrackerStorage::open(tracker_storage_path) {
+            Ok(storage) => storage,
+            Err(_) => {
+                // For testing, create an in-memory equivalent or use a temporary directory
+                let temp_path = std::env::temp_dir().join("tracker_boxes_test");
+                basis_store::persistence::TrackerStorage::open(temp_path).unwrap()
+            }
+        };
+
         AppState {
             tx,
             event_store,
@@ -67,6 +78,7 @@ mod create_reserve_tests {
             shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(
                 crate::tracker_box_updater::SharedTrackerState::new()
             )),
+            tracker_storage,
         }
     }
 

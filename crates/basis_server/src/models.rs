@@ -229,6 +229,14 @@ pub struct Asset {
     pub amount: u64,
 }
 
+// Response for tracker box ID
+#[derive(Debug, Serialize)]
+pub struct TrackerBoxIdResponse {
+    pub tracker_box_id: String,
+    pub timestamp: u64,
+    pub height: u64,
+}
+
 // Success response helper
 pub fn success_response<T>(data: T) -> ApiResponse<T> {
     ApiResponse {

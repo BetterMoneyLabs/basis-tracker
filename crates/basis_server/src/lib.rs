@@ -37,6 +37,7 @@ pub struct AppState {
     pub reserve_tracker: std::sync::Arc<Mutex<basis_store::ReserveTracker>>,
     pub config: std::sync::Arc<AppConfig>,
     pub shared_tracker_state: std::sync::Arc<tokio::sync::Mutex<tracker_box_updater::SharedTrackerState>>,
+    pub tracker_storage: basis_store::persistence::TrackerStorage,
 }
 
 // Commands that can be sent to the tracker thread

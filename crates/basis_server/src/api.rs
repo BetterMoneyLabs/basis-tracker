@@ -1969,6 +1969,69 @@ pub async fn get_redemption_proof(
     (StatusCode::OK, Json(crate::models::success_response(proof)))
 }
 
+// Get the latest tracker box ID from the tracker storage
+#[axum::debug_handler]
+pub async fn get_latest_tracker_box_id(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<crate::models::TrackerBoxIdResponse>>) {
+    tracing::debug!("Getting latest tracker box ID");
+
+    // Get all tracker boxes from the tracker storage
+    let tracker_boxes = match state.tracker_storage.get_all_tracker_boxes() {
+        Ok(boxes) => boxes,
+        Err(e) => {
+            tracing::error!("Failed to retrieve tracker boxes: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Failed to retrieve tracker boxes".to_string(),
+                )),
+            );
+        }
+    };
+
+    if tracker_boxes.is_empty() {
+        tracing::info!("No tracker boxes found");
+        return (
+            StatusCode::NOT_FOUND,
+            Json(crate::models::error_response(
+                "No tracker boxes found".to_string(),
+            )),
+        );
+    }
+
+    // Find the tracker box with the highest creation height (most recent)
+    let latest_tracker_box = tracker_boxes
+        .into_iter()
+        .max_by_key(|box_info| box_info.creation_height);
+
+    if let Some(tracker_box) = latest_tracker_box {
+        let response = crate::models::TrackerBoxIdResponse {
+            tracker_box_id: tracker_box.box_id,
+            timestamp: tracker_box.last_verified_height, // Using last_verified_height as timestamp
+            height: tracker_box.last_verified_height,
+        };
+
+        tracing::info!(
+            "Successfully retrieved latest tracker box ID: {}",
+            &response.tracker_box_id[..16]  // Log first 16 chars for privacy
+        );
+
+        (
+            StatusCode::OK,
+            Json(crate::models::success_response(response)),
+        )
+    } else {
+        tracing::info!("No tracker boxes found");
+        (
+            StatusCode::NOT_FOUND,
+            Json(crate::models::error_response(
+                "No tracker boxes found".to_string(),
+            )),
+        )
+    }
+}
+
 // Create a reserve creation payload for Ergo node's /wallet/payment/send API
 #[axum::debug_handler]
 pub async fn create_reserve_payload(

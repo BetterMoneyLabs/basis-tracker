@@ -464,6 +464,16 @@ async fn main() {
     // Extract the reserve tracker from the scanner before wrapping in Arc/Mutex
     let scanner_reserve_tracker = ergo_scanner.reserve_tracker.clone();
 
+    // Initialize tracker storage for the new API endpoint
+    let tracker_storage_path = std::path::Path::new("data").join("tracker_boxes");
+    let tracker_storage = match basis_store::persistence::TrackerStorage::open(tracker_storage_path) {
+        Ok(storage) => storage,
+        Err(e) => {
+            tracing::error!("Failed to initialize tracker storage: {:?}", e);
+            std::process::exit(1);
+        }
+    };
+
     let app_state = AppState {
         tx,
         event_store,
@@ -471,6 +481,7 @@ async fn main() {
         reserve_tracker: std::sync::Arc::new(Mutex::new(scanner_reserve_tracker)),
         config: std::sync::Arc::new(config.clone()),
         shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(shared_tracker_state_for_updater)),
+        tracker_storage,
     };
 
     // Build our application with routes - FIXED ROUTE ORDER
@@ -500,6 +511,7 @@ async fn main() {
         .route("/notes", get(get_all_notes)) // Get all notes with age
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
+        .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(
@@ -525,6 +537,7 @@ async fn main() {
     tracing::debug!("  GET /key-status/{{pubkey}}");
     tracing::debug!("  POST /redeem");
     tracing::debug!("  GET /proof");
+    tracing::debug!("  GET /tracker/latest-box-id");
 
     // Run our app with hyper
     let addr = config.socket_addr();
