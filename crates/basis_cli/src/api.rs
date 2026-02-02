@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use basis_store;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateNoteRequest {
@@ -350,6 +351,62 @@ impl TrackerClient {
         } else {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to create reserve: {}", error_text))
+        }
+    }
+}
+
+// Define the TrackerBoxIdResponse struct outside of the impl block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerBoxIdResponse {
+    pub tracker_box_id: String,
+    pub timestamp: u64,
+    pub height: u64,
+}
+
+impl TrackerClient {
+    // New methods for the redemption transaction generation
+
+    /// Get reserves for a specific issuer
+    pub async fn get_reserves_by_issuer(&self, pubkey: &str) -> Result<Vec<basis_store::ExtendedReserveInfo>> {
+        let url = format!("{}/reserves/issuer/{}", self.base_url, pubkey);
+        let response = ureq::get(&url).call()?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<Vec<basis_store::ExtendedReserveInfo>> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap_or_default())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get reserves for issuer {}: {}",
+                pubkey, error_text
+            ))
+        }
+    }
+
+    pub async fn get_latest_tracker_box_id(&self) -> Result<TrackerBoxIdResponse> {
+        let url = format!("{}/tracker/latest-box-id", self.base_url);
+        let response = ureq::get(&url).call()?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<TrackerBoxIdResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else if response.status() == 404 {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("No tracker box found: {}", error_text))
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get latest tracker box ID: {}",
+                error_text
+            ))
         }
     }
 }
