@@ -46,6 +46,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::transaction::TransactionCommands,
     },
+    /// Test operations
+    Test {
+        #[command(subcommand)]
+        cmd: commands::test_redemption::TestCommands,
+    },
     /// Interactive mode
     Interactive,
     /// Server status
@@ -73,6 +78,9 @@ async fn main() -> Result<()> {
         }
         Commands::Transaction { cmd } => {
             commands::transaction::handle_transaction_command(cmd, &client).await
+        }
+        Commands::Test { cmd } => {
+            commands::test_redemption::handle_test_command(cmd, &client).await
         }
         Commands::Interactive => {
             let mut interactive = interactive::InteractiveMode::new(account_manager, client);

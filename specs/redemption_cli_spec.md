@@ -278,7 +278,7 @@ The transaction will have two outputs:
 - `registers`: Empty object (no special registers needed for recipient)
 
 **Output 2 - Updated Reserve**:
-- `address`: The issuer's address (derived from issuer public key or retrieved from the original reserve box)
+- `address`: The reserve contract P2S address (from configuration: `ergo.basis_reserve_contract_p2s`)
 - `value`: Remaining collateral after redemption = original reserve value - redeemed amount - transaction fee
 - `assets`: Contains the tracker NFT token to maintain reserve identity
 - `registers`:
@@ -322,17 +322,23 @@ The transaction will have two outputs:
    - Call `GET /utils/rawToAddress/{recipient_pubkey}` to get the recipient address
    - Call `GET /utils/rawToAddress/{issuer_pubkey}` to get the issuer address (for the updated reserve output)
 
-### Step 6: Reserve Box Retrieval
-1. Query the Ergo node to retrieve the current reserve box details:
-   - Use `/utxo/byId/{reserve_box_id}` to get the reserve box
+### Step 6: Reserve Box Retrieval from Ergo Node
+1. Query the Ergo node directly to retrieve the current reserve box details:
+   - Use `GET /utxo/byId/{reserve_box_id}` on the Ergo node API at the configured node URL
+   - Include API key in header if required: `api_key: <ergo_api_key>`
    - Extract the current value, assets, and register values
    - Verify the reserve has sufficient collateral for the redemption
+   - Serialize the box to bytes using the node's serialization format
+   - The serialized bytes will be used in the `inputsRaw` field of the transaction
 
-### Step 7: Tracker Box Retrieval
-1. Query the Ergo node to retrieve the current tracker box details:
-   - Use `/utxo/byId/{tracker_box_id}` to get the tracker box
+### Step 7: Tracker Box Retrieval from Ergo Node
+1. Query the Ergo node directly to retrieve the current tracker box details:
+   - Use `GET /utxo/byId/{tracker_box_id}` on the Ergo node API at the configured node URL
+   - Include API key in header if required: `api_key: <ergo_api_key>`
    - Extract the current AVL tree root digest from R5 register
    - Extract the tracker public key from R4 register
+   - Serialize the tracker box to bytes using the node's serialization format
+   - The serialized tracker box bytes will be used in the `dataInputsRaw` field of the transaction
 
 ### Step 8: AVL Tree Update
 1. Generate the updated AVL tree state after the redemption:
@@ -371,7 +377,7 @@ The transaction will have two outputs:
        "<hex_encoded_serialized_reserve_box>"
      ],
      "dataInputsRaw": [
-       "<hex_encoded_serialized_tracker_box>"
+       "<hex_encoded_serialized_tracker_box_from_node_api>" // Actual serialized tracker box bytes retrieved from the Ergo node via the /utxo/byId/{box_id} API
      ]
    }
    ```

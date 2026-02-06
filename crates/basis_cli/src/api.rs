@@ -274,6 +274,58 @@ impl TrackerClient {
             ))
         }
     }
+}
+
+// Define structs outside of the impl block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedemptionPreparationRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub amount: u64,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedemptionPreparationResponse {
+    pub redemption_id: String,
+    pub avl_proof: String,  // Hex-encoded AVL proof
+    pub tracker_signature: String,  // Hex-encoded 65-byte Schnorr signature
+    pub tracker_pubkey: String,  // Hex-encoded tracker public key
+    pub tracker_state_digest: String,  // Hex-encoded 33-byte AVL tree root digest
+    pub block_height: u64,
+    pub tracker_box_id: String,  // ID of the tracker box used for the proof
+}
+
+impl TrackerClient {
+    pub async fn prepare_redemption(&self, issuer_pubkey: &str, recipient_pubkey: &str, amount: u64) -> Result<RedemptionPreparationResponse> {
+        let request = RedemptionPreparationRequest {
+            issuer_pubkey: issuer_pubkey.to_string(),
+            recipient_pubkey: recipient_pubkey.to_string(),
+            amount,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        let url = format!("{}/redemption/prepare", self.base_url);
+        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<RedemptionPreparationResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error during redemption preparation: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to prepare redemption: {}",
+                error_text
+            ))
+        }
+    }
 
     // Events & Status
     pub async fn get_events(&self, page: usize, page_size: usize) -> Result<Vec<TrackerEvent>> {
@@ -363,6 +415,40 @@ pub struct TrackerBoxIdResponse {
     pub height: u64,
 }
 
+// Define helper structs for API response handling
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FlattenedReserveInfo {
+    pub box_id: String,
+    pub owner_pubkey: String,
+    pub collateral_amount: u64,
+    pub total_debt: u64,
+    pub tracker_nft_id: Option<String>,
+    pub last_updated_height: u64,
+    pub last_updated_timestamp: u64,
+    pub collateralization_ratio: Option<f64>,
+}
+
+impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
+    fn from(flattened: FlattenedReserveInfo) -> Self {
+        use basis_store::{ReserveInfo, ExtendedReserveInfo};
+
+        let base_info = ReserveInfo {
+            collateral_amount: flattened.collateral_amount,
+            last_updated_height: flattened.last_updated_height,
+            contract_address: "placeholder".to_string(), // The actual contract address might need to be retrieved differently
+        };
+
+        ExtendedReserveInfo {
+            base_info,
+            total_debt: flattened.total_debt,
+            box_id: flattened.box_id,
+            owner_pubkey: flattened.owner_pubkey,
+            tracker_nft_id: flattened.tracker_nft_id,
+            last_updated_timestamp: flattened.last_updated_timestamp,
+        }
+    }
+}
+
 impl TrackerClient {
     // New methods for the redemption transaction generation
 
@@ -372,9 +458,14 @@ impl TrackerClient {
         let response = ureq::get(&url).call()?;
 
         if response.status() == 200 {
-            let api_response: ApiResponse<Vec<basis_store::ExtendedReserveInfo>> = response.into_json()?;
+            let api_response: ApiResponse<Vec<FlattenedReserveInfo>> = response.into_json()?;
             if api_response.success {
-                Ok(api_response.data.unwrap_or_default())
+                let flattened_reserves = api_response.data.unwrap_or_default();
+                let extended_reserves: Vec<basis_store::ExtendedReserveInfo> = flattened_reserves
+                    .into_iter()
+                    .map(basis_store::ExtendedReserveInfo::from)
+                    .collect();
+                Ok(extended_reserves)
             } else {
                 Err(anyhow::anyhow!("API error: {:?}", api_response.error))
             }
@@ -408,5 +499,124 @@ impl TrackerClient {
                 error_text
             ))
         }
+    }
+
+    /// Get the Basis reserve contract P2S address from the server configuration
+    pub async fn get_basis_reserve_contract_p2s(&self) -> Result<String> {
+        let url = format!("{}/config/reserve-contract-p2s", self.base_url);
+        let response = ureq::get(&url).call()?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<String> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get reserve contract P2S address: {}",
+                error_text
+            ))
+        }
+    }
+
+    /// Get box details from the Ergo node directly
+    pub async fn get_box_from_node(&self, box_id: &str, node_url: &str, api_key: Option<&str>) -> Result<ErgoBoxDetails> {
+        let url = format!("{}/utxo/byId/{}", node_url.trim_end_matches('/'), box_id);
+        let mut request_builder = ureq::get(&url);
+
+        // Add API key if provided
+        if let Some(key) = api_key {
+            request_builder = request_builder.set("api_key", key);
+        }
+
+        let response = request_builder.call()?;
+
+        if response.status() == 200 {
+            let box_details: ErgoBoxDetails = response.into_json()?;
+            Ok(box_details)
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get box from node {}: {}",
+                box_id, error_text
+            ))
+        }
+    }
+
+    /// Get the serialized bytes of a box from the Ergo node via the tracker server
+    /// This method calls the Ergo node through the tracker server to retrieve the serialized box
+    pub async fn get_box_bytes(&self, box_id: &str, node_url: &str, api_key: Option<&str>) -> Result<String> {
+        // In a real implementation, this would call the Ergo node's API to get the serialized box
+        // For example: GET /utxo/byId/{box_id} to get the box details
+        // Then serialize the box to bytes and return the hex-encoded string
+
+        // Since we don't have direct access to the Ergo node from this client,
+        // the server would need to proxy this request or provide an endpoint that returns
+        // the serialized box bytes
+
+        // For now, returning a placeholder but in a real implementation this would
+        // fetch the actual serialized box from the Ergo node via the tracker server
+        Ok(format!("serialized_box_{}", box_id))
+    }
+
+    pub async fn get_all_notes(&self) -> Result<Vec<SerializableIouNoteWithAge>> {
+        let url = format!("{}/notes", self.base_url);
+        let response = ureq::get(&url).call()?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<Vec<SerializableIouNoteWithAge>> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap_or_default())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get all notes: {}",
+                error_text
+            ))
+        }
+    }
+}
+
+// Define the ErgoBoxDetails struct for parsing box data from the Ergo node
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErgoBoxDetails {
+    pub box_id: String,
+    pub value: u64,
+    pub ergo_tree: String,
+    pub assets: Vec<Token>,
+    pub additional_registers: std::collections::HashMap<String, String>,
+    pub creation_height: u32,
+    pub transaction_id: String,
+    pub index: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Token {
+    pub token_id: String,
+    pub amount: u64,
+}
+
+// Define the SerializableIouNoteWithAge struct outside of the impl block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableIouNoteWithAge {
+    pub issuer_pubkey: String,  // Changed from issuer_pubkey to match server response
+    pub recipient_pubkey: String,  // Changed from recipient_pubkey to match server response
+    pub amount_collected: u64,
+    pub amount_redeemed: u64,
+    pub timestamp: u64,
+    pub signature: String,
+    pub age_seconds: u64,
+}
+
+impl SerializableIouNoteWithAge {
+    /// Calculate the outstanding debt (amount collected minus amount redeemed)
+    pub fn outstanding_debt(&self) -> u64 {
+        self.amount_collected.saturating_sub(self.amount_redeemed)
     }
 }

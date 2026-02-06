@@ -16,6 +16,57 @@ use crate::{
     TrackerBoxInfo, TrackerStateManager,
 };
 
+use std::collections::HashMap;
+
+/// Wrapper struct for the actual API response from /scan/unspentBoxes endpoint
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ApiScanBox {
+    #[serde(rename = "box")]
+    inner_box: ApiInnerBox,
+    #[serde(rename = "confirmationsNum")]
+    confirmations_num: u32,
+    address: String,
+    #[serde(rename = "creationTransaction")]
+    creation_transaction: String,
+    scans: Vec<i32>,
+    onchain: bool,
+    #[serde(rename = "creationOutIndex")]
+    creation_out_index: u32,
+    #[serde(rename = "spendingTransaction")]
+    spending_transaction: Option<String>,
+    #[serde(rename = "spendingHeight")]
+    spending_height: Option<u64>,
+    #[serde(rename = "inclusionHeight")]
+    inclusion_height: u64,
+    spent: bool,
+}
+
+/// The inner box structure from the API response
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ApiInnerBox {
+    #[serde(rename = "boxId")]
+    box_id: String,
+    value: u64,
+    #[serde(rename = "ergoTree")]
+    ergo_tree: String,
+    #[serde(rename = "creationHeight")]
+    creation_height: u64,
+    #[serde(rename = "transactionId")]
+    transaction_id: String,
+    #[serde(rename = "additionalRegisters")]
+    additional_registers: HashMap<String, String>,
+    assets: Vec<ApiBoxAsset>,
+    index: u32,
+}
+
+/// Asset structure from the API response
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ApiBoxAsset {
+    #[serde(rename = "tokenId")]
+    token_id: String,
+    amount: u64,
+}
+
 #[derive(Error, Debug)]
 pub enum TrackerScannerError {
     #[error("Tracker scanner error: {0}")]
@@ -358,13 +409,39 @@ impl TrackerServerState {
             )));
         }
 
-        let boxes: Vec<ScanBox> = response
-            .json()
-            .await
-            .map_err(|e| TrackerScannerError::JsonError(format!("Failed to parse boxes: {}", e)))?;
+        let response_text = response.text().await.map_err(|e| {
+            error!("Failed to read response text: {}", e);
+            TrackerScannerError::HttpError(format!("Failed to read response text: {}", e))
+        })?;
 
-        info!("Retrieved {} unspent tracker boxes", boxes.len());
-        
+        // Parse the JSON response as the API format first
+        let api_boxes: Vec<ApiScanBox> = serde_json::from_str(&response_text)
+            .map_err(|e| {
+                error!("Failed to parse API tracker boxes JSON: {}", e);
+                error!("Raw response was: {}", response_text);
+                TrackerScannerError::JsonError(format!("Failed to parse API tracker boxes: {}", e))
+            })?;
+
+        // Convert API boxes to our internal ScanBox format
+        let mut boxes = Vec::new();
+        for api_box in api_boxes {
+            let converted_box = ScanBox {
+                box_id: api_box.inner_box.box_id,
+                value: api_box.inner_box.value,
+                ergo_tree: api_box.inner_box.ergo_tree,
+                creation_height: api_box.inner_box.creation_height,
+                transaction_id: api_box.inner_box.transaction_id,
+                additional_registers: api_box.inner_box.additional_registers,
+                assets: api_box.inner_box.assets.into_iter().map(|a| crate::ergo_scanner::BoxAsset {
+                    token_id: a.token_id,
+                    amount: a.amount,
+                }).collect(),
+            };
+            boxes.push(converted_box);
+        }
+
+        info!("Retrieved {} unspent tracker boxes (converted from API format)", boxes.len());
+
         Ok(boxes)
     }
 
@@ -399,11 +476,16 @@ impl TrackerServerState {
             .ok_or_else(|| TrackerScannerError::MissingRegister("R5".to_string()))?
             .clone();
 
-        let last_verified_height_str = scan_box.additional_registers.get("R6")
-            .ok_or_else(|| TrackerScannerError::MissingRegister("R6".to_string()))?;
-
-        let last_verified_height = last_verified_height_str.parse::<u64>()
-            .map_err(|e| TrackerScannerError::InvalidRegisterData(format!("Invalid R6 register: {}", e)))?;
+        let last_verified_height = match scan_box.additional_registers.get("R6") {
+            Some(last_verified_height_str) => {
+                last_verified_height_str.parse::<u64>()
+                    .map_err(|e| TrackerScannerError::InvalidRegisterData(format!("Invalid R6 register: {}", e)))?
+            },
+            None => {
+                // Use creation_height as fallback if R6 is not present
+                scan_box.creation_height
+            }
+        };
 
         // Validate register data (basic sanity checks)
         if tracker_pubkey.len() != 66 { // 33 bytes hex encoded (after stripping 0x07 prefix if present)
@@ -412,9 +494,18 @@ impl TrackerServerState {
             ));
         }
 
-        if state_commitment.len() != 64 { // 32 bytes hex encoded
+        // The R5 register contains the serialized SAvlTree which can vary in length
+        // It should start with 0x64 (SAvlTree type identifier) followed by the tree data
+        if !state_commitment.starts_with("64") {
             return Err(TrackerScannerError::InvalidRegisterData(
-                format!("Invalid state commitment length: {} (expected 64 hex chars)", state_commitment.len())
+                format!("Invalid state commitment format: does not start with SAvlTree type identifier (64)")
+            ));
+        }
+
+        // Optionally, we can add a reasonable length check to prevent extremely large values
+        if state_commitment.len() < 66 { // At least 64 + 2 chars for the type identifier
+            return Err(TrackerScannerError::InvalidRegisterData(
+                format!("Invalid state commitment length: {} (too short)", state_commitment.len())
             ));
         }
 

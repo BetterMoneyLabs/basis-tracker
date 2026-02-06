@@ -2139,3 +2139,34 @@ pub async fn create_reserve_payload(
         Json(crate::models::success_response(response)),
     )
 }
+
+// Get the Basis reserve contract P2S address from server configuration
+#[axum::debug_handler]
+pub async fn get_basis_reserve_contract_p2s(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<String>>) {
+    tracing::debug!("Getting Basis reserve contract P2S address from configuration");
+
+    // Get the reserve contract address from the server configuration
+    let config = match crate::config::AppConfig::load() {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("Failed to load configuration: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Failed to load server configuration".to_string(),
+                )),
+            );
+        }
+    };
+
+    let reserve_contract_address = config.basis_reserve_contract_p2s();
+
+    tracing::info!("Successfully retrieved Basis reserve contract P2S address: {}", reserve_contract_address);
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(reserve_contract_address.to_string())),
+    )
+}

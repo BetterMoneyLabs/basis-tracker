@@ -137,6 +137,20 @@ async fn main() {
                         match tracker_scanner.ensure_scan_registered().await {
                             Ok(scan_id) => {
                                 tracing::info!("Tracker scan registered with ID: {}", scan_id);
+
+                                // Process tracker boxes once to populate storage
+                                match tracker_scanner.process_tracker_boxes().await {
+                                    Ok(tracker_boxes) => {
+                                        tracing::info!("Processed {} tracker boxes", tracker_boxes.len());
+                                        if let Err(e) = tracker_scanner.update_tracker_state(&tracker_boxes).await {
+                                            tracing::error!("Failed to update tracker state: {}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to process tracker boxes: {}", e);
+                                    }
+                                }
+
                                 tracing::info!("Tracker scanner initialization completed successfully");
                             },
                             Err(e) => {
@@ -512,6 +526,7 @@ async fn main() {
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
+        .route("/config/reserve-contract-p2s", get(get_basis_reserve_contract_p2s))
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(

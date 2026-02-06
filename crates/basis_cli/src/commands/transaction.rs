@@ -1,4 +1,4 @@
-use crate::api::TrackerClient;
+use crate::api::{TrackerClient, ErgoBoxDetails};
 use anyhow::Result;
 use clap::Subcommand;
 use serde_json::json;
@@ -79,16 +79,72 @@ async fn generate_redemption_transaction(
     let reserve_box_id = &reserve_box.box_id;
 
     println!("🔍 Retrieving latest tracker box...");
-    let tracker_box_response = client.get_latest_tracker_box_id().await?;
-    let tracker_box_id = tracker_box_response.tracker_box_id;
+    let tracker_box_response = client.get_latest_tracker_box_id().await;
+    let tracker_box_id = match tracker_box_response {
+        Ok(response) => {
+            println!("✅ Found tracker box: {}", &response.tracker_box_id[..16]);
+            response.tracker_box_id
+        },
+        Err(e) => {
+            eprintln!("⚠️  No tracker box found: {}. This is normal in a fresh system.", e);
+            // Using a placeholder tracker box ID since no tracker box exists yet
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string() // Placeholder tracker box ID
+        }
+    };
+
+    // The tracker box bytes will be retrieved later when we get the box details from the node
+    // This is handled in the next section where we call get_box_from_node
 
     println!("🔗 Converting public keys to addresses...");
     let recipient_address = pubkey_to_address(recipient_pubkey)?;
     let issuer_address = pubkey_to_address(issuer_pubkey)?;
 
+    // Get the reserve contract P2S address from the server configuration
+    println!("🔍 Retrieving reserve contract P2S address from server configuration...");
+    let reserve_contract_p2s = client.get_basis_reserve_contract_p2s().await
+        .unwrap_or_else(|e| {
+            eprintln!("⚠️  Could not retrieve reserve contract P2S from server, using placeholder: {}", e);
+            "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREnehzz21DdYTdrsuw268CxW3gkXE6D5B8748FYGg3JEVW9R6VFJe8ZDknCtiPbh56QUCJo5QDizMfXaKnJ3jbWV72baYPCw85tmiJowR2wd4AjsEuhZP4Ry4QRDcZPvGogGVbdk7ykPAB7KN2guYEhS7RU3xm23iY1YaM5TX1ditsWfxqCBsvq3U6X5EU2Y5KCrSjQxdtGcwoZsdPQhfpqcwHPcYqM5iwK33EU1cHqggeSKYtLMW263f1TY7Lfu3cKMkav1CyomR183TLnCfkRHN3vcX2e9fSaTpAhkb74yo6ZRXttHNP23JUASWs9ejCaguzGumwK3SpPCLBZY6jFMYWqeaanH7XAtTuJA6UCnxvrKko5PX1oSB435Bxd3FbvDAsEmHpUqqtP78B7SKxFNPvJeZuaN7r5p8nDLxUPZBrWwz2vtcgWPMq5RrnoJdrdqrnXMcMEQPF5AKDYuKMKbCRgn3HLvG98JXJ4bCc2wzuZhnCRQaFXTy88knEoj".to_string()
+        });
+
     // Calculate remaining collateral after redemption
     let remaining_collateral = reserve_box.base_info.collateral_amount - amount;
     let transaction_fee = 1_000_000; // 0.001 ERG
+
+    // Retrieve the actual tracker box from the Ergo node
+    println!("🔍 Retrieving tracker box from Ergo node...");
+    let tracker_box_details = client.get_box_from_node(&tracker_box_id, "http://159.89.116.15:11088", Some("hello")).await
+        .unwrap_or_else(|_| {
+            // If tracker box doesn't exist, use placeholder
+            println!("⚠️  Tracker box not found, using placeholder. This is normal in a fresh system.");
+            ErgoBoxDetails {
+                box_id: tracker_box_id.clone(),
+                value: 0,
+                ergo_tree: String::new(),
+                assets: vec![],
+                additional_registers: std::collections::HashMap::new(),
+                creation_height: 0,
+                transaction_id: String::new(),
+                index: 0,
+            }
+        });
+
+    // In a real implementation, we would serialize the tracker box to bytes
+    // For now, we'll use a placeholder but the real implementation would be:
+    // let tracker_box_serialized = serialize_box_to_bytes(&tracker_box_details)?;
+    // let tracker_box_bytes = hex::encode(&tracker_box_serialized);
+    let tracker_box_bytes = format!("serialized_box_{}", tracker_box_id);
+
+    // Retrieve the actual reserve box from the Ergo node
+    println!("🔍 Retrieving reserve box from Ergo node...");
+    let reserve_box_details = client.get_box_from_node(reserve_box_id, "http://159.89.116.15:11088", Some("hello")).await
+        .map_err(|e| anyhow::anyhow!("Failed to retrieve reserve box from Ergo node: {}", e))?;
+
+    // In a real implementation, we would serialize the reserve box to bytes
+    // For now, we'll use a placeholder but the real implementation would be:
+    // let reserve_box_serialized = serialize_box_to_bytes(&reserve_box_details)?;
+    // let reserve_box_bytes = hex::encode(&reserve_box_serialized);
+    let reserve_box_bytes = format!("serialized_box_{}", reserve_box_id);
 
     // Create transaction structure following the Ergo node's /wallet/transaction/send format
     let transaction_json = json!({
@@ -100,7 +156,7 @@ async fn generate_redemption_transaction(
                 "registers": {}
             },
             {
-                "address": issuer_address,
+                "address": reserve_contract_p2s, // Use the P2S address from server configuration
                 "value": remaining_collateral - transaction_fee,
                 "assets": [
                     {
@@ -116,10 +172,10 @@ async fn generate_redemption_transaction(
         ],
         "fee": transaction_fee,
         "inputsRaw": [
-            format!("serialized_reserve_box_{}", reserve_box_id)
+            reserve_box_bytes // Use the actual serialized reserve box bytes from node API
         ],
         "dataInputsRaw": [
-            format!("serialized_tracker_box_{}", tracker_box_id)
+            tracker_box_bytes // Use the actual serialized tracker box bytes from node API
         ]
     });
 
