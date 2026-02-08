@@ -81,8 +81,9 @@ The scanner fetches unspent boxes matching the registered scan using the `/scan/
 Each box retrieved from the scan is processed as follows:
 1. **Box Parsing**: Extract box information including ID, value, creation height, and register data
 2. **Reserve Information Extraction**: Parse key registers:
-   - R4: Contains the owner's public key
-   - R5: Contains an optional tracker NFT ID
+   - R4: Contains the owner's public key (33-byte compressed secp256k1 point)
+   - R5: Contains the AVL tree root digest (33-byte commitment to all notes owed by this issuer)
+   - R6: Contains the NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to
    - Box value: The collateral amount
 3. **State Updates**: Update both in-memory tracker and persistent storage with the new reserve information
 4. **Spent Box Detection**: Compare current scan results with previously known reserves to identify spent boxes
@@ -144,6 +145,16 @@ Tracker boxes contain different data than reserve boxes:
    - R5: Contains the AVL+ tree root digest (33-byte commitment to all notes in the system)
    - R6: Contains the last verified height
 3. **Tracker State Updates**: Update the tracker state manager with cross-verification information
+
+### Processing Reserve Boxes
+
+Reserve boxes contain the following key information:
+1. **Asset Validation**: Verify the box contains the tracker NFT token
+2. **Register Information Extraction**: Parse key registers:
+   - R4: Contains the issuer's public key (33-byte compressed secp256k1 point)
+   - R5: Contains the AVL tree root digest (33-byte commitment to all notes owed by this issuer)
+   - R6: Contains the NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to
+3. **Reserve State Updates**: Update the reserve tracker with collateralization ratios and reserve status
 
 ## Data Models
 

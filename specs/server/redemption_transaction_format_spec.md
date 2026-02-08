@@ -73,7 +73,8 @@ A redemption transaction typically has the following structure:
       ],
       "registers": {
         "R4": "02d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b",
-        "R5": "hex_encoded_avl_tree_root_digest"
+        "R5": "hex_encoded_avl_tree_root_digest",
+        "R6": "hex_encoded_tracker_nft_id"
       }
     }
   ],
@@ -99,9 +100,10 @@ A redemption transaction typically has the following structure:
 - `address`: The issuer's address (where remaining collateral goes)
 - `value`: Remaining collateral after redemption (original collateral - redeemed amount - fee)
 - `assets`: Contains the tracker NFT token to maintain reserve identity
-- `registers`: 
-  - `R4`: The issuer's public key (33-byte compressed format)
-  - `R5`: The AVL tree root digest (32-byte hash + 1-byte height)
+- `registers`:
+  - `R4`: The issuer's public key (33-byte compressed format) - identifies the reserve owner
+  - `R5`: The AVL tree root digest (32-byte hash + 1-byte height) - commitment to current tracker state
+  - `R6`: The NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to
 
 #### 3. Transaction Metadata
 - `fee`: Transaction fee (typically 1000000 nanoERG = 0.001 ERG)
@@ -131,7 +133,8 @@ A redemption transaction typically has the following structure:
       ],
       "registers": {
         "R4": "02d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b",
-        "R5": "a1b2c3d4e5f67890123456789012345678901234567890123456789012345678"
+        "R5": "a1b2c3d4e5f67890123456789012345678901234567890123456789012345678",
+        "R6": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b"
       }
     }
   ],

@@ -165,6 +165,7 @@ For this testing scenario, we will use the following predetermined keys for Alic
      - `assets`: The tokens in the box (should include the tracker NFT)
      - `additional_registers.R4`: Alice's public key (`027e5a0a99998fa10474af3a2a704ecc657e4928300e020ac0e422627e8f01a087`)
      - `additional_registers.R5`: The current AVL tree root digest for this reserve
+     - `additional_registers.R6`: The tracker NFT ID (bytes) - identifies which tracker server this reserve is linked to
      - `creation_height`: The block height when the box was created
 
 3. **Serialize Reserve Box for Transaction**:
@@ -197,7 +198,8 @@ For this testing scenario, we will use the following predetermined keys for Alic
            ],
            "registers": {
              "R4": "027e5a0a99998fa10474af3a2a704ecc657e4928300e020ac0e422627e8f01a087",
-             "R5": "<updated_avl_tree_digest_after_redemption>"
+             "R5": "<updated_avl_tree_digest_after_redemption>",
+             "R6": "<tracker_nft_id_from_alice_reserve>"
            }
          }
        ],
@@ -217,6 +219,10 @@ For this testing scenario, we will use the following predetermined keys for Alic
      - `fee`: Transaction fee (typically 1,000,000 nanoERG)
      - `inputsRaw`: Array containing the hex-encoded serialized bytes of Alice's reserve box being spent (retrieved from Ergo node API)
      - `dataInputsRaw`: Array containing the hex-encoded serialized bytes of the tracker box (retrieved from Ergo node API)
+   - When constructing the updated reserve output, ensure that:
+     - R4 register contains Alice's public key (same as original)
+     - R5 register contains the updated AVL tree root digest after redemption
+     - R6 register contains the tracker NFT ID (preserved from the original reserve box to maintain tracker association)
 
 3. **File Output**:
    - Write the transaction JSON to a file with a descriptive name (e.g., `alice_to_bob_redemption_transaction_{timestamp}.json`)

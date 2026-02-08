@@ -76,10 +76,11 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 
 ### Tracker Box Registers
 
-The tracker box uses Ergo registers R4 and R5 to store commitment information:
+The tracker box uses Ergo registers R4, R5, and R6 to store commitment information:
 
 - `R4`: Contains the tracker's public key (33-byte compressed secp256k1 point) that identifies the tracker server
 - `R5`: Contains the AVL+ tree root digest (33-byte commitment to all notes in the system), updated whenever notes are added or modified
+- `R6`: Contains the last verified height (for cross-verification purposes)
 
 ### Tracker State Digest Format
 
@@ -88,6 +89,14 @@ The tracker state digest follows the AVL+ tree format (33 bytes total):
 - **Bytes 2-33**: 32-byte hash of the AVL tree root (64 hex characters when encoded)
 - **Total**: 33 bytes (66 hex characters when hex-encoded)
 - **Type Identifier**: When serialized as SAvlTree, includes a type identifier (0x64) as the first byte of the serialized format
+
+### Reserve Box Registers
+
+The reserve box uses Ergo registers R4, R5, and R6 to store commitment and identification information:
+
+- `R4`: Contains the issuer's public key (33-byte compressed secp256k1 point) that identifies the reserve owner
+- `R5`: Contains the AVL tree root digest (33-byte commitment to all notes owed by this issuer), updated when notes are redeemed
+- `R6`: Contains the NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to
 
 ### IOU Note Structure
 
@@ -193,6 +202,7 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
     - `registers`: Map of register values
       - `R4`: Owner public key from request
       - `R5`: Tracker NFT ID (if configured) or provided NFT ID
+      - `R6`: Tracker NFT ID (bytes) - identifies which tracker server this reserve is linked to
   - `fee`: Transaction fee amount from configuration
   - `change_address`: "default" placeholder (filled by wallet)
 

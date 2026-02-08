@@ -284,6 +284,7 @@ The transaction will have two outputs:
 - `registers`:
   - `R4`: The issuer's public key (33-byte compressed format) - same as `--issuer_pubkey`
   - `R5`: The updated AVL tree root digest (32-byte hash + 1-byte height) reflecting the redeemed note
+  - `R6`: The NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to
 
 #### 4. Transaction Metadata
 - `fee`: Transaction fee (typically 1,000,000 nanoERG = 0.001 ERG)
@@ -340,11 +341,13 @@ The transaction will have two outputs:
    - Serialize the tracker box to bytes using the node's serialization format
    - The serialized tracker box bytes will be used in the `dataInputsRaw` field of the transaction
 
-### Step 8: AVL Tree Update
+### Step 8: AVL Tree Update and Register Preservation
 1. Generate the updated AVL tree state after the redemption:
    - Update the note's `amount_redeemed` field by adding the redemption amount
    - Update the note's timestamp to current time
    - Generate the new AVL tree root digest reflecting the updated note state
+2. Preserve existing register values:
+   - R6 register value (tracker NFT ID) should be copied from the input reserve box to maintain tracker association
 
 ### Step 9: Transaction Assembly
 1. Create the transaction structure following the format specified in transaction_assembly_serialization.md:
@@ -368,7 +371,8 @@ The transaction will have two outputs:
          ],
          "registers": {
            "R4": "<issuer_pubkey>",
-           "R5": "<updated_avl_tree_digest>"
+           "R5": "<updated_avl_tree_digest>",
+           "R6": "<tracker_nft_id>"
          }
        }
      ],
