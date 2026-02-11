@@ -31,6 +31,8 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::account::AccountCommands,
     },
+    /// Generate a new secp256k1 keypair
+    GenerateKeypair(commands::keypair::GenerateKeypairArgs),
     /// Note operations
     Note {
         #[command(subcommand)]
@@ -69,6 +71,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Account { cmd } => {
             commands::account::handle_account_command(cmd, &mut account_manager).await
+        }
+        Commands::GenerateKeypair(args) => {
+            commands::keypair::handle_generate_keypair_command(args).await
         }
         Commands::Note { cmd } => {
             commands::note::handle_note_command(cmd, &account_manager, &client).await
