@@ -51,7 +51,7 @@ pub async fn get_all_reserves(
                         owner_pubkey: decode_potentially_double_hex_encoded(&info.owner_pubkey),
                         collateral_amount: info.base_info.collateral_amount,
                         total_debt: info.total_debt,
-                        tracker_nft_id: info.tracker_nft_id,
+                        tracker_nft_id: info.base_info.tracker_nft_id.clone(),
                         last_updated_height: info.base_info.last_updated_height,
                         last_updated_timestamp: info.last_updated_timestamp,
                         collateralization_ratio,
@@ -101,7 +101,7 @@ pub async fn get_reserves_by_issuer(
                         owner_pubkey: decode_potentially_double_hex_encoded(&info.owner_pubkey),
                         collateral_amount: info.base_info.collateral_amount,
                         total_debt: info.total_debt,
-                        tracker_nft_id: info.tracker_nft_id,
+                        tracker_nft_id: info.base_info.tracker_nft_id.clone(),
                         last_updated_height: info.base_info.last_updated_height,
                         last_updated_timestamp: info.last_updated_timestamp,
                         collateralization_ratio,
@@ -127,6 +127,51 @@ pub async fn get_reserves_by_issuer(
     }
 }
 
+/// Get a specific reserve by box ID
+#[axum::debug_handler]
+pub async fn get_reserve_by_box_id(
+    State(state): State<AppState>,
+    axum::extract::Path(box_id): axum::extract::Path<String>,
+) -> (StatusCode, Json<ApiResponse<Option<SerializableReserveInfo>>>) {
+    tracing::debug!("Getting reserve by box ID: {}", box_id);
+
+    // Get reserve storage from scanner and query database directly
+    let scanner = state.ergo_scanner.lock().await;
+    let reserve_storage = scanner.reserve_storage();
+
+    // Get the specific reserve from database
+    match reserve_storage.get_reserve(&box_id) {
+        Ok(Some(reserve_info)) => {
+            let collateralization_ratio = reserve_info.collateralization_ratio();
+            let serializable_reserve = SerializableReserveInfo {
+                box_id: reserve_info.box_id,
+                owner_pubkey: decode_potentially_double_hex_encoded(&reserve_info.owner_pubkey),
+                collateral_amount: reserve_info.base_info.collateral_amount,
+                total_debt: reserve_info.total_debt,
+                tracker_nft_id: reserve_info.base_info.tracker_nft_id.clone(),
+                last_updated_height: reserve_info.base_info.last_updated_height,
+                last_updated_timestamp: reserve_info.last_updated_timestamp,
+                collateralization_ratio,
+            };
+
+            tracing::info!("Successfully retrieved reserve with box ID: {}", box_id);
+
+            (StatusCode::OK, Json(success_response(Some(serializable_reserve))))
+        }
+        Ok(None) => {
+            tracing::info!("Reserve with box ID {} not found", box_id);
+            (StatusCode::NOT_FOUND, Json(success_response(None)))
+        }
+        Err(e) => {
+            tracing::error!("Failed to get reserve from database: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response("Failed to retrieve reserve from database".to_string())),
+            )
+        }
+    }
+}
+
 /// Serializable version of ExtendedReserveInfo for API responses
 #[derive(Debug, Serialize)]
 pub struct SerializableReserveInfo {
@@ -134,7 +179,7 @@ pub struct SerializableReserveInfo {
     pub owner_pubkey: String,
     pub collateral_amount: u64,
     pub total_debt: u64,
-    pub tracker_nft_id: Option<String>,
+    pub tracker_nft_id: String, // Tracker NFT ID from R6 register (hex-encoded serialized SColl(SByte) format following byte_array_register_serialization.md spec)
     pub last_updated_height: u64,
     pub last_updated_timestamp: u64,
     pub collateralization_ratio: f64,

@@ -29,8 +29,6 @@ pub struct ExtendedReserveInfo {
     pub box_id: String,
     /// Owner's public key (hex encoded)
     pub owner_pubkey: String,
-    /// Tracker NFT ID (if any, hex encoded)
-    pub tracker_nft_id: Option<String>,
     /// Last update timestamp
     pub last_updated_timestamp: u64,
 }
@@ -226,11 +224,11 @@ impl ExtendedReserveInfo {
                 collateral_amount,
                 last_updated_height,
                 contract_address: "".to_string(), // Placeholder
+                tracker_nft_id: tracker_nft_id.map(|id| hex::encode(id)).unwrap_or_else(|| "".to_string()),
             },
             total_debt: 0,
             box_id: hex::encode(box_id),
             owner_pubkey: hex::encode(owner_pubkey),
-            tracker_nft_id: tracker_nft_id.map(hex::encode),
             last_updated_timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -263,6 +261,7 @@ mod tests {
         let retrieved = tracker.get_reserve(&reserve_info.box_id).unwrap();
         assert_eq!(retrieved.base_info.collateral_amount, 1000000000);
         assert_eq!(retrieved.total_debt, 0);
+        assert_eq!(retrieved.base_info.tracker_nft_id, hex::encode(b"test_tracker_nft_1234567890"));
 
         // Add debt
         tracker.add_debt(&reserve_info.box_id, 500000000).unwrap(); // 0.5 ERG debt
@@ -305,11 +304,11 @@ mod tests {
                 collateral_amount: 1000,
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
+                tracker_nft_id: "test_nft_id".to_string(),
             },
             total_debt: 0,
             box_id: "test".to_string(),
             owner_pubkey: "test".to_string(),
-            tracker_nft_id: None,
             last_updated_timestamp: 0,
         };
 
@@ -321,6 +320,7 @@ mod tests {
                 collateral_amount: 1000,
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
+                tracker_nft_id: "test_nft_id".to_string(),
             },
             total_debt: 800,
             ..reserve.clone()
@@ -336,6 +336,7 @@ mod tests {
                 collateral_amount: 1000,
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
+                tracker_nft_id: "test_nft_id".to_string(),
             },
             total_debt: 1000,
             ..reserve

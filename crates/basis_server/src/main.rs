@@ -523,6 +523,7 @@ async fn main() {
         .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
         .route("/notes/recipient/{pubkey}", get(get_notes_by_recipient))
         .route("/notes", get(get_all_notes)) // Get all notes with age
+        .route("/reserves/{box_id}", get(get_reserve_by_box_id))
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
@@ -545,6 +546,7 @@ async fn main() {
     tracing::debug!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
     tracing::debug!("  GET /notes (all notes with age)");
     tracing::debug!("  GET /reserves");
+    tracing::debug!("  GET /reserves/{{box_id}}");
     tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
     tracing::debug!("  POST /reserves/create");
     tracing::debug!("  GET /events");

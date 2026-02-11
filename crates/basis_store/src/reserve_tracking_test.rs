@@ -49,7 +49,7 @@ mod tests {
                     let mut registers = std::collections::HashMap::new();
                     // Use a valid hex-encoded compressed public key (33 bytes = 66 hex chars)
                     registers.insert("R4".to_string(), "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb".to_string());
-                    registers.insert("R5".to_string(), "tracker_nft_1".to_string());
+                    registers.insert("R6".to_string(), "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string()); // 32-byte tracker NFT ID (64 hex chars)
                     registers
                 },
             },
@@ -64,7 +64,7 @@ mod tests {
                     let mut registers = std::collections::HashMap::new();
                     // Use a valid hex-encoded compressed public key (33 bytes = 66 hex chars)
                     registers.insert("R4".to_string(), "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc".to_string());
-                    // No R5 for this one (optional tracker NFT)
+                    registers.insert("R6".to_string(), "2bf34e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f30415".to_string()); // 32-byte tracker NFT ID (64 hex chars)
                     registers
                 },
             },
@@ -82,7 +82,7 @@ mod tests {
                         "  - Collateral: {}",
                         reserve_info.base_info.collateral_amount
                     );
-                    println!("  - Tracker NFT: {:?}", reserve_info.tracker_nft_id);
+                    println!("  - Tracker NFT: {:?}", reserve_info.base_info.tracker_nft_id);
 
                     // Verify the parsed data matches expected values
                     assert_eq!(reserve_info.base_info.collateral_amount, scan_box.value);
@@ -98,14 +98,14 @@ mod tests {
                         *expected_owner_pubkey  // Already hex-encoded
                     );
 
-                    // Check tracker NFT extraction (if present)
-                    if let Some(expected_tracker_nft) = scan_box.additional_registers.get("R5") {
+                    // Check tracker NFT extraction (if present) - now comes from R6 register according to spec
+                    if let Some(expected_tracker_nft) = scan_box.additional_registers.get("R6") {
                         assert_eq!(
-                            reserve_info.tracker_nft_id,
-                            Some(hex::encode(expected_tracker_nft.as_bytes()))
+                            reserve_info.base_info.tracker_nft_id,
+                            *expected_tracker_nft  // Compare directly since we're using raw hex strings
                         );
                     } else {
-                        assert!(reserve_info.tracker_nft_id.is_none());
+                        // If no R6 register, the tracker_nft_id should be empty (handled by the parsing logic)
                     }
                 }
                 Err(e) => panic!("Failed to parse reserve box {}: {}", scan_box.box_id, e),
@@ -157,10 +157,11 @@ mod tests {
             reserve1.owner_pubkey,
             "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb"
         );
-        let expected_tracker_nft_hex = hex::encode("tracker_nft_1".as_bytes());
+        // Expected tracker NFT ID is now the 32-byte hex string we put in the R6 register
+        let expected_tracker_nft_hex = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304"; // 32-byte tracker NFT ID
         assert_eq!(
-            reserve1.tracker_nft_id,
-            Some(expected_tracker_nft_hex)
+            reserve1.base_info.tracker_nft_id,
+            expected_tracker_nft_hex
         );
 
         let reserve2 = state
@@ -172,7 +173,9 @@ mod tests {
             reserve2.owner_pubkey,
             "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc"
         );
-        assert!(reserve2.tracker_nft_id.is_none());
+        // Since tracker_nft_id is now a required field in base_info, we can't have it as None anymore
+        // The test should check that it's not empty or has the expected value
+        assert!(!reserve2.base_info.tracker_nft_id.is_empty());
 
         // Test reserve removal (simulating spent reserves)
         println!("\nTesting reserve removal (spent reserves)...");
@@ -287,9 +290,17 @@ mod tests {
                         _ => "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb", // default
                     };
                     registers.insert("R4".to_string(), owner_key.to_string());
-                    if let Some(nft_id) = nft {
-                        registers.insert("R5".to_string(), hex::encode(nft_id.as_bytes()));
-                    }
+                    // Always include R6 register with a 32-byte tracker NFT ID
+                    let tracker_nft_id = match nft {
+                        Some(nft_val) => {
+                            // Generate a 32-byte hex string based on the nft value
+                            let nft_bytes = hex::encode(nft_val.as_bytes());
+                            // Pad or truncate to ensure exactly 64 hex chars (32 bytes)
+                            format!("{:0<64}", nft_bytes.get(..64).unwrap_or(&nft_bytes))
+                        },
+                        None => "0000000000000000000000000000000000000000000000000000000000000000".to_string(), // 32 zero bytes
+                    };
+                    registers.insert("R6".to_string(), tracker_nft_id);
                     registers
                 },
             };

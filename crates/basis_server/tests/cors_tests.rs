@@ -143,6 +143,11 @@ use tower_http::cors::{Any, CorsLayer};
             },
         });
 
+        let temp_dir = std::env::temp_dir().join(format!("basis_test_tracker_storage_cors_{}", std::process::id()));
+        let tracker_storage = basis_store::persistence::TrackerStorage::open(
+            &temp_dir
+        ).expect("Failed to create tracker storage");
+
         let app_state = AppState {
             tx,
             event_store,
@@ -152,6 +157,7 @@ use tower_http::cors::{Any, CorsLayer};
             shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(
                 basis_server::tracker_box_updater::SharedTrackerState::new()
             )),
+            tracker_storage,
         };
 
         // Build the app with CORS enabled (same as main server)

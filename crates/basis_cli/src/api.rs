@@ -436,6 +436,7 @@ impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
             collateral_amount: flattened.collateral_amount,
             last_updated_height: flattened.last_updated_height,
             contract_address: "placeholder".to_string(), // The actual contract address might need to be retrieved differently
+            tracker_nft_id: flattened.tracker_nft_id.unwrap_or_default(),
         };
 
         ExtendedReserveInfo {
@@ -443,7 +444,6 @@ impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
             total_debt: flattened.total_debt,
             box_id: flattened.box_id,
             owner_pubkey: flattened.owner_pubkey,
-            tracker_nft_id: flattened.tracker_nft_id,
             last_updated_timestamp: flattened.last_updated_timestamp,
         }
     }

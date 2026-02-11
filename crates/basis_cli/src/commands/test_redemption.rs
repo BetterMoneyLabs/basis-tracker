@@ -223,7 +223,7 @@ fn generate_unsigned_transaction(
                 "value": remaining_collateral - transaction_fee,
                 "assets": [
                     {
-                        "tokenId": reserve_info.tracker_nft_id.as_ref().unwrap_or(&"tracker_nft_id_not_configured".to_string()),
+                        "tokenId": &reserve_info.base_info.tracker_nft_id,
                         "amount": 1
                     }
                 ],

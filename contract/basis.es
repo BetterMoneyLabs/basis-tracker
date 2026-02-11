@@ -149,7 +149,7 @@
       // Verify reserve owner Schnorr signature: g^z = a * x^e
       val properReserveSignature = (g.exp(reserveZ) == reserveA.multiply(ownerKey.exp(reserveEInt)))
 
-      // Verify receiver's proposition (creditor must be able to spend the redemption output)
+      // Verify receiver's signature on transaction bytes
       val receiverCondition = proveDlog(receiver)
 
       // Combine all validation conditions

@@ -59,10 +59,10 @@ impl Default for TxContext {
 }
 
 /// Complete redemption transaction data structure
-/// 
+///
 /// This structure contains all the components needed to build a redemption transaction
 /// that follows the Basis contract specification. The transaction structure is:
-/// 
+///
 /// - Inputs: [Reserve box] (spent)
 /// - Data Inputs: [Tracker box] (for AVL proof verification)
 /// - Outputs: [Updated reserve box, Redemption output box, Change box (optional)]
@@ -85,6 +85,8 @@ pub struct RedemptionTransactionData {
     pub tracker_signature: Vec<u8>,
     /// Transaction fee in nanoERG
     pub fee: u64,
+    /// Tracker NFT ID from R6 register (hex-encoded serialized SColl(SByte) format following byte_array_register_serialization.md spec)
+    pub tracker_nft_id: String,
 }
 
 /// Builder for redemption transactions following the Basis contract specification
@@ -98,23 +100,24 @@ pub struct RedemptionTransactionBuilder;
 
 impl RedemptionTransactionBuilder {
     /// Prepare redemption transaction data structure
-    /// 
+    ///
     /// This method validates all redemption parameters and prepares the complete
     /// transaction structure that would be built with ergo-lib when blockchain
     /// integration is available.
-    /// 
+    ///
     /// # Transaction Structure
     /// - **Inputs**: Reserve box (spent to redeem funds)
     /// - **Data Inputs**: Tracker box (for AVL proof verification)
-    /// - **Outputs**: 
+    /// - **Outputs**:
     ///   - Updated reserve box (reduced collateral)
     ///   - Redemption output box (funds to recipient)
     ///   - Optional change box (leftover funds after fee)
     /// - **Context Extension**: Contract parameters and signatures
-    /// 
+    ///
     /// # Parameters
     /// - `reserve_box_id`: The on-chain reserve box containing collateral
     /// - `tracker_box_id`: The tracker box with AVL tree commitment
+    /// - `tracker_nft_id`: The tracker NFT ID from R6 register (hex-encoded serialized SColl(SByte) format following byte_array_register_serialization.md spec)
     /// - `note`: The IOU note being redeemed
     /// - `issuer_pubkey`: Issuer's public key for signature verification
     /// - `recipient_address`: Address where redeemed funds are sent
@@ -125,6 +128,7 @@ impl RedemptionTransactionBuilder {
     pub fn prepare_redemption_transaction(
         reserve_box_id: &str,
         tracker_box_id: &str,
+        tracker_nft_id: &str,
         note: &IouNote,
         _issuer_pubkey: &PubKey,
         recipient_address: &str,
@@ -135,33 +139,54 @@ impl RedemptionTransactionBuilder {
     ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
         // Calculate the debt amount being redeemed
         let redemption_amount = note.outstanding_debt();
-        
+
         // Validate all required transaction components
         // Reserve box validation
         if reserve_box_id.is_empty() {
             return Err(TransactionBuilderError::Configuration("Reserve box ID is required".to_string()));
         }
-        
+
         // Tracker box validation (required for AVL proof verification)
         if tracker_box_id.is_empty() {
             return Err(TransactionBuilderError::Configuration("Tracker box ID is required".to_string()));
         }
-        
+
+        // Tracker NFT ID validation (required for R6 register preservation)
+        if tracker_nft_id.is_empty() {
+            return Err(TransactionBuilderError::Configuration("Tracker NFT ID is required".to_string()));
+        }
+
+        // Validate the tracker NFT ID format according to byte_array_register_serialization.md spec
+        // The register should contain exactly 32 bytes for the tracker NFT ID
+        if let Err(_) = hex::decode(tracker_nft_id) {
+            return Err(TransactionBuilderError::Configuration("Tracker NFT ID must be valid hex-encoded bytes".to_string()));
+        }
+
+        let tracker_nft_bytes = hex::decode(tracker_nft_id).unwrap(); // Safe to unwrap due to above check
+
+        // Validate that the tracker NFT ID is exactly 32 bytes
+        if tracker_nft_bytes.len() != 32 {
+            return Err(TransactionBuilderError::Configuration(format!(
+                "Tracker NFT ID must be exactly 32 bytes, got {} bytes",
+                tracker_nft_bytes.len()
+            )));
+        }
+
         // Recipient address validation
         if recipient_address.is_empty() {
             return Err(TransactionBuilderError::Configuration("Recipient address is required".to_string()));
         }
-        
+
         // AVL proof validation (proves debt exists in tracker state)
         if avl_proof.is_empty() {
             return Err(TransactionBuilderError::Configuration("AVL proof is required".to_string()));
         }
-        
+
         // Schnorr signature validation (must be 65 bytes: 33-byte a + 32-byte z)
         if issuer_sig.len() != 65 {
             return Err(TransactionBuilderError::Configuration("Issuer signature must be 65 bytes".to_string()));
         }
-        
+
         if tracker_sig.len() != 65 {
             return Err(TransactionBuilderError::Configuration("Tracker signature must be 65 bytes".to_string()));
         }
@@ -175,17 +200,18 @@ impl RedemptionTransactionBuilder {
             issuer_signature: issuer_sig.to_vec(),
             tracker_signature: tracker_sig.to_vec(),
             fee: context.fee,
+            tracker_nft_id: tracker_nft_id.to_string(),
         })
     }
 
 
 
     /// Create mock transaction bytes for testing
-    /// 
+    ///
     /// In a real implementation, this would use ergo-lib to serialize an actual
     /// Ergo transaction. This mock version creates a human-readable representation
     /// of the transaction structure for testing and debugging.
-    /// 
+    ///
     /// When blockchain integration is complete, this will be replaced with:
     /// `unsigned_tx.sigma_serialize_bytes()` from ergo-lib
     pub fn create_mock_transaction_bytes(
@@ -194,14 +220,15 @@ impl RedemptionTransactionBuilder {
         // Create a human-readable representation of the transaction structure
         // This helps with testing and debugging without requiring actual blockchain integration
         let mock_data = format!(
-            "redemption_tx:reserve={},tracker={},amount={},recipient={},fee={}",
+            "redemption_tx:reserve={},tracker={},amount={},recipient={},fee={},tracker_nft={}",
             &transaction_data.reserve_box_id[..std::cmp::min(16, transaction_data.reserve_box_id.len())],
             &transaction_data.tracker_box_id[..std::cmp::min(16, transaction_data.tracker_box_id.len())],
             transaction_data.redemption_amount,
             &transaction_data.recipient_address[..std::cmp::min(16, transaction_data.recipient_address.len())],
-            transaction_data.fee
+            transaction_data.fee,
+            &transaction_data.tracker_nft_id[..std::cmp::min(16, transaction_data.tracker_nft_id.len())]
         );
-        
+
         mock_data.into_bytes()
     }
 
@@ -251,27 +278,30 @@ impl RedemptionTransactionBuilder {
     }
 
     /// Build a real Ergo redemption transaction
-    /// 
+    ///
     /// This function creates an actual Ergo transaction that follows the Basis contract specification:
     /// - Spends the reserve box
     /// - Uses tracker box as data input for AVL proof verification
     /// - Creates updated reserve box output
     /// - Creates redemption output box for recipient
     /// - Includes proper context extension with contract parameters
-    /// 
+    /// - Preserves R6 register with tracker NFT ID in output reserve box following byte_array_register_serialization.md spec
+    ///
     /// # Parameters
     /// - `reserve_box_id`: The reserve box ID being spent
     /// - `tracker_box_id`: The tracker box ID used as data input
+    /// - `tracker_nft_id`: The tracker NFT ID from R6 register (hex-encoded serialized SColl(SByte) format following byte_array_register_serialization.md spec)
     /// - `recipient_address`: Address where redeemed funds are sent
     /// - `redemption_amount`: Amount being redeemed
     /// - `fee`: Transaction fee in nanoERG
     /// - `current_height`: Current blockchain height
-    /// 
+    ///
     /// # Returns
     /// - Serialized transaction bytes ready for submission to Ergo network
     pub fn build_redemption_transaction(
         reserve_box_id: &str,
         tracker_box_id: &str,
+        tracker_nft_id: &str,
         recipient_address: &str,
         redemption_amount: u64,
         fee: u64,
@@ -282,18 +312,20 @@ impl RedemptionTransactionBuilder {
         // 2. Create updated reserve box output with reduced collateral
         // 3. Create redemption output box for recipient
         // 4. Set context extension with contract parameters
-        // 5. Build and serialize the transaction
-        
+        // 5. Preserve R6 register with tracker NFT ID in output reserve box
+        // 6. Build and serialize the transaction
+
         // For now, create a mock transaction that follows ergo-lib patterns
         // This will be replaced with actual ergo-lib transaction building
         // when blockchain integration is complete
-        
+
         // Create a transaction structure that includes all necessary components
         // This follows chaincash-rs pattern of creating structured transaction data
         let real_tx_data = format!(
-            "ergo_tx_v1:reserve={},tracker={},amount={},recipient={},fee={},height={}",
+            "ergo_tx_v1:reserve={},tracker={},tracker_nft={},amount={},recipient={},fee={},height={}",
             &reserve_box_id[..std::cmp::min(16, reserve_box_id.len())],
             &tracker_box_id[..std::cmp::min(16, tracker_box_id.len())],
+            &tracker_nft_id[..std::cmp::min(16, tracker_nft_id.len())],
             redemption_amount,
             &recipient_address[..std::cmp::min(16, recipient_address.len())],
             fee,
@@ -337,6 +369,7 @@ mod tests {
         let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
             "test_reserve_box_123",
             "test_tracker_box_456",
+            "test_tracker_nft_1234567890abcdef",
             &note,
             &issuer_pubkey,
             "9".repeat(51).as_str(),
@@ -434,6 +467,7 @@ mod tests {
         let result = RedemptionTransactionBuilder::build_redemption_transaction(
             "test_reserve_box_1234567890abcdef",
             "test_tracker_box_abcdef1234567890",
+            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
             "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
             100000000, // 0.1 ERG
             1000000,   // 0.001 ERG fee (following chaincash-rs SUGGESTED_TX_FEE pattern)
@@ -469,6 +503,7 @@ mod tests {
             let result = RedemptionTransactionBuilder::build_redemption_transaction(
                 "test_reserve_box_1234567890abcdef",
                 "test_tracker_box_abcdef1234567890",
+                "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
                 "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
                 amount,
                 1000000, // 0.001 ERG fee
@@ -498,6 +533,7 @@ mod tests {
             let result = RedemptionTransactionBuilder::build_redemption_transaction(
                 "test_reserve_box_1234567890abcdef",
                 "test_tracker_box_abcdef1234567890",
+                "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
                 "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
                 100000000, // 0.1 ERG
                 fee,
@@ -522,6 +558,7 @@ mod tests {
         let result = RedemptionTransactionBuilder::build_redemption_transaction(
             "", // Empty reserve box ID
             "test_tracker_box_abcdef1234567890",
+            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
             "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
             100000000,
             1000000,
@@ -533,6 +570,7 @@ mod tests {
         let result = RedemptionTransactionBuilder::build_redemption_transaction(
             "test_reserve_box_1234567890abcdef",
             "", // Empty tracker box ID
+            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
             "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
             100000000,
             1000000,
@@ -544,6 +582,7 @@ mod tests {
         let result = RedemptionTransactionBuilder::build_redemption_transaction(
             "test_reserve_box_1234567890abcdef",
             "test_tracker_box_abcdef1234567890",
+            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
             "", // Empty recipient address
             100000000,
             1000000,
@@ -562,6 +601,7 @@ mod tests {
         let result = RedemptionTransactionBuilder::build_redemption_transaction(
             &create_test_reserve_box_id(),
             &create_test_tracker_box_id(),
+            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
             &create_test_recipient_address(),
             100000000, // 0.1 ERG
             1000000,   // 0.001 ERG fee
@@ -571,11 +611,134 @@ mod tests {
         assert!(result.is_ok());
         let tx_bytes = result.unwrap();
         assert!(!tx_bytes.is_empty());
-        
+
         let tx_string = String::from_utf8_lossy(&tx_bytes);
         assert!(tx_string.contains("ergo_tx_v1"));
         assert!(tx_string.contains("e56847ed19b3dc6b")); // first 16 chars of reserve box ID
         assert!(tx_string.contains("f67858fe2ac4ed7c")); // first 16 chars of tracker box ID
         assert!(tx_string.contains("100000000")); // redemption amount
+    }
+
+    #[test]
+    fn test_prepare_redemption_transaction_with_r6_validation() {
+        let (issuer_secret, issuer_pubkey) = crate::schnorr::generate_keypair();
+        let (_, recipient_pubkey) = crate::schnorr::generate_keypair();
+
+        // Create test note
+        let note = crate::IouNote::create_and_sign(
+            recipient_pubkey,
+            100000000, // 0.1 ERG
+            1672531200, // Old timestamp
+            &issuer_secret.as_bytes(),
+        )
+        .unwrap();
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+        
+        // Valid 32-byte tracker NFT ID (64 hex chars)
+        let valid_tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            valid_tracker_nft_id,
+            &note,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_ok());
+
+        let transaction_data = result.unwrap();
+        assert_eq!(transaction_data.tracker_nft_id, valid_tracker_nft_id);
+        assert_eq!(transaction_data.redemption_amount, 100000000);
+        assert_eq!(transaction_data.fee, 1000000);
+    }
+
+    #[test]
+    fn test_prepare_redemption_transaction_invalid_r6_length() {
+        let (issuer_secret, issuer_pubkey) = crate::schnorr::generate_keypair();
+        let (_, recipient_pubkey) = crate::schnorr::generate_keypair();
+
+        // Create test note
+        let note = crate::IouNote::create_and_sign(
+            recipient_pubkey,
+            100000000, // 0.1 ERG
+            1672531200, // Old timestamp
+            &issuer_secret.as_bytes(),
+        )
+        .unwrap();
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+        
+        // Invalid tracker NFT ID - only 16 bytes (32 hex chars) instead of 32 bytes (64 hex chars)
+        let invalid_tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f304";
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            invalid_tracker_nft_id,
+            &note,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("must be exactly 32 bytes"));
+    }
+
+    #[test]
+    fn test_prepare_redemption_transaction_invalid_r6_hex() {
+        let (issuer_secret, issuer_pubkey) = crate::schnorr::generate_keypair();
+        let (_, recipient_pubkey) = crate::schnorr::generate_keypair();
+
+        // Create test note
+        let note = crate::IouNote::create_and_sign(
+            recipient_pubkey,
+            100000000, // 0.1 ERG
+            1672531200, // Old timestamp
+            &issuer_secret.as_bytes(),
+        )
+        .unwrap();
+
+        let context = TxContext::default();
+        let avl_proof = vec![0u8; 64];
+        let issuer_sig = vec![0u8; 65];
+        let tracker_sig = vec![0u8; 65];
+        
+        // Invalid tracker NFT ID - contains non-hex characters
+        let invalid_tracker_nft_id = "zzf23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+
+        let result = RedemptionTransactionBuilder::prepare_redemption_transaction(
+            "test_reserve_box_123",
+            "test_tracker_box_456",
+            invalid_tracker_nft_id,
+            &note,
+            &issuer_pubkey,
+            "9".repeat(51).as_str(),
+            &avl_proof,
+            &issuer_sig,
+            &tracker_sig,
+            &context,
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("valid hex-encoded bytes"));
     }
 }

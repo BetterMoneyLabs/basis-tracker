@@ -782,19 +782,38 @@ impl ServerState {
             owner_pubkey_raw
         };
 
-        // Extract tracker NFT from R5 register (optional)
-        let tracker_nft_id = scan_box.additional_registers.get("R5").map(|s| s.clone());
+        // Extract tracker NFT ID from R6 register (required according to spec)
+        let tracker_nft_id_raw = scan_box
+            .additional_registers
+            .get("R6")
+            .ok_or_else(|| {
+                ScannerError::InvalidReserveBox(format!("Missing R6 register in box {}", box_id))
+            })?
+            .clone();
 
         // Create extended reserve info
         // Decode the hex-encoded public key to actual bytes
         let owner_pubkey_bytes = hex::decode(&owner_pubkey)
             .map_err(|_| ScannerError::InvalidReserveBox(format!("Invalid hex in owner pubkey for box {}", box_id)))?;
 
+        // Decode the hex-encoded tracker NFT ID to actual bytes
+        let tracker_nft_id_bytes = hex::decode(&tracker_nft_id_raw)
+            .map_err(|_| ScannerError::InvalidReserveBox(format!("Invalid hex in tracker NFT ID for box {}", box_id)))?;
+
+        // Validate that the tracker NFT ID is exactly 32 bytes (the actual tracker NFT ID)
+        if tracker_nft_id_bytes.len() != 32 {
+            return Err(ScannerError::InvalidReserveBox(format!(
+                "Invalid tracker NFT ID length in box {}: expected 32 bytes, got {}",
+                box_id,
+                tracker_nft_id_bytes.len()
+            )));
+        }
+
         let reserve_info = ExtendedReserveInfo::new(
             box_id.as_bytes(),
             &owner_pubkey_bytes,
             value,
-            tracker_nft_id.as_deref().map(|s| s.as_bytes()),
+            Some(&tracker_nft_id_bytes),
             creation_height,
         );
 
@@ -1098,13 +1117,16 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn test_parse_reserve_box_with_prefix_stripping() {
+    fn test_parse_reserve_box_with_r6_register() {
         // Create a mock scan box with a public key that has the 0x07 prefix
+        // and a valid 32-byte tracker NFT ID in R6 register
         let mut registers = HashMap::new();
         // This is a 33-byte public key with 0x07 prefix (GroupElement format)
         let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
         registers.insert("R4".to_string(), prefixed_pubkey.to_string());
-        registers.insert("R5".to_string(), "some_tracker_nft_id".to_string());
+        // This is a 32-byte tracker NFT ID (64 hex chars)
+        let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        registers.insert("R6".to_string(), tracker_nft_id.to_string());
 
         let scan_box = ScanBox {
             box_id: "test_box_id".to_string(),
@@ -1129,7 +1151,10 @@ mod tests {
                 let expected_pubkey = &prefixed_pubkey[2..]; // Remove first 2 characters (07)
 
                 assert_eq!(reserve_info.owner_pubkey, expected_pubkey);
+                // The tracker_nft_id should match the one from R6 register
+                assert_eq!(reserve_info.base_info.tracker_nft_id, tracker_nft_id);
                 println!("SUCCESS: Prefix was correctly stripped. Original: {}, Stripped: {}", prefixed_pubkey, reserve_info.owner_pubkey);
+                println!("SUCCESS: Tracker NFT ID correctly extracted from R6 register: {}", reserve_info.base_info.tracker_nft_id);
             },
             Err(e) => {
                 panic!("Failed to parse reserve box: {:?}", e);
@@ -1138,13 +1163,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_reserve_box_without_prefix() {
-        // Create a mock scan box with a public key that doesn't have the 0x07 prefix
+    fn test_parse_reserve_box_missing_r6_register() {
+        // Create a mock scan box with a public key but missing R6 register
         let mut registers = HashMap::new();
-        // This is a standard 33-byte compressed public key (02 prefix)
-        let unprefixed_pubkey = "02c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
-        registers.insert("R4".to_string(), unprefixed_pubkey.to_string());
-        registers.insert("R5".to_string(), "some_tracker_nft_id".to_string());
+        // This is a 33-byte public key with 0x07 prefix (GroupElement format)
+        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        registers.insert("R4".to_string(), prefixed_pubkey.to_string());
+        // Note: R6 register is intentionally missing
 
         let scan_box = ScanBox {
             box_id: "test_box_id_2".to_string(),
@@ -1160,17 +1185,57 @@ mod tests {
         let config = NodeConfig::default();
         let server_state = ServerState::new(config).expect("Failed to create server state");
 
-        // Test the parse_reserve_box function
+        // Test the parse_reserve_box function - should return an error
         let result = server_state.parse_reserve_box(&scan_box);
 
         match result {
-            Ok(reserve_info) => {
-                // The owner_pubkey should remain unchanged
-                assert_eq!(reserve_info.owner_pubkey, unprefixed_pubkey);
-                println!("SUCCESS: Unprefixed key remained unchanged: {}", reserve_info.owner_pubkey);
+            Ok(_) => {
+                panic!("Expected error when R6 register is missing, but parsing succeeded");
             },
             Err(e) => {
-                panic!("Failed to parse reserve box: {:?}", e);
+                // Check that the error message mentions the missing R6 register
+                assert!(e.to_string().contains("Missing R6 register"));
+                println!("SUCCESS: Correctly returned error for missing R6 register: {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_reserve_box_invalid_r6_length() {
+        // Create a mock scan box with an invalid R6 register (not 32 bytes)
+        let mut registers = HashMap::new();
+        // This is a 33-byte public key with 0x07 prefix (GroupElement format)
+        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        registers.insert("R4".to_string(), prefixed_pubkey.to_string());
+        // This is an invalid tracker NFT ID with wrong length (only 16 bytes = 32 hex chars, should be 32 bytes = 64 hex chars)
+        let invalid_tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f304";
+        registers.insert("R6".to_string(), invalid_tracker_nft_id.to_string());
+
+        let scan_box = ScanBox {
+            box_id: "test_box_id_3".to_string(),
+            value: 1000000000, // 1 ERG
+            creation_height: 1000,
+            ergo_tree: "test_ergo_tree".to_string(),
+            transaction_id: "test_tx_id".to_string(),
+            additional_registers: registers,
+            assets: vec![],
+        };
+
+        // Create a dummy server state for testing
+        let config = NodeConfig::default();
+        let server_state = ServerState::new(config).expect("Failed to create server state");
+
+        // Test the parse_reserve_box function - should return an error
+        let result = server_state.parse_reserve_box(&scan_box);
+
+        match result {
+            Ok(_) => {
+                panic!("Expected error when R6 register has invalid length, but parsing succeeded");
+            },
+            Err(e) => {
+                // Check that the error message mentions the invalid length
+                assert!(e.to_string().contains("Invalid tracker NFT ID length"));
+                println!("SUCCESS: Correctly returned error for invalid R6 register length: {:?}", e);
             }
         }
     }

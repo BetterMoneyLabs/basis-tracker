@@ -138,6 +138,11 @@ mod http_api_tests {
             },
         });
 
+        let temp_dir = std::env::temp_dir().join(format!("basis_test_tracker_storage_{}", std::process::id()));
+        let tracker_storage = basis_store::persistence::TrackerStorage::open(
+            &temp_dir
+        ).expect("Failed to create tracker storage");
+
         AppState {
             tx,
             event_store,
@@ -147,6 +152,7 @@ mod http_api_tests {
             shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(
                 basis_server::tracker_box_updater::SharedTrackerState::new()
             )),
+            tracker_storage,
         }
     }
 

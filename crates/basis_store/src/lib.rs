@@ -81,6 +81,8 @@ pub struct ReserveInfo {
     pub last_updated_height: u64,
     /// Reserve contract address
     pub contract_address: String,
+    /// Tracker NFT ID from R6 register (hex-encoded serialized SColl(SByte) format following byte_array_register_serialization.md spec)
+    pub tracker_nft_id: String,
 }
 
 /// Tracker box information for state commitment boxes
