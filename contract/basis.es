@@ -73,6 +73,9 @@
       // #5 - proof for insertion into reserve's AVL+ tree
       // #6 - tracker's signature
 
+      // Base point for elliptic curve operations
+      val g: GroupElement = groupGenerator
+
       // Tracker box holds the debt information as key-value pairs: AB -> (amount, timestamp)
       val tracker = CONTEXT.dataInputs(0) // Data input: tracker box containing debt records
       val trackerNftId = tracker.tokens(0)._1 // NFT token ID identifying the tracker
@@ -83,8 +86,6 @@
       // Verify that tracker identity matches
       val trackerIdCorrect = trackerNftId == expectedTrackerId
 
-      val g: GroupElement = groupGenerator // Base point for elliptic curve operations
-
       // Receiver of the redemption (creditor)
       val receiver = getVar[GroupElement](1).get
       val receiverBytes = receiver.getEncoded // Receiver's public key bytes
@@ -92,6 +93,7 @@
       val ownerKeyBytes = ownerKey.getEncoded // Reserve owner's public key (from R4 register) bytes
 
       // Create key for debt record: hash(ownerKey || receiverKey)
+      // the key is used in the reserve's tree stored in R5 register
       val key = blake2b256(ownerKeyBytes ++ receiverBytes)
       
       // Reserve owner's signature for the debt record
@@ -105,11 +107,6 @@
       val value = longToByteArray(debtAmount) ++ longToByteArray(timestamp) ++ reserveSigBytes
 
       val reserveId = SELF.tokens(0)._1 // Reserve singleton token ID
-
-      // Output box where redeemed funds are sent
-      val redemptionOut = OUTPUTS(index + 1)
-      val redemptionTreeHash = blake2b256(redemptionOut.propositionBytes)
-      val afterFees = redemptionOut.value
 
       // Update timestamp tree to prevent double redemption
       // Store timestamp to mark it as redeemed
