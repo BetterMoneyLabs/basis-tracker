@@ -102,9 +102,10 @@
       // Debt amount and timestamp from the debt record
       // todo: save debt being redeemed in the reserve tree, along with the timestamp, and then debtAmount is
       // todo: total amount of debt, and only up to the delta can be redeemed
-      val debtAmount = getVar[Long](3).get
+
+      val totalDebt = getVar[Long](3).get
       val timestamp = getVar[Long](4).get
-      val value = longToByteArray(debtAmount) ++ longToByteArray(timestamp) ++ reserveSigBytes
+      val value = longToByteArray(totalDebt) ++ longToByteArray(timestamp) ++ reserveSigBytes
 
       val reserveId = SELF.tokens(0)._1 // Reserve singleton token ID
 
@@ -118,7 +119,7 @@
       val properTimestampTree = nextTree == selfOut.R5[AvlTree].get // todo: check that the timestamp has increased
 
       // Message to verify signatures: key || amount || timestamp
-      val message = key ++ longToByteArray(debtAmount) ++ longToByteArray(timestamp)
+      val message = key ++ longToByteArray(totalDebt) ++ longToByteArray(timestamp)
 
       // Tracker's signature authorizing the redemption
       val trackerSigBytes = getVar[Coll[Byte]](6).get
@@ -144,7 +145,7 @@
 
       // Calculate amount being redeemed and verify it doesn't exceed debt
       val redeemed = SELF.value - selfOut.value
-      val properlyRedeemed = (redeemed <= debtAmount) && (enoughTimeSpent || properTrackerSignature)
+      val properlyRedeemed = (redeemed <= totalDebt) && (enoughTimeSpent || properTrackerSignature)
 
       // Split reserve owner signature into components (Schnorr signature: (a, z))
       val reserveABytes = reserveSigBytes.slice(0, 33) // Random point a
