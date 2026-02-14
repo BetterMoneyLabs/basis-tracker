@@ -4,6 +4,8 @@
     // https://www.ergoforum.org/t/basis-a-foundational-on-chain-reserve-approach-to-support-a-variety-of-offchain-protocols/5153
 
     // Main use-cases:
+    // * digital payments with credit creation allowed
+    // * especially with areas with no stable Inernet connection (over mesh networks)
     // * payments for content (such as 402 HTTP code processing)
     // * micropayments
     // * payments in p2p networks
@@ -11,7 +13,7 @@
 
     // Here are some properties of Basis design:
     // * offchain payments with no need to create anything on-chain first, so possibility to create credit
-    // * usage of minimally trusted trackers to track state of mutual debt offchain
+    // * only minimally trusted trackers to track state of mutual debt offchain used, with no possibility to steal funds etc
     // * onchain contract based redemption with prevention of double redemptions
 
     // How does that work:

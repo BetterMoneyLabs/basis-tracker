@@ -15,6 +15,7 @@ pub mod redemption_simple_tests;
 pub mod reserve_tracker;
 pub mod schnorr;
 pub mod schnorr_tests;
+pub mod transaction_builder;
 #[cfg(test)]
 pub mod simple_integration_tests;
 pub mod tests;

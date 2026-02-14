@@ -244,27 +244,28 @@ The redemption transaction builder now properly implements the transaction build
 pub struct RedemptionTransactionBuilder;
 
 impl RedemptionTransactionBuilder {
-    /// Prepare redemption transaction data structure with proper validation
-    pub fn prepare_redemption_transaction(
+    /// Build unsigned Ergo redemption transaction with complete validation
+    pub fn build_unsigned_redemption_transaction(
         reserve_box_id: &str,
         tracker_box_id: &str,
-        amount_collected: u64,
-        amount_redeemed: u64,
-        timestamp: u64,
-        issuer_pubkey: &PubKey,
+        tracker_nft_id: &str,
+        note: &crate::IouNote,
         recipient_address: &str,
         avl_proof: &[u8],
         issuer_sig: &[u8],
         tracker_sig: &[u8],
         context: &TxContext,
     ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
-        // Implementation with proper validation and transaction preparation
+        // Implementation that creates proper Ergo transaction structure
+        // with full validation, inputs, outputs, data inputs, and context extensions
+        // including R6 register preservation with tracker NFT ID
     }
 
     /// Build actual Ergo redemption transaction with all required components
     pub fn build_redemption_transaction(
         reserve_box_id: &str,
         tracker_box_id: &str,
+        tracker_nft_id: &str,
         recipient_address: &str,
         redemption_amount: u64,
         fee: u64,
@@ -272,11 +273,12 @@ impl RedemptionTransactionBuilder {
     ) -> Result<Vec<u8>, TransactionBuilderError> {
         // Implementation that creates proper Ergo transaction structure
         // with inputs, outputs, data inputs, and context extensions
+        // including R6 register preservation with tracker NFT ID
     }
 }
 ```
 
-The redemption transaction builder now includes proper validation, transaction structure creation, and serialization of all required components for the Basis redemption process.
+The redemption transaction builder now includes proper validation, transaction structure creation, and serialization of all required components for the Basis redemption process, including R6 register preservation with tracker NFT ID.
 
 ### Integration with Server Startup
 

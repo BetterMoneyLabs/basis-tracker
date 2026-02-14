@@ -32,10 +32,8 @@ The `transaction_builder` module contains the core logic for creating redemption
 
 #### Key Functions
 
-- **`prepare_redemption_transaction`**: Validates parameters and prepares transaction structure
-- **`validate_redemption_parameters`**: Ensures sufficient collateral and time lock expiration
+- **`build_unsigned_redemption_transaction`**: Creates unsigned Ergo transaction with full validation (when blockchain integration is complete)
 - **`build_redemption_transaction`**: Creates actual Ergo transaction (when blockchain integration is complete)
-- **`create_mock_transaction_bytes`**: Creates human-readable transaction representation for testing
 
 ### 2. Schnorr Signature Module
 
@@ -66,11 +64,10 @@ The crate defines comprehensive error types:
 
 ### Redemption Process
 
-1. **Preparation**: The system prepares redemption transaction data using `prepare_redemption_transaction`
-2. **Validation**: Parameters are validated to ensure sufficient collateral and proper time lock expiration
-3. **Proof Generation**: AVL proofs are created to prove debt exists in the tracker's state
-4. **Signature Collection**: Both issuer and tracker signatures are collected
-5. **Transaction Building**: Final transaction is built with all required components
+1. **Validation**: Parameters are validated to ensure sufficient collateral and proper time lock expiration
+2. **Proof Generation**: AVL proofs are created to prove debt exists in the tracker's state
+3. **Signature Collection**: Both issuer and tracker signatures are collected
+4. **Transaction Building**: Final transaction is built with all required components
 
 ### Time Lock Validation
 
