@@ -17,7 +17,7 @@
     // * onchain contract based redemption with prevention of double redemptions
 
     // How does that work:
-    //  * a tracker holds A -> B debt (as positive number), along with ever increasing (on every operation) timestamp.
+    //  * a tracker holds ever created A -> B debt (as positive ever increasing number), along with ever increasing (on every operation) timestamp.
     //    A key->value dictionary is used to store the data as hash(AB) -> (amount, timestamp, sig_A), where AB is concatenation of public
     //    keys A and B, "amount" is amount of debt of A before B, timestamp is operation timestamp (in milliseconds), sig_A is signature of A for
     //    A for message (hash(AB), amount, timestamp).
@@ -26,7 +26,7 @@
     //  * tracker is periodically committing to its state (dictionary) by posting its digest on chain
     //  * at any moment it is possible to redeem A debt to B by calling redemption action of the reserve contract below
     //    B -> timestamp pair is written into the contract box. Calling the contract after with timestamp <= written on is
-    //    prohibited. Tracker signature is needed to redeem. On next operation with tracker, debt of A is decreased.
+    //    prohibited. Tracker signature is needed to redeem.
     //    If not, A is refusing to sign updated records. Tracker cant steal A's funds as A's signature is checked.
     //  * if tracker is going offline, possible to redeem without its signature, when at least one week passed
     //  * always possible to top up the reserve, to redeem, reserve holder is making an offchain payment to self (A -> A)
@@ -34,7 +34,7 @@
 
 
     // Data:
-    //  - token #0 - identifying singleton token
+    //  - token #0 - identifying singleton (NFT) token
     //  - R4 - signing key (as a group element)
     //  - R5 - tree of timestamps redeemed (to avoid double spending, it should have insert-only flag set)
     //  - R6 - NFT id of tracker server (bytes) // todo: support multiple payment servers by using a tree
@@ -47,14 +47,16 @@
     //  - R4 - tracker's signing key
     //  - R5 - commitment to credit data
 
+    // action and reserve output index. By passing them instead of hard-coding, we allow for multiple notes to be
+    // redeemed at once, which can be used for atomic mutual debt clearing etc
     val v = getVar[Byte](0).get
     val action = v / 10
-    val index = v % 10
+    val index = v % 10 // reserve output position
 
     val ownerKey = SELF.R4[GroupElement].get // reserve owner's key
     val selfOut = OUTPUTS(index)
 
-    // common checks for all the paths (not incl. ERG value check)
+    // common checks for all the paths (not incl. ERG value and R5 check)
     val selfPreserved =
             selfOut.propositionBytes == SELF.propositionBytes &&
             selfOut.tokens == SELF.tokens &&
@@ -63,6 +65,13 @@
 
     if (action == 0) {
       // redemption path
+      // context extension variables used:
+      // #1 - receiver pubkey (as a group element)
+      // #2 - reserve owner's signature for the debt record
+      // #3 - current debt amount
+      // #4 - timestamp
+      // #5 - proof for insertion into reserve's AVL+ tree
+      // #6 - tracker's signature
 
       // Tracker box holds the debt information as key-value pairs: AB -> (amount, timestamp)
       val tracker = CONTEXT.dataInputs(0) // Data input: tracker box containing debt records
@@ -70,7 +79,9 @@
       val trackerPubKey = tracker.R4[GroupElement].get // Tracker's public key for signature verification
       val trackerTree = tracker.R5[AvlTree].get // AVL tree storing debt commitments from tracker
       val expectedTrackerId = SELF.R6[Coll[Byte]].get // Expected tracker ID stored in reserve contract
-      val trackerIdCorrect = trackerNftId == expectedTrackerId // Verify tracker identity matches
+
+      // Verify that tracker identity matches
+      val trackerIdCorrect = trackerNftId == expectedTrackerId
 
       val g: GroupElement = groupGenerator // Base point for elliptic curve operations
 
@@ -78,7 +89,7 @@
       val receiver = getVar[GroupElement](1).get
       val receiverBytes = receiver.getEncoded // Receiver's public key bytes
 
-      val ownerKeyBytes = ownerKey.getEncoded // Reserve owner's public key bytes
+      val ownerKeyBytes = ownerKey.getEncoded // Reserve owner's public key (from R4 register) bytes
 
       // Create key for debt record: hash(ownerKey || receiverKey)
       val key = blake2b256(ownerKeyBytes ++ receiverBytes)
@@ -156,6 +167,7 @@
 
       // Combine all validation conditions
       sigmaProp(selfPreserved &&
+                trackerIdCorrect &&
                 properTimestampTree &&
                 properReserveSignature &&
                 properlyRedeemed &&
@@ -164,8 +176,8 @@
       // top up
       sigmaProp(
         selfPreserved &&
-        (selfOut.value - SELF.value >= 1000000000)  && // at least 1 ERG added
-        selfOut.R5[AvlTree].get == SELF.R5[AvlTree].get
+        selfOut.R5[AvlTree].get == SELF.R5[AvlTree].get && // R5 register preservation is not checked in selfPreserved
+        (selfOut.value - SELF.value >= 1000000000) // at least 1 ERG added
       )
     } else {
       sigmaProp(false)
