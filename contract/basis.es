@@ -34,9 +34,8 @@
 
 
     // Data:
-    //  - token #0 - identifying singleton (NFT) token
     //  - R4 - signing key (as a group element)
-    //  - R5 - tree of timestamps redeemed (to avoid double spending, it should have insert-only flag set)
+    //  - R5 - tree of debt redeemed
     //  - R6 - NFT id of tracker server (bytes) // todo: support multiple payment servers by using a tree
     //
     // Actions:
@@ -45,7 +44,6 @@
     //
     //  Tracker box registers:
     //  - R4 - tracker's signing key
-    //  - R5 - commitment to credit data
 
     // action and reserve output index. By passing them instead of hard-coding, we allow for multiple notes to be
     // redeemed at once, which can be used for atomic mutual debt clearing etc
@@ -68,19 +66,18 @@
       // context extension variables used:
       // #1 - receiver pubkey (as a group element)
       // #2 - reserve owner's signature for the debt record
-      // #3 - current debt amount
-      // #4 - timestamp
+      // #3 - current total debt amount
       // #5 - proof for insertion into reserve's AVL+ tree
       // #6 - tracker's signature
+      // #7 - proof for AVL+ tree lookup for lender-borrower pair
 
       // Base point for elliptic curve operations
       val g: GroupElement = groupGenerator
 
-      // Tracker box holds the debt information as key-value pairs: AB -> (amount, timestamp)
+      // Tracker box holds the debt information as key-value pairs: AB -> amount
       val tracker = CONTEXT.dataInputs(0) // Data input: tracker box containing debt records
       val trackerNftId = tracker.tokens(0)._1 // NFT token ID identifying the tracker
       val trackerPubKey = tracker.R4[GroupElement].get // Tracker's public key for signature verification
-      val trackerTree = tracker.R5[AvlTree].get // AVL tree storing debt commitments from tracker
       val expectedTrackerId = SELF.R6[Coll[Byte]].get // Expected tracker ID stored in reserve contract
 
       // Verify that tracker identity matches
@@ -99,27 +96,14 @@
       // Reserve owner's signature for the debt record
       val reserveSigBytes = getVar[Coll[Byte]](2).get
 
-      // Debt amount and timestamp from the debt record
-      // todo: save debt being redeemed in the reserve tree, along with the timestamp, and then debtAmount is
-      // todo: total amount of debt, and only up to the delta can be redeemed
-
       val totalDebt = getVar[Long](3).get
-      val timestamp = getVar[Long](4).get
-      val value = longToByteArray(totalDebt) ++ longToByteArray(timestamp) ++ reserveSigBytes
 
-      val reserveId = SELF.tokens(0)._1 // Reserve singleton token ID
+      val lookupProof = getVar[Coll[Byte]](7).get
+      val redeemedDebtBytes = SELF.R5[AvlTree].get.get(key, lookupProof).get
+      val redeemedDebt = byteArrayToLong(redeemedDebtBytes)
 
-      // Update timestamp tree to prevent double redemption
-      // Store timestamp to mark it as redeemed
-      val timestampKeyVal = (key, longToByteArray(timestamp))  // key -> timestamp value
-      val proof = getVar[Coll[Byte]](5).get // Merkle proof for tree insertion
-      // Insert redeemed timestamp into AVL tree
-      val nextTree: AvlTree = SELF.R5[AvlTree].get.insert(Coll(timestampKeyVal), proof).get // todo: tree can have insert or update flags
-      // Verify tree was properly updated in output
-      val properTimestampTree = nextTree == selfOut.R5[AvlTree].get // todo: check that the timestamp has increased
-
-      // Message to verify signatures: key || amount || timestamp
-      val message = key ++ longToByteArray(totalDebt) ++ longToByteArray(timestamp)
+      // Message to verify signatures: key || total debt
+      val message = key ++ longToByteArray(totalDebt)
 
       // Tracker's signature authorizing the redemption
       val trackerSigBytes = getVar[Coll[Byte]](6).get
@@ -140,12 +124,14 @@
       // Check if enough time has passed for emergency redemption (without tracker signature)
       // tracker signature is still provided but may be invalid
       // todo: consider more efficient check where tracker signature is not needed at all
-      val lastBlockTime = CONTEXT.headers(0).timestamp
-      val enoughTimeSpent = (timestamp > 0) && (lastBlockTime - timestamp) > 7 * 86400000 // 7 days in milliseconds passed
+
+      val trackerUpdateTime = tracker.creationInfo._1
+      val enoughTimeSpent = (HEIGHT - trackerUpdateTime) > 3 * 720 // 3 days passed
 
       // Calculate amount being redeemed and verify it doesn't exceed debt
       val redeemed = SELF.value - selfOut.value
-      val properlyRedeemed = (redeemed <= totalDebt) && (enoughTimeSpent || properTrackerSignature)
+      val debtDelta = (totalDebt - redeemedDebt)
+      val properlyRedeemed = (redeemed > 0) && (redeemed <= debtDelta) && (enoughTimeSpent || properTrackerSignature)
 
       // Split reserve owner signature into components (Schnorr signature: (a, z))
       val reserveABytes = reserveSigBytes.slice(0, 33) // Random point a
@@ -160,13 +146,21 @@
       // Verify reserve owner Schnorr signature: g^z = a * x^e
       val properReserveSignature = (g.exp(reserveZ) == reserveA.multiply(ownerKey.exp(reserveEInt)))
 
+      val newRedeemed = redeemedDebt + redeemed
+      val treeValue = longToByteArray(newRedeemed)
+      val redeemedKeyVal = (key, treeValue)  // key -> redeemed debt value
+      val insertProof = getVar[Coll[Byte]](5).get // Merkle proof for tree insertion
+      val nextTree: AvlTree = SELF.R5[AvlTree].get.insert(Coll(redeemedKeyVal), insertProof).get // todo: insertOrUpdate?
+      // Verify tree was properly updated in output
+      val properRedemptionTree = nextTree == selfOut.R5[AvlTree].get
+
       // Verify receiver's signature on transaction bytes
       val receiverCondition = proveDlog(receiver)
 
       // Combine all validation conditions
       sigmaProp(selfPreserved &&
                 trackerIdCorrect &&
-                properTimestampTree &&
+                properRedemptionTree &&
                 properReserveSignature &&
                 properlyRedeemed &&
                 receiverCondition)
@@ -174,7 +168,7 @@
       // top up
       sigmaProp(
         selfPreserved &&
-        selfOut.R5[AvlTree].get == SELF.R5[AvlTree].get && // R5 register preservation is not checked in selfPreserved
+        selfOut.R5[AvlTree].get == SELF.R5[AvlTree].get && // as R5 register preservation is not checked in selfPreserved
         (selfOut.value - SELF.value >= 1000000000) // at least 1 ERG added
       )
     } else {
