@@ -7,13 +7,35 @@ This document specifies the implementation of a periodic tracker box update mech
 ## Design Requirements
 
 1. **Periodic Execution**: Run every 10 minutes (600 seconds) to periodically update tracker state commitment
-2. **Register Updates**: Update R4 (tracker public key) and R5 (AVL+ tree root digest) registers in tracker box
+2. **Register Updates**: Update R4 (tracker public key as GroupElement) and R5 (AVL tree root digest) registers in tracker box
 3. **Blockchain Submission**: Submit actual transactions to update tracker box on Ergo blockchain
 4. **Background Task**: Run as a dedicated background task to avoid blocking main server operations
 5. **Thread Safety**: Ensure safe concurrent access to shared resources
 6. **Error Handling**: Implement proper error handling and logging for failed update attempts
 7. **Configuration**: Make update interval configurable via server configuration
 8. **State Synchronization**: Maintain synchronization between tracker state changes and blockchain commitment
+
+## Tracker Box Registers
+
+The tracker box uses the following registers:
+
+- **R4**: Tracker's public key (GroupElement / 33-byte compressed secp256k1 point)
+  - Identifies the tracker server
+  - Used for verifying tracker signatures on redemption transactions
+- **R5**: AVL tree root digest (33 bytes: 1 byte height + 32 bytes hash)
+  - Commitment to all debt records in the tracker's state
+  - Stores: `hash(issuer_pubkey || recipient_pubkey) -> totalDebt`
+  - Updated whenever notes are added, modified, or transferred
+- **R6**: Reserved for future use (currently not used)
+
+## AVL Tree Commitment
+
+The tracker's AVL tree (R5) stores cumulative debt records:
+
+- **Key**: `blake2b256(issuer_pubkey_bytes || recipient_pubkey_bytes)` = 32 bytes
+- **Value**: `longToByteArray(totalDebt)` = 8 bytes (big-endian encoded)
+
+This on-chain commitment allows the reserve contract to verify that the tracker is attesting to a debt amount that is actually recorded in its state during redemption.
 
 ## Component Architecture
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `basis_server` crate is a Rust web server built with the Axum framework that provides an HTTP API for the Basis Tracker system. It serves as the core component for managing IOU notes, tracking reserve events on the Ergo blockchain, and providing proof mechanisms for the Basis protocol.
+The `basis_server` crate is a Rust web server built with the Axum framework that provides an HTTP API for the Basis Tracker system. It serves as the core component for managing IOU notes, tracking reserve events on the Ergo blockchain, providing proof mechanisms for the Basis protocol, and facilitating redemption with tracker signatures.
 
 ## Architecture
 
@@ -14,6 +14,7 @@ The `basis_server` crate is a Rust web server built with the Axum framework that
 4. **Store Module**: Implements event storage functionality
 5. **Config Module**: Handles application configuration
 6. **Tracker Thread**: Background task that processes commands via message passing
+7. **AVL Tree Manager**: Manages the tracker's AVL tree state and proof generation
 
 ### Communication Pattern
 
@@ -47,7 +48,7 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `POST /redeem/complete` - Complete redemption process
 - `GET /proof` - Get proof for a specific note
 - `POST /tracker/signature` - Request tracker signature for redemption (real Schnorr signature generation)
-- `POST /redemption/prepare` - Prepare redemption with all necessary data (real AVL proof + tracker signature)
+- `POST /redemption/prepare` - Prepare redemption with all necessary data (real AVL proofs + tracker signature)
 - `GET /proof/redemption` - Get redemption-specific proof with tracker state digest
 
 ### Reserve Endpoints
@@ -73,18 +74,21 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `ReserveSpent`: When a reserve box is spent
 - `Commitment`: Commitment to tracker state
 - `CollateralAlert`: When collateralization ratio falls below threshold
+- `DebtTransfer`: When debt is transferred between creditors (novation)
 
 ### Tracker Box Registers
 
-The tracker box uses Ergo registers R4, R5, and R6 to store commitment information:
+The tracker box uses Ergo registers R4 and R5 to store commitment information:
 
-- `R4`: Contains the tracker's public key (33-byte compressed secp256k1 point) that identifies the tracker server
-- `R5`: Contains the AVL+ tree root digest (33-byte commitment to all notes in the system), updated whenever notes are added or modified
-- `R6`: Contains the last verified height (for cross-verification purposes)
+- **R4**: Contains the tracker's public key (GroupElement / 33-byte compressed secp256k1 point) that identifies the tracker server
+- **R5**: Contains the AVL tree root digest (33-byte commitment to all notes in the system)
+  - Stores: `hash(A_pubkey || B_pubkey) -> totalDebt`
+  - Updated whenever notes are added, modified, or transferred
+- **R6**: Reserved for future use (currently not used)
 
 ### Tracker State Digest Format
 
-The tracker state digest follows the AVL+ tree format (33 bytes total):
+The tracker state digest follows the AVL tree format (33 bytes total):
 - **Byte 1**: Tree height (1 byte) - indicates the depth of the AVL tree
 - **Bytes 2-33**: 32-byte hash of the AVL tree root (64 hex characters when encoded)
 - **Total**: 33 bytes (66 hex characters when hex-encoded)
@@ -94,9 +98,11 @@ The tracker state digest follows the AVL+ tree format (33 bytes total):
 
 The reserve box uses Ergo registers R4, R5, and R6 to store commitment and identification information:
 
-- `R4`: Contains the issuer's public key (33-byte compressed secp256k1 point) that identifies the reserve owner
-- `R5`: Contains the AVL tree root digest (33-byte commitment to all notes owed by this issuer), updated when notes are redeemed
-- `R6`: Contains the NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to
+- **R4**: Contains the issuer's public key (GroupElement / 33-byte compressed secp256k1 point) that identifies the reserve owner
+- **R5**: Contains the AVL tree root digest (33-byte commitment)
+  - Stores: `hash(ownerKey || receiverKey) -> cumulativeRedeemedAmount`
+  - Updated when notes are redeemed
+- **R6**: Contains the NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to
 
 ### IOU Note Structure
 
@@ -104,10 +110,10 @@ The server handles IOU (I Owe You) notes that represent debt obligations:
 
 For most endpoints:
 - `recipient_pubkey`: Public key of the recipient
-- `amount_collected`: Total amount collected
+- `amount_collected`: Total amount collected (cumulative debt)
 - `amount_redeemed`: Amount already redeemed
 - `timestamp`: Creation timestamp
-- `signature`: Cryptographic signature
+- `signature`: Cryptographic signature (Schnorr signature on `hash(issuer||recipient) || totalDebt`)
 
 For the `GET /notes` endpoint (all notes), additional fields are included:
 - `issuer_pubkey`: Public key of the issuer
@@ -118,10 +124,8 @@ For the `GET /notes` endpoint (all notes), additional fields are included:
 The `/tracker/signature` endpoint accepts requests with the following structure:
 - `issuer_pubkey`: Public key of the note issuer (hex-encoded, 33 bytes)
 - `recipient_pubkey`: Public key of the note recipient (hex-encoded, 33 bytes)
-- `amount`: Redemption amount in nanoERG
-- `timestamp`: Unix timestamp of the redemption request
-- `recipient_address`: Ergo address where funds should be sent
-- `reserve_box_id`: ID of the reserve box being spent
+- `total_debt`: Total cumulative debt amount in nanoERG
+- `emergency`: Boolean indicating if this is an emergency redemption (affects message format)
 
 ### Tracker Signature Response Structure
 
@@ -130,34 +134,43 @@ The `/tracker/signature` endpoint returns responses with the following structure
 - `tracker_signature`: 65-byte Schnorr signature (hex-encoded, 130 characters) proving tracker authorization
 - `tracker_pubkey`: Tracker's public key (hex-encoded, 66 characters)
 - `message_signed`: The hex-encoded message that was signed
+  - Normal: `hash(issuerKey||recipientKey) || longToByteArray(totalDebt)`
+  - Emergency: `hash(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(0L)`
 
 ### Redemption Preparation Request Structure
 
 The `/redemption/prepare` endpoint accepts requests with the following structure:
 - `issuer_pubkey`: Public key of the note issuer (hex-encoded, 33 bytes)
 - `recipient_pubkey`: Public key of the note recipient (hex-encoded, 33 bytes)
-- `amount`: Redemption amount in nanoERG
-- `timestamp`: Unix timestamp of the redemption request
+- `total_debt`: Total cumulative debt amount in nanoERG
 
 ### Redemption Preparation Response Structure
 
 The `/redemption/prepare` endpoint returns responses with the following structure:
 - `redemption_id`: Unique identifier for the redemption process
-- `avl_proof`: AVL+ tree lookup proof for the specific note (hex-encoded bytes)
+- `tracker_lookup_proof`: AVL tree lookup proof for tracker's tree (context var #8, hex-encoded bytes)
+- `reserve_lookup_proof`: AVL tree lookup proof for reserve's tree (context var #7, optional, hex-encoded bytes)
+- `reserve_insert_proof`: AVL tree insert proof for reserve's tree (context var #5, hex-encoded bytes)
 - `tracker_signature`: 65-byte Schnorr signature from tracker (hex-encoded, 130 characters)
 - `tracker_pubkey`: Tracker's public key (hex-encoded, 66 characters)
 - `tracker_state_digest`: 33-byte AVL tree root digest (hex-encoded, 66 characters) representing current tracker state
 - `block_height`: Current blockchain height at time of proof generation
+- `is_first_redemption`: Boolean indicating if this is the first redemption (reserve_lookup_proof can be omitted)
 
 ### Redemption Proof Response Structure
 
 The `/proof/redemption` endpoint returns responses with the following structure:
 - `issuer_pubkey`: Public key of the note issuer (hex-encoded, 66 characters)
 - `recipient_pubkey`: Public key of the note recipient (hex-encoded, 66 characters)
-- `proof_data`: AVL+ tree lookup proof for the specific note (hex-encoded bytes)
+- `tracker_lookup_proof`: AVL tree lookup proof for tracker's tree (context var #8, hex-encoded bytes)
+- `reserve_lookup_proof`: AVL tree lookup proof for reserve's tree (context var #7, optional, hex-encoded bytes)
+- `reserve_insert_proof`: AVL tree insert proof for reserve's tree (context var #5, hex-encoded bytes)
 - `tracker_state_digest`: 33-byte AVL tree root digest (hex-encoded, 66 characters) representing current tracker state
+- `reserve_state_digest`: 33-byte AVL tree root digest (hex-encoded, 66 characters) representing current reserve state
 - `block_height`: Current blockchain height at time of proof generation
 - `timestamp`: Unix timestamp of the proof generation
+- `total_debt`: Total cumulative debt from tracker's tree
+- `already_redeemed`: Already redeemed amount from reserve's tree (0 if first redemption)
 
 ### Real Cryptographic Implementation
 
@@ -170,18 +183,25 @@ The server now implements real cryptographic functionality using the Ergo node's
 - **Security**: Private keys remain secured within the Ergo node, with the tracker only requesting signatures for specific messages
 - **Authentication**: Requests to the signing API are authenticated using the tracker API key
 - **Implementation**: Tracker signature endpoints (`/tracker/signature` and `/redemption/prepare`) now make HTTP requests to the Ergo node API instead of performing local signing
-- **Message Format**: Signing messages follow the format `recipient_pubkey || amount_be_bytes || timestamp_be_bytes` as specified in the Schnorr signature specification
+- **Message Format**: 
+  - Normal redemption: `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt)`
+  - Emergency redemption (after 3 days): `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(0L)`
 
-#### AVL+ Tree Proof Generation
-- **Real Proofs**: All proof endpoints now generate actual AVL+ tree lookup proofs from the tracker's AVL tree state
+#### AVL Tree Proof Generation
+- **Real Proofs**: All proof endpoints now generate actual AVL tree lookup and insert proofs from the tracker's and reserve's AVL tree state
 - **Format**: Properly formatted proof data that demonstrates existence of key-value pairs in the AVL tree
 - **State Commitment**: Tracker state digest properly formatted as 33-byte AVL tree root (1 byte height + 32 bytes hash)
 - **Integration**: Proofs are generated by the actual tracker state manager using the AVL tree implementation
+- **Context Variables**: Proofs are generated for specific context extension variables:
+  - #5: Reserve tree insert proof
+  - #7: Reserve tree lookup proof (optional)
+  - #8: Tracker tree lookup proof (required)
 
 #### Tracker State Management
 - **Shared State**: Tracker state is maintained in shared state accessible via `state.shared_tracker_state`
 - **Real Digests**: Tracker state digests come from actual AVL tree root, not mock implementations
 - **Consistency**: All endpoints return consistent tracker state commitments that match the current AVL tree state
+- **Debt Tracking**: Tracker maintains cumulative debt for each (issuer, recipient) pair
 
 ### Reserve Creation Payload Structure
 
@@ -200,11 +220,27 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
       - `token_id`: NFT ID from request
       - `amount`: Always 1 for NFTs
     - `registers`: Map of register values
-      - `R4`: Owner public key from request
-      - `R5`: Tracker NFT ID (if configured) or provided NFT ID
+      - `R4`: Owner public key from request (GroupElement)
+      - `R5`: Initial AVL tree (empty tree for new reserve)
       - `R6`: Tracker NFT ID (bytes) - identifies which tracker server this reserve is linked to
   - `fee`: Transaction fee amount from configuration
   - `change_address`: "default" placeholder (filled by wallet)
+
+### Debt Transfer Support
+
+The server supports debt transfer (novation) operations:
+
+- `POST /debt/transfer` - Request debt transfer from one creditor to another
+  - Request structure:
+    - `debtor_pubkey`: Public key of the debtor (hex-encoded)
+    - `current_creditor_pubkey`: Public key of the current creditor (hex-encoded)
+    - `new_creditor_pubkey`: Public key of the new creditor (hex-encoded)
+    - `transfer_amount`: Amount to transfer in nanoERG
+  - Process:
+    1. Server verifies debtor has sufficient debt to current creditor
+    2. Server requests debtor's signature on transfer message
+    3. Server atomically updates both debt records
+    4. Server posts updated AVL tree commitment
 
 ## Configuration
 
@@ -238,6 +274,7 @@ The server integrates with the Ergo blockchain through:
 3. **Reserve Event Processing**: Handles reserve creation, top-ups, and redemptions
 4. **Real-time Updates**: Tracks collateralization ratios and reserve status
 5. **Scan Registration**: Automatically registers both reserve and tracker scans with the Ergo node using the `/scan` API
+6. **AVL Tree Verification**: Verifies on-chain AVL tree commitments match off-chain state
 
 ## Event Store
 
@@ -255,20 +292,24 @@ The server implements comprehensive error handling:
 - Proper HTTP status codes (200, 400, 500)
 - Detailed error messages for debugging
 - Graceful fallback when blockchain scanner is unavailable
+- AVL tree proof validation errors
+- Emergency redemption timeout handling
 
 ## Security Considerations
 
 - CORS headers configured for cross-origin requests
 - Input validation for all public keys and amounts
-- Signature verification for note creation
+- Signature verification for note creation and debt transfer
 - Channel-based communication to ensure thread safety
+- Remote signature generation to protect private keys
+- AVL tree proof verification to prevent fraud
 
 ## Current State Summary
 
 The basis_server crate is a fully functional HTTP API server that:
 - Manages IOU notes and redemption processes
 - Monitors Ergo blockchain reserve events
-- Provides real AVL+ tree proof mechanisms for the Basis protocol
+- Provides real AVL tree proof mechanisms for the Basis protocol
 - Generates real Schnorr signatures via Ergo node's signing API for redemption transactions
 - Implements proper async/await patterns and error handling
 - Supports configuration and event storage
@@ -278,5 +319,22 @@ The basis_server crate is a fully functional HTTP API server that:
 - Supports redemption-specific proof generation (`/proof/redemption`)
 - Integrates with shared tracker state for consistent AVL tree root commitments
 - Uses secure remote signing via Ergo node API to protect private keys
+- Supports debt transfer (novation) for triangular trade
+- Handles emergency redemption after 3-day timeout
 
 This crate serves as the central hub for the Basis Tracker system, connecting the blockchain layer with client applications through a well-defined HTTP interface with real cryptographic operations while maintaining security through remote signing.
+
+## Context Extension Variables Reference
+
+For redemption transactions prepared by the server:
+
+| Variable | Type | Description | Required |
+|----------|------|-------------|----------|
+| #0 | Byte | Action byte (0x00 for redemption) | Yes |
+| #1 | GroupElement | Receiver pubkey | Yes |
+| #2 | Coll[Byte] | Reserve owner's signature bytes | Yes |
+| #3 | Long | Total debt amount | Yes |
+| #5 | Coll[Byte] | AVL proof for reserve tree insertion | Yes |
+| #6 | Coll[Byte] | Tracker's signature bytes | Yes |
+| #7 | Coll[Byte] | AVL proof for reserve tree lookup | No (omit for first redemption) |
+| #8 | Coll[Byte] | AVL proof for tracker tree lookup | Yes |

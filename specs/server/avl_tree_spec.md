@@ -2,50 +2,51 @@
 
 ## Overview
 
-This document specifies the implementation of an AVL tree for the Basis Tracker system to provide efficient note storage, retrieval, and cryptographic proof generation. The AVL tree will maintain commitments to all IOU notes in the system and support generating Merkle proofs for individual notes.
+This document specifies the implementation of AVL trees for the Basis Tracker system. The tracker uses AVL trees to maintain cryptographic commitments to off-chain credit data, enabling efficient verification of debt amounts during redemption. The AVL tree supports generating cryptographic proofs for individual debt records.
 
 ## Design Requirements
 
-1. **Key-based Database IDs**: Each note will be identified by the hash of its keys (issuer and recipient public keys) rather than synthetic IDs
-2. **No Removal Operation**: The AVL tree implementation will not support removal of notes
-3. **Cryptographic Proofs**: Support generating Merkle proofs for notes against the tree root
+1. **Key-based Storage**: Each debt record is identified by `hash(issuer_pubkey || recipient_pubkey)` (32 bytes using Blake2b256)
+2. **Cumulative Debt Tracking**: Store cumulative debt amounts (totalDebt) that only increase over time
+3. **Cryptographic Proofs**: Support generating Merkle proofs for debt records against the tree root
 4. **Efficient Updates**: Maintain O(log n) complexity for insertions and updates
 5. **Persistent Storage**: Integrate with the existing storage layer using fjall database
+6. **On-chain Commitment**: The AVL tree root digest is committed on-chain in tracker box R5 register
 
 ## Data Structure
 
-### Note Entity Structure
+### Debt Record Structure
 
-The `IouNote` structure remains unchanged without synthetic IDs:
+The tracker stores cumulative debt records:
 
 ```rust
-pub struct IouNote {
-    /// Recipient's public key
+pub struct DebtRecord {
+    /// Recipient's public key (33 bytes compressed secp256k1)
     pub recipient_pubkey: PubKey,
-    /// Total amount ever collected (cumulative debt)
-    pub amount_collected: u64,
-    /// Total amount ever redeemed
-    pub amount_redeemed: u64,
+    /// Total cumulative debt amount (only increases)
+    pub total_debt: u64,
     /// Timestamp of latest payment/update
     pub timestamp: u64,
-    /// Signature from issuer (A)
+    /// Signature from issuer (A) on message: hash(A||B) || totalDebt
     pub signature: Signature,
 }
 ```
 
-### Note Key Structure
+### Record Key Structure
 
-The database key for each note is computed as:
-- Hash of issuer public key (32 bytes) concatenated with hash of recipient public key (32 bytes) = 64 bytes
-- This creates a unique identifier based on the note's parties
+The database key for each record is computed as:
+- `key = blake2b256(issuer_pubkey_bytes || recipient_pubkey_bytes)` = 32 bytes
+- This creates a unique identifier based on the debtor-creditor pair
 
 ## AVL Tree Integration
 
 ### AVL Tree Data Model
 
-The AVL tree will store key-value pairs where:
-- **Key**: Concatenation of issuer public key hash (32 bytes) and recipient public key hash (32 bytes) = 64 bytes
-- **Value**: Serialized note data without any additional ID
+The AVL tree stores key-value pairs where:
+- **Key**: `blake2b256(issuer_pubkey || recipient_pubkey)` = 32 bytes
+- **Value**: `longToByteArray(totalDebt)` = 8 bytes (big-endian encoded)
+
+This minimal storage format is used for the on-chain commitment in the tracker box R5 register.
 
 ### AVL Tree Update Algorithm
 
