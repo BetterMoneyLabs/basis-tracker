@@ -188,7 +188,7 @@ For this testing scenario, we will use the following predetermined keys for Alic
            "registers": {}
          },
          {
-           "address": "W52Uvz86YC7XkV8GXjM9DDkMLHWqZLyZGRi1FbmyppvPy7cREnehzz21DdYTdrsuw268CxW3gkXE6D5B8748FYGg3JEVW9R6VFJe8ZDknCtiPbh56QUCJo5QDizMfXaKnJ3jbWV72baYPCw85tmiJowR2wd4AjsEuhZP4Ry4QRDcZPvGogGVbdk7ykPAB7KN2guYEhS7RU3xm23iY1YaM5TX1ditsWfxqCBsvq3U6X5EU2Y5KCrSjQxdtGcwoZsdPQhfpqcwHPcYqM5iwK33EU1cHqggeSKYtLMW263f1TY7Lfu3cKMkav1CyomR183TLnCfkRHN3vcX2e9fSaTpAhkb74yo6ZRXttHNP23JUASWs9ejCaguzGumwK3SpPCLBZY6jFMYWqeaanH7XAtTuJA6UCnxvrKko5PX1oSB435Bxd3FbvDAsEmHpUqqtP78B7SKxFNPvJeZuaN7r5p8nDLxUPZBrWwz2vtcgWPMq5RrnoJdrdqrnXMcMEQPF5AKDYuKMKbCRgn3HLvG98JXJ4bCc2wzuZhnCRQaFXTy88knEoj",
+           "address": "RtQxdWJ9axeb5Ltahqosnhj45BE26xuDK4YWddVj5p59t9RjKPEkkHCYEiyxwRFMJcEHwVd9syFod8ReQo1Zaz9eNTZ5JwDEN5hkLd67sVr2sNQ6R46TSfausAc9D3q7et1apYaXnqV9PkpHPMCA1zMCEsmmADj62XRGq4Cw2VwpuKKCAdreTgmLzdFWHGVGQMsPDFFBkRibsPFMzXkytdy2mPs2zCtm15uyDpd3jDLBy95BtUFXU2DdaYa1xMZE9UXju4R4MhWH8vqWda5BgpRTa1RpQxpS5b96FG46r1v3ZWCLYcVo51J1ekY8cqqVFNNykpQScRRYqFjCLMjG26dYEwZyn21wGeLJ7RzcTwCpvGDBa2w1P3ycAEJAv9XDPEtJrSQpkvBaD1HaZ6X2JuXmFjPF5MChmVLk4CTXtRQVRis7vP95ByTTmbHbtVdao32kbN3xhCWgJZZdaKkNyKH4vFQn5jyoEmiV7FjQDegWnnaFXu5FW6stx9cbhsxWz5FfGpW1BCMRNNJTCRF6FtYoehrMT74LDRNxHQ38EmMn6mBEpSrhkzDj2jysdFJvDUf8UQjLZQLmUQtgNotfxeAPxiavsT5mLUja3hdWvZPv71FcHxvP53WJHAcn9JPek3vepbH9gxRdmBMW",
            "value": <remaining_collateral_after_redemption_minus_fee>,
            "assets": [
              {
