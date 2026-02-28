@@ -300,8 +300,9 @@ impl TrackerStateManager {
 
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing)
-        if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
-            if note.timestamp <= existing_note.timestamp {
+        let existing_note = self.lookup_note(issuer_pubkey, &note.recipient_pubkey).ok();
+        if let Some(ref existing) = existing_note {
+            if note.timestamp <= existing.timestamp {
                 return Err(NoteError::PastTimestamp);
             }
         }
@@ -326,12 +327,16 @@ impl TrackerStateManager {
         value_bytes.extend_from_slice(&note.signature);
         value_bytes.extend_from_slice(&note.recipient_pubkey);
 
-        // Update AVL tree state first to ensure consistency
-        // Use update operation since in Basis tracker, only one note per issuer-recipient pair exists
-        // and new operations replace existing ones
-        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes.clone());
+        // Use insert for new notes, update for existing notes
+        let avl_result = if existing_note.is_some() {
+            // Update existing note
+            self.avl_state.update(key_bytes.clone(), value_bytes.clone())
+        } else {
+            // Insert new note
+            self.avl_state.insert(key_bytes.clone(), value_bytes.clone())
+        };
 
-        // Only proceed with database storage if AVL tree update succeeded
+        // Only proceed with database storage if AVL tree operation succeeded
         match avl_result {
             Ok(()) => {
                 // Now store note in persistent storage
