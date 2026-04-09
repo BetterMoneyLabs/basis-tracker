@@ -469,6 +469,22 @@ impl TrackerStorage {
         Ok(tracker_boxes)
     }
 
+    /// Get the latest tracker box ID (highest last_verified_height)
+    pub fn get_latest_tracker_box_id(&self) -> Result<Option<String>, NoteError> {
+        let tracker_boxes = self.get_all_tracker_boxes()?;
+
+        if tracker_boxes.is_empty() {
+            return Ok(None);
+        }
+
+        // Find the box with the highest last_verified_height
+        let latest_box = tracker_boxes
+            .into_iter()
+            .max_by_key(|b| b.last_verified_height);
+
+        Ok(latest_box.map(|b| b.box_id))
+    }
+
     /// Remove a tracker box from the database
     pub fn remove_tracker_box(&self, box_id: &str) -> Result<(), NoteError> {
         self.partition

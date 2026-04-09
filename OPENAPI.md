@@ -121,7 +121,76 @@ The OpenAPI specification includes validation rules:
 - Public keys must match pattern: `^[0-9a-fA-F]{66}$`
 - Signatures must match pattern: `^[0-9a-fA-F]{130}$`
 - Amounts must be positive integers
-- Timestamps must be valid Unix timestamps
+- Timestamps must be valid Unix timestamps (tracked for record-keeping, not used in signing message)
+
+### Signing Message Format
+
+Note that the signature in note creation requests signs the following message format:
+- **Normal redemption**: `key || totalDebt` (40 bytes)
+- **Emergency redemption**: `key || totalDebt || 0L` (48 bytes)
+- Where `key = blake2b256(ownerKey || receiverKey)` (32 bytes)
+
+### Context Extension Variables
+
+Redemption transactions use context extension variables to pass data to the Basis contract:
+
+| Variable | Register | Purpose | Source |
+|----------|----------|---------|--------|
+| **#0** | - | Action byte (0x00 = redemption) | Constant |
+| **#1** | - | Receiver's public key (33 bytes) | From request |
+| **#2** | - | Reserve owner's Schnorr signature (65 bytes) | From issuer wallet |
+| **#3** | - | Total debt amount (8 bytes) | From tracker AVL proof |
+| **#5** | - | Reserve insert proof | From `/reserve/proof` endpoint |
+| **#6** | - | Tracker's Schnorr signature (65 bytes) | From `/tracker/signature` endpoint |
+| **#7** | - | Reserve lookup proof (optional) | From `/reserve/proof` endpoint |
+| **#8** | - | Tracker lookup proof | From `/tracker/proof` endpoint |
+
+**Note:** Context variable #7 (reserve lookup proof) is omitted for first redemptions when `already_redeemed = 0`.
+
+### AVL Proof Endpoints
+
+The API provides three proof endpoints for redemption transactions:
+
+1. **`GET /tracker/proof`** - Tracker lookup proof (context var #8)
+   - Proves `totalDebt` exists in tracker's AVL tree
+   - Returns: `key`, `value`, `proof`, `total_debt`, `tracker_state_digest`
+
+2. **`GET /reserve/proof`** - Reserve proofs (context var #5 and #7)
+   - Provides both insert proof (#5) and lookup proof (#7)
+   - Returns: `key`, `value`, `proof` (lookup), `insert_proof`, `already_redeemed`, `is_first_redemption`
+
+3. **`GET /proof/redemption`** - Comprehensive redemption proof
+   - Combines all proofs in single request
+   - Returns: `tracker_lookup_proof`, `reserve_lookup_proof`, `reserve_insert_proof`, state digests, amounts
+
+### Tracker Signature Endpoint
+
+**`POST /tracker/signature`** - Request tracker signature for redemption
+
+The tracker signs the same message as the issuer:
+- Normal: `key || totalDebt` (40 bytes)
+- Emergency: `key || totalDebt || 0L` (48 bytes)
+
+Request body:
+```json
+{
+  "issuer_pubkey": "hex...",
+  "recipient_pubkey": "hex...",
+  "total_debt": 1000000000,
+  "emergency": false
+}
+```
+
+Response:
+```json
+{
+  "success": true,
+  "tracker_signature": "hex...",
+  "tracker_pubkey": "hex...",
+  "message_signed": "hex...",
+  "is_emergency": false
+}
+```
 
 ## Tools
 

@@ -29,9 +29,14 @@ This specification defines a new API endpoint for the Ergo node that allows exte
 ```json
 {
   "address": "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
-  "message": "02415748f8eef16c5ea6896cec3a8defccc8a0dace245248be66ffd6ff2159da32000000000003d09000000000694fa26d"
+  "message": "6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a40000000002faf08000000194f8c88000"
 }
 ```
+
+In this example, the message is 48 bytes (96 hex characters):
+- `6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4` - key = blake2b256(ownerKey || receiverKey) (32 bytes)
+- `0000000002faf080` - totalDebt = 50,000,000 nanoERG (8 bytes big-endian)
+- `00000194f8c88000` - timestamp = 1,743,379,200,000 ms (8 bytes big-endian)
 
 ## Response Format
 
@@ -100,15 +105,13 @@ This specification defines a new API endpoint for the Ergo node that allows exte
 
 ### Schnorr Signature Structure
 - **Total Length**: 65 bytes (130 hex characters)
-- **Format**: `[prefix][a_component][z_component]`
-  - `prefix`: 1 byte (0x02 or 0x03) - compressed public key format indicator
-  - `a_component`: 32 bytes - the 'a' component of the signature (33 bytes total with prefix)
-  - `z_component`: 32 bytes - the 'z' component of the signature
+- **Format**: `[a_component][z_component]`
+  - `a_component`: 33 bytes - compressed random point R = k*G (starts with 0x02 or 0x03)
+  - `z_component`: 32 bytes - response scalar (unsigned, big-endian)
 
 ### Example Breakdown
 For signature `"02f40cf9d43542868b3e97a790872812574a8be92fd02ce229908d578724c28b925fa689420f9be9f5ddb3d22a6b2a317351008ad38fe222f66aae251f04daae03"`:
-- `02`: Prefix (compressed public key format)
-- `f40cf9d43542868b3e97a790872812574a8be92fd02ce229908d578724c28b92`: 'a' component (32 bytes)
+- `02f40cf9d43542868b3e97a790872812574a8be92fd02ce229908d578724c28b92`: 'a' component (33 bytes, compressed point with 0x02 prefix)
 - `5fa689420f9be9f5ddb3d22a6b2a317351008ad38fe222f66aae251f04daae03`: 'z' component (32 bytes)
 
 ## Security Considerations
@@ -169,7 +172,7 @@ For signature `"02f40cf9d43542868b3e97a790872812574a8be92fd02ce229908d578724c28b
 - **Signature Format**: 65 bytes with correct structure (33-byte 'a' component + 32-byte 'z' component)
 - **Challenge Computation**: Uses Blake2b256(a || message || public_key) with correct input ordering
 - **Verification Equation**: `g^z == a * x^e` holds true with Ergo node signatures and Basis server verification
-- **Message Format**: Follows the correct format: recipient_pubkey (33 bytes) || amount_be_bytes (8 bytes) || timestamp_be_bytes (8 bytes)
+- **Message Format**: Follows the correct format: `blake2b256(ownerKey || receiverKey)` (32 bytes) || totalDebt (8 bytes BE) || timestamp (8 bytes BE) = 48 bytes total
 
 ### Successful Integration
 The Ergo node's `/utils/schnorrSign` API can now be used directly with the Basis server's verification algorithm:
@@ -177,6 +180,25 @@ The Ergo node's `/utils/schnorrSign` API can now be used directly with the Basis
 - The verification equation `g^z == a * x^e` is satisfied with node-generated signatures
 - All Schnorr signature test vectors pass with both implementations
 - Cross-verification between systems is now possible
+
+### Message Format for Basis Protocol
+
+The Basis protocol uses a specific 48-byte message format for all signatures (both reserve owner and tracker):
+
+```
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+```
+
+Where:
+- `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
+  - `ownerKeyBytes`: Reserve owner's compressed public key (33 bytes)
+  - `receiverKeyBytes`: Recipient's compressed public key (33 bytes)
+- `totalDebt`: 8-byte big-endian representation of the total cumulative debt amount
+- `timestamp`: 8-byte big-endian representation of the payment timestamp (milliseconds since Unix epoch)
+
+**Total message length**: 32 + 8 + 8 = **48 bytes**
+
+Both the reserve owner and the tracker sign the **exact same message**. The timestamp enables replay attack prevention during redemption (contract verifies new timestamp > stored timestamp).
 
 ### Integration Workflow
 1. Call Ergo node API: `POST /utils/schnorrSign` with address and message

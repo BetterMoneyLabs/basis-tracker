@@ -1,6 +1,6 @@
 //! Integration tests for real Ergo scanner against actual Ergo nodes
 
-use crate::ergo_scanner::{NodeConfig, ReserveEvent, ScannerError, ServerState};
+use crate::ergo_scanner::{NodeConfig, ScannerError, ServerState};
 
 /// Integration test suite that tests against real Ergo nodes
 pub struct RealScannerIntegrationTestSuite {

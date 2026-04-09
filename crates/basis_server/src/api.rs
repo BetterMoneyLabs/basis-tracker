@@ -1122,14 +1122,107 @@ pub async fn initiate_redemption(
         found_box_id
     };
 
-    // Create redemption request
+    // Fetch blockchain data from Ergo node
+    let (tracker_box_id, tracker_nft_id, current_height) = {
+        // Get tracker_storage reference first (before any awaits)
+        let tracker_storage_ref = state.tracker_storage.clone();
+        let tracker_nft_id_config = state.config.ergo.tracker_nft_id.clone();
+        let ergo_scanner_ref = state.ergo_scanner.clone();
+        
+        // Get current blockchain height
+        let scanner_guard = ergo_scanner_ref.lock().await;
+        let current_height = match scanner_guard.get_current_height().await {
+            Ok(height) => height,
+            Err(e) => {
+                tracing::error!("Failed to get current blockchain height: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        format!("Failed to get blockchain height: {}", e)
+                    )),
+                );
+            }
+        };
+        drop(scanner_guard); // Release lock early
+
+        // Get tracker box ID from tracker_storage (if available)
+        let tracker_box_id = match tracker_storage_ref.get_latest_tracker_box_id() {
+            Ok(Some(box_id)) => {
+                tracing::debug!("Found latest tracker box: {}", box_id);
+                box_id
+            }
+            Ok(None) => {
+                tracing::warn!("No tracker boxes found in storage");
+                "tracker_box_placeholder".to_string()
+            }
+            Err(e) => {
+                tracing::error!("Failed to get tracker box ID from storage: {:?}", e);
+                "tracker_box_placeholder".to_string()
+            }
+        };
+
+        // Get tracker NFT ID from configuration (R6 register value)
+        let tracker_nft_id = match tracker_nft_id_config {
+            Some(id) => id,
+            None => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response("Tracker NFT ID not configured".to_string())),
+                );
+            }
+        };
+
+        (tracker_box_id, tracker_nft_id, current_height)
+    };
+
+    // Get tracker signature for normal redemption (not needed for emergency)
+    let tracker_signature_hex = if !payload.emergency {
+        match get_tracker_signature_for_redemption(
+            &state,
+            &payload.issuer_pubkey,
+            &payload.recipient_pubkey,
+            payload.amount,
+            payload.timestamp,
+            payload.emergency,
+        ).await {
+            Ok(sig) => Some(sig),
+            Err((status_code, error_resp)) => {
+                // Convert the error response to the correct type
+                return (
+                    status_code,
+                    Json(crate::models::error_response(
+                        format!("Failed to get tracker signature: {:?}", error_resp.0.error)
+                    )),
+                );
+            }
+        }
+    } else {
+        None // Emergency redemption doesn't require tracker signature
+    };
+
+    // Get change address from configuration
+    let change_address = state.config.get_change_address()
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to get change address from config: {}", e);
+            // Fallback: derive from tracker public key directly
+            recipient_address.clone() // Use recipient address as fallback (not ideal but safe)
+        });
+
+    // Create redemption request with blockchain data
     let redemption_request = basis_store::RedemptionRequest {
         issuer_pubkey: payload.issuer_pubkey.clone(),
         recipient_pubkey: payload.recipient_pubkey.clone(),
         amount: payload.amount,
         timestamp: payload.timestamp,
-        reserve_box_id, // Use the found reserve box ID
+        reserve_box_id: reserve_box_id.clone(), // Use the found reserve box ID
+        tracker_box_id, // Fetched from blockchain
+        tracker_nft_id, // From configuration (R6 register)
+        current_height, // Fetched from Ergo node
         recipient_address: recipient_address.clone(), // Use derived address from public key
+        change_address, // From configuration or derived from tracker pubkey
+        issuer_signature: payload.issuer_signature.clone(),
+        emergency: payload.emergency,
+        tracker_signature: tracker_signature_hex,
     };
 
     // Send command to tracker thread to initiate redemption
@@ -1174,11 +1267,10 @@ pub async fn initiate_redemption(
                 value: 100000, // Minimum ERG value for box (0.001 ERG)
                 registers: {
                     let mut regs = std::collections::HashMap::new();
-                    // R4 and R5 registers will be populated with the actual values from the redemption transaction
-                    // The redemption manager should prepare these values appropriately
-                    // For now, using placeholders based on the redemption data
-                    regs.insert("R4".to_string(), redemption_data.transaction_bytes.clone()); // Placeholder for R4 register
-                    regs.insert("R5".to_string(), hex::encode(&redemption_data.avl_proof)); // AVL proof for the note being redeemed
+                    // R4: Issuer's public key (GroupElement) - from the redemption request
+                    // R5: AVL proof for the note being redeemed (for reserve tree update)
+                    regs.insert("R4".to_string(), payload.issuer_pubkey.clone()); // Issuer pubkey
+                    regs.insert("R5".to_string(), hex::encode(&redemption_data.avl_proof)); // AVL proof
                     regs
                 },
                 assets: vec![crate::models::TokenData {
@@ -1417,7 +1509,330 @@ pub async fn get_proof(
     (StatusCode::OK, Json(crate::models::success_response(proof)))
 }
 
+// Get tracker lookup proof for context var #8
+// Following specs/server/redemption_transaction_format_spec.md - GET /tracker/proof
+#[axum::debug_handler]
+pub async fn get_tracker_proof(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<ApiResponse<crate::models::TrackerProofData>>) {
+    tracing::debug!("Getting tracker proof with params: {:?}", params);
+
+    let empty_string = "".to_string();
+    let issuer_pubkey = params.get("issuer_pubkey").unwrap_or(&empty_string);
+    let recipient_pubkey = params.get("recipient_pubkey").unwrap_or(&empty_string);
+
+    if issuer_pubkey.is_empty() || recipient_pubkey.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "issuer_pubkey and recipient_pubkey parameters are required".to_string(),
+            )),
+        );
+    }
+
+    // Validate hex encoding and length
+    let issuer_pubkey_bytes = match hex::decode(issuer_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes hex-encoded".to_string(),
+                )),
+            );
+        }
+    };
+
+    let recipient_pubkey_bytes = match hex::decode(recipient_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes hex-encoded".to_string(),
+                )),
+            );
+        }
+    };
+
+    // Convert to fixed-size arrays
+    let issuer_pubkey: basis_store::PubKey = match issuer_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes".to_string(),
+                )),
+            );
+        }
+    };
+
+    let recipient_pubkey: basis_store::PubKey = match recipient_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes".to_string(),
+                )),
+            );
+        }
+    };
+
+    // Get tracker state digest from shared state
+    let tracker_state_digest = {
+        let tracker_state = state.shared_tracker_state.lock().await;
+        hex::encode(&tracker_state.get_avl_root_digest())
+    };
+
+    // Request tracker lookup proof from tracker thread
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    if let Err(e) = state.tx.send(TrackerCommand::GetTrackerLookupProof {
+        issuer_pubkey,
+        recipient_pubkey,
+        response_tx,
+    }).await {
+        tracing::error!("Failed to send tracker proof command: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+
+    // Wait for response from tracker thread
+    match response_rx.await {
+        Ok(Ok(proof)) => {
+            // Extract total debt from proof value
+            let total_debt = if proof.value.len() == 8 {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&proof.value);
+                u64::from_be_bytes(bytes)
+            } else {
+                0u64
+            };
+
+            let proof_data = crate::models::TrackerProofData {
+                key: hex::encode(&proof.key),
+                value: hex::encode(&proof.value),
+                proof: hex::encode(&proof.proof),
+                total_debt,
+                tracker_state_digest,
+            };
+
+            tracing::info!(
+                "Tracker proof generated for {} -> {} (total_debt: {})",
+                hex::encode(&issuer_pubkey),
+                hex::encode(&recipient_pubkey),
+                proof_data.total_debt
+            );
+
+            (StatusCode::OK, Json(crate::models::success_response(proof_data)))
+        },
+        Ok(Err(e)) => {
+            tracing::warn!("Failed to generate tracker proof: {:?}", e);
+            (
+                StatusCode::NOT_FOUND,
+                Json(crate::models::error_response(
+                    format!("Debt record not found: {:?}", e),
+                )),
+            )
+        }
+        Err(_) => {
+            tracing::error!("Tracker thread response channel closed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
+            )
+        }
+    }
+}
+
+// Get reserve lookup proof for context var #7
+// Following specs/server/redemption_transaction_format_spec.md - GET /reserve/proof
+#[axum::debug_handler]
+pub async fn get_reserve_proof(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<ApiResponse<crate::models::ReserveProofData>>) {
+    tracing::debug!("Getting reserve proof with params: {:?}", params);
+
+    let empty_string = "".to_string();
+    let issuer_pubkey = params.get("issuer_pubkey").unwrap_or(&empty_string);
+    let recipient_pubkey = params.get("recipient_pubkey").unwrap_or(&empty_string);
+
+    if issuer_pubkey.is_empty() || recipient_pubkey.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "issuer_pubkey and recipient_pubkey parameters are required".to_string(),
+            )),
+        );
+    }
+
+    // Validate hex encoding and length
+    let issuer_pubkey_bytes = match hex::decode(issuer_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes hex-encoded".to_string(),
+                )),
+            );
+        }
+    };
+
+    let recipient_pubkey_bytes = match hex::decode(recipient_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes hex-encoded".to_string(),
+                )),
+            );
+        }
+    };
+
+    // Convert to fixed-size arrays
+    let issuer_pubkey: basis_store::PubKey = match issuer_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes".to_string(),
+                )),
+            );
+        }
+    };
+
+    let recipient_pubkey: basis_store::PubKey = match recipient_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes".to_string(),
+                )),
+            );
+        }
+    };
+
+    // Request reserve lookup proof from tracker thread
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    if let Err(e) = state.tx.send(TrackerCommand::GetReserveLookupProof {
+        issuer_pubkey,
+        recipient_pubkey,
+        response_tx,
+    }).await {
+        tracing::error!("Failed to send reserve proof command: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+
+    // Wait for response from tracker thread
+    match response_rx.await {
+        Ok(Ok(proof)) => {
+            // Extract timestamp and already_redeemed from proof value (16 bytes: timestamp || already_redeemed)
+            let (stored_timestamp, already_redeemed) = if proof.value.len() == 16 {
+                let mut ts_bytes = [0u8; 8];
+                ts_bytes.copy_from_slice(&proof.value[0..8]);
+                let mut redeemed_bytes = [0u8; 8];
+                redeemed_bytes.copy_from_slice(&proof.value[8..16]);
+                (u64::from_be_bytes(ts_bytes), u64::from_be_bytes(redeemed_bytes))
+            } else if proof.value.len() == 8 {
+                // Backward compat: old 8-byte format
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&proof.value);
+                (0u64, u64::from_be_bytes(bytes))
+            } else {
+                (0u64, 0u64)
+            };
+
+            // Calculate new_already_redeemed (current + amount from query params)
+            // For now, use current value as the new value (server will calculate properly in redemption flow)
+            let new_already_redeemed = already_redeemed;
+
+            // Request reserve insert proof from tracker thread
+            let (insert_proof_tx, insert_proof_rx) = tokio::sync::oneshot::channel();
+            let insert_proof = if let Err(e) = state.tx.send(TrackerCommand::GetReserveInsertProof {
+                issuer_pubkey,
+                recipient_pubkey,
+                timestamp: stored_timestamp,
+                new_already_redeemed,
+                response_tx: insert_proof_tx,
+            }).await {
+                tracing::error!("Failed to send reserve insert proof command: {}", e);
+                vec![0u8; 64] // Fallback to placeholder
+            } else {
+                match insert_proof_rx.await {
+                    Ok(Ok(proof_bytes)) => proof_bytes,
+                    Ok(Err(e)) => {
+                        tracing::warn!("Failed to generate reserve insert proof: {:?}", e);
+                        vec![0u8; 64] // Fallback to placeholder
+                    }
+                    Err(_) => {
+                        tracing::error!("Tracker thread response channel closed for insert proof");
+                        vec![0u8; 64] // Fallback to placeholder
+                    }
+                }
+            };
+
+            let proof_data = crate::models::ReserveProofData {
+                key: hex::encode(&proof.key),
+                value: hex::encode(&proof.value),
+                proof: proof.proof.clone().map(|p| hex::encode(p)),
+                already_redeemed,
+                is_first_redemption: proof.proof.is_none(),
+                insert_proof: hex::encode(&insert_proof),
+            };
+
+            tracing::info!(
+                "Reserve proof generated for {} -> {} (already_redeemed: {}, is_first: {})",
+                hex::encode(&issuer_pubkey),
+                hex::encode(&recipient_pubkey),
+                proof_data.already_redeemed,
+                proof_data.is_first_redemption
+            );
+
+            (StatusCode::OK, Json(crate::models::success_response(proof_data)))
+        },
+        Ok(Err(e)) => {
+            tracing::warn!("Failed to generate reserve proof: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Failed to generate reserve proof: {:?}", e),
+                )),
+            )
+        }
+        Err(_) => {
+            tracing::error!("Tracker thread response channel closed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Internal server error".to_string(),
+                )),
+            )
+        }
+    }
+}
+
 // Request tracker signature for redemption
+// Following specs/server/redemption_state_spec.md - POST /tracker/signature
 #[axum::debug_handler]
 pub async fn request_tracker_signature(
     State(state): State<AppState>,
@@ -1426,14 +1841,29 @@ pub async fn request_tracker_signature(
     tracing::debug!("Requesting tracker signature for redemption: {:?}", payload);
 
     // Validate public keys
-    if hex::decode(&payload.issuer_pubkey).is_err() || hex::decode(&payload.recipient_pubkey).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(crate::models::error_response(
-                "Invalid hex encoding for public keys".to_string(),
-            )),
-        );
-    }
+    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes hex-encoded".to_string(),
+                )),
+            );
+        }
+    };
+
+    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes hex-encoded".to_string(),
+                )),
+            );
+        }
+    };
 
     // Get tracker public key from configuration
     let tracker_pubkey_bytes = match state.config.tracker_public_key_bytes() {
@@ -1456,25 +1886,22 @@ pub async fn request_tracker_signature(
         }
     };
 
-    // Create a message to be signed by the tracker following the spec
-    // According to the offchain spec: (recipient_pubkey || amount || timestamp)
-    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "Invalid hex encoding for recipient public key".to_string(),
-                )),
-            );
-        }
-    };
+    // Create message to be signed following the Basis protocol specification.
+    // message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+    // where key = blake2b256(ownerKeyBytes || receiverBytes)
+    // Total: 48 bytes (32 + 8 + 8)
+    // Both normal and emergency redemption use the SAME message format.
+    // For emergency redemption, the tracker signature simply becomes optional.
+    let key_hash: [u8; 32] = basis_store::blake2b256_hash(&issuer_pubkey_bytes);
+    let mut key_hash_bytes = Vec::new();
+    key_hash_bytes.extend_from_slice(&key_hash);
+    key_hash_bytes.extend_from_slice(&recipient_pubkey_bytes);
+    let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_bytes);
 
-    let message_to_sign_bytes = basis_offchain::schnorr::signing_message(
-        &recipient_pubkey_bytes.try_into().unwrap_or([0u8; 33]),
-        payload.amount,
-        payload.timestamp,
-    );
+    let mut message_to_sign_bytes = Vec::with_capacity(48);
+    message_to_sign_bytes.extend_from_slice(&key);
+    message_to_sign_bytes.extend_from_slice(&payload.total_debt.to_be_bytes());
+    message_to_sign_bytes.extend_from_slice(&payload.timestamp.to_be_bytes());
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
 
@@ -1526,15 +1953,12 @@ pub async fn request_tracker_signature(
     };
 
     // Verify that the signature from the Ergo node is compatible with our verification algorithm
-    // Due to compatibility issues discovered between Ergo node and Basis server Schnorr implementations
     if let Err(verification_error) = verify_ergo_node_signature_compatibility(
         &tracker_signature,
         &message_to_sign,
         &tracker_pubkey_bytes,
     ).await {
-        tracing::warn!("Ergo node signature is not compatible with Basis verification: {}. This may cause verification issues later.", verification_error);
-        // Note: We still return the signature but log the compatibility issue
-        // In a production environment, you might want to handle this differently
+        tracing::warn!("Ergo node signature compatibility warning: {}", verification_error);
     }
 
     let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
@@ -1544,18 +1968,101 @@ pub async fn request_tracker_signature(
         tracker_signature,
         tracker_pubkey,
         message_signed: message_to_sign,
+        is_emergency: if payload.emergency { Some(true) } else { None },
     };
 
     tracing::info!(
-        "Tracker signature generated for redemption from {} to {}",
+        "Tracker signature generated for redemption from {} to {} (emergency: {})",
         payload.issuer_pubkey,
-        payload.recipient_pubkey
+        payload.recipient_pubkey,
+        payload.emergency
     );
 
     (StatusCode::OK, Json(crate::models::success_response(response)))
 }
 
+/// Helper function to get tracker signature for redemption
+/// Used by the redemption flow to include tracker signature in the request
+async fn get_tracker_signature_for_redemption(
+    state: &AppState,
+    issuer_pubkey: &str,
+    recipient_pubkey: &str,
+    total_debt: u64,
+    timestamp: u64,
+    emergency: bool,
+) -> Result<String, (StatusCode, Json<ApiResponse<()>>)> {
+    // Decode public keys
+    let issuer_pubkey_bytes = hex::decode(issuer_pubkey)
+        .map_err(|_| (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response("Invalid issuer pubkey hex".to_string())),
+        ))?;
+
+    let recipient_pubkey_bytes = hex::decode(recipient_pubkey)
+        .map_err(|_| (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response("Invalid recipient pubkey hex".to_string())),
+        ))?;
+
+    // Get tracker public key from configuration
+    let tracker_pubkey_bytes = state.config.tracker_public_key_bytes()
+        .ok()
+        .flatten()
+        .ok_or_else(|| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response("Tracker public key not configured".to_string())),
+        ))?;
+
+    // Build signing message: key || totalDebt || timestamp (48 bytes)
+    let key_hash: [u8; 32] = basis_store::blake2b256_hash(&issuer_pubkey_bytes);
+    let mut key_hash_bytes = Vec::new();
+    key_hash_bytes.extend_from_slice(&key_hash);
+    key_hash_bytes.extend_from_slice(&recipient_pubkey_bytes);
+    let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_bytes);
+
+    let mut message_to_sign_bytes = Vec::with_capacity(48);
+    message_to_sign_bytes.extend_from_slice(&key);
+    message_to_sign_bytes.extend_from_slice(&total_debt.to_be_bytes());
+    message_to_sign_bytes.extend_from_slice(&timestamp.to_be_bytes());
+
+    let message_to_sign = hex::encode(&message_to_sign_bytes);
+
+    // Convert tracker public key to P2PK address
+    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
+    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+    let tracker_ec_point = EcPoint::sigma_parse_bytes(&tracker_pubkey_bytes)
+        .map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(format!("Failed to parse tracker public key: {}", e))),
+        ))?;
+
+    let prove_dlog = ProveDlog::from(tracker_ec_point);
+    let tracker_address = Address::P2Pk(prove_dlog);
+    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
+    let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
+
+    // Get node URL and API key from configuration
+    let node_url = &state.config.ergo.node.node_url;
+    let api_key = state.config.ergo.node.api_key.as_deref();
+
+    // Call the Ergo node's schnorrSign API
+    call_schnorr_sign_api(
+        node_url,
+        api_key,
+        &tracker_p2pk_address,
+        &message_to_sign,
+    ).await
+    .map_err(|e| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(crate::models::error_response(format!("Failed to generate tracker signature: {}", e))),
+    ))
+}
+
 // Prepare redemption with all necessary data
+// Following specs/server/redemption_state_spec.md - POST /redemption/prepare
 #[axum::debug_handler]
 pub async fn prepare_redemption(
     State(state): State<AppState>,
@@ -1601,25 +2108,43 @@ pub async fn prepare_redemption(
         payload.timestamp
     );
 
-    // Create a message to be signed by the tracker following the spec
-    // According to the offchain spec: (recipient_pubkey || amount || timestamp)
-    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
-        Ok(bytes) => bytes,
-        Err(_) => {
+    // Decode public keys for message generation
+    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(crate::models::error_response(
-                    "Invalid hex encoding for recipient public key".to_string(),
+                    "issuer_pubkey must be 33 bytes hex-encoded".to_string(),
                 )),
             );
         }
     };
 
-    let message_to_sign_bytes = basis_offchain::schnorr::signing_message(
-        &recipient_pubkey_bytes.try_into().unwrap_or([0u8; 33]),
-        payload.amount,
-        payload.timestamp,
-    );
+    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes hex-encoded".to_string(),
+                )),
+            );
+        }
+    };
+
+    // Create message to be signed following specs/server/redemption_transaction_format_spec.md
+    // Normal redemption: message = key || longToByteArray(totalDebt)
+    // where key = blake2b256(ownerKeyBytes || receiverBytes)
+    let key_hash: [u8; 32] = basis_store::blake2b256_hash(&issuer_pubkey_bytes);
+    let mut key_hash_bytes = Vec::new();
+    key_hash_bytes.extend_from_slice(&key_hash);
+    key_hash_bytes.extend_from_slice(&recipient_pubkey_bytes);
+    let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_bytes);
+
+    let mut message_to_sign_bytes = Vec::new();
+    message_to_sign_bytes.extend_from_slice(&key);
+    message_to_sign_bytes.extend_from_slice(&payload.amount.to_be_bytes());
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
 

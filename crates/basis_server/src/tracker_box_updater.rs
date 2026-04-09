@@ -160,24 +160,27 @@ impl TrackerBoxUpdater {
                     let r4_bytes = r4_constant.sigma_serialize_bytes();
                     let r4_hex = hex::encode(&r4_bytes);
 
-                    // R5 should contain the full AVL tree data structure, not just the digest
-                    // For Ergo, this should be the serialized SAvlTree type which includes the tree structure
-                    // For now, we'll use the proper serialized AVL tree format with insert flag enabled
-                    // The format should be: [type_byte][tree_structure_with_digest][flags]
-                    // For an empty tree it would be: 644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900012000
-                    // But for a tracker with notes, we need the actual tree structure
-                    // For now, let's create a placeholder with the proper format for a non-empty tree
-                    // We'll use the expected format: 64[type_bytes][digest][insert_flag][key_len][value_len]
+                    // R5 should contain the serialized SAvlTree type
+                    // The proper format for Ergo AVL tree register is the serialized tree structure
+                    // Following the Ergo specification for SAvlTree serialization:
+                    // - Type byte: 0x64 (SAvlTree type identifier)
+                    // - Root digest: 33 bytes (1 byte height + 32 bytes blake2b256 hash)
+                    // - Flags: 1 byte (bit 0=insert, bit 1=update, bit 2=remove allowed)
+                    // - Key length: 4 bytes big-endian (64 for hash(issuer||receiver))
+                    // - Value length: 4 bytes big-endian (0 for variable length)
 
-                    // For now, we'll use the proper serialized format for the AVL tree structure
-                    // This should be the serialized SAvlTree value containing the actual tree data
-                    // Since we're working with the root digest, we need to create the proper serialized AVL tree format
-                    let mut r5_bytes = Vec::new();
-                    r5_bytes.push(0x64); // AVL tree type identifier
-                    r5_bytes.extend_from_slice(&current_root); // 33-byte root digest
-                    r5_bytes.push(0x01); // Insert flag enabled
-                    r5_bytes.push(0x20); // Key length (32 bytes)
-                    r5_bytes.push(0x00); // Value length (variable)
+                    // Get the current root digest from shared state (33 bytes)
+                    // The root digest from basis_trees::BasisAvlTree is already in the correct format:
+                    // [height_byte (1 byte) || blake2b256_hash (32 bytes)]
+                    let root_digest = current_root; // Already [u8; 33]
+
+                    // Build the serialized SAvlTree
+                    let mut r5_bytes = Vec::with_capacity(43); // 1 + 33 + 1 + 4 + 4 = 43 bytes
+                    r5_bytes.push(0x64u8); // SAvlTree type identifier
+                    r5_bytes.extend_from_slice(&root_digest); // 33-byte root digest
+                    r5_bytes.push(0x01u8); // Flags: insert-only allowed (bit 0 set)
+                    r5_bytes.extend_from_slice(&64u32.to_be_bytes()); // Key length: 64 bytes
+                    r5_bytes.extend_from_slice(&0u32.to_be_bytes()); // Value length: 0 (variable)
 
                     let r5_hex = hex::encode(&r5_bytes);
 

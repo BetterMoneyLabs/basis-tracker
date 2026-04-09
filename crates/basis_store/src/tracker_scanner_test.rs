@@ -130,7 +130,9 @@ mod tests {
         // Create a mock ScanBox
         let mut registers = HashMap::new();
         registers.insert("R4".to_string(), "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string());
-        registers.insert("R5".to_string(), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+        // R5 should be a valid SAvlTree format (starts with 0x64, at least 66 hex chars)
+        registers.insert("R5".to_string(), "640123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01".to_string());
+        // R6 is the last verified height (u64 as string)
         registers.insert("R6".to_string(), "1000".to_string());
 
         let scan_box = ScanBox {
@@ -155,7 +157,7 @@ mod tests {
         let tracker_box = result.unwrap();
         assert_eq!(tracker_box.box_id, "test_box_id_1234567890abcdef");
         assert_eq!(tracker_box.tracker_pubkey, "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7");
-        assert_eq!(tracker_box.state_commitment, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        assert_eq!(tracker_box.state_commitment, "640123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01");
         assert_eq!(tracker_box.last_verified_height, 1000);
         assert_eq!(tracker_box.value, 1000000);
         assert_eq!(tracker_box.creation_height, 950);
@@ -212,10 +214,10 @@ mod tests {
     #[test]
     fn test_parse_tracker_box_missing_register() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let metadata_storage = ScannerMetadataStorage::open(temp_dir.path().join("metadata"))
             .expect("Failed to create metadata storage");
-        
+
         let tracker_storage = TrackerStorage::open(temp_dir.path().join("tracker"))
             .expect("Failed to create tracker storage");
 
@@ -229,11 +231,11 @@ mod tests {
 
         let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
 
-        // Create a mock ScanBox missing R6 register
+        // Create a mock ScanBox missing R5 register (required)
         let mut registers = HashMap::new();
         registers.insert("R4".to_string(), "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string());
-        registers.insert("R5".to_string(), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
-        // Missing R6
+        // Missing R5 (required - state commitment)
+        registers.insert("R6".to_string(), "1000".to_string());
 
         let scan_box = ScanBox {
             box_id: "test_box_id_1234567890abcdef".to_string(),
@@ -250,7 +252,7 @@ mod tests {
             additional_registers: registers,
         };
 
-        // Parse should fail due to missing register
+        // Parse should fail due to missing R5 register
         let result = server_state.parse_tracker_box(&scan_box);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), crate::tracker_scanner::TrackerScannerError::MissingRegister(_)));

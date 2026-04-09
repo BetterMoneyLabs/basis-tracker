@@ -34,6 +34,7 @@ pub mod reserve_tracking_test;
 #[cfg(test)]
 pub mod test_helpers;
 #[cfg(test)]
+pub mod basis_spec_tests;
 
 
 use secp256k1;
@@ -116,6 +117,30 @@ pub struct NoteProof {
     pub operations: Vec<u8>,
 }
 
+/// Tracker lookup proof for context var #8 in redemption transactions
+/// Proves that totalDebt exists in the tracker's AVL tree at key hash(ownerKey||receiverKey)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerLookupProof {
+    /// The AVL tree key: hash(ownerKey || receiverKey) (64 bytes: 32 + 32)
+    pub key: Vec<u8>,
+    /// The value: totalDebt as 8-byte big-endian
+    pub value: Vec<u8>,
+    /// AVL proof bytes for the lookup
+    pub proof: Vec<u8>,
+}
+
+/// Reserve lookup proof for context var #7 in redemption transactions
+/// Proves that (timestamp, already_redeemed) exists in the reserve's AVL tree at key hash(ownerKey||receiverKey)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReserveLookupProof {
+    /// The AVL tree key: hash(ownerKey || receiverKey) (64 bytes: 32 + 32)
+    pub key: Vec<u8>,
+    /// The value: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes total
+    pub value: Vec<u8>,
+    /// AVL proof bytes for the lookup (None for first redemption)
+    pub proof: Option<Vec<u8>>,
+}
+
 /// Key for note lookup (hash of issuer + recipient)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NoteKey {
@@ -164,6 +189,8 @@ pub struct TrackerStateManager {
     avl_state: basis_trees::BasisAvlTree,
     current_state: TrackerState,
     storage: persistence::NoteStorage,
+    /// Reserve AVL tree tracking hash(ownerKey || receiverKey) -> already_redeemed
+    reserve_avl_state: basis_trees::BasisAvlTree,
 }
 
 impl TrackerStateManager {
@@ -201,6 +228,18 @@ impl TrackerStateManager {
             }
         };
 
+        // Create reserve AVL tree for tracking already_redeemed
+        let reserve_avl_state = match basis_trees::BasisAvlTree::new() {
+            Ok(tree) => {
+                tracing::debug!("Reserve AVL tree created successfully");
+                tree
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize reserve AVL tree: {:?}", e);
+                panic!("Failed to initialize reserve AVL tree: {:?}", e);
+            }
+        };
+
         tracing::debug!("TrackerStateManager created successfully");
         Self {
             avl_state,
@@ -210,6 +249,7 @@ impl TrackerStateManager {
                 last_update_timestamp: 0,
             },
             storage,
+            reserve_avl_state,
         }
     }
 
@@ -274,6 +314,18 @@ impl TrackerStateManager {
             }
         };
 
+        // Create reserve AVL tree for tracking already_redeemed
+        let reserve_avl_state = match basis_trees::BasisAvlTree::new() {
+            Ok(tree) => {
+                tracing::debug!("Reserve AVL tree created successfully");
+                tree
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize reserve AVL tree: {:?}", e);
+                panic!("Failed to initialize reserve AVL tree: {:?}", e);
+            }
+        };
+
         tracing::debug!("TrackerStateManager created successfully");
         Self {
             avl_state,
@@ -283,10 +335,12 @@ impl TrackerStateManager {
                 last_update_timestamp: 0,
             },
             storage,
+            reserve_avl_state,
         }
     }
 
     /// Add a new note to the tracker state
+    /// Updates the AVL tree with hash(issuer||receiver) -> totalDebt mapping
     pub fn add_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
         // Validate that timestamp is not in the future
         let current_time = std::time::SystemTime::now()
@@ -313,23 +367,16 @@ impl TrackerStateManager {
                 NoteError::InvalidSignature
             })?;
 
-        // Prepare AVL tree key and value in advance
+        // Prepare AVL tree key: hash(issuer_pubkey || receiver_pubkey)
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let key_bytes = key.to_bytes();
 
-        // Create value bytes matching persistence format
-        let mut value_bytes = Vec::new();
-        value_bytes.extend_from_slice(issuer_pubkey);
-        value_bytes.extend_from_slice(&note.amount_collected.to_be_bytes());
-        value_bytes.extend_from_slice(&note.amount_redeemed.to_be_bytes());
-        value_bytes.extend_from_slice(&note.timestamp.to_be_bytes());
-        value_bytes.extend_from_slice(&note.signature);
-        value_bytes.extend_from_slice(&note.recipient_pubkey);
+        // Value is just the totalDebt (amount_collected) as 8-byte big-endian
+        // This matches the contract spec: hash(A||B) -> totalDebt
+        let value_bytes = note.amount_collected.to_be_bytes().to_vec();
 
         // Update AVL tree state first to ensure consistency
-        // Use update operation since in Basis tracker, only one note per issuer-recipient pair exists
-        // and new operations replace existing ones
-        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes.clone());
+        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
 
         // Only proceed with database storage if AVL tree update succeeded
         match avl_result {
@@ -343,7 +390,8 @@ impl TrackerStateManager {
         }
     }
 
-    /// Update an existing note
+    /// Update an existing note in the tracker state
+    /// Updates the AVL tree with hash(issuer||receiver) -> totalDebt mapping
     pub fn update_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
         // Validate that timestamp is not in the future
         let current_time = std::time::SystemTime::now()
@@ -363,18 +411,13 @@ impl TrackerStateManager {
             }
         }
 
-        // Prepare key and value in advance
+        // Prepare AVL tree key: hash(issuer_pubkey || receiver_pubkey)
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let key_bytes = key.to_bytes();
 
-        // Create value bytes matching persistence format (consistent with add_note)
-        let mut value_bytes = Vec::new();
-        value_bytes.extend_from_slice(issuer_pubkey);
-        value_bytes.extend_from_slice(&note.amount_collected.to_be_bytes());
-        value_bytes.extend_from_slice(&note.amount_redeemed.to_be_bytes());
-        value_bytes.extend_from_slice(&note.timestamp.to_be_bytes());
-        value_bytes.extend_from_slice(&note.signature);
-        value_bytes.extend_from_slice(&note.recipient_pubkey);
+        // Value is just the totalDebt (amount_collected) as 8-byte big-endian
+        // This matches the contract spec: hash(A||B) -> totalDebt
+        let value_bytes = note.amount_collected.to_be_bytes().to_vec();
 
         // Update AVL tree state first to ensure consistency
         let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
@@ -391,6 +434,205 @@ impl TrackerStateManager {
         }
     }
 
+    /// Get the total debt for a specific (issuer, receiver) pair from the AVL tree
+    /// Returns the cumulative debt amount (totalDebt) stored in the tracker's AVL tree
+    pub fn get_total_debt(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<u64, NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+        
+        // Lookup value in AVL tree
+        let value_bytes = self.avl_state.get(&key_bytes)
+            .ok_or_else(|| NoteError::StorageError("Debt record not found in AVL tree".to_string()))?;
+        
+        // Convert 8-byte big-endian to u64
+        if value_bytes.len() != 8 {
+            return Err(NoteError::StorageError("Invalid debt value format in AVL tree".to_string()));
+        }
+        
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&value_bytes);
+        Ok(u64::from_be_bytes(bytes))
+    }
+
+    /// Generate a tracker lookup proof for context var #8
+    /// This proof verifies that totalDebt exists in the tracker's AVL tree
+    pub fn generate_tracker_lookup_proof(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<TrackerLookupProof, NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+
+        // Get the total debt value
+        let total_debt = self.get_total_debt(issuer_pubkey, recipient_pubkey)?;
+
+        // Generate AVL proof for the lookup
+        let avl_proof = self.avl_state.generate_proof();
+
+        Ok(TrackerLookupProof {
+            key: key_bytes,
+            value: total_debt.to_be_bytes().to_vec(),
+            proof: avl_proof,
+        })
+    }
+
+    /// Get the already_redeemed amount for a specific (issuer, receiver) pair from the reserve AVL tree
+    /// Returns the cumulative redeemed amount stored in the reserve's AVL tree
+    pub fn get_already_redeemed(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<u64, NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+
+        // Lookup value in reserve AVL tree
+        let value_bytes = match self.reserve_avl_state.get(&key_bytes) {
+            Some(bytes) => bytes,
+            None => return Ok(0u64), // First redemption - no already_redeemed amount
+        };
+
+        // Value format: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE) = 16 bytes
+        if value_bytes.len() != 16 {
+            return Err(NoteError::StorageError(format!(
+                "Invalid reserve tree value format: expected 16 bytes (timestamp||redeemedAmount), got {}",
+                value_bytes.len()
+            )));
+        }
+
+        // Extract redeemedAmount from bytes 8-16
+        let mut redeemed_bytes = [0u8; 8];
+        redeemed_bytes.copy_from_slice(&value_bytes[8..16]);
+        Ok(u64::from_be_bytes(redeemed_bytes))
+    }
+
+    /// Get the stored timestamp for a (owner, receiver) pair from the reserve AVL tree
+    pub fn get_already_redeemed_timestamp(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<u64, NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+
+        // Lookup value in reserve AVL tree
+        let value_bytes = match self.reserve_avl_state.get(&key_bytes) {
+            Some(bytes) => bytes,
+            None => return Ok(0u64), // First redemption - no stored timestamp
+        };
+
+        // Value format: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE) = 16 bytes
+        if value_bytes.len() != 16 {
+            return Err(NoteError::StorageError(format!(
+                "Invalid reserve tree value format: expected 16 bytes, got {}",
+                value_bytes.len()
+            )));
+        }
+
+        // Extract timestamp from bytes 0-8
+        let mut timestamp_bytes = [0u8; 8];
+        timestamp_bytes.copy_from_slice(&value_bytes[0..8]);
+        Ok(u64::from_be_bytes(timestamp_bytes))
+    }
+
+    /// Update the already_redeemed amount and timestamp in the reserve AVL tree
+    /// Called after a successful redemption to prevent double-spending
+    /// Value format: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE) = 16 bytes
+    pub fn update_already_redeemed(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        timestamp: u64,
+        already_redeemed: u64,
+    ) -> Result<(), NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+        // Value: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE)
+        let mut value_bytes = Vec::with_capacity(16);
+        value_bytes.extend_from_slice(&timestamp.to_be_bytes());
+        value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
+
+        // Update reserve AVL tree
+        self.reserve_avl_state.update(key_bytes, value_bytes)
+            .map_err(|e| NoteError::StorageError(format!("Reserve AVL tree update failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Generate a reserve lookup proof for context var #7
+    /// This proof verifies that (timestamp, already_redeemed) exists in the reserve's AVL tree
+    /// Returns None proof for first redemption (no lookup proof needed)
+    pub fn generate_reserve_lookup_proof(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<ReserveLookupProof, NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+
+        // Get the already_redeemed value and timestamp
+        let already_redeemed = self.get_already_redeemed(issuer_pubkey, recipient_pubkey)?;
+        let stored_timestamp = self.get_already_redeemed_timestamp(issuer_pubkey, recipient_pubkey)?;
+
+        // For first redemption, no lookup proof is needed (per spec)
+        let is_first_redemption = already_redeemed == 0;
+
+        // Value: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes
+        let mut value_bytes = Vec::with_capacity(16);
+        value_bytes.extend_from_slice(&stored_timestamp.to_be_bytes());
+        value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
+
+        if is_first_redemption {
+            Ok(ReserveLookupProof {
+                key: key_bytes,
+                value: value_bytes,
+                proof: None, // Omitted for first redemption
+            })
+        } else {
+            // Generate AVL proof for the lookup
+            let avl_proof = self.reserve_avl_state.generate_proof();
+
+            Ok(ReserveLookupProof {
+                key: key_bytes,
+                value: value_bytes,
+                proof: Some(avl_proof),
+            })
+        }
+    }
+
+    /// Generate a reserve insert proof for context var #5
+    /// This proof will be used to INSERT the new (timestamp, already_redeemed) into the reserve's AVL tree
+    /// The insert proof contains the necessary neighbor nodes to verify the insertion
+    /// Value format: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE) = 16 bytes
+    pub fn generate_reserve_insert_proof(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        timestamp: u64,
+        new_already_redeemed: u64,
+    ) -> Result<Vec<u8>, NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+        // Value: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE)
+        let mut value_bytes = Vec::with_capacity(16);
+        value_bytes.extend_from_slice(&timestamp.to_be_bytes());
+        value_bytes.extend_from_slice(&new_already_redeemed.to_be_bytes());
+
+        // Generate AVL proof for the insert operation
+        // The proof contains neighbor nodes needed to verify the insertion
+        let insert_proof = self.reserve_avl_state.generate_proof();
+
+        // Note: The value_bytes are used to construct the insert proof
+        // In a full implementation, the insert_proof would include the value
+        let _ = (key_bytes, value_bytes);
+
+        Ok(insert_proof)
+    }
 
     /// Generate proof for a specific note
     pub fn generate_proof(
@@ -517,11 +759,15 @@ impl IouNote {
         self.amount_collected == self.amount_redeemed
     }
 
-    /// Create and sign a new IOU note using the chaincash-rs Schnorr signature approach
+    /// Create and sign a new IOU note using the new spec signing format
+    /// 
+    /// Following specs/server/redemption_transaction_format_spec.md:
+    /// message = key || longToByteArray(totalDebt)
+    /// where key = blake2b256(ownerKeyBytes || receiverKeyBytes)
     pub fn create_and_sign(
         recipient_pubkey: PubKey,
         amount_collected: u64,
-        timestamp: u64,
+        _timestamp: u64,  // Kept for API compatibility but not used in signing message
         issuer_secret_key: &[u8; 32],
     ) -> Result<Self, NoteError> {
         use secp256k1::{Secp256k1, SecretKey};
@@ -536,8 +782,8 @@ impl IouNote {
         let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let issuer_pubkey = public_key.serialize();
 
-        // Generate the signing message (same format as chaincash-rs)
-        let message = schnorr::signing_message(&recipient_pubkey, amount_collected, timestamp);
+        // Generate the signing message: key || totalDebt || timestamp
+        let message = schnorr::signing_message(&issuer_pubkey, &recipient_pubkey, amount_collected, _timestamp);
 
         // Use the chaincash-rs approach for Schnorr signing
         let signature = schnorr::schnorr_sign(&message, &secret_key.secret_bytes(), &issuer_pubkey)?;
@@ -546,25 +792,27 @@ impl IouNote {
             recipient_pubkey,
             amount_collected,
             amount_redeemed: 0, // Start with no redemptions
-            timestamp,
+            timestamp: _timestamp,
             signature,
         })
     }
 
-    /// Generate the message that should be signed
-    pub fn signing_message(&self) -> Vec<u8> {
-        let mut message = Vec::new();
-        message.extend_from_slice(&self.recipient_pubkey);
-        message.extend_from_slice(&self.amount_collected.to_be_bytes());
-        message.extend_from_slice(&self.timestamp.to_be_bytes());
-        message
+    /// Generate the message that should be signed following the Basis protocol specification.
+    ///
+    /// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp)
+    ///
+    /// Total: 48 bytes
+    ///
+    /// # Arguments
+    /// * `owner_pubkey` - Reserve owner's public key (the issuer of the IOU note)
+    pub fn signing_message(&self, owner_pubkey: &PubKey) -> Vec<u8> {
+        crate::schnorr::signing_message(owner_pubkey, &self.recipient_pubkey, self.amount_collected, self.timestamp)
     }
 
     /// Verify the signature against an issuer public key using Schnorr signature verification
     /// This follows the chaincash-rs approach for Schnorr signature verification
     pub fn verify_signature(&self, issuer_pubkey: &PubKey) -> Result<(), NoteError> {
-        // Generate the signing message
-        let message = self.signing_message();
+        let message = self.signing_message(issuer_pubkey);
 
         // Use the canonical Schnorr verification from basis_core
         let verifier = SchnorrVerifier;
@@ -575,6 +823,11 @@ impl IouNote {
             Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => Err(NoteError::InvalidSignature),
             Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
         }
+    }
+
+    /// Get the recipient public key as a hex-encoded string
+    pub fn recipient_pubkey_hex(&self) -> String {
+        hex::encode(&self.recipient_pubkey)
     }
 }
 

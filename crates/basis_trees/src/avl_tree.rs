@@ -10,10 +10,15 @@ use ergo_avltree_rust::{
     operation::{KeyValue, Operation},
 };
 
+use std::collections::HashMap;
+
 /// In-memory AVL tree state for tracker commitments
 pub struct BasisAvlTree {
     prover: BatchAVLProver,
     current_state: TrackerState,
+    /// In-memory cache for key-value lookups
+    /// This mirrors the AVL tree state for efficient get() operations
+    cache: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 // Simple resolver function for AVL tree
@@ -36,6 +41,7 @@ impl BasisAvlTree {
         Ok(Self {
             prover,
             current_state,
+            cache: HashMap::new(),
         })
     }
 
@@ -56,6 +62,9 @@ impl BasisAvlTree {
             .perform_one_operation(&operation)
             .map_err(|e| TreeError::StorageError(format!("AVL tree insert failed: {:?}", e)))?;
 
+        // Update cache
+        self.cache.insert(key.clone(), value.clone());
+
         // Update state
         self.update_state();
 
@@ -72,6 +81,8 @@ impl BasisAvlTree {
 
         match self.prover.perform_one_operation(&update_op) {
             Ok(_) => {
+                // Update cache
+                self.cache.insert(key.clone(), value.clone());
                 self.update_state();
                 Ok(())
             },
@@ -86,6 +97,8 @@ impl BasisAvlTree {
                     .perform_one_operation(&insert_op)
                     .map_err(|e| TreeError::StorageError(format!("AVL tree operation failed: {:?}", e)))?;
 
+                // Update cache
+                self.cache.insert(key.clone(), value.clone());
                 self.update_state();
                 Ok(())
             }
@@ -108,6 +121,13 @@ impl BasisAvlTree {
         } else {
             [0u8; 33] // Empty tree digest
         }
+    }
+
+    /// Lookup a value by key in the AVL tree
+    /// Returns the value bytes if found, None otherwise
+    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        // Use the in-memory cache for efficient lookups
+        self.cache.get(key).cloned()
     }
 
     /// Get the current tracker state

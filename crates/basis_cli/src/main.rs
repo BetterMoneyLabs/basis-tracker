@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
             commands::reserve::handle_reserve_command(cmd, &account_manager, &client).await
         }
         Commands::Transaction { cmd } => {
-            commands::transaction::handle_transaction_command(cmd, &client).await
+            commands::transaction::handle_transaction_command(cmd, &client, &account_manager).await
         }
         Commands::Test { cmd } => {
             commands::test_redemption::handle_test_command(cmd, &client).await

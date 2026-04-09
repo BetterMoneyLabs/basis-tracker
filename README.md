@@ -39,17 +39,17 @@ As a simple but pretty secure solution, the following design is proposed, which 
   disappearing, after some period last tracker state snapshot committed on-chain becomes redeemable without it. If tracker
   is starting censoring notes associated with a public key, by not including them into on-chain update, it is still
   possible to redeem them. There could be different improvements to the tracker design, see "Future Extensions" section.
-* IOU note from A to B is represented as (B_pubkey, amount, timestamp, sig_A) record, where amount is the **total** amount of
-  A's debt before B, timestamp is timestamp of latest payment from A to B, and sig_A is a signature for (B_pubkey, amount,
-  nonce). Only one updateable note is stored by a tracker, and redeemable onchain. Thus a tracker is storing
-  (amount, timestamp) pairs for all A->B debt relationships. The tracker commits on-chain to the data by storing a digest
-  of a tree where hash(A ++ B) acts as a key, and (amount, timestamp) acts as a value.
+* IOU note from A to B represents cumulative debt with format: cumulative debt amount tracked by tracker, where the tracker
+  stores `hash(A_pubkey || B_pubkey) -> totalDebt` mappings. The signature from A (sig_A) is computed over
+  `key || totalDebt` where `key = blake2b256(ownerKey || receiverKey)`. Only one updateable note is stored by a tracker
+  per (A,B) pair, and is redeemable onchain. The tracker commits on-chain to the data by storing an AVL tree root digest
+  in register R5, where the tree stores `hash(A || B) -> totalDebt` mappings.
 
-* If A has on-chain reserve, B may redeem offchain from A->B note, by providing proof of (amount, timestamp). Reserve
-  contract UTXO is storing tree of hash(AB) -> timestamp pairs. It is impossible to withdraw a note with timestamp <=
-  redeemed again. After on-chain redemption, A and B should contact offchain to deduct before next payment from A to B done.
-  A note may be redeemed only one week after creation (timestamp of last block is one week ahead of timestamp in the note,
-  at least), thus for services it makes sense to have a lot of rotating keys.
+* If A has on-chain reserve, B may redeem from A->B note by providing proof of totalDebt from tracker's AVL tree. The reserve
+  contract UTXO stores an AVL tree in R5 tracking `hash(ownerKey || receiverKey) -> cumulativeRedeemedAmount`. Redemption
+  requires both reserve owner's signature AND tracker's signature on `key || totalDebt`. Emergency redemption is available
+  after 3 days (3*720 blocks) from tracker creation height if tracker becomes unavailable. After on-chain redemption, the
+  reserve's AVL tree is updated with the new cumulative redeemed amount, preventing double redemption.
 
 ## Basis Contract
 
@@ -58,6 +58,17 @@ A basic contract corresponding to the design outlined in the previous section, i
 ## Offchain Logic
 
 ### Tracker
+
+**⚠️ Production Requirement: Tracker Box Setup**
+
+Before running the tracker in production, you **must** create and initialize the tracker box on-chain. The tracker box contains the AVL tree root digest that commits to all debt relationships.
+
+**Without a tracker box:**
+- Redemptions will fail (system uses placeholder values)
+- No on-chain state commitment
+- System cannot verify tracker signatures
+
+📖 **See [docs/TRACKER_BOX_SETUP.md](docs/TRACKER_BOX_SETUP.md) for complete setup instructions.**
 
 Tracker is publishing following events via NOSTR protocol as relay:
 

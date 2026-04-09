@@ -43,7 +43,14 @@ async fn test_complete_issuance_redemption_flow() {
         amount: 500, // Partial redemption
         timestamp,
         reserve_box_id: "test_reserve_box_1".to_string(),
+        tracker_box_id: "test_tracker_box_1".to_string(),
+        tracker_nft_id: "test_tracker_nft_1".to_string(),
+        current_height: 1000,
         recipient_address: "test_recipient_address".to_string(),
+        change_address: "test_change_address".to_string(),
+        issuer_signature: "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101".to_string(),
+        emergency: false,
+        tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
     };
     
     println!("Redemption request created:");
@@ -161,7 +168,14 @@ async fn test_error_conditions_flow() {
         amount: 2000, // More than outstanding debt
         timestamp: 1672531200,
         reserve_box_id: "test_reserve_box_1".to_string(),
+        tracker_box_id: "test_tracker_box_1".to_string(),
+        tracker_nft_id: "test_tracker_nft_1".to_string(),
+        current_height: 1000,
         recipient_address: "test_recipient_address".to_string(),
+        change_address: "test_change_address".to_string(),
+        issuer_signature: "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101".to_string(),
+        emergency: false,
+        tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
     };
     
     let redemption_valid = excessive_redemption.amount <= note.outstanding_debt();
@@ -175,25 +189,23 @@ async fn test_error_conditions_flow() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     let recent_note = IouNote::create_and_sign(
         recipient_pubkey,
         1000,
         recent_timestamp,
         &issuer_secret.secret_bytes(),
     ).unwrap();
-    
-    let one_week = 7 * 24 * 60 * 60;
-    let min_redemption_time = recent_timestamp + one_week;
-    let current_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    
-    let is_redeemable = current_time >= min_redemption_time;
-    assert!(!is_redeemable, "Recent note should not be redeemable yet");
-    println!("✓ Time lock validation passed");
-    
+
+    // Note: Time lock enforcement is now handled by the contract based on tracker creation height.
+    // Emergency redemption is available after 3 days (3*720 blocks) from tracker creation.
+    // Normal redemption requires both owner and tracker signatures with no time restriction.
+    // The transaction builder no longer enforces time locks.
+
+    // Verify the note was created successfully
+    assert_eq!(recent_note.amount_collected, 1000);
+    println!("✓ Note created successfully (time lock now enforced by contract)");
+
     println!("\n=== Error Conditions Flow Test Passed ===\n");
 }
 

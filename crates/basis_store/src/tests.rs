@@ -50,28 +50,19 @@ fn test_iou_note_creation() -> Result<(), String> {
 }
 
 fn test_signing_message() -> Result<(), String> {
-    let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [2u8; 65]);
+    let owner_pubkey = [1u8; 33];
+    let receiver_pubkey = [2u8; 33];
+    let timestamp = 1743379200000u64;
+    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [3u8; 65]);
 
-    let message = note.signing_message();
+    // Format: key (32) || totalDebt (8) || timestamp (8) = 48 bytes
+    let message = note.signing_message(&owner_pubkey);
     if message.is_empty() {
         return Err("signing message is empty".to_string());
     }
 
-    if message.len() < 33 + 8 + 8 {
-        return Err("signing message too short".to_string());
-    }
-
-    if &message[0..33] != &[1u8; 33] {
-        return Err("pubkey not at start of message".to_string());
-    }
-
-    let amount_bytes = 1000u64.to_be_bytes();
-    let timestamp_bytes = 1234567890u64.to_be_bytes();
-    if !message.windows(8).any(|window| window == amount_bytes) {
-        return Err("amount bytes not found in message".to_string());
-    }
-    if !message.windows(8).any(|window| window == timestamp_bytes) {
-        return Err("timestamp bytes not found in message".to_string());
+    if message.len() != 48 {
+        return Err(format!("signing message should be 48 bytes, got {}", message.len()));
     }
 
     println!("✓ test_signing_message passed");

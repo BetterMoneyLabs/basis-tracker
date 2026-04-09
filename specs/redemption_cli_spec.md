@@ -72,21 +72,24 @@ The transaction has two outputs:
   - `R4`: The issuer's public key (GroupElement) - same as input
   - `R5`: The **updated** AVL tree root digest after inserting new redeemed amount
     - Key: `blake2b256(ownerKeyBytes || receiverBytes)`
-    - Value: `alreadyRedeemed + redemptionAmount`
+    - Value: `longToByteArray(timestamp) ++ longToByteArray(newRedeemedAmount)` (16 bytes total)
+      - `timestamp`: 8 bytes big-endian, the payment timestamp
+      - `newRedeemedAmount`: 8 bytes big-endian, cumulative redeemed amount
   - `R6`: The NFT ID of the tracker server (bytes) - same as input
 
 #### 4. Context Extension Variables
 
 | ID | Name | Type | Description | Required |
 |----|------|------|-------------|----------|
-| #0 | action | Byte | Action byte: 0x00 for redemption | Yes |
-| #1 | receiver | GroupElement | Receiver's public key | Yes |
-| #2 | reserveSig | Coll[Byte] | Reserve owner's Schnorr signature (65 bytes) | Yes |
-| #3 | totalDebt | Long | Total cumulative debt amount | Yes |
+| #0 | action | Byte | Action byte: `action*10 + index` (0x00 for redemption at output index 0) | Yes |
+| #1 | receiver | GroupElement | Receiver's public key (33 bytes compressed) | Yes |
+| #2 | reserveSig | Coll[Byte] | Reserve owner's Schnorr signature (65 bytes: 33-byte a + 32-byte z) | Yes |
+| #3 | totalDebt | Long | Total cumulative debt amount (nanoERG) | Yes |
+| #4 | timestamp | Long | Payment timestamp (milliseconds since Unix epoch) | Yes |
 | #5 | insertProof | Coll[Byte] | AVL proof for inserting into reserve tree | Yes |
-| #6 | trackerSig | Coll[Byte] | Tracker's Schnorr signature (65 bytes) | Yes |
-| #7 | lookupProofReserve | Coll[Byte] | AVL proof for looking up in reserve tree | No (omit for first redemption) |
-| #8 | lookupProofTracker | Coll[Byte] | AVL proof for looking up in tracker tree | Yes |
+| #6 | trackerSig | Coll[Byte] | Tracker's Schnorr signature (65 bytes: 33-byte a + 32-byte z) | Yes (normal redemption) |
+| #7 | lookupProofReserve | Coll[Byte] | AVL proof for looking up in reserve tree for `(timestamp, redeemedDebt)` | No (omit for first redemption) |
+| #8 | lookupProofTracker | Coll[Byte] | AVL proof for looking up in tracker tree for `totalDebt` | Yes |
 
 #### 5. Transaction Metadata
 - `fee`: Transaction fee (typically 1000000 nanoERG = 0.001 ERG)
@@ -156,15 +159,16 @@ The transaction has two outputs:
      - `reserve_insert_proof` (context var #5)
 
 ### Step 9: Request Signatures
-1. Build signing message:
-   - `key = blake2b256(issuer_pubkey_bytes || recipient_pubkey_bytes)`
-   - Normal: `message = key || longToByteArray(totalDebt)`
-   - Emergency: `message = key || longToByteArray(totalDebt) || longToByteArray(0L)`
+1. Build signing message (48 bytes):
+   - `key = blake2b256(issuer_pubkey_bytes || recipient_pubkey_bytes)` (32 bytes)
+   - `message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
+     - `totalDebt`: 8-byte big-endian representation of the total cumulative debt amount
+     - `timestamp`: 8-byte big-endian representation of the payment timestamp (milliseconds since Unix epoch)
 
 2. Request reserve owner's signature:
    - CLI prompts user or uses configured key
    - Sign message with issuer's private key
-   - Format: 65-byte Schnorr signature
+   - Format: 65-byte Schnorr signature (33-byte a + 32-byte z)
 
 3. Request tracker's signature:
    - Call `POST /tracker/signature` with:
@@ -173,6 +177,7 @@ The transaction has two outputs:
        "issuer_pubkey": "<issuer_pubkey>",
        "recipient_pubkey": "<recipient_pubkey>",
        "total_debt": <total_debt>,
+       "timestamp": <timestamp>,
        "emergency": <true/false>
      }
      ```
@@ -184,7 +189,8 @@ The transaction has two outputs:
 
 2. Generate updated AVL tree:
    - `key = blake2b256(ownerKeyBytes || receiverBytes)`
-   - `updatedTree = reserveTree.insert((key, longToByteArray(newRedeemed)), insertProof)`
+   - `treeValue = longToByteArray(timestamp) ++ longToByteArray(newRedeemed)` (16 bytes total)
+   - `updatedTree = reserveTree.insert((key, treeValue), insertProof)`
    - Extract new root digest for R5 register
 
 ### Step 11: Transaction Assembly
@@ -227,6 +233,7 @@ Assemble the transaction following the Ergo node's `/wallet/transaction/send` fo
     "1": "<receiver_pubkey_hex>",
     "2": "<reserve_owner_signature_hex>",
     "3": <total_debt>,
+    "4": <timestamp>,
     "5": "<avl_insert_proof_hex>",
     "6": "<tracker_signature_hex>",
     "7": "<reserve_lookup_proof_hex>",
@@ -281,6 +288,7 @@ Note: Context var #7 should be omitted from the JSON if this is the first redemp
     "1": "02receiver_pubkey_hex...",
     "2": "reserve_owner_signature_hex...",
     "3": 5000000000,
+    "4": 1743379200000,
     "5": "avl_insert_proof_hex...",
     "6": "tracker_signature_hex...",
     "8": "tracker_lookup_proof_hex..."
@@ -322,6 +330,7 @@ Note: Context var #7 should be omitted from the JSON if this is the first redemp
     "1": "02receiver_pubkey_hex...",
     "2": "reserve_owner_signature_hex...",
     "3": 5000000000,
+    "4": 1743379200000,
     "5": "avl_insert_proof_hex...",
     "6": "tracker_signature_hex...",
     "7": "reserve_lookup_proof_hex...",

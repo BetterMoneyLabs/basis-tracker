@@ -47,6 +47,9 @@ pub struct ErgoConfig {
 pub struct TransactionConfig {
     /// Default transaction fee in nanoERG (0.001 ERG = 1,000,000 nanoERG)
     pub fee: u64,
+    /// Change address for redemption transactions (P2PK address starting with '9' for mainnet)
+    /// If not specified, the tracker's public key will be used to derive a change address
+    pub change_address: Option<String>,
 }
 
 impl AppConfig {
@@ -259,6 +262,51 @@ impl AppConfig {
         }
         digest
     }
+
+    /// Get the change address for redemption transactions
+    /// Returns configured change address, or derives from tracker public key if not configured
+    pub fn get_change_address(&self) -> Result<String, Box<dyn std::error::Error>> {
+        // If change address is explicitly configured, use it
+        if let Some(ref addr) = self.transaction.change_address {
+            if !addr.is_empty() {
+                return Ok(addr.clone());
+            }
+        }
+
+        // Otherwise, derive from tracker public key
+        match &self.ergo.tracker_public_key {
+            Some(pubkey_input) if !pubkey_input.is_empty() => {
+                // Check if it's already an address (starts with '9' for mainnet or '3' for testnet)
+                if pubkey_input.starts_with('9') || pubkey_input.starts_with('3') {
+                    Ok(pubkey_input.clone())
+                } else {
+                    // It's a hex public key, derive address
+                    let network_prefix = self.network_prefix_from_tracker_key()?;
+                    let pubkey_bytes = hex::decode(pubkey_input)?;
+                    
+                    if pubkey_bytes.len() != 33 {
+                        return Err("Invalid tracker public key length".into());
+                    }
+
+                    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+                    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
+                    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+                    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+                    let ec_point = EcPoint::sigma_parse_bytes(&pubkey_bytes)?;
+                    let prove_dlog = ProveDlog::new(ec_point);
+                    let address = Address::P2Pk(prove_dlog);
+                    let encoder = AddressEncoder::new(network_prefix);
+                    Ok(encoder.address_to_str(&address))
+                }
+            }
+            _ => {
+                // Fallback to a default mainnet address format if no tracker key configured
+                // This should not happen in production
+                Err("No change address configured and no tracker public key available".into())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +335,7 @@ mod tests {
             },
             transaction: TransactionConfig {
                 fee: 1000000,
+                        change_address: None,
             },
         };
 

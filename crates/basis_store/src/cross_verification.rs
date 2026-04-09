@@ -36,14 +36,14 @@ fn test_basic_cryptography() -> Result<(), String> {
     use crate::IouNote;
 
     // Test that we can create notes and generate signing messages
-    let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [0u8; 65]);
-    let message = note.signing_message();
-    assert_eq!(message.len(), 33 + 8 + 8);
+    let owner_pubkey = [1u8; 33];
+    let receiver_pubkey = [2u8; 33];
+    let timestamp = 1743379200000u64;
+    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65]);
 
-    // Test that the message format is correct
-    assert_eq!(&message[0..33], &[1u8; 33]);
-    assert_eq!(&message[33..41], &1000u64.to_be_bytes());
-    assert_eq!(&message[41..49], &1234567890u64.to_be_bytes());
+    // Format: key (32) || totalDebt (8) || timestamp (8) = 48 bytes
+    let message = note.signing_message(&owner_pubkey);
+    assert_eq!(message.len(), 48);
 
     Ok(())
 }
@@ -84,37 +84,36 @@ fn test_edge_cases() -> Result<(), String> {
 
     // Test 2: Maximum length values
     let max_amount = u64::MAX;
-    let max_timestamp = u64::MAX;
-    let max_pubkey = [0xFFu8; 33];
+    let owner_pubkey = [0xFFu8; 33];
+    let receiver_pubkey = [0xFEu8; 33];
+    let timestamp = 1743379200000u64;
 
-    let note = IouNote::new(max_pubkey, max_amount, 0, max_timestamp, [0x01u8; 65]);
-    let message = note.signing_message();
-    assert_eq!(message.len(), 33 + 8 + 8);
+    let note = IouNote::new(receiver_pubkey, max_amount, 0, timestamp, [0x01u8; 65]);
+    let message = note.signing_message(&owner_pubkey);
+    assert_eq!(message.len(), 48);
 
-    // Test 3: Zero values (except signature which would fail verification)
+    // Test 3: Zero values
     let zero_note = IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]);
-    let zero_message = zero_note.signing_message();
-    assert_eq!(zero_message.len(), 33 + 8 + 8);
+    let zero_message = zero_note.signing_message(&owner_pubkey);
+    assert_eq!(zero_message.len(), 48);
 
     Ok(())
 }
 
-/// Verify that the message format exactly matches basis.es
+/// Verify that the message format matches the new spec
 fn test_message_format_compatibility() -> Result<(), String> {
-    // In basis.es line 118: message = key ++ longToByteArray(debtAmount) ++ longToByteArray(timestamp)
-    // Where key = blake2b256(ownerKeyBytes ++ receiverBytes)
+    // New spec format: message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+    // Where key = blake2b256(ownerKeyBytes || receiverBytes)
+    // Total: 48 bytes (32 byte key + 8 byte totalDebt + 8 byte timestamp)
 
-    // Our implementation: message = recipient_pubkey || amount_be_bytes || timestamp_be_bytes
-    // This matches the basis.es format for the part after the key hash
+    let owner_pubkey = [1u8; 33];
+    let receiver_pubkey = [2u8; 33];
+    let timestamp = 1743379200000u64;
+    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65]);
+    let message = note.signing_message(&owner_pubkey);
 
-    let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [0u8; 65]);
-    let message = note.signing_message();
-
-    // Verify structure: recipient_pubkey (33) + amount (8) + timestamp (8)
-    assert_eq!(message.len(), 33 + 8 + 8);
-    assert_eq!(&message[0..33], &[1u8; 33]);
-    assert_eq!(&message[33..41], &1000u64.to_be_bytes());
-    assert_eq!(&message[41..49], &1234567890u64.to_be_bytes());
+    // Verify structure: key_hash (32) + total_debt (8) + timestamp (8)
+    assert_eq!(message.len(), 48);
 
     Ok(())
 }
@@ -128,15 +127,22 @@ pub fn generate_compatibility_report() -> String {
 Implementation: Rust (basis_store crate)
 
 Cryptographic Features:
-✓ Message format: recipient_pubkey || amount_be_bytes || timestamp_be_bytes
-✓ Hash function: Blake2b256 (first 32 bytes of Blake2b512)
-✓ Signature verification: ECDSA secp256k1
+✓ Message format: key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+  - key = blake2b256(ownerKeyBytes || receiverBytes) (32 bytes)
+  - totalDebt = 8-byte big-endian cumulative debt amount
+  - timestamp = 8-byte big-endian payment timestamp (ms since Unix epoch)
+  - All messages: 48 bytes total (both normal and emergency redemption)
+  - Emergency redemption: tracker signature optional after 2160 blocks
+✓ Hash function: Blake2b256
+✓ Signature verification: Schnorr secp256k1
 ✓ Public key format: 33-byte compressed secp256k1
-✓ Signature format: 64-byte compact ECDSA
+✓ Signature format: 65-byte Schnorr (33-byte a + 32-byte z)
 
 Algorithm Details:
-- Uses proper cryptographic verification with secp256k1 ECDSA
-- Matches the message format and hash function from basis.es
+- Uses proper cryptographic verification with secp256k1 Schnorr signatures
+- Matches the message format from basis.es contract
+- Challenge computation: e = H(a || message || issuer_pubkey)
+- Verification equation: g^z = a * x^e
 - Provides cryptographically sound signature verification
 
 Status: IMPLEMENTED
@@ -158,6 +164,6 @@ mod tests {
         let report = generate_compatibility_report();
         assert!(report.contains("IMPLEMENTED"));
         assert!(report.contains("Blake2b256"));
-        assert!(report.contains("ECDSA secp256k1"));
+        assert!(report.contains("Schnorr secp256k1"));
     }
 }

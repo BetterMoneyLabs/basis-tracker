@@ -66,11 +66,21 @@ pub async fn handle_note_command(
             let status_before = client.get_reserve_status(&issuer_pubkey).await?;
             print_reserve_status(&status_before);
 
-            // Create signing message: recipient_pubkey || amount_be_bytes || timestamp_be_bytes
+            // Create signing message following new spec: key || totalDebt
+            // where key = blake2b256(ownerKey || receiverKey)
+            let recipient_bytes = hex::decode(&recipient)?;
+            let issuer_bytes = hex::decode(&issuer_pubkey)?;
+            
+            // Compute key = blake2b256(ownerKey || receiverKey)
+            let mut key_hash_input = Vec::new();
+            key_hash_input.extend_from_slice(&issuer_bytes);
+            key_hash_input.extend_from_slice(&recipient_bytes);
+            let key_hash = blake2b256_hash(&key_hash_input);
+            
+            // Build message: key || totalDebt
             let mut message = Vec::new();
-            message.extend_from_slice(&hex::decode(&recipient)?);
+            message.extend_from_slice(&key_hash);
             message.extend_from_slice(&amount.to_be_bytes());
-            message.extend_from_slice(&timestamp.to_be_bytes());
 
             let signature = current_account.sign_message(&message)?;
             let signature_hex = hex::encode(signature);
@@ -186,12 +196,52 @@ pub async fn handle_note_command(
             // Use the note's original timestamp for redemption
             let timestamp = note.timestamp;
 
+            // Generate issuer signature for redemption
+            // Message format: key || totalDebt [|| 0L for emergency]
+            // where key = blake2b256(ownerKey || receiverKey)
+            let issuer_pubkey_bytes = hex::decode(&issuer)
+                .map_err(|e| anyhow::anyhow!("Invalid issuer pubkey hex: {}", e))?;
+            let recipient_pubkey_bytes = hex::decode(&recipient_pubkey)
+                .map_err(|e| anyhow::anyhow!("Invalid recipient pubkey hex: {}", e))?;
+
+            // Compute key hash
+            use blake2::{Blake2b, Digest};
+            use generic_array::typenum::U32;
+            let mut key_hash_input = Vec::new();
+            key_hash_input.extend_from_slice(&issuer_pubkey_bytes);
+            key_hash_input.extend_from_slice(&recipient_pubkey_bytes);
+            let key_hash = Blake2b::<U32>::new()
+                .chain_update(&key_hash_input)
+                .finalize()
+                .to_vec();
+
+            // Build signing message: key || totalDebt
+            let mut message = key_hash;
+            message.extend_from_slice(&note.amount_collected.to_be_bytes());
+            // Note: For emergency redemption, we would append 0L here
+            // let emergency = false; // Could be made configurable
+            // if emergency {
+            //     message.extend_from_slice(&0u64.to_be_bytes());
+            // }
+
+            // Sign the message with issuer's private key
+            let issuer_signature = current_account.sign_message(&message)?;
+
             // Initiate redemption
             let redeem_request = RedeemRequest {
                 issuer_pubkey: issuer.clone(),
                 recipient_pubkey: recipient_pubkey.clone(),
                 amount,
                 timestamp,
+                reserve_box_id: String::new(), // Will be looked up by server
+                tracker_box_id: String::new(), // Will be fetched by server
+                tracker_nft_id: String::new(), // Will be fetched by server
+                current_height: 0, // Will be fetched by server
+                recipient_address: String::new(), // Will be derived from recipient_pubkey by server
+                change_address: String::new(), // Will be derived from tracker pubkey by server
+                issuer_signature: hex::encode(&issuer_signature),
+                emergency: false,
+                tracker_signature: None, // Server will generate tracker signature
             };
 
             let response = client.initiate_redemption(redeem_request).await?;
@@ -242,4 +292,17 @@ fn print_reserve_status(status: &KeyStatusResponse) {
         _ => "EXCELLENT",
     };
     println!("  Status: {}", status_text);
+}
+
+/// Blake2b256 hash function for creating signing message keys
+fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
+    use blake2::{Blake2b, Digest};
+    use generic_array::typenum::U32;
+    
+    let mut hasher = Blake2b::<U32>::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    result[..32]
+        .try_into()
+        .expect("Blake2b should produce at least 32 bytes")
 }

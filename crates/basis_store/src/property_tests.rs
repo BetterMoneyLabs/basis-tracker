@@ -138,13 +138,12 @@ mod property_tests {
         #[test]
         fn test_time_lock_validation(
             note_timestamp in 1000000000u64..2000000000,
-            current_time in 1000000000u64..2000000000
+            _current_time in 1000000000u64..2000000000
         ) {
-            // Test time lock validation logic
-            let one_week = 7 * 24 * 60 * 60;
-            let min_redemption_time = note_timestamp + one_week;
-
-            let is_redeemable = current_time >= min_redemption_time;
+            // Note: Time lock enforcement is now handled by the contract based on tracker creation height.
+            // Emergency redemption is available after 3 days (3*720 blocks) from tracker creation.
+            // Normal redemption requires both owner and tracker signatures with no time restriction.
+            // The transaction builder no longer enforces time locks.
 
             // Create a test note
             let note = IouNote::new(
@@ -155,18 +154,11 @@ mod property_tests {
                 [2u8; 65],
             );
 
-            // In a real implementation, we'd check against current_time
-            // For now, just verify the time calculation is correct
-            prop_assert_eq!(min_redemption_time, note_timestamp + one_week);
+            // Verify note was created successfully
+            prop_assert_eq!(note.timestamp, note_timestamp);
 
-            // Test boundary conditions
-            if current_time == min_redemption_time {
-                prop_assert!(is_redeemable, "Exactly at min redemption time should be redeemable");
-            }
-
-            if current_time == min_redemption_time - 1 {
-                prop_assert!(!is_redeemable, "One second before min redemption time should not be redeemable");
-            }
+            // Time lock is now enforced by contract, not transaction builder
+            // Contract checks: (HEIGHT - trackerCreationHeight) > 3 * 720
         }
     }
 

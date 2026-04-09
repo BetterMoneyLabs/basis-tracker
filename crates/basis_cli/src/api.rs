@@ -47,6 +47,32 @@ pub struct RedeemRequest {
     pub recipient_pubkey: String,
     pub amount: u64,
     pub timestamp: u64,
+    /// Reserve box ID (optional - will be looked up if not provided)
+    #[serde(default)]
+    pub reserve_box_id: String,
+    /// Tracker box ID (optional - fetched by server)
+    #[serde(default)]
+    pub tracker_box_id: String,
+    /// Tracker NFT ID from reserve box R6 register (optional - fetched by server)
+    #[serde(default)]
+    pub tracker_nft_id: String,
+    /// Current blockchain height (optional - fetched by server)
+    #[serde(default)]
+    pub current_height: u64,
+    /// Recipient address for redemption output (optional - derived from recipient_pubkey if not provided)
+    #[serde(default)]
+    pub recipient_address: String,
+    /// Change address for transaction outputs (optional - server will derive from tracker pubkey if not provided)
+    #[serde(default)]
+    pub change_address: String,
+    /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
+    pub issuer_signature: String,
+    /// Whether this is an emergency redemption
+    #[serde(default)]
+    pub emergency: bool,
+    /// Tracker's Schnorr signature (optional - server will generate if not provided)
+    #[serde(default)]
+    pub tracker_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +127,27 @@ pub struct ProofResponse {
     pub tracker_state_digest: String,
     pub block_height: u64,
     pub timestamp: u64,
+}
+
+// Tracker signature request/response for redemption
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerSignatureRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub total_debt: u64,
+    /// Payment timestamp in milliseconds since Unix epoch
+    pub timestamp: u64,
+    #[serde(default)]
+    pub emergency: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerSignatureResponse {
+    pub success: bool,
+    pub tracker_signature: String,
+    pub tracker_pubkey: String,
+    pub message_signed: String,
+    pub is_emergency: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +321,43 @@ impl TrackerClient {
             ))
         }
     }
+
+    /// Request tracker signature for redemption
+    /// Following the Basis protocol specification - POST /tracker/signature
+    pub async fn request_tracker_signature(
+        &self,
+        issuer_pubkey: &str,
+        recipient_pubkey: &str,
+        total_debt: u64,
+        timestamp: u64,
+        emergency: bool,
+    ) -> Result<TrackerSignatureResponse> {
+        let request = TrackerSignatureRequest {
+            issuer_pubkey: issuer_pubkey.to_string(),
+            recipient_pubkey: recipient_pubkey.to_string(),
+            total_debt,
+            timestamp,
+            emergency,
+        };
+
+        let url = format!("{}/tracker/signature", self.base_url);
+        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<TrackerSignatureResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to request tracker signature: {}",
+                error_text
+            ))
+        }
+    }
 }
 
 // Define structs outside of the impl block
@@ -296,7 +380,79 @@ pub struct RedemptionPreparationResponse {
     pub tracker_box_id: String,  // ID of the tracker box used for the proof
 }
 
+// Tracker proof response for context var #8
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerProofResponse {
+    pub key: String,
+    pub value: String,
+    pub proof: String,
+    pub total_debt: u64,
+    pub tracker_state_digest: String,
+}
+
+// Reserve proof response for context var #5 (insert) and #7 (lookup)
+// GET /reserve/proof endpoint response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveProofResponse {
+    /// Hex-encoded AVL tree key: hash(ownerKey || receiverKey)
+    pub key: String,
+    /// Hex-encoded value: already_redeemed as 8-byte big-endian
+    pub value: String,
+    /// Hex-encoded AVL proof bytes (None for first redemption) - for context var #7 (lookup)
+    pub proof: Option<String>,
+    /// Already redeemed amount as integer
+    pub already_redeemed: u64,
+    /// Whether this is the first redemption (no lookup proof needed)
+    pub is_first_redemption: bool,
+    /// Hex-encoded AVL insert proof for context var #5 (insert operation)
+    /// This proof is used to INSERT the new already_redeemed amount into the reserve tree
+    pub insert_proof: String,
+}
+
 impl TrackerClient {
+    /// Get tracker lookup proof for context var #8
+    pub async fn get_tracker_proof(&self, issuer_pubkey: &str, recipient_pubkey: &str) -> Result<TrackerProofResponse> {
+        let url = format!(
+            "{}/tracker/proof?issuer_pubkey={}&recipient_pubkey={}",
+            self.base_url, issuer_pubkey, recipient_pubkey
+        );
+        let response = ureq::get(&url).call()?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<TrackerProofResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("Failed to get tracker proof: {}", error_text))
+        }
+    }
+
+    /// Get reserve proof for context var #5 (insert) and #7 (lookup)
+    pub async fn get_reserve_proof(&self, issuer_pubkey: &str, recipient_pubkey: &str) -> Result<ReserveProofResponse> {
+        let url = format!(
+            "{}/reserve/proof?issuer_pubkey={}&recipient_pubkey={}",
+            self.base_url, issuer_pubkey, recipient_pubkey
+        );
+        let response = ureq::get(&url).call()?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<ReserveProofResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                // If reserve not found, this might be first redemption
+                Err(anyhow::anyhow!("Reserve record not found: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("Failed to get reserve proof: {}", error_text))
+        }
+    }
+
     pub async fn prepare_redemption(&self, issuer_pubkey: &str, recipient_pubkey: &str, amount: u64) -> Result<RedemptionPreparationResponse> {
         let request = RedemptionPreparationRequest {
             issuer_pubkey: issuer_pubkey.to_string(),

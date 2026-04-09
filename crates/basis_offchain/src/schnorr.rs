@@ -27,9 +27,19 @@ pub type PubKey = [u8; 33];
 /// Signature type (Secp256k1) - following chaincash-rs format: 33 bytes a + 32 bytes z
 pub type Signature = [u8; 65];
 
-/// Generate the signing message in the same format as chaincash-rs
-pub fn signing_message(recipient_pubkey: &PubKey, amount: u64, timestamp: u64) -> Vec<u8> {
-    basis_core::types::signing_message(recipient_pubkey, amount, timestamp)
+/// Generate the signing message following the Basis protocol specification.
+///
+/// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp)
+///
+/// Where key = blake2b256(ownerKeyBytes || receiverKeyBytes)
+/// Total: 48 bytes (32 + 8 + 8)
+pub fn signing_message(
+    owner_key: &PubKey,
+    receiver_key: &PubKey,
+    total_debt: u64,
+    timestamp: u64,
+) -> Vec<u8> {
+    basis_core::types::signing_message(owner_key, receiver_key, total_debt, timestamp)
 }
 
 /// Validate that a public key is a valid compressed secp256k1 point
@@ -101,37 +111,33 @@ mod tests {
 
     #[test]
     fn test_signing_message_format() {
-        let recipient_pubkey = [0x02u8; 33];
-        let amount = 1000u64;
-        let timestamp = 1234567890u64;
+        let owner_pubkey = [0x02u8; 33];
+        let receiver_pubkey = [0x03u8; 33];
+        let total_debt = 1000u64;
+        let timestamp = 1743379200000u64;
 
-        let message = signing_message(&recipient_pubkey, amount, timestamp);
-
-        // Check message length
-        assert_eq!(message.len(), 33 + 8 + 8); // pubkey + amount + timestamp
-
-        // Check message content
-        assert_eq!(&message[0..33], &recipient_pubkey);
-        assert_eq!(&message[33..41], &amount.to_be_bytes());
-        assert_eq!(&message[41..49], &timestamp.to_be_bytes());
+        // Test message format: key (32) || totalDebt (8) || timestamp (8) = 48 bytes
+        let message = signing_message(&owner_pubkey, &receiver_pubkey, total_debt, timestamp);
+        assert_eq!(message.len(), 48);
     }
 
     #[test]
     fn test_roundtrip_signature() {
         let secp = Secp256k1::new();
 
-        // Generate test key pair
+        // Generate test key pair (issuer)
         let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
         let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let issuer_pubkey = public_key.serialize();
 
         // Test data
-        let recipient_pubkey = [0x02u8; 33];
-        let amount = 1000u64;
-        let timestamp = 1234567890u64;
+        let owner_pubkey = issuer_pubkey;
+        let receiver_pubkey = [0x02u8; 33];
+        let total_debt = 1000u64;
+        let timestamp = 1743379200000u64;
 
-        // Generate signing message
-        let message = signing_message(&recipient_pubkey, amount, timestamp);
+        // Generate signing message: key || totalDebt || timestamp
+        let message = signing_message(&owner_pubkey, &receiver_pubkey, total_debt, timestamp);
 
         // Create signature using the core implementation
         let verifier = SchnorrVerifier;
@@ -142,8 +148,8 @@ mod tests {
         verifier.verify_signature(&signature, &message, &issuer_pubkey)
             .expect("Verification should succeed");
 
-        // Test with wrong message
-        let wrong_message = signing_message(&recipient_pubkey, amount + 1, timestamp);
+        // Test with wrong total_debt
+        let wrong_message = signing_message(&owner_pubkey, &receiver_pubkey, total_debt + 1, timestamp);
         assert!(verifier.verify_signature(&signature, &wrong_message, &issuer_pubkey).is_err());
 
         // Test with wrong issuer

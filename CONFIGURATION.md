@@ -80,7 +80,9 @@ The Tracker NFT is a critical component of the Basis system that:
 When creating a reserve contract box, you must set these registers:
 
 - **R4**: Issuer's public key (GroupElement)
-- **R5**: AVL tree of redeemed timestamps (initially empty)
+- **R5**: AVL tree tracking cumulative redeemed amounts (initially empty)
+  - Stores: `hash(ownerKey || receiverKey) -> cumulativeRedeemedAmount`
+  - Updated on each redemption to prevent double-spending
 - **R6**: Tracker NFT ID (from your configuration)
 
 ## Environment Variables

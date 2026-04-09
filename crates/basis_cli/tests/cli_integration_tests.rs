@@ -24,7 +24,14 @@ mod cli_tests {
             amount: 500,
             timestamp: 1234567890,
             reserve_box_id: "test_reserve_box_1".to_string(),
+            tracker_box_id: "test_tracker_box_1".to_string(),
+            tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+            current_height: 1000,
             recipient_address: "test_recipient_address".to_string(),
+            change_address: "test_change_address".to_string(),
+            issuer_signature: "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101".to_string(),
+            emergency: false,
+            tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
         };
 
         // Test field validation

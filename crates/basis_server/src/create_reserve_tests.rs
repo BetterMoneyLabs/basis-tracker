@@ -55,6 +55,7 @@ mod create_reserve_tests {
             },
             transaction: crate::config::TransactionConfig {
                 fee: 1000000,
+                        change_address: None,
             },
         });
 

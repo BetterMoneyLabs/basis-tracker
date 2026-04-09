@@ -39,3 +39,6 @@ alice.txt
 bob.txt
 secret.txt
 alice_keys_output.txt
+
+# Scala reference implementation (managed separately)
+scala/

@@ -32,23 +32,38 @@ For signature `"02f40cf9d43542868b3e97a790872812574a8be92fd02ce229908d578724c28b
 ## Signing Process
 
 ### Message Format
-The message to be signed follows the format: `recipient_pubkey || amount_be_bytes || timestamp_be_bytes`
+The message to be signed follows the Basis protocol specification (always 48 bytes):
+
+**Standard Format** (48 bytes):
+```
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+```
 
 Where:
-- `recipient_pubkey`: 33-byte compressed public key of the recipient (hex-encoded)
-- `amount_be_bytes`: 8-byte big-endian representation of the amount
-- `timestamp_be_bytes`: 8-byte big-endian representation of the Unix timestamp
+- `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
+  - `ownerKeyBytes`: 33-byte compressed public key of the reserve owner (issuer/payer)
+  - `receiverKeyBytes`: 33-byte compressed public key of the recipient (creditor/payee)
+- `totalDebt`: 8-byte big-endian representation of the total cumulative debt amount
+- `timestamp`: 8-byte big-endian representation of the payment timestamp (milliseconds since Unix epoch, Java time format)
+
+**Total message length**: 32 + 8 + 8 = **48 bytes**
+
+**IMPORTANT**:
+- Both the reserve owner (payer) and the tracker sign the **exact same message**
+- The timestamp is the time of the latest payment from owner to receiver, in milliseconds since Unix epoch
+- Emergency redemption uses the **same message format** - the only difference is that the tracker signature becomes optional after the emergency period (2160 blocks from tracker creation)
 
 ### Signing Algorithm
 1. **Input Validation**:
-   - Verify recipient public key is 33 bytes in compressed format
-   - Verify amount and timestamp are valid u64 values
+   - Verify owner public key is 33 bytes in compressed format
+   - Verify receiver public key is 33 bytes in compressed format
+   - Verify totalDebt is a valid u64 value
+   - Verify timestamp is a valid i64 value (milliseconds since Unix epoch)
 
 2. **Message Construction**:
-   - Concatenate recipient public key bytes (33 bytes)
-   - Concatenate amount as 8-byte big-endian (8 bytes)
-   - Concatenate timestamp as 8-byte big-endian (8 bytes)
-   - Total message length: 49 bytes
+   - Compute key hash: `key = blake2b256(ownerKey || receiverKey)` (32 bytes)
+   - Concatenate: `key || longToByteArray(totalDebt) || longToByteArray(timestamp)`
+   - Total message length: 48 bytes (always)
 
 3. **Nonce Generation**:
    - Generate a cryptographically secure random nonce `k` (scalar value)
@@ -249,16 +264,34 @@ function schnorr_verify(signature, message_bytes, public_key_bytes):
 
 ### Example Message Construction
 Given:
-- Recipient pubkey: `02d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b` (33 bytes)
-- Amount: 1000000000 (0x000000003B9ACA00)
-- Timestamp: 1672531200 (0x63B1A800)
+- Owner (payer) pubkey: `0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83` (33 bytes)
+- Receiver (payee) pubkey: `03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea` (33 bytes)
+- Total debt: 50000000 nanoERG (0.05 ERG)
+- Timestamp: 1743379200000 ms (Sat Mar 29 2025)
 
-Message bytes: `02d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b000000003B9ACA000000000063B1A800`
+Step 1 - Compute key:
+```
+key = blake2b256(ownerKeyBytes || receiverKeyBytes)
+    = blake2b256(0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 || 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea)
+    = 6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4
+```
+
+Step 2 - Assemble message (48 bytes):
+```
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+        = 6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4 || 0000000002faf080 || 00000194f8c88000
+```
+
+Message breakdown:
+- Key (32 bytes): `6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4`
+- Total debt (8 bytes BE): `0000000002faf080` = 50,000,000 nanoERG
+- Timestamp (8 bytes BE): `00000194f8c88000` = 1,743,379,200,000 ms
 
 ### Expected Signature Format
 - Length: 65 bytes (130 hex characters)
-- Structure: [1-byte prefix][33-byte A component][32-byte z component]
-- Valid prefix: 0x02 or 0x03
+- Structure: [33-byte a component][32-byte z component]
+  - a component: compressed random point R = k*G (starts with 0x02 or 0x03)
+  - z component: response scalar (unsigned, 32 bytes)
 
 ## Compliance Requirements
 

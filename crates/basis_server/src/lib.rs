@@ -38,6 +38,8 @@ pub struct AppState {
     pub config: std::sync::Arc<AppConfig>,
     pub shared_tracker_state: std::sync::Arc<tokio::sync::Mutex<tracker_box_updater::SharedTrackerState>>,
     pub tracker_storage: basis_store::persistence::TrackerStorage,
+    // Note: tracker_scanner is not stored here due to Send trait bounds
+    // Tracker box ID is fetched from tracker_storage directly
 }
 
 // Commands that can be sent to the tracker thread
@@ -85,5 +87,22 @@ pub enum TrackerCommand {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
         response_tx: tokio::sync::oneshot::Sender<Result<basis_store::NoteProof, basis_store::NoteError>>,
+    },
+    GetTrackerLookupProof {
+        issuer_pubkey: basis_store::PubKey,
+        recipient_pubkey: basis_store::PubKey,
+        response_tx: tokio::sync::oneshot::Sender<Result<basis_store::TrackerLookupProof, basis_store::NoteError>>,
+    },
+    GetReserveLookupProof {
+        issuer_pubkey: basis_store::PubKey,
+        recipient_pubkey: basis_store::PubKey,
+        response_tx: tokio::sync::oneshot::Sender<Result<basis_store::ReserveLookupProof, basis_store::NoteError>>,
+    },
+    GetReserveInsertProof {
+        issuer_pubkey: basis_store::PubKey,
+        recipient_pubkey: basis_store::PubKey,
+        timestamp: u64,
+        new_already_redeemed: u64,
+        response_tx: tokio::sync::oneshot::Sender<Result<Vec<u8>, basis_store::NoteError>>,
     },
 }

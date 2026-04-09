@@ -30,7 +30,7 @@ Basis is a protocol for off-chain payments with on-chain redemption capabilities
 
 ### Payment Flow
 
-1. To make a new payment to B, A takes the current AB record, increases cumulative debt, signs the updated record (message: `hash(A||B) || totalDebt`) and sends it to the tracker
+1. To make a new payment to B, A takes the current AB record, increases cumulative debt, signs the updated record (message: `hash(A||B) || totalDebt || timestamp`) and sends it to the tracker. The timestamp is in milliseconds since Unix epoch (Java time format).
 2. The tracker verifies the note against its state, updates its internal ledger, and provides a signature on the same message
 3. A sends both signatures (A's and tracker's) to B. B now holds a valid, redeemable IOU note
 
@@ -38,10 +38,13 @@ Basis is a protocol for off-chain payments with on-chain redemption capabilities
 
 1. At any moment, it is possible to redeem A's debt to B by calling the redemption action of the reserve contract
 2. The contract tracks cumulative amount of debt already redeemed for each (owner, receiver) pair in an AVL tree
-3. Redemption requires **BOTH** reserve owner's signature **AND** tracker's signature on message: `hash(ownerKey||receiverKey) || totalDebt`
-4. The tracker signature guarantees that the off-chain state is consistent and prevents double-spending
-5. Additionally, the contract verifies that `totalDebt` is committed in the tracker's AVL tree (context var #8 provides lookup proof)
-6. To redeem: B contacts tracker to obtain signature on the debt note, then presents reserve owner's signature (from original IOU note) and tracker's signature to the on-chain contract along with AVL tree proofs:
+3. The AVL tree stores: `hash(ownerKey||receiverKey) -> (timestamp, cumulativeRedeemedAmount)` where timestamp is the latest payment timestamp and cumulativeRedeemedAmount is total redeemed
+4. Redemption requires **BOTH** reserve owner's signature **AND** tracker's signature on message: `hash(ownerKey||receiverKey) || totalDebt || timestamp`
+5. The tracker signature guarantees that the off-chain state is consistent and prevents double-spending
+6. Additionally, the contract verifies that `totalDebt` is committed in the tracker's AVL tree (context var #8 provides lookup proof)
+7. The contract also verifies that the note's timestamp is **greater than** any previously redeemed timestamp, preventing replay attacks with old notes
+8. To redeem: B contacts tracker to obtain signature on the debt note, then presents reserve owner's signature (from original IOU note) and tracker's signature to the on-chain contract along with AVL tree proofs:
+   - Proof for reserve tree insertion (context var #5, required)
    - Proof for reserve tree lookup (context var #7, optional for first redemption)
    - Proof for tracker tree lookup (context var #8, required)
 
@@ -91,11 +94,11 @@ A owes debt to B. B wants to buy from C. If A agrees, A's debt to B can be decre
 ## Normal Workflow
 
 1. A is willing to buy some services from B. A asks B whether debt notes (IOU) are accepted as payment. This can be done non-interactively if B publishes their acceptance predicate
-2. If A's debt note is acceptable, A creates an IOU note with cumulative debt amount and signs it (signature on message: `hash(A_pubkey || B_pubkey) || totalDebt`). A sends the note to the tracker
+2. If A's debt note is acceptable, A creates an IOU note with cumulative debt amount and signs it (signature on message: `hash(A_pubkey || B_pubkey) || totalDebt || timestamp`). The timestamp is in milliseconds since Unix epoch (Java time format). A sends the note to the tracker
 3. The tracker verifies the note against its state, updates its internal ledger, and provides a signature on the same message. This tracker signature is required for on-chain redemption
 4. A sends both signatures (A's and tracker's) to B. B now holds a valid, redeemable IOU note
-5. At any time, B can redeem the debt by presenting both signatures to the reserve contract along with an AVL tree proof showing the cumulative redeemed amount. The contract verifies both signatures and ensures the redeemed amount doesn't exceed (totalDebt - alreadyRedeemed)
-6. At any time, A can make another payment to B by signing a message with increased cumulative debt amount
+5. At any time, B can redeem the debt by presenting both signatures to the reserve contract along with AVL tree proofs. The contract verifies both signatures, ensures the redeemed amount doesn't exceed (totalDebt - alreadyRedeemed), and verifies timestamp > storedTimestamp to prevent replay attacks
+6. At any time, A can make another payment to B by signing a message with increased cumulative debt amount and new timestamp
 7. A can refund by redeeming like B (in pseudonymous environments, A may have multiple keys). B should always track collateralization level and can prepare redemption transactions in advance
 
 ## Debt Transfer Workflow (Triangular Trade)
@@ -119,6 +122,45 @@ A owes debt to B. B wants to buy from C. If A agrees, A's debt to B can be decre
 - No on-chain fees for off-chain transactions - suitable for micropayments
 - Unlike other off-chain cash schemes (Lightning, Cashu/Fedimint etc), transactions can be done with no collateralization first
 
+## Cryptographic Details
+
+### Message Format (48 bytes)
+
+All signatures (both payer/reserve owner and tracker) sign the **exact same message**:
+
+```
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+```
+
+Where:
+- `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
+  - `ownerKeyBytes`: Reserve owner's compressed public key (33 bytes)
+  - `receiverKeyBytes`: Recipient's compressed public key (33 bytes)
+- `totalDebt`: 8-byte big-endian representation of the total cumulative debt amount
+- `timestamp`: 8-byte big-endian representation of the payment timestamp (milliseconds since Unix epoch)
+
+**Total message length**: 32 + 8 + 8 = **48 bytes**
+
+### Schnorr Signature Format (65 bytes)
+
+- **a component**: 33 bytes (compressed random point R = k*G on secp256k1 curve)
+- **z component**: 32 bytes (response scalar, unsigned big-endian)
+- **Total**: 65 bytes (130 hex characters)
+
+**Signing**:
+1. Generate random nonce `k`
+2. Compute `a = k * G` (random point, compressed)
+3. Compute challenge: `e = blake2b256(a_bytes || message || public_key_bytes)` (strong Fiat-Shamir)
+4. Compute response: `z = k + e * secret_key (mod n)`
+
+**Verification**: `g^z == a * public_key^e`
+
+### Key Derivation
+
+- **Curve**: secp256k1 (same as Bitcoin/Ergo)
+- **Hash**: Blake2b-256 (32 bytes digest)
+- **Public key format**: Compressed (33 bytes, prefix 0x02 or 0x03)
+
 ## Contract Specification
 
 ### Reserve Contract
@@ -126,8 +168,11 @@ A owes debt to B. B wants to buy from C. If A agrees, A's debt to B can be decre
 #### Data (Registers)
 
 - **R4**: Reserve owner's signing key (as a GroupElement)
-- **R5**: AVL tree tracking cumulative redeemed debt per (owner, receiver) pair
-  - Stores: `hash(ownerKey || receiverKey) -> cumulativeRedeemedAmount`
+- **R5**: AVL tree tracking redeemed debt and timestamp per (owner, receiver) pair
+  - Stores: `hash(ownerKey || receiverKey) -> (timestamp, cumulativeRedeemedAmount)`
+  - Value format: `timestamp (8 bytes big-endian) ++ cumulativeRedeemedAmount (8 bytes big-endian) = 16 bytes total`
+  - Where timestamp is the latest payment timestamp (Long, 8 bytes big-endian)
+  - And cumulativeRedeemedAmount is the total amount redeemed (Long, 8 bytes big-endian)
 - **R6**: NFT ID of tracker server (bytes)
 
 #### Actions
@@ -147,31 +192,39 @@ A owes debt to B. B wants to buy from C. If A agrees, A's debt to B can be decre
 
 #### Context Extension Variables
 
+- **#0**: Action byte (`action * 10 + index`, where action=0 for redemption, index is reserve output position)
 - **#1**: Receiver pubkey (as a GroupElement)
-- **#2**: Reserve owner's signature bytes for the debt record (Schnorr signature on `key || totalDebt`)
+- **#2**: Reserve owner's signature bytes for the debt record (Schnorr signature on `key || totalDebt || timestamp`, 65 bytes)
 - **#3**: Current total debt amount (Long)
+- **#4**: Timestamp of the payment (Long, milliseconds since Unix epoch)
 - **#5**: Proof for insertion into reserve's AVL tree (Coll[Byte])
-- **#6**: Tracker's signature bytes (Schnorr signature on `key || totalDebt` or `key || totalDebt || 0L` for emergency)
-- **#7**: [OPTIONAL] Proof for AVL tree lookup in reserve's tree for `hash(ownerKey||receiverKey) -> redeemedDebt`
+- **#6**: Tracker's signature bytes (Schnorr signature on `key || totalDebt || timestamp`, 65 bytes)
+- **#7**: [OPTIONAL] Proof for AVL tree lookup in reserve's tree for `hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)`
   - Not needed for first redemption (when redeemedDebt = 0)
 - **#8**: Proof for AVL tree lookup in tracker's tree for `hash(ownerKey||receiverKey) -> totalDebt` (required)
 
 #### Validation Steps
 
-1. **Tracker ID verification**: Verify tracker box NFT ID matches reserve's R6
-2. **Tracker debt verification**: Verify totalDebt is committed in tracker's AVL tree using context var #8
-3. **Reserve owner signature verification**: Verify Schnorr signature on `key || totalDebt`
-4. **Tracker signature verification**: Verify Schnorr signature on `key || totalDebt` (or `key || totalDebt || 0L` for emergency)
-5. **Redemption amount verification**: Ensure redeemed amount > 0 and <= (totalDebt - alreadyRedeemed)
-6. **AVL tree update verification**: Verify reserve's AVL tree is properly updated with new redeemed amount
-7. **Receiver signature verification**: Verify receiver's signature on transaction bytes
+1. **Self preservation**: Verify contract proposition bytes, tokens, R4, and R6 are preserved in output
+2. **Tracker ID verification**: Verify tracker box NFT ID matches reserve's R6
+3. **Tracker debt verification**: Verify totalDebt is committed in tracker's AVL tree using context var #8
+4. **Timestamp verification**: Verify new timestamp > stored timestamp (prevents replay attacks with old notes)
+5. **Reserve owner signature verification**: Verify Schnorr signature on `key || totalDebt || timestamp` (65 bytes)
+6. **Tracker signature verification**: Verify Schnorr signature on `key || totalDebt || timestamp` (65 bytes), OR emergency period has passed
+7. **Redemption amount verification**: Ensure redeemed amount > 0 and <= (totalDebt - alreadyRedeemed)
+8. **AVL tree update verification**: Verify reserve's AVL tree is properly updated with new `(timestamp, cumulativeRedeemedAmount)` using context var #5
+9. **Receiver signature verification**: Verify receiver's signature on transaction bytes (proveDlog)
 
 #### Emergency Redemption
 
-- If tracker becomes unavailable, emergency redemption is possible after 3 days (3 * 720 blocks) from tracker creation
-- Emergency redemption uses modified message format: `key || totalDebt || 0L`
-- Tracker signature is still required but may be invalid (check is bypassed after timeout)
-- **NOTE**: All debts associated with this tracker (both new and old) become eligible for emergency redemption simultaneously after 3 days from tracker creation
+- If tracker becomes unavailable, emergency redemption is possible after 3 days (2160 blocks) from tracker creation
+- The same message format is used: `key || totalDebt || timestamp`
+- Tracker signature becomes **optional** after the emergency period
+- If no tracker signature is provided, the contract checks that `(HEIGHT - tracker_creation_height) > 2160`
+- If a tracker signature IS provided, it must be valid regardless of emergency period
+- **NOTE**: All debts associated with this tracker become eligible for emergency redemption simultaneously after 3 days from tracker creation
+- Reserve owner's signature is still required (proves debt validity)
+- Replay attacks still prevented by timestamp verification (must be > stored timestamp)
 
 ### Top-up Path (Action #1)
 

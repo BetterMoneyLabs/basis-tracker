@@ -532,9 +532,9 @@ impl TrackerServerState {
                     // Store the parsed box
                     self.tracker_storage.store_tracker_box(&tracker_box)
                         .map_err(|e| TrackerScannerError::StoreError(format!("Failed to store tracker box: {:?}", e)))?;
-                    
+
                     processed_boxes.push(tracker_box);
-                    
+
                     debug!("Successfully processed tracker box: {}", scan_box.box_id);
                 }
                 Err(e) => {
@@ -545,8 +545,25 @@ impl TrackerServerState {
         }
 
         info!("Processed {} tracker boxes ({} successful)", total_boxes, processed_boxes.len());
-        
+
         Ok(processed_boxes)
+    }
+
+    /// Get the latest tracker box ID from the registered scan
+    /// Returns the box ID of the most recent tracker box (highest creation height)
+    pub async fn get_latest_tracker_box_id(&self) -> Result<Option<String>, TrackerScannerError> {
+        let unspent_boxes = self.get_unspent_tracker_boxes().await?;
+        
+        if unspent_boxes.is_empty() {
+            return Ok(None);
+        }
+
+        // Find the box with the highest creation height
+        let latest_box = unspent_boxes
+            .into_iter()
+            .max_by_key(|box_| box_.creation_height);
+
+        Ok(latest_box.map(|box_| box_.box_id))
     }
 
     /// Update tracker state with processed boxes

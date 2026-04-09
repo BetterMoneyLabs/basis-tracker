@@ -4,8 +4,34 @@ use crate::{
     schnorr::{self, generate_keypair},
     IouNote, PubKey, RedemptionManager, RedemptionRequest, TrackerStateManager,
 };
-use secp256k1::SecretKey;
 use serde_json::{json, Value};
+use blake2::{Blake2b, Digest};
+use generic_array::typenum::U32;
+
+/// Helper function to generate redemption signature
+fn generate_redemption_signature(
+    issuer_secret_bytes: &[u8; 32],
+    issuer_pubkey: &PubKey,
+    recipient_pubkey: &PubKey,
+    total_debt: u64,
+) -> Vec<u8> {
+    let mut key_hash_input = Vec::new();
+    key_hash_input.extend_from_slice(issuer_pubkey);
+    key_hash_input.extend_from_slice(recipient_pubkey);
+    
+    let mut hasher = Blake2b::<U32>::new();
+    hasher.update(&key_hash_input);
+    let key_hash = hasher.finalize().to_vec();
+    
+    let mut message = Vec::new();
+    message.extend_from_slice(&key_hash);
+    message.extend_from_slice(&total_debt.to_be_bytes());
+    
+    let signature = schnorr::schnorr_sign(&message, issuer_secret_bytes, issuer_pubkey)
+        .expect("Failed to create signature");
+    
+    signature.to_vec()
+}
 
 /// Simulated blockchain data for redemption tests
 #[derive(Debug, Clone)]
@@ -131,18 +157,17 @@ pub fn generate_test_signatures(
     tracker_secret: &[u8; 32],
     message: &[u8],
 ) -> (Vec<u8>, Vec<u8>) {
-    let issuer_secret_key = SecretKey::from_slice(issuer_secret).unwrap();
-    let tracker_secret_key = SecretKey::from_slice(tracker_secret).unwrap();
-
-    // Generate public keys
+    // Generate public keys from secret bytes
     let secp = secp256k1::Secp256k1::new();
+    let issuer_secret_key = secp256k1::SecretKey::from_slice(issuer_secret).unwrap();
+    let tracker_secret_key = secp256k1::SecretKey::from_slice(tracker_secret).unwrap();
     let issuer_pubkey =
         secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret_key).serialize();
     let tracker_pubkey =
         secp256k1::PublicKey::from_secret_key(&secp, &tracker_secret_key).serialize();
 
-    let issuer_sig = schnorr::schnorr_sign(message, &issuer_secret_key.secret_bytes(), &issuer_pubkey).unwrap();
-    let tracker_sig = schnorr::schnorr_sign(message, &tracker_secret_key.secret_bytes(), &tracker_pubkey).unwrap();
+    let issuer_sig = schnorr::schnorr_sign(message, issuer_secret, &issuer_pubkey).unwrap();
+    let tracker_sig = schnorr::schnorr_sign(message, tracker_secret, &tracker_pubkey).unwrap();
     (issuer_sig.to_vec(), tracker_sig.to_vec())
 }
 
@@ -259,6 +284,20 @@ mod tests {
             .add_note(&issuer_pubkey, &note)
             .unwrap();
 
+        // Generate proper signatures for redemption
+        let issuer_signature = generate_redemption_signature(
+            &issuer_secret,
+            &issuer_pubkey,
+            &recipient_pubkey,
+            amount_collected,
+        );
+        let tracker_signature = generate_redemption_signature(
+            &issuer_secret,
+            &issuer_pubkey,
+            &recipient_pubkey,
+            amount_collected,
+        );
+
         // Create redemption request
         let redemption_request = RedemptionRequest {
             issuer_pubkey: hex::encode(issuer_pubkey),
@@ -266,13 +305,23 @@ mod tests {
             amount: amount_collected,
             timestamp,
             reserve_box_id: "test_reserve_box_1".to_string(),
+            tracker_box_id: "test_tracker_box_1".to_string(),
+            tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+            current_height: 1000,
             recipient_address: "test_recipient_address".to_string(),
+            change_address: "test_change_address".to_string(),
+            issuer_signature: hex::encode(&issuer_signature),
+            emergency: false,
+            tracker_signature: Some(hex::encode(&tracker_signature)),
         };
 
         // Initiate redemption
         let redemption_data = redemption_manager.initiate_redemption(&redemption_request);
 
         // Should succeed
+        if let Err(e) = &redemption_data {
+            println!("Redemption failed with error: {:?}", e);
+        }
         assert!(redemption_data.is_ok(), "Valid redemption should succeed");
 
         let redemption_data = redemption_data.unwrap();
@@ -337,6 +386,13 @@ mod tests {
             timestamp,
             reserve_box_id: "test_reserve_box_1".to_string(),
             recipient_address: "test_recipient_address".to_string(),
+            tracker_box_id: "test_tracker_box_1".to_string(),
+            tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+            current_height: 1000,
+            change_address: "test_change_address".to_string(),
+            issuer_signature: "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101".to_string(),
+            emergency: false,
+            tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
         };
 
         // Initiate redemption - should fail due to time lock
@@ -398,6 +454,13 @@ mod tests {
             timestamp,
             reserve_box_id: "test_reserve_box_1".to_string(),
             recipient_address: "test_recipient_address".to_string(),
+            tracker_box_id: "test_tracker_box_1".to_string(),
+            tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+            current_height: 1000,
+            change_address: "test_change_address".to_string(),
+            issuer_signature: "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101".to_string(),
+            emergency: false,
+            tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
         };
 
         // Initiate redemption - should fail due to invalid signature
@@ -476,6 +539,20 @@ mod tests {
             .add_note(&issuer_pubkey, &note)
             .unwrap();
 
+        // Generate proper signatures for redemption
+        let issuer_signature = generate_redemption_signature(
+            &issuer_secret,
+            &issuer_pubkey,
+            &recipient_pubkey,
+            amount_collected,
+        );
+        let tracker_signature = generate_redemption_signature(
+            &issuer_secret,
+            &issuer_pubkey,
+            &recipient_pubkey,
+            amount_collected,
+        );
+
         // Create full redemption request
         let redemption_request = RedemptionRequest {
             issuer_pubkey: hex::encode(issuer_pubkey),
@@ -483,7 +560,14 @@ mod tests {
             amount: amount_collected, // Full amount
             timestamp,
             reserve_box_id: "test_reserve_box_1".to_string(),
+            tracker_box_id: "test_tracker_box_1".to_string(),
+            tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+            current_height: 1000,
             recipient_address: "test_recipient_address".to_string(),
+            change_address: "test_change_address".to_string(),
+            issuer_signature: hex::encode(&issuer_signature),
+            emergency: false,
+            tracker_signature: Some(hex::encode(&tracker_signature)),
         };
 
         // Initiate full redemption
@@ -556,6 +640,13 @@ mod tests {
             timestamp,
             reserve_box_id: "test_reserve_box_1".to_string(),
             recipient_address: "test_recipient_address".to_string(),
+            tracker_box_id: "test_tracker_box_1".to_string(),
+            tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+            current_height: 1000,
+            change_address: "test_change_address".to_string(),
+            issuer_signature: "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101".to_string(),
+            emergency: false,
+            tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
         };
 
         // Initiate redemption - should fail due to invalid signature
@@ -606,6 +697,20 @@ mod tests {
             .add_note(&issuer_pubkey, &note)
             .unwrap();
 
+        // Generate proper signatures for redemption
+        let issuer_signature = generate_redemption_signature(
+            &issuer_secret,
+            &issuer_pubkey,
+            &recipient_pubkey,
+            amount_collected,
+        );
+        let tracker_signature = generate_redemption_signature(
+            &issuer_secret,
+            &issuer_pubkey,
+            &recipient_pubkey,
+            amount_collected,
+        );
+
         // Create redemption request
         let redemption_request = RedemptionRequest {
             issuer_pubkey: hex::encode(issuer_pubkey),
@@ -613,7 +718,14 @@ mod tests {
             amount: amount_collected,
             timestamp,
             reserve_box_id: "test_reserve_box_1".to_string(),
+            tracker_box_id: "test_tracker_box_1".to_string(),
+            tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+            current_height: 1000,
             recipient_address: "test_recipient_address".to_string(),
+            change_address: "test_change_address".to_string(),
+            issuer_signature: hex::encode(&issuer_signature),
+            emergency: false,
+            tracker_signature: Some(hex::encode(&tracker_signature)),
         };
 
         // Step 1: Initiate redemption

@@ -197,11 +197,11 @@ mod tests {
 
         // Create test data
         let recipient_pubkey = issuer_pubkey; // Use the generated public key as recipient
-        let amount = 1000000000u64; // 1 ERG in nanoERG
-        let timestamp = 1672531200u64; // Example timestamp
+        let total_debt = 1000000000u64; // 1 ERG in nanoERG
+        let timestamp = 1743379200000u64; // Mar 29, 2025 in ms
 
-        // Create the message to be signed
-        let message = crate::types::signing_message(&recipient_pubkey, amount, timestamp);
+        // Create the message to be signed: key || totalDebt || timestamp
+        let message = crate::types::signing_message(&issuer_pubkey, &recipient_pubkey, total_debt, timestamp);
 
         // Sign the message
         let verifier = SchnorrVerifier;
@@ -226,11 +226,11 @@ mod tests {
 
         // Create test data
         let recipient_pubkey = issuer_pubkey; // Use the generated public key as recipient
-        let amount = 1000000000u64; // 1 ERG in nanoERG
-        let timestamp = 1672531200u64; // Example timestamp
+        let total_debt = 1000000000u64; // 1 ERG in nanoERG
+        let timestamp = 1743379200000u64; // Mar 29, 2025 in ms
 
-        // Create the message to be signed
-        let message = crate::types::signing_message(&recipient_pubkey, amount, timestamp);
+        // Create the message to be signed: key || totalDebt || timestamp
+        let message = crate::types::signing_message(&issuer_pubkey, &recipient_pubkey, total_debt, timestamp);
 
         // Sign the message
         let verifier = SchnorrVerifier;

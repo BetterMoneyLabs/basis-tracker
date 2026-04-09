@@ -56,7 +56,12 @@
 ### Signature Format
 - **Public keys**: 33 bytes compressed secp256k1 (66 hex chars)
 - **Signatures**: 65 bytes (130 hex chars) - 33-byte a + 32-byte z (Schnorr format)
-- **Signing message**: `recipient_pubkey || amount_be_bytes || timestamp_be_bytes`
+- **Signing message**: `key || longToByteArray(totalDebt)` for normal redemption (40 bytes)
+  - For emergency redemption: `key || longToByteArray(totalDebt) || longToByteArray(0L)` (48 bytes)
+  - Where `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
+  - `ownerKey`: Reserve owner's public key (issuer of the IOU note)
+  - `receiverKey`: Recipient's public key (creditor)
+  - `totalDebt`: Total cumulative debt amount (8 bytes big-endian)
 - **Verification**: Schnorr signature verification following chaincash-rs approach
 - **Algorithm**: `g^z = a * x^e` where:
   - `g` is generator point

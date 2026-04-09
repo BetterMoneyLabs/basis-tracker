@@ -113,6 +113,42 @@ mod http_api_tests {
                         let result = Ok(mock_proof);
                         let _ = response_tx.send(result);
                     }
+                    TrackerCommand::GetTrackerLookupProof {
+                        issuer_pubkey: _,
+                        recipient_pubkey: _,
+                        response_tx,
+                    } => {
+                        // Mock tracker lookup proof
+                        let mock_proof = basis_store::TrackerLookupProof {
+                            key: vec![0u8; 64],
+                            value: vec![0u8; 8],
+                            proof: vec![1, 2, 3, 4],
+                        };
+                        let _ = response_tx.send(Ok(mock_proof));
+                    }
+                    TrackerCommand::GetReserveLookupProof {
+                        issuer_pubkey: _,
+                        recipient_pubkey: _,
+                        response_tx,
+                    } => {
+                        // Mock reserve lookup proof
+                        let mock_proof = basis_store::ReserveLookupProof {
+                            key: vec![0u8; 64],
+                            value: vec![0u8; 8],
+                            proof: Some(vec![1, 2, 3, 4]),
+                        };
+                        let _ = response_tx.send(Ok(mock_proof));
+                    }
+                    TrackerCommand::GetReserveInsertProof {
+                        issuer_pubkey: _,
+                        recipient_pubkey: _,
+                        timestamp: _,
+                        new_already_redeemed: _,
+                        response_tx,
+                    } => {
+                        // Mock reserve insert proof
+                        let _ = response_tx.send(Ok(vec![1, 2, 3, 4]));
+                    }
                 }
             }
         });
@@ -135,6 +171,7 @@ mod http_api_tests {
             },
             transaction: config::TransactionConfig {
                 fee: 1000000,
+                change_address: None,
             },
         });
 

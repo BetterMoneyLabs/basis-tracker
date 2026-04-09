@@ -302,22 +302,23 @@ fn get_test_vectors() -> Vec<SchnorrTestVector> {
     ]
 }
 
-/// Test that the signing message format matches basis.es
+/// Test that the signing message format matches the new spec
 fn test_signing_message_format() {
-    let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [0u8; 65]);
-    let message = note.signing_message();
+    let owner_pubkey = [1u8; 33];
+    let receiver_pubkey = [2u8; 33];
+    let timestamp = 1743379200000u64;
+    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65]);
 
-    // Message should be: recipient_pubkey || amount_be_bytes || timestamp_be_bytes
-    assert_eq!(message.len(), 33 + 8 + 8);
-    assert_eq!(&message[0..33], &[1u8; 33]);
-    assert_eq!(&message[33..41], &1000u64.to_be_bytes());
-    assert_eq!(&message[41..49], &1234567890u64.to_be_bytes());
+    // Format: key (32) || totalDebt (8) || timestamp (8) = 48 bytes
+    let message = note.signing_message(&owner_pubkey);
+
+    assert_eq!(message.len(), 48);
 }
 
 /// Test that the challenge computation matches basis.es
 fn test_challenge_computation() {
     let a_bytes = [0x01u8; 33];
-    let message_bytes = [0x02u8; 49]; // 33 + 8 + 8
+    let message_bytes = [0x02u8; 48]; // 32 + 8 + 8
     let issuer_pubkey = [0x03u8; 33];
 
     // Compute challenge e = H(a || message || issuer_pubkey)
@@ -407,7 +408,7 @@ mod comprehensive_tests {
         // Test signing and verification with different issuers
         for (recipient_pubkey, amount, timestamp) in test_cases {
             // Alice signs a note to recipient
-            let message = schnorr::signing_message(&recipient_pubkey, amount, timestamp);
+            let message = schnorr::signing_message(&alice_pubkey, &recipient_pubkey, amount, timestamp);
             let signature = schnorr::schnorr_sign(&message, &alice_secret, &alice_pubkey)
                 .expect("Failed to create signature");
 
@@ -418,12 +419,13 @@ mod comprehensive_tests {
             assert!(schnorr::schnorr_verify(&signature, &message, &bob_pubkey).is_err());
 
             // Should fail with wrong message
-            let wrong_message = schnorr::signing_message(&recipient_pubkey, amount + 1, timestamp);
+            let wrong_message = schnorr::signing_message(&alice_pubkey, &recipient_pubkey, amount + 1, timestamp);
             assert!(schnorr::schnorr_verify(&signature, &wrong_message, &alice_pubkey).is_err());
         }
 
         // Test signature format validation
-        let message = schnorr::signing_message(&bob_pubkey, 1000, 1234567890);
+        let message_timestamp = 1743379200000u64;
+        let message = schnorr::signing_message(&alice_pubkey, &bob_pubkey, 1000, message_timestamp);
         let signature = schnorr::schnorr_sign(&message, &alice_secret, &alice_pubkey)
             .expect("Failed to create signature");
 
@@ -485,7 +487,7 @@ mod comprehensive_tests {
         let amount = 1000u64;
         let timestamp = 1234567890u64;
 
-        let message = schnorr::signing_message(&recipient_pubkey, amount, timestamp);
+        let message = schnorr::signing_message(&pubkey, &recipient_pubkey, amount, timestamp);
 
         // Create two signatures with the same input
         // Note: Since we use random nonces, these will be different

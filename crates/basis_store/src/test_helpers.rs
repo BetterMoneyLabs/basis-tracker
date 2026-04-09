@@ -102,7 +102,14 @@ pub fn create_test_redemption_request(
         amount,
         timestamp,
         reserve_box_id: "test_reserve_box_1".to_string(),
+        tracker_box_id: "test_tracker_box_1".to_string(),
+        tracker_nft_id: "test_tracker_nft_1".to_string(),
+        current_height: 1000,
         recipient_address: "test_recipient_address".to_string(),
+        change_address: "test_change_address".to_string(),
+        issuer_signature: "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101".to_string(),
+        emergency: false,
+        tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
     }
 }
 

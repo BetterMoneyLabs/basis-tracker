@@ -1,24 +1,34 @@
 //! Transaction building for Basis redemption
-//! 
+//!
 //! This module provides the foundation for building redemption transactions that interact with
 //! the Basis reserve contract on the Ergo blockchain. The transaction builder prepares all
 //! necessary components for redemption including:
-//! 
+//!
 //! - Reserve box spending (input)
 //! - Tracker box as data input (for AVL proof verification)
 //! - Updated reserve box (output)
 //! - Redemption output box (funds sent to recipient)
-//! - Context extension with contract parameters
+//! - Context extension with contract parameters (#0-#8)
 //! - Schnorr signatures (issuer and tracker)
 //! - AVL tree proofs for debt verification
-//! 
+//!
+//! Context Extension Variables (following specs/server/redemption_transaction_format_spec.md):
+//! - #0: action (Byte) - action*10 + output_index (0x00 for redemption at index 0)
+//! - #1: receiver (GroupElement) - Receiver's public key
+//! - #2: reserveSig (Coll[Byte]) - Reserve owner's Schnorr signature (65 bytes)
+//! - #3: totalDebt (Long) - Total cumulative debt amount
+//! - #4: timestamp (Long) - Payment timestamp (milliseconds since Unix epoch)
+//! - #5: insertProof (Coll[Byte]) - AVL proof for inserting into reserve tree
+//! - #6: trackerSig (Coll[Byte]) - Tracker's Schnorr signature (65 bytes)
+//! - #7: lookupProofReserve (Coll[Byte]) - AVL proof for looking up in reserve tree (optional for first redemption)
+//! - #8: lookupProofTracker (Coll[Byte]) - AVL proof for looking up in tracker tree
+//!
 //! When blockchain integration is complete, this will use ergo-lib to build actual transactions
 //! that can be submitted to the Ergo network.
 
 use thiserror::Error;
 
-
-
+use std::collections::HashMap;
 
 #[derive(Error, Debug)]
 pub enum TransactionBuilderError {
@@ -30,8 +40,70 @@ pub enum TransactionBuilderError {
     Configuration(String),
 }
 
+/// Context extension variables for redemption transaction
+/// Following specs/server/redemption_transaction_format_spec.md
+#[derive(Debug, Clone)]
+pub struct ContextExtension {
+    /// #0: Action byte (action*10 + output_index, 0x00 for redemption at index 0)
+    pub action: u8,
+    /// #1: Receiver's public key (33 bytes compressed)
+    pub receiver_pubkey: Vec<u8>,
+    /// #2: Reserve owner's Schnorr signature (65 bytes)
+    pub reserve_signature: Vec<u8>,
+    /// #3: Total debt amount
+    pub total_debt: u64,
+    /// #4: Payment timestamp (milliseconds since Unix epoch)
+    pub timestamp: u64,
+    /// #5: AVL insert proof for reserve tree
+    pub insert_proof: Vec<u8>,
+    /// #6: Tracker's Schnorr signature (65 bytes)
+    pub tracker_signature: Vec<u8>,
+    /// #7: AVL lookup proof for reserve tree (None for first redemption)
+    pub reserve_lookup_proof: Option<Vec<u8>>,
+    /// #8: AVL lookup proof for tracker tree
+    pub tracker_lookup_proof: Vec<u8>,
+}
+
+impl ContextExtension {
+    /// Convert context extension to a HashMap for JSON serialization
+    pub fn to_json_map(&self) -> HashMap<String, serde_json::Value> {
+        let mut map = HashMap::new();
+
+        // #0: Action byte
+        map.insert("0".to_string(), serde_json::Value::Number(self.action.into()));
+
+        // #1: Receiver pubkey (hex-encoded)
+        map.insert("1".to_string(), serde_json::Value::String(hex::encode(&self.receiver_pubkey)));
+
+        // #2: Reserve signature (hex-encoded)
+        map.insert("2".to_string(), serde_json::Value::String(hex::encode(&self.reserve_signature)));
+
+        // #3: Total debt (number)
+        map.insert("3".to_string(), serde_json::Value::Number(self.total_debt.into()));
+
+        // #4: Timestamp (number, milliseconds since Unix epoch)
+        map.insert("4".to_string(), serde_json::Value::Number(serde_json::Number::from(self.timestamp)));
+
+        // #5: Insert proof (hex-encoded)
+        map.insert("5".to_string(), serde_json::Value::String(hex::encode(&self.insert_proof)));
+
+        // #6: Tracker signature (hex-encoded)
+        map.insert("6".to_string(), serde_json::Value::String(hex::encode(&self.tracker_signature)));
+
+        // #7: Reserve lookup proof (hex-encoded, optional)
+        if let Some(ref proof) = self.reserve_lookup_proof {
+            map.insert("7".to_string(), serde_json::Value::String(hex::encode(proof)));
+        }
+
+        // #8: Tracker lookup proof (hex-encoded)
+        map.insert("8".to_string(), serde_json::Value::String(hex::encode(&self.tracker_lookup_proof)));
+
+        map
+    }
+}
+
 /// Context for transaction building containing blockchain and fee parameters
-/// 
+///
 /// This structure holds all the contextual information needed to build a valid
 /// redemption transaction that can be accepted by the Ergo network.
 #[derive(Debug, Clone)]
@@ -65,7 +137,7 @@ impl Default for TxContext {
 /// - Inputs: [Reserve box] (spent)
 /// - Data Inputs: [Tracker box] (for AVL proof verification)
 /// - Outputs: [Updated reserve box, Redemption output box, Change box (optional)]
-/// - Context Extension: Contract parameters (action, signatures, proofs, amounts)
+/// - Context Extension: Contract parameters (#0-#8)
 #[derive(Debug, Clone)]
 pub struct RedemptionTransactionData {
     /// Reserve box ID being spent (contains collateral backing the debt)
@@ -84,8 +156,16 @@ pub struct RedemptionTransactionData {
     pub tracker_signature: Vec<u8>,
     /// Transaction fee in nanoERG
     pub fee: u64,
-    /// Tracker NFT ID from R6 register (hex-encoded serialized SColl(SByte) format following byte_array_register_serialization.md spec)
+    /// Tracker NFT ID from R6 register (hex-encoded, 32 bytes = 64 hex chars)
     pub tracker_nft_id: String,
+    /// Context extension variables for contract validation
+    pub context_extension: Option<ContextExtension>,
+    /// Total debt amount from tracker's AVL tree
+    pub total_debt: u64,
+    /// Already redeemed amount for this (owner, receiver) pair
+    pub already_redeemed: u64,
+    /// Whether this is the first redemption (no lookup proof needed for reserve tree)
+    pub is_first_redemption: bool,
 }
 
 /// Builder for redemption transactions following the Basis contract specification
@@ -116,10 +196,12 @@ impl RedemptionTransactionBuilder {
     /// - `tracker_nft_id`: The tracker NFT ID from R6 register (hex-encoded serialized SColl(SByte) format following byte_array_register_serialization.md spec)
     /// - `note`: The IOU note being redeemed
     /// - `recipient_address`: Address where redeemed funds are sent
-    /// - `avl_proof`: AVL proof for the debt in tracker's AVL tree
+    /// - `avl_proof`: AVL proof for the debt in tracker's AVL tree (for insert operation)
     /// - `issuer_sig`: 65-byte Schnorr signature from issuer
     /// - `tracker_sig`: 65-byte Schnorr signature from tracker
     /// - `context`: Transaction context (fee, height, network)
+    /// - `reserve_lookup_proof`: Optional AVL proof for looking up already_redeemed in reserve tree (None for first redemption)
+    /// - `tracker_lookup_proof`: AVL proof for looking up totalDebt in tracker tree
     ///
     /// # Returns
     /// - RedemptionTransactionData structure containing all transaction components
@@ -133,6 +215,8 @@ impl RedemptionTransactionBuilder {
         issuer_sig: &[u8],
         tracker_sig: &[u8],
         context: &TxContext,
+        reserve_lookup_proof: Option<Vec<u8>>,
+        tracker_lookup_proof: Vec<u8>,
     ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
         // Validate all required transaction components
         // Reserve box validation
@@ -194,20 +278,39 @@ impl RedemptionTransactionBuilder {
         // Note: In a real implementation, we would check the actual reserve value
         // For now, we assume the caller has verified sufficient funds
 
-        // Check time lock expiration (1 week minimum as per Basis contract)
-        // This prevents immediate redemption and gives the tracker time to update state
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        // Note: Time lock enforcement is handled by the contract, not the transaction builder.
+        // Emergency redemption is available after 3 days (3*720 blocks) from tracker creation height.
+        // The contract checks: (HEIGHT - trackerCreationHeight) > 3 * 720
+        // Normal redemption requires both owner and tracker signatures.
+        // Emergency redemption bypasses tracker signature verification after the time lock.
 
-        let min_redemption_time = note.timestamp + 7 * 24 * 60 * 60; // 1 week in seconds
-        if current_time < min_redemption_time {
-            return Err(TransactionBuilderError::TransactionBuilding(
-                format!("Redemption time lock not expired: current={}, required={}",
-                        current_time, min_redemption_time)
-            ));
-        }
+        // Decode recipient public key for context extension
+        let recipient_pubkey_bytes = hex::decode(&note.recipient_pubkey_hex())
+            .unwrap_or_else(|_| vec![0u8; 33]);
+
+        // Build context extension variables (following specs/server/redemption_transaction_format_spec.md)
+        // Note: For first redemption, reserve_lookup_proof (#7) is omitted
+        // Check if this is the first redemption by checking already_redeemed amount
+        let already_redeemed = note.amount_redeemed;
+        let is_first_redemption = already_redeemed == 0;
+        let total_debt = note.amount_collected; // Total debt from tracker's AVL tree
+        let timestamp = note.timestamp; // Payment timestamp from the note
+
+        // Use the reserve_lookup_proof passed as parameter
+        // This should be None for first redemption, Some(proof) for subsequent redemptions
+        let reserve_lookup_proof_to_use = reserve_lookup_proof;
+
+        let context_extension = ContextExtension {
+            action: 0x00, // Redemption action
+            receiver_pubkey: recipient_pubkey_bytes,
+            reserve_signature: issuer_sig.to_vec(),
+            total_debt,
+            timestamp,
+            insert_proof: avl_proof.to_vec(),
+            tracker_signature: tracker_sig.to_vec(),
+            reserve_lookup_proof: reserve_lookup_proof_to_use,
+            tracker_lookup_proof, // Use actual tracker tree lookup proof from parameter
+        };
 
         // Create transaction data structure with all components
         Ok(RedemptionTransactionData {
@@ -220,6 +323,10 @@ impl RedemptionTransactionBuilder {
             tracker_signature: tracker_sig.to_vec(),
             fee: context.fee,
             tracker_nft_id: tracker_nft_id.to_string(),
+            context_extension: Some(context_extension),
+            total_debt,
+            already_redeemed,
+            is_first_redemption,
         })
     }
 

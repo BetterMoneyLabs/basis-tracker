@@ -102,6 +102,17 @@ pub struct RedeemRequest {
     pub recipient_pubkey: String,
     pub amount: u64,
     pub timestamp: u64,
+    /// Reserve box ID (optional - will be looked up if not provided)
+    #[serde(default)]
+    pub reserve_box_id: String,
+    /// Recipient address for redemption output (optional - derived from recipient_pubkey if not provided)
+    #[serde(default)]
+    pub recipient_address: String,
+    /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
+    pub issuer_signature: String,
+    /// Whether this is an emergency redemption
+    #[serde(default)]
+    pub emergency: bool,
 }
 
 // Redemption completion request
@@ -160,23 +171,28 @@ pub struct ProofResponse {
 }
 
 // Request for tracker signature
+// Following specs/server/redemption_state_spec.md - POST /tracker/signature
 #[derive(Debug, Deserialize)]
 pub struct TrackerSignatureRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
-    pub amount: u64,
+    pub total_debt: u64,
+    /// Payment timestamp in milliseconds since Unix epoch
     pub timestamp: u64,
-    pub recipient_address: String,
-    pub reserve_box_id: String,
+    #[serde(default)]
+    pub emergency: bool,
 }
 
 // Response for tracker signature
+// Following specs/server/redemption_state_spec.md
 #[derive(Debug, Serialize)]
 pub struct TrackerSignatureResponse {
     pub success: bool,
     pub tracker_signature: String,
     pub tracker_pubkey: String,
     pub message_signed: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_emergency: Option<bool>,
 }
 
 // Request for redemption preparation
@@ -197,6 +213,95 @@ pub struct RedemptionPreparationResponse {
     pub tracker_pubkey: String,
     pub tracker_state_digest: String,
     pub block_height: u64,
+}
+
+// Redemption proof response - following specs/server/redemption_state_spec.md
+// GET /proof/redemption endpoint response
+#[derive(Debug, Serialize)]
+pub struct RedemptionProofResponse {
+    pub success: bool,
+    pub data: RedemptionProofData,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RedemptionProofData {
+    pub tracker_lookup_proof: String,
+    pub reserve_lookup_proof: Option<String>,
+    pub reserve_insert_proof: String,
+    pub tracker_state_digest: String,
+    pub reserve_state_digest: String,
+    pub total_debt: u64,
+    pub already_redeemed: u64,
+    pub proof_valid: bool,
+    pub is_first_redemption: bool,
+}
+
+// Tracker lookup proof response - for context var #8
+// GET /tracker/proof endpoint response
+#[derive(Debug, Serialize)]
+pub struct TrackerProofResponse {
+    pub success: bool,
+    pub data: TrackerProofData,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrackerProofData {
+    /// Hex-encoded AVL tree key: hash(ownerKey || receiverKey)
+    pub key: String,
+    /// Hex-encoded value: totalDebt as 8-byte big-endian
+    pub value: String,
+    /// Hex-encoded AVL proof bytes
+    pub proof: String,
+    /// Total debt as integer
+    pub total_debt: u64,
+    /// Current tracker state digest (R5 register value)
+    pub tracker_state_digest: String,
+}
+
+// Reserve lookup proof response - for context var #7
+// GET /reserve/proof endpoint response
+#[derive(Debug, Serialize)]
+pub struct ReserveProofData {
+    /// Hex-encoded AVL tree key: hash(ownerKey || receiverKey)
+    pub key: String,
+    /// Hex-encoded value: already_redeemed as 8-byte big-endian
+    pub value: String,
+    /// Hex-encoded AVL proof bytes (None for first redemption) - for context var #7 (lookup)
+    pub proof: Option<String>,
+    /// Already redeemed amount as integer
+    pub already_redeemed: u64,
+    /// Whether this is the first redemption (no lookup proof needed)
+    pub is_first_redemption: bool,
+    /// Hex-encoded AVL insert proof for context var #5 (insert operation)
+    /// This proof is used to INSERT the new already_redeemed amount into the reserve tree
+    pub insert_proof: String,
+}
+
+// Redemption preparation response - updated with new fields
+#[derive(Debug, Serialize)]
+pub struct RedemptionPreparationResponseV2 {
+    pub success: bool,
+    pub data: RedemptionPreparationData,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RedemptionPreparationData {
+    pub redemption_id: String,
+    pub tracker_lookup_proof: String,
+    pub reserve_lookup_proof: Option<String>,
+    pub reserve_insert_proof: String,
+    pub tracker_signature: String,
+    pub reserve_signature: String,
+    pub tracker_pubkey: String,
+    pub tracker_state_digest: String,
+    pub reserve_state_digest: String,
+    pub total_debt: u64,
+    pub already_redeemed: u64,
+    pub is_first_redemption: bool,
+    pub transaction_bytes: String,
 }
 
 // Request for creating a reserve

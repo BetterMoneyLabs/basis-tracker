@@ -50,6 +50,7 @@ async fn main() {
                     },
                     transaction: TransactionConfig {
                         fee: 1000000, // 0.001 ERG
+                        change_address: None, // Will be derived from tracker public key
                     },
                 }
             })
@@ -104,6 +105,7 @@ async fn main() {
 
     // Initialize tracker scanner for monitoring tracker state commitment boxes
     tracing::debug!("Tracker NFT ID from config: {:?}", config.ergo.tracker_nft_id);
+    let _tracker_scanner_initialized = 
     if config.ergo.tracker_nft_id.is_some() && config.ergo.tracker_nft_id.as_ref().map_or(false, |id| !id.is_empty()) {
         tracing::info!("Initializing tracker scanner with tracker NFT ID...");
         let tracker_scanner_config = TrackerNodeConfig {
@@ -152,28 +154,33 @@ async fn main() {
                                 }
 
                                 tracing::info!("Tracker scanner initialization completed successfully");
+                                true
                             },
                             Err(e) => {
                                 tracing::warn!("Failed to register tracker scan: {:?}", e);
                                 tracing::info!("Continuing without tracker scanner registration...");
+                                false
                             }
                         }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to create tracker storage for tracker scanner: {:?}", e);
                         tracing::info!("Continuing without tracker scanner...");
+                        false
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!("Failed to create metadata storage for tracker scanner: {:?}", e);
                 tracing::info!("Continuing without tracker scanner...");
+                false
             }
         }
     } else {
         tracing::info!("Tracker NFT ID not configured, skipping tracker scanner initialization");
         tracing::info!("To enable tracker scanner, configure 'ergo.tracker_nft_id' in your configuration");
-    }
+        false
+    };
 
     // Initialize reserve tracker
     tracing::info!("Initializing reserve tracker...");
@@ -302,6 +309,32 @@ async fn main() {
                     response_tx,
                 } => {
                     let result = redemption_manager.tracker.generate_proof(&issuer_pubkey, &recipient_pubkey);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::GetTrackerLookupProof {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::GetReserveLookupProof {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::GetReserveInsertProof {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    timestamp,
+                    new_already_redeemed,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.generate_reserve_insert_proof(&issuer_pubkey, &recipient_pubkey, timestamp, new_already_redeemed);
                     let _ = response_tx.send(result);
                 }
             }
@@ -510,6 +543,8 @@ async fn main() {
         .route("/redeem/complete", post(complete_redemption).options(handle_options))
         .route("/proof", get(get_proof))
         .route("/proof/redemption", get(get_redemption_proof))
+        .route("/tracker/proof", get(get_tracker_proof))
+        .route("/reserve/proof", get(get_reserve_proof))
         .route("/tracker/signature", post(request_tracker_signature).options(handle_options))
         .route("/redemption/prepare", post(prepare_redemption).options(handle_options))
         .route("/reserves", get(get_all_reserves))
