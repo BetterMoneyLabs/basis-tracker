@@ -24,9 +24,7 @@ use tower_http::cors::{Any, CorsLayer};
             node_url: "http://localhost:9053".to_string(),
             ..Default::default()
         };
-        
-        // Create temporary directories for test storage using std::fs
-        let temp_dir = std::env::temp_dir().join(format!("basis_test_{}", std::process::id()));
+
         // Create server state with temporary storage
         let ergo_scanner = Arc::new(tokio::sync::Mutex::new(
             basis_store::ergo_scanner::ServerState::new(config).unwrap()
@@ -180,7 +178,10 @@ use tower_http::cors::{Any, CorsLayer};
             },
         });
 
-        let temp_dir = std::env::temp_dir().join(format!("basis_test_tracker_storage_cors_{}", std::process::id()));
+        // Use a unique temporary directory for each test invocation using a counter
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique_id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let temp_dir = std::env::temp_dir().join(format!("basis_test_tracker_storage_cors_{}_{}", std::process::id(), unique_id));
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
         let tracker_storage = basis_store::persistence::TrackerStorage::open(
             &temp_dir

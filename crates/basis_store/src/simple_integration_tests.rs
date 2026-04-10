@@ -70,6 +70,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "Requires network connectivity to Ergo node"]
     async fn test_simple_integration_suite() {
         let mut test_suite = SimpleIntegrationTestSuite::new().expect("Should create test suite");
 
