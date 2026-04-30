@@ -264,10 +264,10 @@ A redemption transaction typically has the following structure:
 ### Context Extension Validation
 - **#0 (action)**: Must be 0x00 for redemption
 - **#1 (receiver)**: Must be valid GroupElement (33-byte compressed pubkey)
-- **#2 (reserveSig)**: Must be valid 65-byte Schnorr signature on `key || totalDebt`
+- **#2 (reserveSig)**: Must be valid 65-byte Schnorr signature on `key || totalDebt || timestamp`
 - **#3 (totalDebt)**: Must match value in tracker's AVL tree
 - **#5 (insertProof)**: Must be valid AVL proof for inserting updated redeemed amount
-- **#6 (trackerSig)**: Must be valid 65-byte Schnorr signature on `key || totalDebt` (or `key || totalDebt || 0L` for emergency)
+- **#6 (trackerSig)**: Must be valid 65-byte Schnorr signature on `key || totalDebt || timestamp` (optional for emergency redemption after 3 days)
 - **#7 (lookupProofReserve)**: Required for subsequent redemptions, omitted for first
 - **#8 (lookupProofTracker)**: Must be valid AVL proof for looking up totalDebt in tracker's tree
 
@@ -358,8 +358,8 @@ verify: trackerTotalDebt == totalDebt
 ```
 
 ### Signature Requirements
-- Reserve owner's signature on `key || totalDebt` (or `key || totalDebt || 0L` for emergency)
-- Tracker's signature on `key || totalDebt` (or `key || totalDebt || 0L` for emergency)
+- Reserve owner's signature on `key || totalDebt || timestamp` (48 bytes, always required)
+- Tracker's signature on `key || totalDebt || timestamp` (48 bytes, optional for emergency redemption after 3 days)
 - Signatures must be provided as 65-byte Schnorr signatures (33 bytes 'a' + 32 bytes 'z')
 - Signatures are attached via context extension variables #2 and #6
 

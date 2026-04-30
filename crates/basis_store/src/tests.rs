@@ -74,17 +74,15 @@ fn test_note_key_generation() -> Result<(), String> {
     let recipient_pubkey = [2u8; 33];
 
     let note_key = NoteKey::from_keys(&issuer_pubkey, &recipient_pubkey);
+    let note_key_reverse = NoteKey::from_keys(&recipient_pubkey, &issuer_pubkey);
 
-    if note_key.issuer_hash == note_key.recipient_hash {
-        return Err("issuer and recipient hashes should be different".to_string());
+    if note_key.key_hash == note_key_reverse.key_hash {
+        return Err("issuer+recipient and recipient+issuer hashes should be different".to_string());
     }
 
     let note_key2 = NoteKey::from_keys(&issuer_pubkey, &recipient_pubkey);
-    if note_key.issuer_hash != note_key2.issuer_hash {
-        return Err("issuer hash should be consistent".to_string());
-    }
-    if note_key.recipient_hash != note_key2.recipient_hash {
-        return Err("recipient hash should be consistent".to_string());
+    if note_key.key_hash != note_key2.key_hash {
+        return Err("key hash should be consistent for same inputs".to_string());
     }
 
     println!("✓ test_note_key_generation passed");
@@ -293,12 +291,12 @@ fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
     let issuer_pubkey: PubKey = [1u8; 33];
     let recipient_pubkey: PubKey = [2u8; 33];
 
-    // Create a note with a far future timestamp
+    // Create a note with a far future timestamp (in milliseconds)
     let note = IouNote::new(
         recipient_pubkey,
         1000,
         0,
-        9999999999, // Far future timestamp
+        9999999999999, // Far future timestamp in milliseconds
         [0u8; 65],
     );
 

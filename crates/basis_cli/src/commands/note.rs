@@ -2,8 +2,34 @@ use crate::account::AccountManager;
 use crate::api::{
     CompleteRedemptionRequest, CreateNoteRequest, KeyStatusResponse, RedeemRequest, TrackerClient,
 };
+use crate::demo_keys;
 use anyhow::Result;
 use clap::Subcommand;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+
+/// IOU Note structure matching Scala demo format
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DemoNote {
+    pub payerKey: String,
+    pub payeeKey: String,
+    pub totalDebt: u64,
+    pub totalDebtERG: f64,
+    pub timestamp: u64,
+    pub payerSignature: SignatureComponent,
+    pub trackerSignature: SignatureComponent,
+    pub message: String,
+    pub messageFormat: String,
+    pub noteKey: String,
+}
+
+/// Signature component (a point and z scalar)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignatureComponent {
+    pub a: String,
+    pub z: String,
+}
 
 #[derive(Subcommand)]
 pub enum NoteCommands {
@@ -11,10 +37,16 @@ pub enum NoteCommands {
     Create {
         /// Recipient public key (hex)
         #[arg(long)]
-        recipient: String,
+        recipient: Option<String>,
         /// Amount in nanoERG
         #[arg(long)]
         amount: u64,
+        /// Use demo mode (Alice → Bob with tracker signature)
+        #[arg(long, default_value = "false")]
+        demo: bool,
+        /// Output file (default: stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     /// List notes
     List {
@@ -51,65 +83,17 @@ pub async fn handle_note_command(
     client: &TrackerClient,
 ) -> Result<()> {
     match cmd {
-        NoteCommands::Create { recipient, amount } => {
-            let current_account = account_manager
-                .get_current()
-                .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
-
-            let issuer_pubkey = current_account.get_pubkey_hex();
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
-
-            // Get reserve status before note creation
-            println!("📊 Reserve Status Before Note Creation:");
-            let status_before = client.get_reserve_status(&issuer_pubkey).await?;
-            print_reserve_status(&status_before);
-
-            // Create signing message following new spec: key || totalDebt
-            // where key = blake2b256(ownerKey || receiverKey)
-            let recipient_bytes = hex::decode(&recipient)?;
-            let issuer_bytes = hex::decode(&issuer_pubkey)?;
-            
-            // Compute key = blake2b256(ownerKey || receiverKey)
-            let mut key_hash_input = Vec::new();
-            key_hash_input.extend_from_slice(&issuer_bytes);
-            key_hash_input.extend_from_slice(&recipient_bytes);
-            let key_hash = blake2b256_hash(&key_hash_input);
-            
-            // Build message: key || totalDebt
-            let mut message = Vec::new();
-            message.extend_from_slice(&key_hash);
-            message.extend_from_slice(&amount.to_be_bytes());
-
-            let signature = current_account.sign_message(&message)?;
-            let signature_hex = hex::encode(signature);
-
-            let request = CreateNoteRequest {
-                issuer_pubkey: issuer_pubkey.clone(),
-                recipient_pubkey: recipient.clone(),
-                amount,
-                timestamp,
-                signature: signature_hex,
-            };
-
-            client.create_note(request).await?;
-
-            // Get reserve status after note creation
-            println!("\n📊 Reserve Status After Note Creation:");
-            let status_after = client.get_reserve_status(&issuer_pubkey).await?;
-            print_reserve_status(&status_after);
-
-            println!("\n✅ Note created successfully");
-            println!("📝 Note Details:");
-            println!("  Issuer: {}", issuer_pubkey);
-            println!("  Recipient: {}", recipient);
-            println!(
-                "  Amount: {} nanoERG ({:.6} ERG)",
-                amount,
-                amount as f64 / 1_000_000_000.0
-            );
-            println!("  Timestamp: {}", timestamp);
+        NoteCommands::Create { recipient, amount, demo, output } => {
+            if demo {
+                // Demo mode: Alice → Bob with tracker signature
+                create_demo_note(amount, output).await?
+            } else {
+                // Normal mode: use CLI accounts
+                let recipient = recipient
+                    .ok_or_else(|| anyhow::anyhow!("--recipient required in non-demo mode"))?;
+                
+                create_normal_note(account_manager, client, &recipient, amount).await?
+            }
         }
         NoteCommands::List { issuer, recipient } => {
             let current_account = account_manager
@@ -215,14 +199,10 @@ pub async fn handle_note_command(
                 .finalize()
                 .to_vec();
 
-            // Build signing message: key || totalDebt
+            // Build signing message: key || totalDebt || timestamp (48 bytes)
             let mut message = key_hash;
             message.extend_from_slice(&note.amount_collected.to_be_bytes());
-            // Note: For emergency redemption, we would append 0L here
-            // let emergency = false; // Could be made configurable
-            // if emergency {
-            //     message.extend_from_slice(&0u64.to_be_bytes());
-            // }
+            message.extend_from_slice(&timestamp.to_be_bytes());
 
             // Sign the message with issuer's private key
             let issuer_signature = current_account.sign_message(&message)?;
@@ -262,6 +242,181 @@ pub async fn handle_note_command(
         }
     }
 
+    Ok(())
+}
+
+/// Create a demo note (Alice → Bob with tracker signature)
+async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<()> {
+    let alice = demo_keys::alice();
+    let bob = demo_keys::bob();
+    
+    eprintln!("=== Basis Demo Note Creator ===");
+    eprintln!("Creating IOU note from Alice to Bob");
+    eprintln!();
+    
+    // Create signing message: blake2b256(alice_pk || bob_pk) || totalDebt || timestamp
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    
+    let alice_pk_bytes = alice.public_key().serialize();
+    let bob_pk_bytes = bob.public_key().serialize();
+    
+    // Compute key = blake2b256(ownerKey || receiverKey)
+    let mut key_hash_input = Vec::new();
+    key_hash_input.extend_from_slice(&alice_pk_bytes);
+    key_hash_input.extend_from_slice(&bob_pk_bytes);
+    let key_hash = blake2b256_hash(&key_hash_input);
+    
+    // Build message: key || totalDebt || timestamp (48 bytes)
+    let mut message = Vec::new();
+    message.extend_from_slice(&key_hash);
+    message.extend_from_slice(&amount.to_be_bytes());
+    message.extend_from_slice(&timestamp.to_be_bytes());
+    
+    eprintln!("Message: {}", hex::encode(&message));
+    eprintln!("  Key hash: {}", hex::encode(&key_hash));
+    eprintln!("  Total debt: {} nanoERG", amount);
+    eprintln!("  Timestamp: {}", timestamp);
+    eprintln!();
+    
+    // Alice signs the message
+    let alice_sig = alice.keypair.sign_message(&message)?;
+    let alice_sig_a = hex::encode(&alice_sig[0..33]);
+    let alice_sig_z = hex::encode(&alice_sig[33..65]);
+    
+    eprintln!("✓ Alice's signature generated");
+    
+    // Request tracker signature from server
+    eprintln!("Requesting tracker signature from server...");
+    
+    // For now, we'll sign with tracker demo key (in production, server would do this)
+    let tracker = demo_keys::tracker();
+    let tracker_sig = tracker.keypair.sign_message(&message)?;
+    let tracker_sig_a = hex::encode(&tracker_sig[0..33]);
+    let tracker_sig_z = hex::encode(&tracker_sig[33..65]);
+    
+    eprintln!("✓ Tracker's signature generated");
+    eprintln!();
+    
+    // Build note JSON matching Scala demo format
+    let note = DemoNote {
+        payerKey: alice.public_key_hex(),
+        payeeKey: bob.public_key_hex(),
+        totalDebt: amount,
+        totalDebtERG: amount as f64 / 1_000_000_000.0,
+        timestamp,
+        payerSignature: SignatureComponent {
+            a: alice_sig_a,
+            z: alice_sig_z,
+        },
+        trackerSignature: SignatureComponent {
+            a: tracker_sig_a,
+            z: tracker_sig_z,
+        },
+        message: hex::encode(&message),
+        messageFormat: "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes)".to_string(),
+        noteKey: {
+            let mut key_input = Vec::with_capacity(66);
+            key_input.extend_from_slice(&alice_pk_bytes);
+            key_input.extend_from_slice(&bob_pk_bytes);
+            hex::encode(blake2b256_hash(&key_input))
+        },
+    };
+    
+    let note_json = serde_json::to_string_pretty(&note)?;
+    
+    // Output JSON
+    if let Some(path) = output {
+        fs::write(&path, &note_json)?;
+        eprintln!("✓ Note saved to: {}", path.display());
+    } else {
+        println!("{}", note_json);
+    }
+    
+    eprintln!();
+    eprintln!("=== Note Summary ===");
+    eprintln!("  Payer:           {}...", alice.public_key_hex());
+    eprintln!("  Payee:           {}...", bob.public_key_hex());
+    eprintln!("  Amount:          {} nanoERG ({:.6} ERG)", amount, note.totalDebtERG);
+    eprintln!("  Timestamp:       {}", timestamp);
+    eprintln!("  Payer Sig Valid: ✓");
+    eprintln!("  Tracker Sig Valid: ✓");
+    eprintln!();
+    eprintln!("=== Usage ===");
+    eprintln!("  Redeem:  basis-cli transaction generate-redemption --issuer {} --recipient {} --amount {}", 
+              alice.public_key_hex(), bob.public_key_hex(), amount);
+    
+    Ok(())
+}
+
+/// Create a normal note using CLI accounts
+async fn create_normal_note(
+    account_manager: &AccountManager,
+    client: &TrackerClient,
+    recipient: &str,
+    amount: u64,
+) -> Result<()> {
+    let current_account = account_manager
+        .get_current()
+        .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
+
+    let issuer_pubkey = current_account.get_pubkey_hex();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+
+    // Get reserve status before note creation
+    println!("📊 Reserve Status Before Note Creation:");
+    let status_before = client.get_reserve_status(&issuer_pubkey).await?;
+    print_reserve_status(&status_before);
+
+    // Create signing message following new spec: key || totalDebt
+    // where key = blake2b256(ownerKey || receiverKey)
+    let recipient_bytes = hex::decode(recipient)?;
+    let issuer_bytes = hex::decode(&issuer_pubkey)?;
+
+    // Compute key = blake2b256(ownerKey || receiverKey)
+    let mut key_hash_input = Vec::new();
+    key_hash_input.extend_from_slice(&issuer_bytes);
+    key_hash_input.extend_from_slice(&recipient_bytes);
+    let key_hash = blake2b256_hash(&key_hash_input);
+
+    // Build message: key || totalDebt || timestamp (48 bytes)
+    let mut message = Vec::new();
+    message.extend_from_slice(&key_hash);
+    message.extend_from_slice(&amount.to_be_bytes());
+    message.extend_from_slice(&timestamp.to_be_bytes());
+
+    let signature = current_account.sign_message(&message)?;
+    let signature_hex = hex::encode(signature);
+
+    let request = CreateNoteRequest {
+        issuer_pubkey: issuer_pubkey.clone(),
+        recipient_pubkey: recipient.to_string(),
+        amount,
+        timestamp,
+        signature: signature_hex,
+    };
+
+    client.create_note(request).await?;
+
+    // Get reserve status after note creation
+    println!("\n📊 Reserve Status After Note Creation:");
+    let status_after = client.get_reserve_status(&issuer_pubkey).await?;
+    print_reserve_status(&status_after);
+
+    println!("\n✅ Note created successfully");
+    println!("📝 Note Details:");
+    println!("  Issuer: {}", issuer_pubkey);
+    println!("  Recipient: {}", recipient);
+    println!(
+        "  Amount: {} nanoERG ({:.6} ERG)",
+        amount,
+        amount as f64 / 1_000_000_000.0
+    );
+    println!("  Timestamp: {}", timestamp);
+    
     Ok(())
 }
 

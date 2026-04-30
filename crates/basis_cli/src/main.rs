@@ -3,6 +3,7 @@ mod api;
 mod commands;
 mod config;
 mod crypto;
+mod demo_keys;
 mod interactive;
 
 use anyhow::Result;

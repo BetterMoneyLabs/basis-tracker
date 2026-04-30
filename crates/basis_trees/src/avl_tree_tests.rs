@@ -20,7 +20,7 @@ fn test_tree_insertion() -> Result<(), TreeError> {
     let mut tree = BasisAvlTree::new()?;
 
     // Test basic insertion
-    let key = vec![1u8; 64];
+    let key = vec![1u8; 32];
     let value = vec![2u8; 32];
 
     let result = tree.insert(key, value);
@@ -38,7 +38,7 @@ fn test_tree_insertion() -> Result<(), TreeError> {
 fn test_tree_update() -> Result<(), TreeError> {
     let mut tree = BasisAvlTree::new()?;
 
-    let key = vec![1u8; 64];
+    let key = vec![1u8; 32];
     let value1 = vec![2u8; 32];
     let value2 = vec![3u8; 32];
 
@@ -67,7 +67,7 @@ fn test_proof_generation() -> Result<(), TreeError> {
     assert!(!empty_proof.is_empty(), "Proof should not be empty");
 
     // Insert some data and generate proof
-    let key = vec![1u8; 64];
+    let key = vec![1u8; 32];
     let value = vec![2u8; 32];
     tree.insert(key, value)?;
 
@@ -86,7 +86,7 @@ fn test_multiple_insertions() -> Result<(), TreeError> {
 
     // Insert multiple keys with proper non-zero values
     for i in 1..11 {  // Start from 1 to avoid zero keys
-        let mut key = vec![0u8; 64];
+        let mut key = vec![0u8; 32];
         key[0] = i;
         let value = vec![i * 2; 32];
         tree.insert(key, value)?;
@@ -107,7 +107,7 @@ fn test_multiple_insertions() -> Result<(), TreeError> {
 fn test_sequential_updates() -> Result<(), TreeError> {
     let mut tree = BasisAvlTree::new()?;
 
-    let mut key = vec![0u8; 64];
+    let mut key = vec![0u8; 32];
     key[0] = 1;
     
     // Insert initial value
@@ -134,7 +134,7 @@ fn test_mixed_operations() -> Result<(), TreeError> {
 
     // Perform mixed operations with proper non-zero keys
     for i in 1..6 {  // Start from 1 to avoid zero keys
-        let mut key = vec![0u8; 64];
+        let mut key = vec![0u8; 32];
         key[0] = i;
         let value = vec![i * 3; 32];
         
@@ -160,7 +160,7 @@ fn test_state_consistency_after_operations() -> Result<(), TreeError> {
 
     // Insert all keys first
     for i in 1..11 {  // Start from 1 to avoid zero keys
-        let mut key = vec![0u8; 64];
+        let mut key = vec![0u8; 32];
         key[0] = i;
         let value = vec![i * 11; 32];
         tree.insert(key, value)?;
@@ -172,7 +172,7 @@ fn test_state_consistency_after_operations() -> Result<(), TreeError> {
 
     // Now perform updates and verify state consistency
     for i in 1..11 {
-        let mut key = vec![0u8; 64];
+        let mut key = vec![0u8; 32];
         key[0] = i;
         let value = vec![i * 22; 32];  // Different value for updates
         
@@ -204,7 +204,7 @@ fn test_large_number_of_operations() -> Result<(), TreeError> {
 
     // Perform many operations with proper non-zero keys
     for i in 1..101 {  // Start from 1 to avoid zero keys
-        let mut key = vec![0u8; 64];
+        let mut key = vec![0u8; 32];
         key[0] = (i % 256) as u8;
         let value = vec![(i * 2 % 256) as u8; 32];
         

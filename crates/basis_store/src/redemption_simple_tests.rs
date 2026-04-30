@@ -54,7 +54,7 @@ fn test_time_lock_validation() {
     let recent_timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_millis() as u64;
 
     let recent_note = IouNote::create_and_sign(
         recipient_pubkey,

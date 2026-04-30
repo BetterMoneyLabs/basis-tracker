@@ -36,6 +36,7 @@ bin = []
 # Test dependencies
 [dev-dependencies]
 basis_store = { path = "../basis_store" }
+secp256k1 = "0.27"
 
 [[bin]]
 name = "basis_cli"

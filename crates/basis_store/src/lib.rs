@@ -121,7 +121,7 @@ pub struct NoteProof {
 /// Proves that totalDebt exists in the tracker's AVL tree at key hash(ownerKey||receiverKey)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackerLookupProof {
-    /// The AVL tree key: hash(ownerKey || receiverKey) (64 bytes: 32 + 32)
+    /// The AVL tree key: blake2b256(ownerKey || receiverKey) (32 bytes)
     pub key: Vec<u8>,
     /// The value: totalDebt as 8-byte big-endian
     pub value: Vec<u8>,
@@ -133,7 +133,7 @@ pub struct TrackerLookupProof {
 /// Proves that (timestamp, already_redeemed) exists in the reserve's AVL tree at key hash(ownerKey||receiverKey)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReserveLookupProof {
-    /// The AVL tree key: hash(ownerKey || receiverKey) (64 bytes: 32 + 32)
+    /// The AVL tree key: blake2b256(ownerKey || receiverKey) (32 bytes)
     pub key: Vec<u8>,
     /// The value: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes total
     pub value: Vec<u8>,
@@ -141,14 +141,31 @@ pub struct ReserveLookupProof {
     pub proof: Option<Vec<u8>>,
 }
 
-/// Key for note lookup (hash of issuer + recipient)
+/// Key for note lookup: blake2b256(issuer_pubkey || recipient_pubkey)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NoteKey {
-    /// Hash of issuer public key
-    pub issuer_hash: [u8; 32],
-    /// Hash of recipient public key
-    pub recipient_hash: [u8; 32],
+    /// blake2b256(issuer_pubkey || recipient_pubkey)
+    pub key_hash: [u8; 32],
 }
+
+impl NoteKey {
+    /// Create a note key from issuer and recipient public keys
+    pub fn from_keys(issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Self {
+        let mut data = Vec::with_capacity(66);
+        data.extend_from_slice(issuer_pubkey);
+        data.extend_from_slice(recipient_pubkey);
+        let key_hash = blake2b256_hash(&data);
+
+        Self { key_hash }
+    }
+
+    /// Convert note key to bytes for AVL tree
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.key_hash.to_vec()
+    }
+}
+
+
 
 /// Status information for a public key
 #[derive(Debug, Clone, PartialEq)]
@@ -346,7 +363,7 @@ impl TrackerStateManager {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
-            .as_secs();
+            .as_millis() as u64;
 
         if note.timestamp > current_time {
             return Err(NoteError::FutureTimestamp);
@@ -397,7 +414,7 @@ impl TrackerStateManager {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
-            .as_secs();
+            .as_millis() as u64;
 
         if note.timestamp > current_time {
             return Err(NoteError::FutureTimestamp);
@@ -702,7 +719,7 @@ impl TrackerStateManager {
         self.current_state.last_update_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_millis() as u64;
     }
 
     /// Get the current tracker state
@@ -828,24 +845,6 @@ impl IouNote {
     /// Get the recipient public key as a hex-encoded string
     pub fn recipient_pubkey_hex(&self) -> String {
         hex::encode(&self.recipient_pubkey)
-    }
-}
-
-impl NoteKey {
-    /// Create a note key from issuer and recipient public keys
-    pub fn from_keys(issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Self {
-        let issuer_hash = blake2b256_hash(issuer_pubkey);
-        let recipient_hash = blake2b256_hash(recipient_pubkey);
-
-        Self {
-            issuer_hash,
-            recipient_hash,
-        }
-    }
-
-    /// Convert note key to bytes for AVL tree
-    pub fn to_bytes(&self) -> Vec<u8> {
-        [&self.issuer_hash[..], &self.recipient_hash[..]].concat()
     }
 }
 

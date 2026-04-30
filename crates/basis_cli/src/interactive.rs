@@ -148,8 +148,10 @@ impl InteractiveMode {
 
                             if let (Some(recipient), Some(amount)) = (recipient, amount) {
                                 let cmd = note::NoteCommands::Create {
-                                    recipient: recipient.to_string(),
+                                    recipient: Some(recipient.to_string()),
                                     amount,
+                                    demo: false,
+                                    output: None,
                                 };
                                 note::handle_note_command(cmd, &self.account_manager, &self.client)
                                     .await?;

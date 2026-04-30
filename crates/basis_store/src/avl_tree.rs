@@ -23,9 +23,9 @@ impl AvlTreeState {
     /// Create a new AVL tree state
     pub fn new() -> Self {
         // Create an AVL tree with variable length values
-        // Key length: 64 bytes (issuer_hash + recipient_hash)
+        // Key length: 32 bytes (blake2b256(issuer_pubkey || recipient_pubkey))
         // Value length: None for variable length values
-        let tree = AVLTree::new(simple_resolver, 64, None);
+        let tree = AVLTree::new(simple_resolver, 32, None);
         let mut prover = BatchAVLProver::new(tree, true);
 
         // Generate an initial proof to establish the empty tree state
@@ -124,7 +124,7 @@ mod tests {
         let mut tree = AvlTreeState::new();
 
         // Test basic insertion
-        let key = vec![1u8; 64];
+        let key = vec![1u8; 32];
         let value = vec![2u8; 32];
 
         let result = tree.insert(key.clone(), value);
@@ -139,7 +139,7 @@ mod tests {
     fn test_avl_tree_update() {
         let mut tree = AvlTreeState::new();
 
-        let key = vec![1u8; 64];
+        let key = vec![1u8; 32];
         let value1 = vec![2u8; 32];
         let value2 = vec![3u8; 32];
 
@@ -158,7 +158,7 @@ mod tests {
     fn test_avl_tree_removal() {
         let mut tree = AvlTreeState::new();
 
-        let key = vec![1u8; 64];
+        let key = vec![1u8; 32];
         let value = vec![2u8; 32];
 
         // Insert and get digest
@@ -184,7 +184,7 @@ mod tests {
         assert!(!empty_proof.is_empty(), "Proof should not be empty");
 
         // Insert some data and generate proof
-        let key = vec![1u8; 64];
+        let key = vec![1u8; 32];
         let value = vec![2u8; 32];
         tree.insert(key, value).unwrap();
 
@@ -199,7 +199,7 @@ mod tests {
 
         // Insert multiple keys with proper format (avoiding zero keys)
         for i in 1..6 {
-            let mut key = vec![i; 64];
+            let mut key = vec![i; 32];
             key[0] = i; // Ensure first byte is non-zero
             let value = vec![i * 2; 32];
             tree.insert(key, value).unwrap();
@@ -209,7 +209,7 @@ mod tests {
 
         // Remove some keys
         for i in 1..3 {
-            let mut key = vec![i; 64];
+            let mut key = vec![i; 32];
             key[0] = i;
             tree.remove(key).unwrap();
         }
@@ -229,7 +229,7 @@ mod tests {
         // Insert keys in sorted order (worst case for balancing)
         // Start from 1 to avoid zero keys
         for i in 1..20 {
-            let mut key = vec![0u8; 64];
+            let mut key = vec![0u8; 32];
             key[0] = i;
             let value = vec![i * 2; 32];
             tree.insert(key, value).unwrap();

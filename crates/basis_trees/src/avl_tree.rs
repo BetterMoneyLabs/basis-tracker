@@ -31,9 +31,9 @@ impl BasisAvlTree {
     /// Create a new in-memory AVL tree
     pub fn new() -> Result<Self, TreeError> {
         // Create an AVL tree with variable length values
-        // Key length: 64 bytes (issuer_hash + recipient_hash)
+        // Key length: 32 bytes (blake2b256(issuer_pubkey || recipient_pubkey))
         // Value length: None for variable length values
-        let tree = AVLTree::new(tree_resolver, 64, None);
+        let tree = AVLTree::new(tree_resolver, 32, None);
         let prover = BatchAVLProver::new(tree, true);
 
         let current_state = TrackerState::empty();

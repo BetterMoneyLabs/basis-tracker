@@ -179,7 +179,7 @@ impl TrackerBoxUpdater {
                     r5_bytes.push(0x64u8); // SAvlTree type identifier
                     r5_bytes.extend_from_slice(&root_digest); // 33-byte root digest
                     r5_bytes.push(0x01u8); // Flags: insert-only allowed (bit 0 set)
-                    r5_bytes.extend_from_slice(&64u32.to_be_bytes()); // Key length: 64 bytes
+                    r5_bytes.extend_from_slice(&32u32.to_be_bytes()); // Key length: 32 bytes
                     r5_bytes.extend_from_slice(&0u32.to_be_bytes()); // Value length: 0 (variable)
 
                     let r5_hex = hex::encode(&r5_bytes);

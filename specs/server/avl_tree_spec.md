@@ -62,14 +62,13 @@ When a new or updated note is submitted, the following algorithm is executed:
 2. **Storage Update**:
    - Update the persistent note storage using the key hash:
      - Insert or update the note in the note database partition
-     - Key format: [issuer_hash][recipient_hash] (64 bytes)
-     - Value format: [issuer pubkey][amount collected][amount redeemed][timestamp][signature][recipient pubkey]
+      - Key format: blake2b256(issuer_pubkey || recipient_pubkey) (32 bytes)
+      - Value format: [issuer pubkey][amount collected][amount redeemed][timestamp][signature][recipient pubkey]
 
-3. **AVL Tree Update**:
-   - Generate the AVL tree key from issuer and recipient public keys:
-     - Calculate Blake2b256 hash of issuer public key
-     - Calculate Blake2b256 hash of recipient public key
-     - Concatenate the two hashes to form a 64-byte key
+### 3. AVL Tree Update:
+    - Generate the AVL tree key from issuer and recipient public keys:
+      - Concatenate issuer_pubkey (33 bytes) and recipient_pubkey (33 bytes)
+      - Calculate Blake2b256 hash of the concatenation to form a 32-byte key
    - Serialize the note data for the tree value:
      - Include note fields in a consistent format
    - Insert or update the key-value pair in the AVL tree:
@@ -143,7 +142,7 @@ impl TrackerStateManager {
 
 The persistence layer is updated to work with key hashes instead of synthetic IDs:
 
-- Database partition key: 64-byte combination of issuer and recipient public key hashes
+- Database partition key: 32-byte blake2b256(issuer_pubkey || recipient_pubkey)
 - Value format remains the same but without synthetic ID
 - All query functions (by issuer, recipient, etc.) work as before using the note structure
 

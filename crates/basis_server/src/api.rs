@@ -715,15 +715,15 @@ pub async fn get_all_notes(
             tracing::info!("Successfully retrieved {} notes", notes_with_issuer.len());
 
             // Convert to serializable format with age calculation
-            let current_time = std::time::SystemTime::now()
+            let current_time_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs();
+                .as_millis() as u64;
 
             let serializable_notes: Vec<crate::models::SerializableIouNoteWithAge> = notes_with_issuer
                 .into_iter()
                 .map(|(issuer_pubkey, note)| {
-                    let age_seconds = current_time.saturating_sub(note.timestamp);
+                    let age_seconds = current_time_ms.saturating_sub(note.timestamp) / 1000;
                     crate::models::SerializableIouNoteWithAge {
                         issuer_pubkey: hex::encode(issuer_pubkey),
                         recipient_pubkey: hex::encode(note.recipient_pubkey),
@@ -1768,26 +1768,44 @@ pub async fn get_reserve_proof(
 
             // Request reserve insert proof from tracker thread
             let (insert_proof_tx, insert_proof_rx) = tokio::sync::oneshot::channel();
-            let insert_proof = if let Err(e) = state.tx.send(TrackerCommand::GetReserveInsertProof {
+            let insert_proof = match state.tx.send(TrackerCommand::GetReserveInsertProof {
                 issuer_pubkey,
                 recipient_pubkey,
                 timestamp: stored_timestamp,
                 new_already_redeemed,
                 response_tx: insert_proof_tx,
             }).await {
-                tracing::error!("Failed to send reserve insert proof command: {}", e);
-                vec![0u8; 64] // Fallback to placeholder
-            } else {
-                match insert_proof_rx.await {
-                    Ok(Ok(proof_bytes)) => proof_bytes,
-                    Ok(Err(e)) => {
-                        tracing::warn!("Failed to generate reserve insert proof: {:?}", e);
-                        vec![0u8; 64] // Fallback to placeholder
+                Ok(_) => {
+                    match insert_proof_rx.await {
+                        Ok(Ok(proof_bytes)) => proof_bytes,
+                        Ok(Err(e)) => {
+                            tracing::warn!("Failed to generate reserve insert proof: {:?}", e);
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(crate::models::error_response(
+                                    format!("Failed to generate reserve insert proof: {:?}", e),
+                                )),
+                            );
+                        }
+                        Err(_) => {
+                            tracing::error!("Tracker thread response channel closed for insert proof");
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(crate::models::error_response(
+                                    "Tracker thread unavailable".to_string(),
+                                )),
+                            );
+                        }
                     }
-                    Err(_) => {
-                        tracing::error!("Tracker thread response channel closed for insert proof");
-                        vec![0u8; 64] // Fallback to placeholder
-                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to send reserve insert proof command: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(crate::models::error_response(
+                            "Tracker thread unavailable".to_string(),
+                        )),
+                    );
                 }
             };
 
@@ -1892,11 +1910,10 @@ pub async fn request_tracker_signature(
     // Total: 48 bytes (32 + 8 + 8)
     // Both normal and emergency redemption use the SAME message format.
     // For emergency redemption, the tracker signature simply becomes optional.
-    let key_hash: [u8; 32] = basis_store::blake2b256_hash(&issuer_pubkey_bytes);
-    let mut key_hash_bytes = Vec::new();
-    key_hash_bytes.extend_from_slice(&key_hash);
-    key_hash_bytes.extend_from_slice(&recipient_pubkey_bytes);
-    let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_bytes);
+    let mut key_hash_input = Vec::new();
+    key_hash_input.extend_from_slice(&issuer_pubkey_bytes);
+    key_hash_input.extend_from_slice(&recipient_pubkey_bytes);
+    let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_input);
 
     let mut message_to_sign_bytes = Vec::with_capacity(48);
     message_to_sign_bytes.extend_from_slice(&key);
@@ -2014,11 +2031,10 @@ async fn get_tracker_signature_for_redemption(
         ))?;
 
     // Build signing message: key || totalDebt || timestamp (48 bytes)
-    let key_hash: [u8; 32] = basis_store::blake2b256_hash(&issuer_pubkey_bytes);
-    let mut key_hash_bytes = Vec::new();
-    key_hash_bytes.extend_from_slice(&key_hash);
-    key_hash_bytes.extend_from_slice(&recipient_pubkey_bytes);
-    let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_bytes);
+    let mut key_hash_input = Vec::new();
+    key_hash_input.extend_from_slice(&issuer_pubkey_bytes);
+    key_hash_input.extend_from_slice(&recipient_pubkey_bytes);
+    let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_input);
 
     let mut message_to_sign_bytes = Vec::with_capacity(48);
     message_to_sign_bytes.extend_from_slice(&key);
@@ -2134,17 +2150,17 @@ pub async fn prepare_redemption(
     };
 
     // Create message to be signed following specs/server/redemption_transaction_format_spec.md
-    // Normal redemption: message = key || longToByteArray(totalDebt)
+    // message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
     // where key = blake2b256(ownerKeyBytes || receiverBytes)
-    let key_hash: [u8; 32] = basis_store::blake2b256_hash(&issuer_pubkey_bytes);
-    let mut key_hash_bytes = Vec::new();
-    key_hash_bytes.extend_from_slice(&key_hash);
-    key_hash_bytes.extend_from_slice(&recipient_pubkey_bytes);
-    let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_bytes);
+    let mut key_hash_input = Vec::new();
+    key_hash_input.extend_from_slice(&issuer_pubkey_bytes);
+    key_hash_input.extend_from_slice(&recipient_pubkey_bytes);
+    let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_input);
 
-    let mut message_to_sign_bytes = Vec::new();
+    let mut message_to_sign_bytes = Vec::with_capacity(48);
     message_to_sign_bytes.extend_from_slice(&key);
     message_to_sign_bytes.extend_from_slice(&payload.amount.to_be_bytes());
+    message_to_sign_bytes.extend_from_slice(&payload.timestamp.to_be_bytes());
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
 

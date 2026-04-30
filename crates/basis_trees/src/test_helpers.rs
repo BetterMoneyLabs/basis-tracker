@@ -79,7 +79,7 @@ pub struct TestTreeConfig {
 impl Default for TestTreeConfig {
     fn default() -> Self {
         Self {
-            key_size: 64,
+            key_size: 32,
             value_size: None,
             enable_persistence: false,
         }
@@ -96,9 +96,9 @@ pub fn create_test_note_data(issuer_pubkey: &[u8], recipient_pubkey: &[u8], amou
     data
 }
 
-/// Helper to create test keys
-pub fn create_test_key(issuer_hash: &[u8], recipient_hash: &[u8]) -> Vec<u8> {
-    [issuer_hash, recipient_hash].concat()
+/// Helper to create test keys (32-byte blake2b256 hash)
+pub fn create_test_key(key_hash: &[u8; 32]) -> Vec<u8> {
+    key_hash.to_vec()
 }
 
 /// Helper to generate test digests

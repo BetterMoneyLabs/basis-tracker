@@ -218,7 +218,7 @@ mod tests {
         let node = TreeNode {
             digest: vec![1u8; 32],
             node_type: NodeType::Leaf,
-            key: Some(vec![2u8; 64]),
+            key: Some(vec![2u8; 32]),
             value: Some(vec![3u8; 100]),
             left_digest: None,
             right_digest: None,
@@ -245,7 +245,7 @@ mod tests {
             sequence_number: storage.next_sequence_number(),
             operation_type: OperationType::Insert,
             timestamp: 1234567890,
-            key: vec![1u8; 64],
+            key: vec![1u8; 32],
             value: vec![2u8; 100],
             previous_value: None,
             tree_root_before: vec![0u8; 33],

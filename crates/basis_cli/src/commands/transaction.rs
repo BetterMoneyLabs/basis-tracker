@@ -95,9 +95,10 @@ async fn generate_redemption_transaction(
             response.tracker_box_id
         },
         Err(e) => {
-            eprintln!("⚠️  No tracker box found: {}. This is normal in a fresh system.", e);
-            // Using a placeholder tracker box ID since no tracker box exists yet
-            "0000000000000000000000000000000000000000000000000000000000000000".to_string()
+            return Err(anyhow::anyhow!(
+                "No tracker box found: {}. Cannot generate redemption transaction without a tracker box.",
+                e
+            ));
         }
     };
 
@@ -109,21 +110,18 @@ async fn generate_redemption_transaction(
     let tracker_proof = client.get_tracker_proof(issuer_pubkey, recipient_pubkey).await?;
     let total_debt = tracker_proof.total_debt;
     let tracker_lookup_proof = hex::decode(&tracker_proof.proof)
-        .unwrap_or_else(|_| vec![0u8; 64]);
+        .map_err(|e| anyhow::anyhow!("Invalid tracker proof hex: {}", e))?;
     let tracker_state_digest = tracker_proof.tracker_state_digest;
 
     // Build serialized SAvlTree for R5 register from tracker state digest
-    // Format: type_byte (0x64) + root_digest (33 bytes) + flags (0x01) + key_len (64) + value_len (0)
+    // Format: type_byte (0x64) + root_digest (33 bytes) + flags (0x01) + key_len (32) + value_len (0)
     let r5_bytes = build_savl_tree_from_digest(&tracker_state_digest);
     let r5_hex = hex::encode(&r5_bytes);
 
     // Get the reserve contract P2S address from the server configuration
     println!("🔍 Retrieving reserve contract P2S address from server configuration...");
     let reserve_contract_p2s = client.get_basis_reserve_contract_p2s().await
-        .unwrap_or_else(|e| {
-            eprintln!("⚠️  Could not retrieve reserve contract P2S from server, using placeholder: {}", e);
-            "RtQxdWJ9axeb5Ltahqosnhj45BE26xuDK4YWddVj5p59t9RjKPEkkHCYEiyxwRFMJcEHwVd9syFod8ReQo1Zaz9eNTZ5JwDEN5hkLd67sVr2sNQ6R46TSfausAc9D3q7et1apYaXnqV9PkpHPMCA1zMCEsmmADj62XRGq4Cw2VwpuKKCAdreTgmLzdFWHGVGQMsPDFFBkRibsPFMzXkytdy2mPs2zCtm15uyDpd3jDLBy95BtUFXU2DdaYa1xMZE9UXju4R4MhWH8vqWda5BgpRTa1RpQxpS5b96FG46r1v3ZWCLYcVo51J1ekY8cqqVFNNykpQScRRYqFjCLMjG26dYEwZyn21wGeLJ7RzcTwCpvGDBa2w1P3ycAEJAv9XDPEtJrSQpkvBaD1HaZ6X2JuXmFjPF5MChmVLk4CTXtRQVRis7vP95ByTTmbHbtVdao32kbN3xhCWgJZZdaKkNyKH4vFQn5jyoEmiV7FjQDegWnnaFXu5FW6stx9cbhsxWz5FfGpW1BCMRNNJTCRF6FtYoehrMT74LDRNxHQ38EmMn6mBEpSrhkzDj2jysdFJvDUf8UQjLZQLmUQtgNotfxeAPxiavsT5mLUja3hdWvZPv71FcHxvP53WJHAcn9JPek3vepbH9gxRdmBMW".to_string()
-        });
+        .map_err(|e| anyhow::anyhow!("Failed to retrieve reserve contract P2S address from server: {}", e))?;
 
     // Calculate remaining collateral after redemption
     let remaining_collateral = reserve_box.base_info.collateral_amount - amount;
@@ -135,41 +133,28 @@ async fn generate_redemption_transaction(
         // For first redemption, no lookup proof needed, but we still need insert proof
         println!("🔍 First redemption - generating reserve insert proof...");
         // For first redemption, insert proof can be generated (lookup proof is omitted)
-        match client.get_reserve_proof(issuer_pubkey, recipient_pubkey).await {
-            Ok(reserve_proof) => {
-                let insert_proof = hex::decode(&reserve_proof.insert_proof)
-                    .unwrap_or_else(|_| vec![0u8; 64]);
-                (None, insert_proof)
-            }
-            Err(e) => {
-                eprintln!("⚠️  Failed to get reserve proof: {}", e);
-                (None, vec![0u8; 64]) // Fallback
-            }
-        }
+        let reserve_proof = client.get_reserve_proof(issuer_pubkey, recipient_pubkey).await
+            .map_err(|e| anyhow::anyhow!("Failed to get reserve proof for first redemption: {}", e))?;
+        let insert_proof = hex::decode(&reserve_proof.insert_proof)
+            .map_err(|e| anyhow::anyhow!("Invalid reserve insert proof hex: {}", e))?;
+        (None, insert_proof)
     } else {
         // For subsequent redemptions, get reserve lookup proof and insert proof from server
         println!("🔍 Retrieving reserve proofs from server...");
-        match client.get_reserve_proof(issuer_pubkey, recipient_pubkey).await {
-            Ok(reserve_proof) => {
-                println!("✅ Got reserve proof: already_redeemed={} nanoERG, is_first={}",
-                    reserve_proof.already_redeemed, reserve_proof.is_first_redemption);
-                // Decode the hex-encoded proofs
-                let lookup_proof = if let Some(proof_hex) = &reserve_proof.proof {
-                    hex::decode(proof_hex).unwrap_or_else(|_| vec![0u8; 64])
-                } else {
-                    eprintln!("⚠️  Reserve proof returned None for non-first redemption");
-                    vec![0u8; 64]
-                };
-                let insert_proof = hex::decode(&reserve_proof.insert_proof)
-                    .unwrap_or_else(|_| vec![0u8; 64]);
-                (Some(lookup_proof), insert_proof)
-            }
-            Err(e) => {
-                eprintln!("⚠️  Failed to get reserve proof: {}", e);
-                eprintln!("   Transaction may fail if this is not the first redemption");
-                (Some(vec![0u8; 64]), vec![0u8; 64]) // Fallback to placeholder
-            }
-        }
+        let reserve_proof = client.get_reserve_proof(issuer_pubkey, recipient_pubkey).await
+            .map_err(|e| anyhow::anyhow!("Failed to get reserve proof for subsequent redemption: {}", e))?;
+        println!("✅ Got reserve proof: already_redeemed={} nanoERG, is_first={}",
+            reserve_proof.already_redeemed, reserve_proof.is_first_redemption);
+        // Decode the hex-encoded proofs
+        let lookup_proof = if let Some(proof_hex) = &reserve_proof.proof {
+            Some(hex::decode(proof_hex)
+                .map_err(|e| anyhow::anyhow!("Invalid reserve lookup proof hex: {}", e))?)
+        } else {
+            return Err(anyhow::anyhow!("Reserve lookup proof is required for subsequent redemption"));
+        };
+        let insert_proof = hex::decode(&reserve_proof.insert_proof)
+            .map_err(|e| anyhow::anyhow!("Invalid reserve insert proof hex: {}", e))?;
+        (lookup_proof, insert_proof)
     };
 
     // Retrieve the actual tracker box from the Ergo node
@@ -233,7 +218,7 @@ async fn generate_redemption_transaction(
         emergency,
     ).await?;
     let tracker_signature = hex::decode(&tracker_signature_response.tracker_signature)
-        .unwrap_or_else(|_| vec![0u8; 65]);
+        .map_err(|e| anyhow::anyhow!("Invalid tracker signature hex: {}", e))?;
 
     // Use the reserve insert proof fetched from server
     // This is the correct proof for inserting into the reserve AVL tree
@@ -330,7 +315,7 @@ async fn generate_redemption_transaction(
 }
 
 /// Helper function to build serialized SAvlTree from tracker state digest
-/// Format: type_byte (0x64) + root_digest (33 bytes) + flags (0x01) + key_len (64) + value_len (0)
+    /// Format: type_byte (0x64) + root_digest (33 bytes) + flags (0x01) + key_len (32) + value_len (0)
 fn build_savl_tree_from_digest(digest_hex: &str) -> Vec<u8> {
     // Decode the hex-encoded digest (should be 66 hex chars = 33 bytes)
     let digest_bytes = hex::decode(digest_hex)
@@ -349,7 +334,7 @@ fn build_savl_tree_from_digest(digest_hex: &str) -> Vec<u8> {
     r5_bytes.push(0x64u8);                        // Type byte: SAvlTree
     r5_bytes.extend_from_slice(&root_digest);     // 33-byte root digest
     r5_bytes.push(0x01u8);                        // Flags: insert-only allowed
-    r5_bytes.extend_from_slice(&64u32.to_be_bytes()); // Key length: 64 bytes
+    r5_bytes.extend_from_slice(&32u32.to_be_bytes()); // Key length: 32 bytes
     r5_bytes.extend_from_slice(&0u32.to_be_bytes());  // Value length: 0 (variable)
     
     r5_bytes

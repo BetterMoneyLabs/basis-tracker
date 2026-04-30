@@ -362,7 +362,7 @@ mod tests {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs(); // Current time
+            .as_millis() as u64; // Current time in milliseconds
 
         let note = IouNote::create_and_sign(
             recipient_pubkey,

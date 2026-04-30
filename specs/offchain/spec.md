@@ -58,8 +58,11 @@ The `schnorr` module implements Schnorr signature operations following the Ergo 
 
 - **`schnorr_sign`**: Creates Schnorr signatures using secret key
 - **`schnorr_verify`**: Verifies Schnorr signatures against public key and message
-- **`signing_message`**: Creates signing messages by concatenating `(key || totalDebt)` or `(key || totalDebt || 0L)` for emergency redemption
-  - Where `key = blake2b256(ownerKeyBytes || receiverBytes)`
+- **`signing_message`**: Creates signing messages by concatenating `key || totalDebt || timestamp` (48 bytes total)
+  - Where `key = blake2b256(ownerKeyBytes || receiverBytes)` (32 bytes)
+  - `totalDebt`: 8-byte big-endian representation of total cumulative debt
+  - `timestamp`: 8-byte big-endian representation of payment timestamp in milliseconds since Unix epoch
+  - Emergency redemption uses the **same** message format; only the tracker signature requirement becomes optional after 3 days
 - **`generate_keypair`**: Generates new key pairs for testing/development
 - **`validate_signature_format`**: Ensures signature has correct 65-byte format
 - **`validate_public_key`**: Validates compressed secp256k1 public keys
@@ -94,16 +97,16 @@ The crate defines comprehensive error types:
    - AVL proof for tracker tree lookup (context var #8, required)
    - AVL proof for reserve tree lookup (context var #7, optional for first redemption)
    - AVL proof for reserve tree insertion (context var #5)
-5. **Signature Collection**: 
-   - Reserve owner's signature on `key || totalDebt` (or `key || totalDebt || 0L` for emergency)
-   - Tracker's signature on `key || totalDebt` (or `key || totalDebt || 0L` for emergency)
+5. **Signature Collection**:
+   - Reserve owner's signature on `key || totalDebt || timestamp` (48 bytes)
+   - Tracker's signature on `key || totalDebt || timestamp` (48 bytes)
 6. **Transaction Building**: Final transaction is built with all required components including context extensions
 
 ### Emergency Redemption
 
 - If tracker becomes unavailable, emergency redemption is possible after 3 days (3 * 720 blocks) from tracker creation
-- Emergency redemption uses modified message format: `key || totalDebt || 0L`
-- Both signatures are still required, but tracker signature verification is bypassed after timeout
+- Emergency redemption uses the **same** message format: `key || totalDebt || timestamp`
+- The tracker signature becomes optional after the timeout; the reserve owner signature is always required
 - **NOTE**: All debts associated with this tracker become eligible for emergency redemption simultaneously after 3 days
 
 ### Time Lock Validation
@@ -163,16 +166,20 @@ The offchain crate is designed to work with:
 
 ### Message Format for Signatures
 
-**Normal Redemption:**
+**All Redemptions (normal and emergency):**
 ```
-message = key || longToByteArray(totalDebt)
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
 where key = blake2b256(ownerKeyBytes || receiverBytes)
 ```
 
+- **key**: 32 bytes, `blake2b256(ownerKeyBytes || receiverBytes)`
+- **totalDebt**: 8 bytes big-endian
+- **timestamp**: 8 bytes big-endian, milliseconds since Unix epoch
+- **Total**: 48 bytes
+
 **Emergency Redemption (after 3 days):**
-```
-message = key || longToByteArray(totalDebt) || longToByteArray(0L)
-```
+- Uses the **same** 48-byte message format
+- Tracker signature becomes optional; reserve owner signature is always required
 
 ## Tracker Integration
 

@@ -359,8 +359,8 @@ Various test files contain placeholder implementations that don't affect product
 ## Production Readiness Checklist
 
 ### Core Protocol
-- [x] Signing message format (`key || totalDebt`)
-- [x] Emergency redemption message format (`key || totalDebt || 0L`)
+- [x] Signing message format (`key || totalDebt || timestamp`, 48 bytes)
+- [x] Emergency redemption uses same message format, tracker signature becomes optional
 - [x] Context extension variables (#0-#8)
 - [x] Tracker AVL tree storage (`hash(A||B) -> totalDebt`)
 - [x] Tracker proof API endpoint

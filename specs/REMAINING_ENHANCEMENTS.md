@@ -249,7 +249,7 @@ Comprehensive end-to-end testing for emergency redemption flow. Emergency redemp
 - [ ] 2.1.3 Add test configuration for emergency mode
 
 #### Phase 2: Unit Tests (0.25 days)
-- [ ] 2.2.1 Test emergency message format (`key || totalDebt || 0L`)
+- [ ] 2.2.1 Test emergency redemption (same message format, tracker signature optional after 3 days)
 - [ ] 2.2.2 Test emergency eligibility calculation
 - [ ] 2.2.3 Test signature verification bypass logic
 

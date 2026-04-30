@@ -135,9 +135,9 @@ impl RedemptionManager {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_millis() as u64;
 
-        let min_redemption_time = note.timestamp + 60; // 60 seconds (1 minute) for testing
+        let min_redemption_time = note.timestamp + 60_000; // 60 seconds in milliseconds for testing
         if current_time < min_redemption_time {
             return Err(RedemptionError::RedemptionTooEarly(
                 current_time,
@@ -175,7 +175,7 @@ impl RedemptionManager {
     /// When blockchain integration is complete, this will produce actual
     /// Ergo transactions that can be submitted to the network.
     pub fn build_unsigned_redemption_transaction(
-        &self,
+        &mut self,
         note: &IouNote,
         proof: &crate::NoteProof,
         request: &RedemptionRequest,
@@ -186,9 +186,20 @@ impl RedemptionManager {
         tracker_sig: &[u8],
         context: &TxContext,
     ) -> Result<RedemptionData, RedemptionError> {
-        // For this helper function, we don't have access to tracker state
-        // so we pass empty proofs
-        // The caller should use the main initiate_redemption function for full functionality
+        // Generate real proofs using tracker state
+        let issuer_pubkey_bytes = parse_pubkey(&request.issuer_pubkey)
+            .map_err(|e| RedemptionError::TransactionError(format!("Invalid issuer pubkey: {}", e)))?;
+        let recipient_pubkey_bytes = parse_pubkey(&request.recipient_pubkey)
+            .map_err(|e| RedemptionError::TransactionError(format!("Invalid recipient pubkey: {}", e)))?;
+        
+        // Generate reserve lookup proof (for already_redeemed)
+        let reserve_lookup_proof = self.tracker.generate_reserve_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
+            .map_err(|e| RedemptionError::TransactionError(format!("Failed to generate reserve lookup proof: {:?}", e)))?;
+        
+        // Generate tracker lookup proof (for totalDebt)
+        let tracker_lookup_proof = self.tracker.generate_tracker_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
+            .map_err(|e| RedemptionError::TransactionError(format!("Failed to generate tracker lookup proof: {:?}", e)))?;
+        
         let transaction_data = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
             reserve_box_id,
             tracker_box_id,
@@ -199,8 +210,8 @@ impl RedemptionManager {
             issuer_sig,
             tracker_sig,
             context,
-            None, // reserve_lookup_proof - not available in this context
-            vec![0u8; 64], // tracker_lookup_proof - placeholder
+            reserve_lookup_proof.proof,
+            tracker_lookup_proof.proof,
         ).map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
         // Generate unique redemption ID for tracking
@@ -237,7 +248,7 @@ impl RedemptionManager {
         let redemption_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_millis() as u64;
 
         Ok(RedemptionData {
             redemption_id,
@@ -270,7 +281,7 @@ impl RedemptionManager {
         note.timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| RedemptionError::StorageError("Failed to get current time".to_string()))?
-            .as_secs();
+            .as_millis() as u64;
 
         // Update the note in tracker
         self.tracker
@@ -469,9 +480,10 @@ fn build_redemption_transaction(
     .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
     // Required signatures: issuer and tracker
+    // Note: Tracker pubkey should be fetched from tracker configuration
     let required_signatures = vec![
         request.issuer_pubkey.clone(),
-        "tracker_signature_key".to_string(), // Placeholder for tracker signature
+        "tracker_pubkey_required".to_string(),
     ];
 
     // Estimated fee (0.001 ERG)
@@ -481,7 +493,7 @@ fn build_redemption_transaction(
     let redemption_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_millis() as u64;
 
     Ok(RedemptionData {
         redemption_id,

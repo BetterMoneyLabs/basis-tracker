@@ -673,9 +673,37 @@ mod tests {
         let key_ab = NoteKey::from_keys(&a, &b);
         let key_ba = NoteKey::from_keys(&b, &a);
 
-        // The key uses issuer_hash and recipient_hash from separate blake2b256 hashes
+        // The key is blake2b256(issuer_pubkey || recipient_pubkey)
         // So swapping order changes the key
         assert_ne!(key_ab, key_ba, "Key with swapped order must differ");
+    }
+
+    /// Test that NoteKey hash matches Scala demo message prefix
+    /// From scala/demo/note.json:
+    /// - payerKey: 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83
+    /// - payeeKey: 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea
+    /// - message:  6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a40000000002faf08000000194f8c88000
+    ///   The first 32 bytes (6995ccf3...) are the key hash.
+    #[test]
+    fn note_key_matches_scala_demo() {
+        let alice_pk = hex::decode("0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let bob_pk = hex::decode("03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea")
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let note_key = NoteKey::from_keys(&alice_pk, &bob_pk);
+        let expected = hex::decode("6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4")
+            .unwrap();
+
+        assert_eq!(
+            note_key.key_hash.to_vec(),
+            expected,
+            "NoteKey hash must match Scala demo message prefix"
+        );
     }
 
     // ========== TRACKER STATE MANAGER TESTS ==========
