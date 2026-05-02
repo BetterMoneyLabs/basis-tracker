@@ -125,7 +125,7 @@ The `/tracker/signature` endpoint accepts requests with the following structure:
 - `issuer_pubkey`: Public key of the note issuer (hex-encoded, 33 bytes)
 - `recipient_pubkey`: Public key of the note recipient (hex-encoded, 33 bytes)
 - `total_debt`: Total cumulative debt amount in nanoERG
-- `emergency`: Boolean indicating if this is an emergency redemption (affects message format)
+- `emergency`: Boolean indicating if this is an emergency redemption (tracker signature optional after 3 days)
 
 ### Tracker Signature Response Structure
 
@@ -134,8 +134,7 @@ The `/tracker/signature` endpoint returns responses with the following structure
 - `tracker_signature`: 65-byte Schnorr signature (hex-encoded, 130 characters) proving tracker authorization
 - `tracker_pubkey`: Tracker's public key (hex-encoded, 66 characters)
 - `message_signed`: The hex-encoded message that was signed
-  - Normal: `hash(issuerKey||recipientKey) || longToByteArray(totalDebt)`
-  - Emergency: `hash(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(0L)`
+  - Normal and emergency: `hash(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
 
 ### Redemption Preparation Request Structure
 
@@ -184,8 +183,8 @@ The server now implements real cryptographic functionality using the Ergo node's
 - **Authentication**: Requests to the signing API are authenticated using the tracker API key
 - **Implementation**: Tracker signature endpoints (`/tracker/signature` and `/redemption/prepare`) now make HTTP requests to the Ergo node API instead of performing local signing
 - **Message Format**: 
-  - Normal redemption: `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt)`
-  - Emergency redemption (after 3 days): `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(0L)`
+  - Normal and emergency: `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
+  - Emergency redemption (after 3 days): same 48-byte message format, tracker signature becomes optional
 
 #### AVL Tree Proof Generation
 - **Real Proofs**: All proof endpoints now generate actual AVL tree lookup and insert proofs from the tracker's and reserve's AVL tree state

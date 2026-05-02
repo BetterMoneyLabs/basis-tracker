@@ -216,7 +216,7 @@ Comprehensive end-to-end testing for emergency redemption flow. Emergency redemp
 
 **Implemented:**
 - ✅ Contract supports emergency redemption (3×720 blocks from tracker creation)
-- ✅ Message format includes `|| 0L` suffix for emergency
+- ✅ Message format is `key || totalDebt || timestamp` (48 bytes) for all redemptions
 - ✅ API endpoint `/tracker/signature` accepts `emergency` flag
 - ✅ Transaction builder supports emergency flag
 
@@ -320,7 +320,7 @@ fn test_premature_emergency_redemption_fails() {
 
 - [ ] Emergency redemption succeeds after 2160 blocks
 - [ ] Emergency redemption fails before 2160 blocks
-- [ ] Emergency message format is correct (48 bytes with 0L suffix)
+- [ ] Emergency redemption uses same 48-byte message format (tracker signature optional)
 - [ ] Tracker signature verification is bypassed in emergency mode
 - [ ] Reserve owner signature is still required
 - [ ] AVL tree is updated correctly

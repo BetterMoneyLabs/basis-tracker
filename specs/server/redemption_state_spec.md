@@ -138,8 +138,8 @@ The redemption process begins when a recipient initiates a redemption request:
    - Return `RedemptionError::AvlProofError` if proof generation fails
 
 9. **Request Signatures**
-   - Build signing message: `message = key || longToByteArray(totalDebt)`
-   - For emergency: `message = key || longToByteArray(totalDebt) || longToByteArray(0L)`
+    - Build signing message: `message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
+    - Emergency redemption uses the same message format; tracker signature becomes optional after 3 days
    - Request reserve owner's signature on message
    - Request tracker's signature on message via Ergo node API
    - Return `RedemptionError::InvalidReserveSignature` or `InvalidTrackerSignature` if invalid
@@ -364,7 +364,7 @@ Request tracker signature for redemption.
   "data": {
     "tracker_signature": "hex_encoded_65_byte_schnorr_signature",
     "tracker_pubkey": "hex_encoded_tracker_public_key",
-    "message_signed": "hex_encoded_message_key_totalDebt_or_key_totalDebt_0L",
+    "message_signed": "hex_encoded_48_byte_message_key_totalDebt_timestamp",
     "is_emergency": false
   },
   "error": null
@@ -402,13 +402,13 @@ If the tracker becomes unavailable, emergency redemption is available after 3 da
 
 ### Message Format
 ```
-message = key || longToByteArray(totalDebt) || longToByteArray(0L)
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
 where key = blake2b256(ownerKeyBytes || receiverBytes)
 ```
 
 ### Process Changes
-1. Build message with appended `0L` (longToByteArray(0L))
-2. Request signatures on modified message
+1. Build message with timestamp (same as normal redemption)
+2. Request signatures on message
 3. Contract checks `enoughTimeSpent` flag
 4. Tracker signature verification bypassed if enough time spent
 

@@ -181,7 +181,7 @@ pub async fn handle_note_command(
             let timestamp = note.timestamp;
 
             // Generate issuer signature for redemption
-            // Message format: key || totalDebt [|| 0L for emergency]
+            // Message format: key || totalDebt || timestamp (48 bytes)
             // where key = blake2b256(ownerKey || receiverKey)
             let issuer_pubkey_bytes = hex::decode(&issuer)
                 .map_err(|e| anyhow::anyhow!("Invalid issuer pubkey hex: {}", e))?;
@@ -371,7 +371,7 @@ async fn create_normal_note(
     let status_before = client.get_reserve_status(&issuer_pubkey).await?;
     print_reserve_status(&status_before);
 
-    // Create signing message following new spec: key || totalDebt
+    // Create signing message: key || totalDebt || timestamp (48 bytes)
     // where key = blake2b256(ownerKey || receiverKey)
     let recipient_bytes = hex::decode(recipient)?;
     let issuer_bytes = hex::decode(&issuer_pubkey)?;

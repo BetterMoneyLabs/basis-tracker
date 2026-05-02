@@ -14,6 +14,7 @@ fn generate_redemption_signature(
     issuer_pubkey: &PubKey,
     recipient_pubkey: &PubKey,
     total_debt: u64,
+    timestamp: u64,
 ) -> Vec<u8> {
     let mut key_hash_input = Vec::new();
     key_hash_input.extend_from_slice(issuer_pubkey);
@@ -26,6 +27,7 @@ fn generate_redemption_signature(
     let mut message = Vec::new();
     message.extend_from_slice(&key_hash);
     message.extend_from_slice(&total_debt.to_be_bytes());
+    message.extend_from_slice(&timestamp.to_be_bytes());
     
     let signature = schnorr::schnorr_sign(&message, issuer_secret_bytes, issuer_pubkey)
         .expect("Failed to create signature");
@@ -290,12 +292,14 @@ mod tests {
             &issuer_pubkey,
             &recipient_pubkey,
             amount_collected,
+            note.timestamp,
         );
         let tracker_signature = generate_redemption_signature(
             &issuer_secret,
             &issuer_pubkey,
             &recipient_pubkey,
             amount_collected,
+            note.timestamp,
         );
 
         // Create redemption request
@@ -545,12 +549,14 @@ mod tests {
             &issuer_pubkey,
             &recipient_pubkey,
             amount_collected,
+            note.timestamp,
         );
         let tracker_signature = generate_redemption_signature(
             &issuer_secret,
             &issuer_pubkey,
             &recipient_pubkey,
             amount_collected,
+            note.timestamp,
         );
 
         // Create full redemption request
@@ -703,12 +709,14 @@ mod tests {
             &issuer_pubkey,
             &recipient_pubkey,
             amount_collected,
+            note.timestamp,
         );
         let tracker_signature = generate_redemption_signature(
             &issuer_secret,
             &issuer_pubkey,
             &recipient_pubkey,
             amount_collected,
+            note.timestamp,
         );
 
         // Create redemption request

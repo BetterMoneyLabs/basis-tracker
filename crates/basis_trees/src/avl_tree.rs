@@ -142,7 +142,7 @@ impl BasisAvlTree {
         self.current_state.last_update_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_millis() as u64;
     }
 
 

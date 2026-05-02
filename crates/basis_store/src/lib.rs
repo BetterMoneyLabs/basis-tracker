@@ -776,10 +776,9 @@ impl IouNote {
         self.amount_collected == self.amount_redeemed
     }
 
-    /// Create and sign a new IOU note using the new spec signing format
+    /// Create and sign a new IOU note
     /// 
-    /// Following specs/server/redemption_transaction_format_spec.md:
-    /// message = key || longToByteArray(totalDebt)
+    /// Message format: key || totalDebt || timestamp (48 bytes)
     /// where key = blake2b256(ownerKeyBytes || receiverKeyBytes)
     pub fn create_and_sign(
         recipient_pubkey: PubKey,

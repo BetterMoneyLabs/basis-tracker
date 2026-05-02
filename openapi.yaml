@@ -453,7 +453,7 @@ paths:
       summary: Request tracker signature for redemption
       description: |
         Request Schnorr signature from tracker for redemption.
-        The tracker signs: key || totalDebt [|| 0L for emergency]
+        The tracker signs: key || totalDebt || timestamp
         where key = blake2b256(ownerKey || receiverKey)
       operationId: requestTrackerSignature
       tags:
@@ -598,7 +598,7 @@ components:
           example: 1234567890
         signature:
           type: string
-          description: Hex-encoded Schnorr signature (signs key || totalDebt)
+          description: Hex-encoded Schnorr signature (signs key || totalDebt || timestamp)
           example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
 
     SerializableReserveInfo:

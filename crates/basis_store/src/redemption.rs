@@ -62,7 +62,7 @@ pub struct RedemptionRequest {
     /// Change address for transaction outputs (derived from tracker pubkey if not specified)
     pub change_address: String,
     /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    /// Signs: key || totalDebt [|| 0L for emergency]
+    /// Signs: key || totalDebt || timestamp (48 bytes)
     /// where key = blake2b256(ownerKey || receiverKey)
     pub issuer_signature: String,
     /// Whether this is an emergency redemption (after 3 days tracker unavailability)

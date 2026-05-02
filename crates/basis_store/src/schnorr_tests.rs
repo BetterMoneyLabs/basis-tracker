@@ -40,9 +40,16 @@ impl SchnorrVerificationVector {
         signature: [u8; 65],
         should_verify: bool,
     ) -> Self {
-        // Compute signing message: recipient_pubkey || amount_be_bytes || timestamp_be_bytes
+        // Compute signing message: blake2b256(issuer_pubkey || recipient_pubkey) || amount || timestamp
+        let mut key_hash_input = Vec::new();
+        key_hash_input.extend_from_slice(&issuer_pubkey);
+        key_hash_input.extend_from_slice(&recipient_pubkey);
+        let mut hasher = Blake2b::<U32>::new();
+        hasher.update(&key_hash_input);
+        let key_hash = hasher.finalize().to_vec();
+        
         let mut signing_message = Vec::new();
-        signing_message.extend_from_slice(&recipient_pubkey);
+        signing_message.extend_from_slice(&key_hash);
         signing_message.extend_from_slice(&amount.to_be_bytes());
         signing_message.extend_from_slice(&timestamp.to_be_bytes());
 

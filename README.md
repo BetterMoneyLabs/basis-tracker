@@ -41,13 +41,13 @@ As a simple but pretty secure solution, the following design is proposed, which 
   possible to redeem them. There could be different improvements to the tracker design, see "Future Extensions" section.
 * IOU note from A to B represents cumulative debt with format: cumulative debt amount tracked by tracker, where the tracker
   stores `hash(A_pubkey || B_pubkey) -> totalDebt` mappings. The signature from A (sig_A) is computed over
-  `key || totalDebt` where `key = blake2b256(ownerKey || receiverKey)`. Only one updateable note is stored by a tracker
+  `key || totalDebt || timestamp` where `key = blake2b256(ownerKey || receiverKey)`. Only one updateable note is stored by a tracker
   per (A,B) pair, and is redeemable onchain. The tracker commits on-chain to the data by storing an AVL tree root digest
   in register R5, where the tree stores `hash(A || B) -> totalDebt` mappings.
 
 * If A has on-chain reserve, B may redeem from A->B note by providing proof of totalDebt from tracker's AVL tree. The reserve
   contract UTXO stores an AVL tree in R5 tracking `hash(ownerKey || receiverKey) -> cumulativeRedeemedAmount`. Redemption
-  requires both reserve owner's signature AND tracker's signature on `key || totalDebt`. Emergency redemption is available
+  requires both reserve owner's signature AND tracker's signature on `key || totalDebt || timestamp`. Emergency redemption is available
   after 3 days (3*720 blocks) from tracker creation height if tracker becomes unavailable. After on-chain redemption, the
   reserve's AVL tree is updated with the new cumulative redeemed amount, preventing double redemption.
 

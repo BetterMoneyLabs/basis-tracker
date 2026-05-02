@@ -126,8 +126,8 @@ The OpenAPI specification includes validation rules:
 ### Signing Message Format
 
 Note that the signature in note creation requests signs the following message format:
-- **Normal redemption**: `key || totalDebt` (40 bytes)
-- **Emergency redemption**: `key || totalDebt || 0L` (48 bytes)
+- **All redemptions**: `key || totalDebt || timestamp` (48 bytes)
+- Emergency redemption uses the same message format; tracker signature becomes optional
 - Where `key = blake2b256(ownerKey || receiverKey)` (32 bytes)
 
 ### Context Extension Variables
@@ -168,8 +168,8 @@ The API provides three proof endpoints for redemption transactions:
 **`POST /tracker/signature`** - Request tracker signature for redemption
 
 The tracker signs the same message as the issuer:
-- Normal: `key || totalDebt` (40 bytes)
-- Emergency: `key || totalDebt || 0L` (48 bytes)
+- All redemptions: `key || totalDebt || timestamp` (48 bytes)
+- Emergency redemption uses the same format; tracker signature becomes optional
 
 Request body:
 ```json

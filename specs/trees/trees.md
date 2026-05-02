@@ -17,7 +17,7 @@ authenticated data structure that enable efficient state commitments and verifia
 - **Verifiable**: Third parties can verify state without full data
 
 **Tree Structure**:
-- **Keys**: `Hash(issuer_pubkey || recipient_pubkey)` (64 bytes)
+- **Keys**: `blake2b256(issuer_pubkey || recipient_pubkey)` (32 bytes)
 - **Values**: Serialized IOU note data
 - **Root Digest**: 33-byte commitment (32-byte hash + 1-byte height)
 
@@ -25,8 +25,7 @@ authenticated data structure that enable efficient state commitments and verifia
 
 ```rust
 struct NoteKey {
-    issuer_hash: [u8; 32],   // Blake2b256(issuer_pubkey)
-    recipient_hash: [u8; 32], // Blake2b256(recipient_pubkey)
+    key_hash: [u8; 32],   // blake2b256(issuer_pubkey || recipient_pubkey)
 }
 ```
 
