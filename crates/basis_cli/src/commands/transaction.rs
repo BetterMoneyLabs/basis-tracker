@@ -224,19 +224,42 @@ async fn generate_redemption_transaction(
     // This is the correct proof for inserting into the reserve AVL tree
     let insert_proof = reserve_insert_proof.clone();
 
-    // Build context extension map
+    // Build context extension map with properly serialized Ergo constants
+    // Ergo constant serialization format:
+    // - Byte (02): prefix 02 + 1-byte hex value
+    // - GroupElement (07): prefix 07 + 33-byte compressed pubkey hex
+    // - Coll[Byte] (0e): prefix 0e + 2-byte length + data hex
+    // - Long (05): prefix 05 + VLQ encoded value (simplified: 8-byte big-endian)
     let mut context_extension = HashMap::new();
-    context_extension.insert("0".to_string(), json!(0)); // action byte (action*10 + index = 0)
-    context_extension.insert("1".to_string(), json!(recipient_pubkey)); // receiver pubkey
-    context_extension.insert("2".to_string(), json!(hex::encode(&issuer_signature))); // reserve signature
-    context_extension.insert("3".to_string(), json!(total_debt)); // total debt
-    context_extension.insert("4".to_string(), json!(note_timestamp)); // timestamp
-    context_extension.insert("5".to_string(), json!(hex::encode(&insert_proof))); // insert proof
-    context_extension.insert("6".to_string(), json!(hex::encode(&tracker_signature))); // tracker signature
+    
+    // #0: Action byte (Byte constant)
+    context_extension.insert("0".to_string(), json!(format!("02{:02x}", 0))); // action byte = 0
+    
+    // #1: Receiver pubkey (GroupElement constant)
+    context_extension.insert("1".to_string(), json!(format!("07{}", recipient_pubkey)));
+    
+    // #2: Reserve signature (Coll[Byte] constant, 65 bytes)
+    context_extension.insert("2".to_string(), json!(format!("0e{:04x}{}", issuer_signature.len(), hex::encode(&issuer_signature))));
+    
+    // #3: Total debt (Long constant)
+    context_extension.insert("3".to_string(), json!(format!("05{:016x}", total_debt)));
+    
+    // #4: Timestamp (Long constant)
+    context_extension.insert("4".to_string(), json!(format!("05{:016x}", note_timestamp)));
+    
+    // #5: Insert proof (Coll[Byte] constant)
+    context_extension.insert("5".to_string(), json!(format!("0e{:04x}{}", insert_proof.len(), hex::encode(&insert_proof))));
+    
+    // #6: Tracker signature (Coll[Byte] constant, 65 bytes)
+    context_extension.insert("6".to_string(), json!(format!("0e{:04x}{}", tracker_signature.len(), hex::encode(&tracker_signature))));
+    
+    // #7: Reserve lookup proof (optional, Coll[Byte] constant)
     if let Some(ref proof) = reserve_lookup_proof {
-        context_extension.insert("7".to_string(), json!(hex::encode(proof))); // reserve lookup proof
+        context_extension.insert("7".to_string(), json!(format!("0e{:04x}{}", proof.len(), hex::encode(proof))));
     }
-    context_extension.insert("8".to_string(), json!(hex::encode(&tracker_lookup_proof))); // tracker lookup proof
+    
+    // #8: Tracker lookup proof (Coll[Byte] constant)
+    context_extension.insert("8".to_string(), json!(format!("0e{:04x}{}", tracker_lookup_proof.len(), hex::encode(&tracker_lookup_proof))));
 
     // Create transaction structure following the Ergo node's /wallet/transaction/send format
     let transaction_json = json!({

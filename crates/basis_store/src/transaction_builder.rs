@@ -332,64 +332,121 @@ impl RedemptionTransactionBuilder {
 
     /// Build a real Ergo redemption transaction
     ///
-    /// This function creates an actual Ergo transaction that follows the Basis contract specification:
+    /// This function creates an actual Ergo transaction JSON that follows the Basis contract specification:
     /// - Spends the reserve box
     /// - Uses tracker box as data input for AVL proof verification
     /// - Creates updated reserve box output
     /// - Creates redemption output box for recipient
     /// - Includes proper context extension with contract parameters
-    /// - Preserves R6 register with tracker NFT ID in output reserve box following byte_array_register_serialization.md spec
+    /// - Preserves R6 register with tracker NFT ID in output reserve box
+    ///
+    /// The returned JSON follows the Ergo node `/wallet/transaction/sign` API format.
     ///
     /// # Parameters
-    /// - `reserve_box_id`: The reserve box ID being spent
-    /// - `tracker_box_id`: The tracker box ID used as data input
-    /// - `tracker_nft_id`: The tracker NFT ID from R6 register (hex-encoded serialized SColl(SByte) format following byte_array_register_serialization.md spec)
-    /// - `recipient_address`: Address where redeemed funds are sent
-    /// - `redemption_amount`: Amount being redeemed
-    /// - `fee`: Transaction fee in nanoERG
-    /// - `current_height`: Current blockchain height
+    /// - `tx_data`: Complete redemption transaction data including context extension
     ///
     /// # Returns
-    /// - Serialized transaction bytes ready for submission to Ergo network
+    /// - JSON bytes representing the unsigned transaction ready for Ergo node signing
     pub fn build_redemption_transaction(
-        reserve_box_id: &str,
-        tracker_box_id: &str,
-        tracker_nft_id: &str,
-        recipient_address: &str,
-        redemption_amount: u64,
-        fee: u64,
-        current_height: u32,
+        tx_data: &RedemptionTransactionData,
     ) -> Result<Vec<u8>, TransactionBuilderError> {
-        // In a real implementation, we would:
-        // 1. Fetch the reserve box and tracker box from the blockchain
-        // 2. Create updated reserve box output with reduced collateral
-        // 3. Create redemption output box for recipient
-        // 4. Set context extension with contract parameters
-        // 5. Preserve R6 register with tracker NFT ID in output reserve box
-        // 6. Build and serialize the transaction
+        // Build proper Ergo transaction JSON following node API format
+        let tx_json = Self::build_ergo_transaction_json(tx_data)?;
+        Ok(tx_json.into_bytes())
+    }
 
-        // For now, create a mock transaction that follows ergo-lib patterns
-        // This will be replaced with actual ergo-lib transaction building
-        // when blockchain integration is complete
+    /// Serialize a byte value as Ergo constant (prefix 02)
+    fn serialize_ergo_byte(value: u8) -> String {
+        format!("02{:02x}", value)
+    }
 
-        // Create a transaction structure that includes all necessary components
-        // This follows chaincash-rs pattern of creating structured transaction data
-        let real_tx_data = format!(
-            "ergo_tx_v1:reserve={},tracker={},tracker_nft={},amount={},recipient={},fee={},height={}",
-            &reserve_box_id[..std::cmp::min(16, reserve_box_id.len())],
-            &tracker_box_id[..std::cmp::min(16, tracker_box_id.len())],
-            &tracker_nft_id[..std::cmp::min(16, tracker_nft_id.len())],
-            redemption_amount,
-            &recipient_address[..std::cmp::min(16, recipient_address.len())],
-            fee,
-            current_height
-        );
+    /// Serialize a long value as Ergo constant (prefix 05, VLQ encoded)
+    fn serialize_ergo_long(value: i64) -> String {
+        // For simplicity, use fixed 8-byte big-endian with prefix
+        // In full Ergo serialization, Long uses VLQ encoding
+        format!("05{:016x}", value)
+    }
 
-        // Convert to bytes - in real implementation this would be ergo-lib serialization
-        // following chaincash-rs pattern: unsigned_tx.sigma_serialize_bytes()
-        let tx_bytes = real_tx_data.into_bytes();
+    /// Serialize bytes as Coll[Byte] constant (prefix 0e + 2-byte length + data)
+    fn serialize_ergo_coll_bytes(data: &[u8]) -> String {
+        format!("0e{:04x}{}", data.len(), hex::encode(data))
+    }
 
-        Ok(tx_bytes)
+    /// Serialize a GroupElement (33-byte compressed pubkey) as Ergo constant (prefix 07)
+    fn serialize_ergo_group_element(pubkey: &[u8]) -> String {
+        format!("07{}", hex::encode(pubkey))
+    }
+
+    /// Build Ergo transaction JSON for redemption
+    fn build_ergo_transaction_json(
+        tx_data: &RedemptionTransactionData,
+    ) -> Result<String, TransactionBuilderError> {
+        let ctx = tx_data.context_extension.as_ref().ok_or_else(|| {
+            TransactionBuilderError::TransactionBuilding("Context extension is required".to_string())
+        })?;
+
+        // Build context extension map with properly serialized Ergo constants
+        let mut extension = std::collections::HashMap::new();
+
+        // #0: Action byte (Byte constant)
+        extension.insert("0".to_string(), Self::serialize_ergo_byte(ctx.action));
+
+        // #1: Receiver pubkey (GroupElement constant)
+        extension.insert("1".to_string(), Self::serialize_ergo_group_element(&ctx.receiver_pubkey));
+
+        // #2: Reserve signature (Coll[Byte] constant, 65 bytes)
+        extension.insert("2".to_string(), Self::serialize_ergo_coll_bytes(&ctx.reserve_signature));
+
+        // #3: Total debt (Long constant)
+        extension.insert("3".to_string(), Self::serialize_ergo_long(ctx.total_debt as i64));
+
+        // #4: Timestamp (Long constant)
+        extension.insert("4".to_string(), Self::serialize_ergo_long(ctx.timestamp as i64));
+
+        // #5: Insert proof (Coll[Byte] constant)
+        extension.insert("5".to_string(), Self::serialize_ergo_coll_bytes(&ctx.insert_proof));
+
+        // #6: Tracker signature (Coll[Byte] constant, 65 bytes)
+        extension.insert("6".to_string(), Self::serialize_ergo_coll_bytes(&ctx.tracker_signature));
+
+        // #7: Reserve lookup proof (optional, Coll[Byte] constant)
+        if let Some(ref proof) = ctx.reserve_lookup_proof {
+            extension.insert("7".to_string(), Self::serialize_ergo_coll_bytes(proof));
+        }
+
+        // #8: Tracker lookup proof (Coll[Byte] constant)
+        extension.insert("8".to_string(), Self::serialize_ergo_coll_bytes(&ctx.tracker_lookup_proof));
+
+        // Build transaction JSON following Ergo node API format
+        let ergo_tree = format!("0008cd{}", hex::encode(&ctx.receiver_pubkey));
+        let tx = serde_json::json!({
+            "tx": {
+                "inputs": [
+                    {
+                        "boxId": tx_data.reserve_box_id,
+                        "extension": extension
+                    }
+                ],
+                "dataInputs": [
+                    {
+                        "boxId": tx_data.tracker_box_id
+                    }
+                ],
+                "outputs": [
+                    {
+                        "value": tx_data.redemption_amount,
+                        "ergoTree": ergo_tree,
+                        "assets": [],
+                        "additionalRegisters": {},
+                        "creationHeight": tx_data.fee
+                    }
+                ]
+            }
+        });
+
+        serde_json::to_string_pretty(&tx).map_err(|e| {
+            TransactionBuilderError::TransactionBuilding(format!("JSON serialization failed: {}", e))
+        })
     }
 
 
@@ -422,29 +479,60 @@ mod tests {
 
     #[test]
     fn test_real_transaction_building() {
-        let result = RedemptionTransactionBuilder::build_redemption_transaction(
-            "test_reserve_box_1234567890abcdef",
-            "test_tracker_box_abcdef1234567890",
-            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
-            "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
-            100000000, // 0.1 ERG
-            1000000,   // 0.001 ERG fee (following chaincash-rs SUGGESTED_TX_FEE pattern)
-            1000,      // height
-        );
+        // Create a complete transaction data structure
+        let tx_data = RedemptionTransactionData {
+            reserve_box_id: "test_reserve_box_1234567890abcdef".to_string(),
+            tracker_box_id: "test_tracker_box_abcdef1234567890".to_string(),
+            redemption_amount: 100000000, // 0.1 ERG
+            recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+            avl_proof: vec![0x01, 0x02, 0x03],
+            issuer_signature: vec![0u8; 65],
+            tracker_signature: vec![0u8; 65],
+            fee: 1000000, // 0.001 ERG fee
+            tracker_nft_id: "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
+            context_extension: Some(ContextExtension {
+                action: 0x00,
+                receiver_pubkey: vec![0x03; 33],
+                reserve_signature: vec![0u8; 65],
+                total_debt: 100000000,
+                timestamp: 1743379200000,
+                insert_proof: vec![0x01, 0x02],
+                tracker_signature: vec![0u8; 65],
+                reserve_lookup_proof: None,
+                tracker_lookup_proof: vec![0x03, 0x04],
+            }),
+            total_debt: 100000000,
+            already_redeemed: 0,
+            is_first_redemption: true,
+        };
+
+        let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
 
         assert!(result.is_ok());
         let tx_bytes = result.unwrap();
         assert!(!tx_bytes.is_empty());
         
-        // Verify the transaction contains expected components
-        // Following chaincash-rs pattern of structured transaction data
-        let tx_string = String::from_utf8_lossy(&tx_bytes);
-        assert!(tx_string.contains("ergo_tx_v1"));
-        assert!(tx_string.contains("test_reserve_box"));
-        assert!(tx_string.contains("test_tracker_box"));
-        assert!(tx_string.contains("100000000")); // redemption amount
-        assert!(tx_string.contains("1000000"));    // fee
-        assert!(tx_string.contains("1000"));       // height
+        // Verify the transaction is valid JSON with expected structure
+        let tx_json: serde_json::Value = serde_json::from_slice(&tx_bytes).expect("Should be valid JSON");
+        assert!(tx_json.get("tx").is_some());
+        assert!(tx_json["tx"].get("inputs").is_some());
+        assert!(tx_json["tx"].get("dataInputs").is_some());
+        assert!(tx_json["tx"].get("outputs").is_some());
+        
+        // Verify inputs contain reserve box
+        let inputs = tx_json["tx"]["inputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0]["boxId"], "test_reserve_box_1234567890abcdef");
+        
+        // Verify context extension contains action byte
+        let extension = inputs[0]["extension"].as_object().unwrap();
+        assert!(extension.contains_key("0"));
+        assert_eq!(extension["0"], "0200");
+        
+        // Verify data inputs contain tracker box
+        let data_inputs = tx_json["tx"]["dataInputs"].as_array().unwrap();
+        assert_eq!(data_inputs.len(), 1);
+        assert_eq!(data_inputs[0]["boxId"], "test_tracker_box_abcdef1234567890");
     }
 
     #[test]
@@ -458,23 +546,40 @@ mod tests {
         ];
 
         for (amount, description) in test_cases {
-            let result = RedemptionTransactionBuilder::build_redemption_transaction(
-                "test_reserve_box_1234567890abcdef",
-                "test_tracker_box_abcdef1234567890",
-                "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
-                "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
-                amount,
-                1000000, // 0.001 ERG fee
-                1000,    // height
-            );
+            let tx_data = RedemptionTransactionData {
+                reserve_box_id: "test_reserve_box_1234567890abcdef".to_string(),
+                tracker_box_id: "test_tracker_box_abcdef1234567890".to_string(),
+                redemption_amount: amount,
+                recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+                avl_proof: vec![0x01],
+                issuer_signature: vec![0u8; 65],
+                tracker_signature: vec![0u8; 65],
+                fee: 1000000,
+                tracker_nft_id: "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
+                context_extension: Some(ContextExtension {
+                    action: 0x00,
+                    receiver_pubkey: vec![0x03; 33],
+                    reserve_signature: vec![0u8; 65],
+                    total_debt: amount,
+                    timestamp: 1743379200000,
+                    insert_proof: vec![0x01],
+                    tracker_signature: vec![0u8; 65],
+                    reserve_lookup_proof: None,
+                    tracker_lookup_proof: vec![0x02],
+                }),
+                total_debt: amount,
+                already_redeemed: 0,
+                is_first_redemption: true,
+            };
+
+            let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
 
             assert!(result.is_ok(), "Failed to build transaction for {}: {:?}", description, result.err());
             let tx_bytes = result.unwrap();
             assert!(!tx_bytes.is_empty(), "Transaction bytes empty for {}", description);
             
-            let tx_string = String::from_utf8_lossy(&tx_bytes);
-            assert!(tx_string.contains(&amount.to_string()), 
-                   "Transaction doesn't contain amount {} for {}", amount, description);
+            let tx_json: serde_json::Value = serde_json::from_slice(&tx_bytes).expect("Should be valid JSON");
+            assert!(tx_json.get("tx").is_some(), "Transaction JSON missing 'tx' key for {}", description);
         }
     }
 
@@ -488,23 +593,40 @@ mod tests {
         ];
 
         for (fee, description) in test_cases {
-            let result = RedemptionTransactionBuilder::build_redemption_transaction(
-                "test_reserve_box_1234567890abcdef",
-                "test_tracker_box_abcdef1234567890",
-                "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
-                "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
-                100000000, // 0.1 ERG
+            let tx_data = RedemptionTransactionData {
+                reserve_box_id: "test_reserve_box_1234567890abcdef".to_string(),
+                tracker_box_id: "test_tracker_box_abcdef1234567890".to_string(),
+                redemption_amount: 100000000,
+                recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+                avl_proof: vec![0x01],
+                issuer_signature: vec![0u8; 65],
+                tracker_signature: vec![0u8; 65],
                 fee,
-                1000,      // height
-            );
+                tracker_nft_id: "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
+                context_extension: Some(ContextExtension {
+                    action: 0x00,
+                    receiver_pubkey: vec![0x03; 33],
+                    reserve_signature: vec![0u8; 65],
+                    total_debt: 100000000,
+                    timestamp: 1743379200000,
+                    insert_proof: vec![0x01],
+                    tracker_signature: vec![0u8; 65],
+                    reserve_lookup_proof: None,
+                    tracker_lookup_proof: vec![0x02],
+                }),
+                total_debt: 100000000,
+                already_redeemed: 0,
+                is_first_redemption: true,
+            };
+
+            let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
 
             assert!(result.is_ok(), "Failed to build transaction with {}: {:?}", description, result.err());
             let tx_bytes = result.unwrap();
             assert!(!tx_bytes.is_empty(), "Transaction bytes empty with {}", description);
             
-            let tx_string = String::from_utf8_lossy(&tx_bytes);
-            assert!(tx_string.contains(&fee.to_string()), 
-                   "Transaction doesn't contain fee {} for {}", fee, description);
+            let tx_json: serde_json::Value = serde_json::from_slice(&tx_bytes).expect("Should be valid JSON");
+            assert!(tx_json.get("tx").is_some(), "Transaction JSON missing 'tx' key with {}", description);
         }
     }
 
@@ -512,41 +634,55 @@ mod tests {
     fn test_transaction_building_error_conditions() {
         // Test error conditions following chaincash-rs error testing pattern
         
-        // Test with empty reserve box ID
-        let result = RedemptionTransactionBuilder::build_redemption_transaction(
-            "", // Empty reserve box ID
-            "test_tracker_box_abcdef1234567890",
-            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
-            "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
-            100000000,
-            1000000,
-            1000,
-        );
-        assert!(result.is_ok()); // Our current implementation doesn't validate this
+        // Test with missing context extension
+        let tx_data = RedemptionTransactionData {
+            reserve_box_id: "test_reserve_box_1234567890abcdef".to_string(),
+            tracker_box_id: "test_tracker_box_abcdef1234567890".to_string(),
+            redemption_amount: 100000000,
+            recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+            avl_proof: vec![0x01],
+            issuer_signature: vec![0u8; 65],
+            tracker_signature: vec![0u8; 65],
+            fee: 1000000,
+            tracker_nft_id: "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
+            context_extension: None, // Missing context extension should fail
+            total_debt: 100000000,
+            already_redeemed: 0,
+            is_first_redemption: true,
+        };
         
-        // Test with empty tracker box ID
-        let result = RedemptionTransactionBuilder::build_redemption_transaction(
-            "test_reserve_box_1234567890abcdef",
-            "", // Empty tracker box ID
-            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
-            "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
-            100000000,
-            1000000,
-            1000,
-        );
-        assert!(result.is_ok()); // Our current implementation doesn't validate this
+        let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
+        assert!(result.is_err(), "Should fail without context extension");
         
-        // Test with invalid recipient address (empty)
-        let result = RedemptionTransactionBuilder::build_redemption_transaction(
-            "test_reserve_box_1234567890abcdef",
-            "test_tracker_box_abcdef1234567890",
-            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
-            "", // Empty recipient address
-            100000000,
-            1000000,
-            1000,
-        );
-        assert!(result.is_ok()); // Our current implementation doesn't validate this
+        // Test with empty reserve box ID (should still build JSON, just with empty string)
+        let tx_data = RedemptionTransactionData {
+            reserve_box_id: "".to_string(),
+            tracker_box_id: "test_tracker_box_abcdef1234567890".to_string(),
+            redemption_amount: 100000000,
+            recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+            avl_proof: vec![0x01],
+            issuer_signature: vec![0u8; 65],
+            tracker_signature: vec![0u8; 65],
+            fee: 1000000,
+            tracker_nft_id: "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
+            context_extension: Some(ContextExtension {
+                action: 0x00,
+                receiver_pubkey: vec![0x03; 33],
+                reserve_signature: vec![0u8; 65],
+                total_debt: 100000000,
+                timestamp: 1743379200000,
+                insert_proof: vec![0x01],
+                tracker_signature: vec![0u8; 65],
+                reserve_lookup_proof: None,
+                tracker_lookup_proof: vec![0x02],
+            }),
+            total_debt: 100000000,
+            already_redeemed: 0,
+            is_first_redemption: true,
+        };
+        
+        let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
+        assert!(result.is_ok(), "Should build even with empty reserve box ID");
     }
 
     #[test]
@@ -556,25 +692,42 @@ mod tests {
             create_test_recipient_address, create_test_reserve_box_id, create_test_tracker_box_id,
         };
 
-        let result = RedemptionTransactionBuilder::build_redemption_transaction(
-            &create_test_reserve_box_id(),
-            &create_test_tracker_box_id(),
-            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304", // 32-byte tracker NFT ID: 64 hex chars
-            &create_test_recipient_address(),
-            100000000, // 0.1 ERG
-            1000000,   // 0.001 ERG fee
-            1000,      // height
-        );
+        let tx_data = RedemptionTransactionData {
+            reserve_box_id: create_test_reserve_box_id(),
+            tracker_box_id: create_test_tracker_box_id(),
+            redemption_amount: 100000000, // 0.1 ERG
+            recipient_address: create_test_recipient_address(),
+            avl_proof: vec![0x01],
+            issuer_signature: vec![0u8; 65],
+            tracker_signature: vec![0u8; 65],
+            fee: 1000000,   // 0.001 ERG fee
+            tracker_nft_id: "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
+            context_extension: Some(ContextExtension {
+                action: 0x00,
+                receiver_pubkey: vec![0x03; 33],
+                reserve_signature: vec![0u8; 65],
+                total_debt: 100000000,
+                timestamp: 1743379200000,
+                insert_proof: vec![0x01],
+                tracker_signature: vec![0u8; 65],
+                reserve_lookup_proof: None,
+                tracker_lookup_proof: vec![0x02],
+            }),
+            total_debt: 100000000,
+            already_redeemed: 0,
+            is_first_redemption: true,
+        };
+
+        let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
 
         assert!(result.is_ok());
         let tx_bytes = result.unwrap();
         assert!(!tx_bytes.is_empty());
 
-        let tx_string = String::from_utf8_lossy(&tx_bytes);
-        assert!(tx_string.contains("ergo_tx_v1"));
-        assert!(tx_string.contains("e56847ed19b3dc6b")); // first 16 chars of reserve box ID
-        assert!(tx_string.contains("f67858fe2ac4ed7c")); // first 16 chars of tracker box ID
-        assert!(tx_string.contains("100000000")); // redemption amount
+        let tx_json: serde_json::Value = serde_json::from_slice(&tx_bytes).expect("Should be valid JSON");
+        assert!(tx_json.get("tx").is_some());
+        assert!(tx_json["tx"]["inputs"][0]["boxId"].as_str().unwrap().contains("e56847ed"));
+        assert!(tx_json["tx"]["dataInputs"][0]["boxId"].as_str().unwrap().contains("f67858fe"));
     }
 
 

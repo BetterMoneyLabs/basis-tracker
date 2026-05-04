@@ -2639,23 +2639,51 @@ pub async fn create_reserve_payload(
 
     let reserve_contract_address = config.ergo.basis_reserve_contract_p2s;
 
-    // Create the payment request for the reserve
-    let mut registers = std::collections::HashMap::new();
-    registers.insert("R4".to_string(), payload.owner_pubkey.clone());
-    // R5 can contain the tracker NFT ID if one is configured
-    if let Some(tracker_nft_id) = &config.ergo.tracker_nft_id {
-        registers.insert("R5".to_string(), tracker_nft_id.clone());
-    } else {
-        // If no tracker NFT ID is configured, we might still include the NFT ID
-        // or leave it empty based on the use case - for now, we'll include the provided nft_id
-        registers.insert("R5".to_string(), payload.nft_id.clone());
+    // Build properly serialized register values following Ergo constant format
+    // R4: GroupElement (owner pubkey) - prefix 07 + 33-byte compressed pubkey
+    let r4_value = format!("07{}", payload.owner_pubkey);
+
+    // R5: SAvlTree (empty AVL tree) - prefix 64 + 33-byte digest + flags + key_len + value_len
+    // Empty tree: type(1) + digest(33) + flags(1) + key_len(4) + value_len(4) = 43 bytes
+    let empty_tree_hex = "64000000000000000000000000000000000000000000000000000000000000000000012000";
+    let r5_value = format!("{}", empty_tree_hex);
+
+    // R6: Coll[Byte] (tracker NFT ID) - prefix 0e + 2-byte length + 32-byte NFT ID
+    let tracker_nft_id = config.ergo.tracker_nft_id.as_ref()
+        .unwrap_or(&payload.nft_id);
+    let tracker_nft_bytes = match hex::decode(tracker_nft_id) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "tracker_nft_id must be valid hex".to_string(),
+                )),
+            );
+        }
+    };
+    // Verify tracker NFT ID is 32 bytes
+    if tracker_nft_bytes.len() != 32 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                format!("tracker_nft_id must be 32 bytes, got {}", tracker_nft_bytes.len()),
+            )),
+        );
     }
+    let r6_value = format!("0e{:04x}{}", tracker_nft_bytes.len(), tracker_nft_id);
+
+    // Create registers map
+    let mut registers = std::collections::HashMap::new();
+    registers.insert("R4".to_string(), r4_value);
+    registers.insert("R5".to_string(), r5_value);
+    registers.insert("R6".to_string(), r6_value);
 
     let payment_request = ReservePaymentRequest {
         address: reserve_contract_address,
         value: payload.erg_amount,
         assets: vec![Asset {
-            token_id: payload.nft_id.clone(), // Clone to avoid moving
+            token_id: payload.nft_id.clone(), // Reserve NFT (singleton)
             amount: 1,
         }],
         registers,

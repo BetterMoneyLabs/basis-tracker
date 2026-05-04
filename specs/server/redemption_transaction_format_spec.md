@@ -35,14 +35,14 @@ For the `/wallet/transaction/send` endpoint, the redemption transaction request 
     "HexString"
   ],
   "contextExtension": {
-    "0": "Number",
-    "1": "String",
-    "2": "String",
-    "3": "Number",
-    "5": "String",
-    "6": "String",
-    "7": "String",
-    "8": "String"
+    "0": "ErgoConstant (Byte)",
+    "1": "ErgoConstant (GroupElement)",
+    "2": "ErgoConstant (Coll[Byte])",
+    "3": "ErgoConstant (Long)",
+    "5": "ErgoConstant (Coll[Byte])",
+    "6": "ErgoConstant (Coll[Byte])",
+    "7": "ErgoConstant (Coll[Byte])",
+    "8": "ErgoConstant (Coll[Byte])"
   }
 }
 ```
@@ -98,14 +98,14 @@ A redemption transaction typically has the following structure:
     "hex_encoded_serialized_tracker_box_bytes"
   ],
   "contextExtension": {
-    "0": 0,
-    "1": "02receiver_pubkey_bytes...",
-    "2": "reserve_owner_signature_bytes...",
-    "3": 5000000000,
-    "5": "avl_insert_proof_bytes...",
-    "6": "tracker_signature_bytes...",
-    "7": "avl_lookup_proof_reserve_bytes...",
-    "8": "avl_lookup_proof_tracker_bytes..."
+    "0": "0200",
+    "1": "0702receiver_pubkey_hex...",
+    "2": "0e4102reserve_owner_sig_hex...",
+    "3": "0500000000004a817c80",
+    "5": "0e...avl_insert_proof_hex...",
+    "6": "0e4102tracker_sig_hex...",
+    "7": "0e...reserve_lookup_proof_hex...",
+    "8": "0e...tracker_lookup_proof_hex..."
   }
 }
 ```
@@ -188,13 +188,13 @@ A redemption transaction typically has the following structure:
     "hex_encoded_serialized_tracker_box_bytes"
   ],
   "contextExtension": {
-    "0": 0,
-    "1": "02receiver_pubkey_hex_encoded...",
-    "2": "reserve_owner_signature_65_bytes_hex...",
-    "3": 5000000000,
-    "5": "avl_insert_proof_hex_encoded...",
-    "6": "tracker_signature_65_bytes_hex_encoded...",
-    "8": "tracker_tree_lookup_proof_hex_encoded..."
+    "0": "0200",
+    "1": "0702d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b",
+    "2": "0e4102a7c72ce8ec8fa336a984651d57d30d8d59482ad8be1f72c2bc2d3fd5e4c65be6d9ad5a543b623ff7b4bec075d85cd804d2cf01772674384e75eb4aab1e953fe0",
+    "3": "0500000000012a05f200",
+    "5": "0e2c0100000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "6": "0e41031872fa7f83f1545d05a083921e4053f194e87a53facda97677da507a6daf15c348d1fd190990c17c0fe4387d9846bb26b9d8ae821492f3f936124102dc60e5b2",
+    "8": "0e2c0100000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   }
 }
 ```
@@ -233,14 +233,14 @@ A redemption transaction typically has the following structure:
     "hex_encoded_serialized_tracker_box_bytes"
   ],
   "contextExtension": {
-    "0": 0,
-    "1": "02receiver_pubkey_hex_encoded...",
-    "2": "reserve_owner_signature_65_bytes_hex...",
-    "3": 5000000000,
-    "5": "avl_insert_proof_hex_encoded...",
-    "6": "tracker_signature_65_bytes_hex_encoded...",
-    "7": "reserve_tree_lookup_proof_hex_encoded...",
-    "8": "tracker_tree_lookup_proof_hex_encoded..."
+    "0": "0200",
+    "1": "0702d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b",
+    "2": "0e4102a7c72ce8ec8fa336a984651d57d30d8d59482ad8be1f72c2bc2d3fd5e4c65be6d9ad5a543b623ff7b4bec075d85cd804d2cf01772674384e75eb4aab1e953fe0",
+    "3": "0500000000012a05f200",
+    "5": "0e2c0100000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "6": "0e41031872fa7f83f1545d05a083921e4053f194e87a53facda97677da507a6daf15c348d1fd190990c17c0fe4387d9846bb26b9d8ae821492f3f936124102dc60e5b2",
+    "7": "0e2c0100000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "8": "0e2c0100000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   }
 }
 ```
@@ -261,15 +261,26 @@ A redemption transaction typically has the following structure:
 - The public key in R4 must match the note issuer's public key
 - Tracker NFT ID in R6 must match the tracker box's NFT ID
 
+### Context Extension Format
+
+Context extension values must be serialized as Ergo constants with type prefixes:
+
+| Type | Prefix | Format | Example |
+|------|--------|--------|---------|
+| Byte | 0x02 | `02` + 1-byte hex | `0200` (byte value 0) |
+| Long | 0x05 | `05` + 16-char hex (8 bytes big-endian) | `0500000000004a817c80` (5 ERG) |
+| GroupElement | 0x07 | `07` + 66-char hex (33-byte compressed pubkey) | `0703af13e3...` |
+| Coll[Byte] | 0x0e | `0e` + 4-char length + hex data | `0e4102a7c7...` (65 bytes) |
+
 ### Context Extension Validation
-- **#0 (action)**: Must be 0x00 for redemption
-- **#1 (receiver)**: Must be valid GroupElement (33-byte compressed pubkey)
-- **#2 (reserveSig)**: Must be valid 65-byte Schnorr signature on `key || totalDebt || timestamp`
-- **#3 (totalDebt)**: Must match value in tracker's AVL tree
-- **#5 (insertProof)**: Must be valid AVL proof for inserting updated redeemed amount
-- **#6 (trackerSig)**: Must be valid 65-byte Schnorr signature on `key || totalDebt || timestamp` (optional for emergency redemption after 3 days)
-- **#7 (lookupProofReserve)**: Required for subsequent redemptions, omitted for first
-- **#8 (lookupProofTracker)**: Must be valid AVL proof for looking up totalDebt in tracker's tree
+- **#0 (action)**: Must be `0200` (Byte constant with value 0x00) for redemption
+- **#1 (receiver)**: Must be valid GroupElement constant (`07` + 33-byte compressed pubkey hex)
+- **#2 (reserveSig)**: Must be Coll[Byte] constant (`0e` + length + 65-byte Schnorr signature hex)
+- **#3 (totalDebt)**: Must be Long constant (`05` + 8-byte big-endian hex), must match value in tracker's AVL tree
+- **#5 (insertProof)**: Must be Coll[Byte] constant (`0e` + length + AVL proof hex)
+- **#6 (trackerSig)**: Must be Coll[Byte] constant (`0e` + length + 65-byte Schnorr signature hex), optional for emergency redemption after 3 days
+- **#7 (lookupProofReserve)**: Coll[Byte] constant, required for subsequent redemptions, omitted for first
+- **#8 (lookupProofTracker)**: Must be Coll[Byte] constant (`0e` + length + AVL proof hex)
 
 ### Signature Message Format
 

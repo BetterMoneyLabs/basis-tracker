@@ -222,16 +222,9 @@ impl RedemptionManager {
             note.timestamp
         );
 
-        // Create transaction bytes using ergo-lib integration
-        // This uses the real transaction builder that validates all parameters
+        // Create transaction bytes using real transaction builder
         let transaction_bytes = RedemptionTransactionBuilder::build_redemption_transaction(
-            &transaction_data.reserve_box_id,
-            &transaction_data.tracker_box_id,
-            &transaction_data.tracker_nft_id,
-            &transaction_data.recipient_address,
-            transaction_data.redemption_amount,
-            transaction_data.fee,
-            context.current_height,
+            &transaction_data,
         )
         .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
@@ -467,15 +460,9 @@ fn build_redemption_transaction(
         tracker_lookup_proof_bytes,
     ).map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
-    // Use real ergo-lib transaction builder from basis_store to create the actual transaction bytes
+    // Use real transaction builder to create the actual transaction bytes
     let transaction_bytes = RedemptionTransactionBuilder::build_redemption_transaction(
-        &transaction_data.reserve_box_id,
-        &transaction_data.tracker_box_id,
-        &transaction_data.tracker_nft_id,
-        &request.recipient_address,
-        transaction_data.redemption_amount,
-        transaction_data.fee,
-        current_height,
+        &transaction_data,
     )
     .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 

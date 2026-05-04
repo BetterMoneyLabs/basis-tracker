@@ -1,0 +1,40 @@
+# Basis Simple Demo Configuration
+#
+# This configuration file sets up the demo environment for testing
+# the Basis protocol flow: Alice issues IOU → Bob redeems
+
+[participants]
+# Mode: "demo" uses hardcoded keys, "custom" uses CLI accounts
+mode = "demo"
+
+[ergo_node]
+# Ergo node configuration
+url = "http://127.0.0.1:9053"
+api_key = "hello"
+network = "mainnet"
+
+[server]
+# Basis tracker server
+url = "http://127.0.0.1:3048"
+
+[demo]
+# Default debt amount: 0.05 ERG (50M nanoERG)
+default_debt_amount = 50000000
+
+# Fee box configuration
+fee_box_value = 250000
+fee_box_count = 4
+
+# Reserve initial collateral: 0.1 ERG (100M nanoERG)
+reserve_initial_collateral = 100000000
+
+# Output directory for generated files
+output_dir = "demo/output"
+
+# Scan IDs for monitoring reserves and trackers
+reserve_scan_id = 38
+tracker_scan_id = 36
+
+# NFT IDs (these would be set during actual deployment)
+# reserve_nft_id = "..."
+# tracker_nft_id = "..."

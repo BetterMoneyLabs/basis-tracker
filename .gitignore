@@ -42,3 +42,5 @@ alice_keys_output.txt
 
 # Scala reference implementation (managed separately)
 scala/
+
+secrets/
