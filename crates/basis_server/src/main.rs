@@ -40,13 +40,14 @@ async fn main() {
                         node: NodeConfig {
                             start_height: None,
                             reserve_contract_p2s: None,
-                            node_url: "http://159.89.116.15:11088".to_string(),
+                            node_url: "http://127.0.0.1:9053".to_string(),
                             scan_name: Some("Basis Reserve Scanner".to_string()),
                             api_key: Some("hello".to_string()),
                         },
                         basis_reserve_contract_p2s: "RtQxdWJ9axeb5Ltahqosnhj45BE26xuDK4YWddVj5p59t9RjKPEkkHCYEiyxwRFMJcEHwVd9syFod8ReQo1Zaz9eNTZ5JwDEN5hkLd67sVr2sNQ6R46TSfausAc9D3q7et1apYaXnqV9PkpHPMCA1zMCEsmmADj62XRGq4Cw2VwpuKKCAdreTgmLzdFWHGVGQMsPDFFBkRibsPFMzXkytdy2mPs2zCtm15uyDpd3jDLBy95BtUFXU2DdaYa1xMZE9UXju4R4MhWH8vqWda5BgpRTa1RpQxpS5b96FG46r1v3ZWCLYcVo51J1ekY8cqqVFNNykpQScRRYqFjCLMjG26dYEwZyn21wGeLJ7RzcTwCpvGDBa2w1P3ycAEJAv9XDPEtJrSQpkvBaD1HaZ6X2JuXmFjPF5MChmVLk4CTXtRQVRis7vP95ByTTmbHbtVdao32kbN3xhCWgJZZdaKkNyKH4vFQn5jyoEmiV7FjQDegWnnaFXu5FW6stx9cbhsxWz5FfGpW1BCMRNNJTCRF6FtYoehrMT74LDRNxHQ38EmMn6mBEpSrhkzDj2jysdFJvDUf8UQjLZQLmUQtgNotfxeAPxiavsT5mLUja3hdWvZPv71FcHxvP53WJHAcn9JPek3vepbH9gxRdmBMW".to_string(),
                         tracker_nft_id: None,
                         tracker_public_key: None,
+                        tracker_secret_key: None,
                     },
                     transaction: TransactionConfig {
                         fee: 1000000, // 0.001 ERG
@@ -88,7 +89,7 @@ async fn main() {
             tracing::info!("Continuing without blockchain scanner...");
             // Create a minimal scanner that won't actually scan
             let minimal_config = NodeConfig {
-                node_url: "http://159.89.116.15:11088".to_string(), // Dummy URL that won't be used
+                node_url: "http://127.0.0.1:9053".to_string(), // Dummy URL that won't be used
                 ..Default::default()
             };
             ServerState::new(minimal_config).unwrap_or_else(|_| panic!("Failed to create minimal scanner"))
@@ -350,19 +351,12 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Try to determine the network prefix from the tracker public key using the config method
-    let network_prefix = match config.network_prefix_from_tracker_key() {
-        Ok(prefix) => prefix,
-        Err(_) => {
-            // Default to mainnet if we can't determine the network prefix
-            ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet
-        }
-    };
+    // Use mainnet network prefix for address encoding
+    let network_prefix = ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet;
 
     let tracker_box_config = TrackerBoxUpdateConfig {
         update_interval_seconds: 600, // 10 minutes
         enabled: true,
-        submit_transaction: config.tracker_public_key_bytes().ok().is_some(), // Enable submission if tracker key is configured
         ergo_node_url: config.ergo.node.node_url.clone(),
         ergo_api_key: config.ergo.node.api_key.clone(),
     };

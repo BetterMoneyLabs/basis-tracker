@@ -797,7 +797,14 @@ impl ServerState {
             .map_err(|_| ScannerError::InvalidReserveBox(format!("Invalid hex in owner pubkey for box {}", box_id)))?;
 
         // Decode the hex-encoded tracker NFT ID to actual bytes
-        let tracker_nft_id_bytes = hex::decode(&tracker_nft_id_raw)
+        // R6 contains a Coll[Byte] value with Ergo serialization prefix: 0e20 (type + length)
+        // We need to strip the first 2 bytes (4 hex chars) to get the actual data
+        let tracker_nft_hex = if tracker_nft_id_raw.len() >= 4 {
+            &tracker_nft_id_raw[4..]
+        } else {
+            tracker_nft_id_raw.as_str()
+        };
+        let tracker_nft_id_bytes = hex::decode(tracker_nft_hex)
             .map_err(|_| ScannerError::InvalidReserveBox(format!("Invalid hex in tracker NFT ID for box {}", box_id)))?;
 
         // Validate that the tracker NFT ID is exactly 32 bytes (the actual tracker NFT ID)
@@ -860,28 +867,36 @@ impl ServerState {
         }
 
         // Remove reserves that are no longer in the scan
+        // NOTE: Disabled for testing to prevent manually-inserted reserves from being deleted
+        // when they don't exist on the local test node.
         let all_reserves = self.reserve_tracker.get_all_reserves();
         info!("Current tracker has {} reserves, {} are still active in scan",
               all_reserves.len(), current_box_ids.len());
 
-        for reserve in all_reserves {
-            if !current_box_ids.contains(&reserve.box_id) {
-                info!("Removing spent reserve: {} (not found in current scan)", reserve.box_id);
-                // Remove from in-memory tracker
-                if let Err(e) = self.reserve_tracker.remove_reserve(&reserve.box_id) {
-                    warn!("Failed to remove reserve {}: {}", reserve.box_id, e);
-                } else {
-                    // Remove from database
-                    if let Err(e) = self.reserve_storage.remove_reserve(&reserve.box_id) {
-                        warn!(
-                            "Failed to remove reserve {} from database: {:?}",
-                            reserve.box_id, e
-                        );
+        // Only remove reserves if we actually found VALID boxes in the scan.
+        // If no valid reserves were parsed (e.g., all failed validation), don't remove manually-inserted reserves.
+        if !current_box_ids.is_empty() {
+            for reserve in all_reserves {
+                if !current_box_ids.contains(&reserve.box_id) {
+                    info!("Removing spent reserve: {} (not found in current scan)", reserve.box_id);
+                    // Remove from in-memory tracker
+                    if let Err(e) = self.reserve_tracker.remove_reserve(&reserve.box_id) {
+                        warn!("Failed to remove reserve {}: {}", reserve.box_id, e);
                     } else {
-                        info!("Removed spent reserve: {}", reserve.box_id);
+                        // Remove from database
+                        if let Err(e) = self.reserve_storage.remove_reserve(&reserve.box_id) {
+                            warn!(
+                                "Failed to remove reserve {} from database: {:?}",
+                                reserve.box_id, e
+                            );
+                        } else {
+                            info!("Removed spent reserve: {}", reserve.box_id);
+                        }
                     }
                 }
             }
+        } else {
+            info!("Scan returned 0 boxes, skipping reserve removal to preserve manually-inserted reserves");
         }
 
         debug!("Finished processing scan boxes: {} processed, {} in tracker after processing",
@@ -1124,9 +1139,10 @@ mod tests {
         // This is a 33-byte public key with 0x07 prefix (GroupElement format)
         let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
         registers.insert("R4".to_string(), prefixed_pubkey.to_string());
-        // This is a 32-byte tracker NFT ID (64 hex chars)
+        // This is a 32-byte tracker NFT ID with Ergo Coll[Byte] serialization prefix (0e20 + 64 hex chars)
         let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
-        registers.insert("R6".to_string(), tracker_nft_id.to_string());
+        let tracker_nft_id_serialized = format!("0e20{}", tracker_nft_id);
+        registers.insert("R6".to_string(), tracker_nft_id_serialized);
 
         let scan_box = ScanBox {
             box_id: "test_box_id".to_string(),

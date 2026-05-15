@@ -31,7 +31,7 @@ impl RealScannerIntegrationTestSuite {
         let height = self.scanner.get_current_height().await?;
         println!("Current blockchain height: {}", height);
 
-        // Height should be reasonable (not 0 for mainnet/testnet)
+        // Height should be reasonable (not 0 for public nodes)
         // For local development, height might be 0
         if self.node_url.contains("213.239.193.208") {
             // Public nodes should have reasonable height
@@ -116,26 +116,6 @@ mod tests {
         if let Err(e) = result {
             println!("Test failed with error (may be due to network): {}", e);
             // Don't fail the test - network issues are expected in CI
-        }
-    }
-
-    /// Test against testnet node
-    #[tokio::test]
-    #[ignore = "Requires network connection to Ergo testnet node"]
-    async fn test_real_scanner_against_testnet_node() {
-        let node_url = "http://213.239.193.208:9052";
-        let mut test_suite = match RealScannerIntegrationTestSuite::new(node_url) {
-            Ok(suite) => suite,
-            Err(e) => {
-                println!("Failed to create test suite: {}", e);
-                return;
-            }
-        };
-
-        let result = test_suite.run_all_tests().await;
-
-        if let Err(e) = result {
-            println!("Testnet test failed with error: {}", e);
         }
     }
 

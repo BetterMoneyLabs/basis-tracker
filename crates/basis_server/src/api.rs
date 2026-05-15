@@ -1042,11 +1042,24 @@ pub async fn initiate_redemption(
 
     // Find the reserve box ID for the issuer using normalized key matching
     let reserve_box_id = {
-        // Get the reserve tracker to look up the reserve
-        let tracker = state.reserve_tracker.lock().await;
+        // Read reserves directly from database (not in-memory tracker) to avoid
+        // issues with scanner removing manually-inserted reserves
+        let scanner = state.ergo_scanner.lock().await;
+        let reserve_storage = scanner.reserve_storage();
 
-        // Get all reserves to find the matching one
-        let all_reserves = tracker.get_all_reserves();
+        // Get all reserves from database
+        let all_reserves = match reserve_storage.get_all_reserves() {
+            Ok(reserves) => reserves,
+            Err(e) => {
+                tracing::error!("Failed to read reserves from database: {:?}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        "Failed to read reserves from database".to_string(),
+                    )),
+                );
+            }
+        };
 
         // Normalize the issuer public key
         let normalized_issuer_key = basis_store::normalize_public_key(&payload.issuer_pubkey);
@@ -1111,6 +1124,7 @@ pub async fn initiate_redemption(
                 proof_available: false,
                 transaction_pending: false,
                 transaction_data: None,
+                transaction_bytes: None,
             };
 
             return (
@@ -1287,6 +1301,7 @@ pub async fn initiate_redemption(
                 proof_available: !redemption_data.avl_proof.is_empty(),
                 transaction_pending: true,
                 transaction_data,
+                transaction_bytes: Some(redemption_data.transaction_bytes),
             };
 
             tracing::info!(
@@ -1322,6 +1337,7 @@ pub async fn initiate_redemption(
                 proof_available: false,
                 transaction_pending: false,
                 transaction_data: None, // No transaction data available on failure
+                transaction_bytes: None,
             };
 
             (
@@ -1922,60 +1938,89 @@ pub async fn request_tracker_signature(
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
 
-    // Convert tracker public key to P2PK address format for the Ergo node API
-    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
-    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
-    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
-    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+    // Try local signing first if tracker secret key is configured
+    let tracker_signature = if let Some(tracker_secret) = state.config.tracker_secret_key_bytes() {
+        tracing::info!("Signing tracker signature locally using configured secret key");
+        
+        match basis_store::schnorr::schnorr_sign(
+            &message_to_sign_bytes,
+            &tracker_secret,
+            &tracker_pubkey_bytes,
+        ) {
+            Ok(signature) => {
+                let sig_hex = hex::encode(&signature);
+                tracing::info!("Local tracker signature generated successfully");
+                sig_hex
+            }
+            Err(e) => {
+                tracing::error!("Failed to sign locally: {:?}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        format!("Failed to sign locally: {:?}", e),
+                    )),
+                );
+            }
+        }
+    } else {
+        // Fall back to Ergo node API
+        tracing::info!("No tracker secret key configured, using Ergo node API");
+        
+        // Convert tracker public key to P2PK address format for the Ergo node API
+        use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+        use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
+        use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
-    let tracker_ec_point = match EcPoint::sigma_parse_bytes(&tracker_pubkey_bytes) {
-        Ok(point) => point,
-        Err(e) => {
-            tracing::error!("Failed to parse tracker public key as EcPoint: {:?}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    format!("Failed to parse tracker public key: {}", e),
-                )),
-            );
+        let tracker_ec_point = match EcPoint::sigma_parse_bytes(&tracker_pubkey_bytes) {
+            Ok(point) => point,
+            Err(e) => {
+                tracing::error!("Failed to parse tracker public key as EcPoint: {:?}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        format!("Failed to parse tracker public key: {}", e),
+                    )),
+                );
+            }
+        };
+
+        let prove_dlog = ProveDlog::from(tracker_ec_point);
+        let tracker_address = Address::P2Pk(prove_dlog);
+        let encoder = AddressEncoder::new(NetworkPrefix::Mainnet); // Use appropriate network prefix
+        let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
+
+        // Get node URL and API key from configuration
+        let node_url = &state.config.ergo.node.node_url;
+        let api_key = state.config.ergo.node.api_key.as_deref();
+
+        // Call the Ergo node's schnorrSign API to generate the tracker signature
+        match call_schnorr_sign_api(
+            node_url,
+            api_key,
+            &tracker_p2pk_address,
+            &message_to_sign,
+        ).await {
+            Ok(signature) => signature,
+            Err(e) => {
+                tracing::error!("Failed to generate tracker signature via Ergo node API: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        format!("Failed to generate tracker signature: {}", e),
+                    )),
+                );
+            }
         }
     };
 
-    let prove_dlog = ProveDlog::from(tracker_ec_point);
-    let tracker_address = Address::P2Pk(prove_dlog);
-    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet); // Use appropriate network prefix
-    let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
-
-    // Get node URL and API key from configuration
-    let node_url = &state.config.ergo.node.node_url;
-    let api_key = state.config.ergo.node.api_key.as_deref();
-
-    // Call the Ergo node's schnorrSign API to generate the tracker signature
-    let tracker_signature = match call_schnorr_sign_api(
-        node_url,
-        api_key,
-        &tracker_p2pk_address,
-        &message_to_sign,
-    ).await {
-        Ok(signature) => signature,
-        Err(e) => {
-            tracing::error!("Failed to generate tracker signature via Ergo node API: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    format!("Failed to generate tracker signature: {}", e),
-                )),
-            );
-        }
-    };
-
-    // Verify that the signature from the Ergo node is compatible with our verification algorithm
+    // Verify that the signature is compatible with our verification algorithm
     if let Err(verification_error) = verify_ergo_node_signature_compatibility(
         &tracker_signature,
         &message_to_sign,
         &tracker_pubkey_bytes,
     ).await {
-        tracing::warn!("Ergo node signature compatibility warning: {}", verification_error);
+        tracing::warn!("Signature compatibility warning: {}", verification_error);
     }
 
     let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
@@ -2000,13 +2045,15 @@ pub async fn request_tracker_signature(
 
 /// Helper function to get tracker signature for redemption
 /// Used by the redemption flow to include tracker signature in the request
+/// 
+/// If tracker_secret_key is configured, signs locally. Otherwise, falls back to Ergo node API.
 async fn get_tracker_signature_for_redemption(
     state: &AppState,
     issuer_pubkey: &str,
     recipient_pubkey: &str,
     total_debt: u64,
     timestamp: u64,
-    emergency: bool,
+    _emergency: bool,
 ) -> Result<String, (StatusCode, Json<ApiResponse<()>>)> {
     // Decode public keys
     let issuer_pubkey_bytes = hex::decode(issuer_pubkey)
@@ -2041,6 +2088,31 @@ async fn get_tracker_signature_for_redemption(
     message_to_sign_bytes.extend_from_slice(&total_debt.to_be_bytes());
     message_to_sign_bytes.extend_from_slice(&timestamp.to_be_bytes());
 
+    // Check if we have a tracker secret key for local signing
+    if let Some(tracker_secret) = state.config.tracker_secret_key_bytes() {
+        tracing::info!("Signing tracker signature locally using configured secret key");
+        
+        // Sign locally using our schnorr implementation
+        let signature = basis_store::schnorr::schnorr_sign(
+            &message_to_sign_bytes,
+            &tracker_secret,
+            &tracker_pubkey_bytes,
+        ).map_err(|e| {
+            tracing::error!("Failed to sign locally: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(format!("Failed to sign locally: {:?}", e))),
+            )
+        })?;
+
+        let signature_hex = hex::encode(&signature);
+        tracing::info!("Local tracker signature generated successfully");
+        return Ok(signature_hex);
+    }
+
+    // Fall back to Ergo node API if no local secret key is configured
+    tracing::info!("No tracker secret key configured, falling back to Ergo node API");
+    
     let message_to_sign = hex::encode(&message_to_sign_bytes);
 
     // Convert tracker public key to P2PK address
@@ -2671,7 +2743,7 @@ pub async fn create_reserve_payload(
             )),
         );
     }
-    let r6_value = format!("0e{:04x}{}", tracker_nft_bytes.len(), tracker_nft_id);
+    let r6_value = format!("0e{:02x}{}", tracker_nft_bytes.len(), tracker_nft_id);
 
     // Create registers map
     let mut registers = std::collections::HashMap::new();

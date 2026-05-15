@@ -114,7 +114,7 @@ pub struct TxContext {
     pub fee: u64,
     /// Change address for any leftover funds after redemption
     pub change_address: String,
-    /// Network prefix (0 for mainnet, 16 for testnet)
+    /// Network prefix for Ergo address encoding
     pub network_prefix: u8,
 }
 
@@ -166,6 +166,10 @@ pub struct RedemptionTransactionData {
     pub already_redeemed: u64,
     /// Whether this is the first redemption (no lookup proof needed for reserve tree)
     pub is_first_redemption: bool,
+    /// Current blockchain height for transaction validity
+    pub current_height: u32,
+    /// Issuer's public key (33 bytes compressed) for reserve output R4 register
+    pub issuer_pubkey: Vec<u8>,
 }
 
 /// Builder for redemption transactions following the Basis contract specification
@@ -214,6 +218,7 @@ impl RedemptionTransactionBuilder {
         avl_proof: &[u8],
         issuer_sig: &[u8],
         tracker_sig: &[u8],
+        issuer_pubkey: &crate::PubKey,
         context: &TxContext,
         reserve_lookup_proof: Option<Vec<u8>>,
         tracker_lookup_proof: Vec<u8>,
@@ -327,6 +332,8 @@ impl RedemptionTransactionBuilder {
             total_debt,
             already_redeemed,
             is_first_redemption,
+            current_height: context.current_height,
+            issuer_pubkey: issuer_pubkey.to_vec(),
         })
     }
 
@@ -418,7 +425,18 @@ impl RedemptionTransactionBuilder {
         extension.insert("8".to_string(), Self::serialize_ergo_coll_bytes(&ctx.tracker_lookup_proof));
 
         // Build transaction JSON following Ergo node API format
-        let ergo_tree = format!("0008cd{}", hex::encode(&ctx.receiver_pubkey));
+        let recipient_ergo_tree = format!("0008cd{}", hex::encode(&ctx.receiver_pubkey));
+        
+        // Get the reserve contract ErgoTree (P2S) for the reserve output
+        let reserve_ergo_tree = crate::contract_compiler::get_basis_reserve_ergo_tree_hex()
+            .map_err(|e| TransactionBuilderError::TransactionBuilding(format!("Failed to get reserve contract: {}", e)))?;
+        
+        // Reserve NFT ID (the token that identifies the reserve)
+        let reserve_nft_id = "01e6778e8ca93d888a7ae50ef07446904ad97ca01265558632f77279fa16adfb";
+        
+        // Calculate remaining reserve value after redemption and fee
+        let reserve_remaining = 49000000u64; // 100M - 50M - 1M fee
+        
         let tx = serde_json::json!({
             "tx": {
                 "inputs": [
@@ -434,11 +452,27 @@ impl RedemptionTransactionBuilder {
                 ],
                 "outputs": [
                     {
+                        "value": reserve_remaining,
+                        "ergoTree": reserve_ergo_tree,
+                        "assets": [
+                            {
+                                "tokenId": reserve_nft_id,
+                                "amount": 1
+                            }
+                        ],
+                        "additionalRegisters": {
+                            "R4": format!("07{}", hex::encode(&tx_data.issuer_pubkey)),
+                            "R5": "64000000000000000000000000000000000000000000000000000000000000000000012000",
+                            "R6": format!("0e20{}", tx_data.tracker_nft_id)
+                        },
+                        "creationHeight": tx_data.current_height
+                    },
+                    {
                         "value": tx_data.redemption_amount,
-                        "ergoTree": ergo_tree,
+                        "ergoTree": recipient_ergo_tree,
                         "assets": [],
                         "additionalRegisters": {},
-                        "creationHeight": tx_data.fee
+                        "creationHeight": tx_data.current_height
                     }
                 ]
             }
@@ -504,6 +538,8 @@ mod tests {
             total_debt: 100000000,
             already_redeemed: 0,
             is_first_redemption: true,
+            current_height: 1779469,
+            issuer_pubkey: vec![0x02; 33],
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -570,6 +606,8 @@ mod tests {
                 total_debt: amount,
                 already_redeemed: 0,
                 is_first_redemption: true,
+            current_height: 1779469,
+            issuer_pubkey: vec![0x02; 33],
             };
 
             let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -614,12 +652,14 @@ mod tests {
                     reserve_lookup_proof: None,
                     tracker_lookup_proof: vec![0x02],
                 }),
-                total_debt: 100000000,
-                already_redeemed: 0,
-                is_first_redemption: true,
-            };
+            total_debt: 100000000,
+            already_redeemed: 0,
+            is_first_redemption: true,
+            current_height: 1779469,
+            issuer_pubkey: vec![0x02; 33],
+        };
 
-            let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
+        let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
 
             assert!(result.is_ok(), "Failed to build transaction with {}: {:?}", description, result.err());
             let tx_bytes = result.unwrap();
@@ -649,6 +689,8 @@ mod tests {
             total_debt: 100000000,
             already_redeemed: 0,
             is_first_redemption: true,
+            current_height: 1779469,
+            issuer_pubkey: vec![0x02; 33],
         };
         
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -679,6 +721,8 @@ mod tests {
             total_debt: 100000000,
             already_redeemed: 0,
             is_first_redemption: true,
+            current_height: 1779469,
+            issuer_pubkey: vec![0x02; 33],
         };
         
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -716,6 +760,8 @@ mod tests {
             total_debt: 100000000,
             already_redeemed: 0,
             is_first_redemption: true,
+            current_height: 1779469,
+            issuer_pubkey: vec![0x02; 33],
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);

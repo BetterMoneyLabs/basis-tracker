@@ -8,15 +8,18 @@ basis_reserve_contract_p2s = "RtQxdWJ9axeb5Ltahqosnhj45BE26xuDK4YWddVj5p59t9RjKP
 # Tracker NFT ID (hex-encoded) - required for reserve creation and redemption
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
 # Example: tracker_nft_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-tracker_nft_id = "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b"
+tracker_nft_id = "000b0695159e5f5c32c606385bd5f276d80133149c84c8b1325366381bf6f17f"
 # Tracker public key - can be hex-encoded public key or P2PK address
 # Example hex: "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
 # Example P2PK: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33"
-tracker_public_key = "9g7RJLKdrmxgvDg8RzbRx7bNqsdT46vsQx3bYDKuEEVkN5D4DkH"
+tracker_public_key = "9f7ZXamnfaDZL7EWLKLuBZgWMuHCusQYK6yow2d7p2eES9oRRRe"
+# Tracker secret key for local signing (hex-encoded, 32 bytes)
+# If provided, the server will sign redemption transactions locally instead of using the Ergo node API
+tracker_secret_key = "3a9b51135a5a37eb0b1af59dd570e0a99a7eb482f9cead153def9097f6beb929"
 
 [ergo.node]
 start_height = 0
-url = "http://159.89.116.15:11088"
+node_url = "http://127.0.0.1:9053"
 api_key = "hello"
 timeout_secs = 30
 

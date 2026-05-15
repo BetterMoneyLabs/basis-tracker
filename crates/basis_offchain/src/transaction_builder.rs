@@ -43,7 +43,7 @@ pub struct TxContext {
     pub fee: u64,
     /// Change address for any leftover funds after redemption
     pub change_address: String,
-    /// Network prefix (0 for mainnet, 16 for testnet)
+    /// Network prefix for Ergo address encoding
     pub network_prefix: u8,
 }
 

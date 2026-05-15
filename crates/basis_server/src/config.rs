@@ -40,6 +40,9 @@ pub struct ErgoConfig {
     pub tracker_nft_id: Option<String>,
     /// Tracker server's public key for the Ergo blockchain (hex-encoded, 33 bytes for compressed format)
     pub tracker_public_key: Option<String>,
+    /// Tracker server's secret key for local signing (hex-encoded, 32 bytes)
+    /// If provided, the server will sign redemption transactions locally instead of using the Ergo node API
+    pub tracker_secret_key: Option<String>,
 }
 
 /// Transaction configuration
@@ -47,7 +50,7 @@ pub struct ErgoConfig {
 pub struct TransactionConfig {
     /// Default transaction fee in nanoERG (0.001 ERG = 1,000,000 nanoERG)
     pub fee: u64,
-    /// Change address for redemption transactions (P2PK address starting with '9' for mainnet)
+    /// Change address for redemption transactions (P2PK address)
     /// If not specified, the tracker's public key will be used to derive a change address
     pub change_address: Option<String>,
 }
@@ -79,6 +82,8 @@ impl AppConfig {
             .set_default("transaction.fee", 1000000)? // 0.001 ERG
             // Tracker public key (optional)
             .set_default("ergo.tracker_public_key", "")?
+            // Tracker secret key (optional - for local signing)
+            .set_default("ergo.tracker_secret_key", "")?
             // Environment variables
             .add_source(config::Environment::with_prefix("BASIS"))
             // Configuration file
@@ -202,41 +207,20 @@ impl AppConfig {
         }
     }
 
-    /// Determine the network prefix from the tracker public key string (hex or P2PK address)
-    pub fn network_prefix_from_tracker_key(&self) -> Result<NetworkPrefix, Box<dyn std::error::Error>> {
-        match &self.ergo.tracker_public_key {
-            Some(pubkey_input) if !pubkey_input.is_empty() => {
-                // First, try to parse as a P2PK address to extract the network prefix
-                let mainnet_encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-                let testnet_encoder = AddressEncoder::new(NetworkPrefix::Testnet);
-
-                // Try parsing with mainnet encoder first
-                if mainnet_encoder.parse_address_from_str(pubkey_input).is_ok() {
-                    Ok(NetworkPrefix::Mainnet)
-                } else if testnet_encoder.parse_address_from_str(pubkey_input).is_ok() {
-                    Ok(NetworkPrefix::Testnet)
-                } else {
-                    // If it's not a valid address, check if it's a hex public key
-                    // If so, use node URL to determine default network
-                    if hex::decode(pubkey_input).is_ok() {
-                        if self.ergo.node.node_url.contains("testnet") {
-                            Ok(NetworkPrefix::Testnet)
-                        } else {
-                            Ok(NetworkPrefix::Mainnet)
-                        }
-                    } else {
-                        Err("Invalid tracker public key format - not hex nor P2PK address".into())
+    /// Get the tracker secret key bytes (if configured)
+    pub fn tracker_secret_key_bytes(&self) -> Option<[u8; 32]> {
+        match &self.ergo.tracker_secret_key {
+            Some(secret_hex) if !secret_hex.is_empty() => {
+                if let Ok(bytes) = hex::decode(secret_hex) {
+                    if bytes.len() == 32 {
+                        let mut secret_bytes = [0u8; 32];
+                        secret_bytes.copy_from_slice(&bytes);
+                        return Some(secret_bytes);
                     }
                 }
+                None
             }
-            _ => {
-                // Default to mainnet if no tracker key is configured
-                if self.ergo.node.node_url.contains("testnet") {
-                    Ok(NetworkPrefix::Testnet)
-                } else {
-                    Ok(NetworkPrefix::Mainnet)
-                }
-            }
+            _ => None,
         }
     }
 
@@ -276,12 +260,11 @@ impl AppConfig {
         // Otherwise, derive from tracker public key
         match &self.ergo.tracker_public_key {
             Some(pubkey_input) if !pubkey_input.is_empty() => {
-                // Check if it's already an address (starts with '9' for mainnet or '3' for testnet)
+                // Check if it's already an address
                 if pubkey_input.starts_with('9') || pubkey_input.starts_with('3') {
                     Ok(pubkey_input.clone())
                 } else {
                     // It's a hex public key, derive address
-                    let network_prefix = self.network_prefix_from_tracker_key()?;
                     let pubkey_bytes = hex::decode(pubkey_input)?;
                     
                     if pubkey_bytes.len() != 33 {
@@ -296,12 +279,12 @@ impl AppConfig {
                     let ec_point = EcPoint::sigma_parse_bytes(&pubkey_bytes)?;
                     let prove_dlog = ProveDlog::new(ec_point);
                     let address = Address::P2Pk(prove_dlog);
-                    let encoder = AddressEncoder::new(network_prefix);
+                    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
                     Ok(encoder.address_to_str(&address))
                 }
             }
             _ => {
-                // Fallback to a default mainnet address format if no tracker key configured
+                // No tracker key configured
                 // This should not happen in production
                 Err("No change address configured and no tracker public key available".into())
             }
@@ -332,6 +315,7 @@ mod tests {
                 basis_reserve_contract_p2s: "test".to_string(),
                 tracker_nft_id: None,
                 tracker_public_key: Some("02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string()),
+                tracker_secret_key: None,
             },
             transaction: TransactionConfig {
                 fee: 1000000,

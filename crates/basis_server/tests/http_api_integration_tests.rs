@@ -168,6 +168,7 @@ mod http_api_tests {
                 basis_reserve_contract_p2s: "test".to_string(),
                 tracker_nft_id: Some("69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string()),
                 tracker_public_key: Some("9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string()),
+                tracker_secret_key: None,
             },
             transaction: config::TransactionConfig {
                 fee: 1000000,
@@ -176,6 +177,7 @@ mod http_api_tests {
         });
 
         let temp_dir = std::env::temp_dir().join(format!("basis_test_tracker_storage_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
         let tracker_storage = basis_store::persistence::TrackerStorage::open(
             &temp_dir
         ).expect("Failed to create tracker storage");

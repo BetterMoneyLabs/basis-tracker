@@ -58,8 +58,6 @@ pub struct TrackerBoxUpdateConfig {
     pub update_interval_seconds: u64,
     /// Flag to enable/disable the tracker box updater (default: true)
     pub enabled: bool,
-    /// Flag to enable actual transaction submission (default: true for active mode)
-    pub submit_transaction: bool,
     /// Ergo node URL for API requests (required, no default provided)
     pub ergo_node_url: String,
     /// API key for Ergo node authentication (optional)

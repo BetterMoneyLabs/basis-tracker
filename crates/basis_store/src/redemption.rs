@@ -209,6 +209,7 @@ impl RedemptionManager {
             &proof.avl_proof,
             issuer_sig,
             tracker_sig,
+            &issuer_pubkey_bytes,
             context,
             reserve_lookup_proof.proof,
             tracker_lookup_proof.proof,
@@ -450,6 +451,7 @@ fn build_redemption_transaction(
         &proof.avl_proof,
         &issuer_signature_bytes,
         &tracker_signature_bytes,
+        &issuer_pubkey_bytes,
         &TxContext {
             current_height,
             fee: 1000000, // 0.001 ERG fee from config

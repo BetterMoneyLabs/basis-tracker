@@ -1,12 +1,22 @@
-//! Persistence layer for IouNote storage using fjall database
+//! Persistence layer for IouNote storage using fjall database with extra indices
+//!
+//! This module provides efficient storage and retrieval of IOU notes with secondary indices
+//! for fast lookups by issuer, recipient, and timestamp without full partition scans.
 
 use crate::{reserve_tracker::ExtendedReserveInfo, IouNote, NoteError, NoteKey, PubKey, TrackerBoxInfo};
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
 
-/// Database storage for IOU notes
+/// Database storage for IOU notes with extra indices for efficient querying
+///
+/// Uses three partitions:
+/// - `iou_notes`: Main data storage (issuer+recipient -> note data)
+/// - `issuer_index`: Secondary index (issuer_pubkey -> list of note keys)
+/// - `recipient_index`: Secondary index (recipient_pubkey -> list of note keys)
 pub struct NoteStorage {
-    partition: fjall::Partition,
+    notes_partition: fjall::Partition,
+    issuer_index: fjall::Partition,
+    recipient_index: fjall::Partition,
 }
 
 /// Database storage for scanner metadata
@@ -81,17 +91,119 @@ impl ScannerMetadataStorage {
 }
 
 impl NoteStorage {
-    /// Open or create a new note storage database
+    /// Open or create a new note storage database with extra indices
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, NoteError> {
         let keyspace = Config::new(path)
             .open()
             .map_err(|e| NoteError::StorageError(format!("Failed to open database: {}", e)))?;
 
-        let partition = keyspace
+        let notes_partition = keyspace
             .open_partition("iou_notes", PartitionCreateOptions::default())
-            .map_err(|e| NoteError::StorageError(format!("Failed to open partition: {}", e)))?;
+            .map_err(|e| NoteError::StorageError(format!("Failed to open notes partition: {}", e)))?;
 
-        Ok(Self { partition })
+        let issuer_index = keyspace
+            .open_partition("issuer_index", PartitionCreateOptions::default())
+            .map_err(|e| NoteError::StorageError(format!("Failed to open issuer index partition: {}", e)))?;
+
+        let recipient_index = keyspace
+            .open_partition("recipient_index", PartitionCreateOptions::default())
+            .map_err(|e| NoteError::StorageError(format!("Failed to open recipient index partition: {}", e)))?;
+
+        Ok(Self { notes_partition, issuer_index, recipient_index })
+    }
+
+    /// Serialize a list of note keys to bytes
+    fn serialize_note_keys(keys: &[NoteKey]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // Store count as u32
+        bytes.extend_from_slice(&(keys.len() as u32).to_be_bytes());
+        // Store each key (66 bytes)
+        for key in keys {
+            bytes.extend_from_slice(&key.to_bytes());
+        }
+        bytes
+    }
+
+    /// Deserialize a list of note keys from bytes
+    fn deserialize_note_keys(bytes: &[u8]) -> Result<Vec<NoteKey>, NoteError> {
+        if bytes.len() < 4 {
+            return Ok(Vec::new());
+        }
+        let count = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let mut keys = Vec::with_capacity(count);
+        let expected_len = 4 + count * 32; // NoteKey is 32 bytes (blake2b hash)
+        if bytes.len() < expected_len {
+            return Err(NoteError::StorageError("Invalid note key list format".to_string()));
+        }
+        let mut offset = 4;
+        for _ in 0..count {
+            let key_bytes: [u8; 32] = bytes[offset..offset + 32].try_into().unwrap();
+            keys.push(NoteKey::from_bytes(&key_bytes));
+            offset += 32;
+        }
+        Ok(keys)
+    }
+
+    /// Add a note key to an index partition
+    fn add_to_index(
+        index: &fjall::Partition,
+        pubkey: &PubKey,
+        note_key: &NoteKey,
+    ) -> Result<(), NoteError> {
+        let pubkey_bytes = pubkey;
+        let existing = index.get(pubkey_bytes).map_err(|e| {
+            NoteError::StorageError(format!("Failed to read index: {}", e))
+        })?;
+
+        let mut keys = match existing {
+            Some(bytes) => Self::deserialize_note_keys(&bytes)?,
+            None => Vec::new(),
+        };
+
+        // Check if key already exists to avoid duplicates
+        let key_bytes = note_key.to_bytes();
+        if !keys.iter().any(|k| k.to_bytes() == key_bytes) {
+            keys.push(note_key.clone());
+            let serialized = Self::serialize_note_keys(&keys);
+            index.insert(pubkey_bytes, &serialized).map_err(|e| {
+                NoteError::StorageError(format!("Failed to update index: {}", e))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove a note key from an index partition
+    fn remove_from_index(
+        index: &fjall::Partition,
+        pubkey: &PubKey,
+        note_key: &NoteKey,
+    ) -> Result<(), NoteError> {
+        let pubkey_bytes = pubkey;
+        let existing = index.get(pubkey_bytes).map_err(|e| {
+            NoteError::StorageError(format!("Failed to read index: {}", e))
+        })?;
+
+        let mut keys = match existing {
+            Some(bytes) => Self::deserialize_note_keys(&bytes)?,
+            None => return Ok(()),
+        };
+
+        let key_bytes = note_key.to_bytes();
+        keys.retain(|k| k.to_bytes() != key_bytes);
+
+        if keys.is_empty() {
+            index.remove(pubkey_bytes).map_err(|e| {
+                NoteError::StorageError(format!("Failed to remove index entry: {}", e))
+            })?;
+        } else {
+            let serialized = Self::serialize_note_keys(&keys);
+            index.insert(pubkey_bytes, &serialized).map_err(|e| {
+                NoteError::StorageError(format!("Failed to update index: {}", e))
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Store an IOU note with its issuer public key
@@ -108,9 +220,13 @@ impl NoteStorage {
         value_bytes.extend_from_slice(&note.signature);
         value_bytes.extend_from_slice(&note.recipient_pubkey);
 
-        self.partition
+        self.notes_partition
             .insert(&key_bytes, &value_bytes)
             .map_err(|e| NoteError::StorageError(format!("Failed to insert note: {}", e)))?;
+
+        // Update indices for efficient querying
+        Self::add_to_index(&self.issuer_index, issuer_pubkey, &key)?;
+        Self::add_to_index(&self.recipient_index, &note.recipient_pubkey, &key)?;
 
         Ok(())
     }
@@ -124,7 +240,7 @@ impl NoteStorage {
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
-        match self.partition.get(&key_bytes) {
+        match self.notes_partition.get(&key_bytes) {
             Ok(Some(value_bytes)) => {
                 // Manual deserialization
                 if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
@@ -173,96 +289,127 @@ impl NoteStorage {
         }
     }
 
-
-    /// Get all notes for a specific issuer
-    pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
+    /// Retrieve notes by their keys using the main partition
+    fn get_notes_by_keys(&self, keys: &[NoteKey]) -> Result<Vec<IouNote>, NoteError> {
         let mut notes = Vec::new();
+        for key in keys {
+            let key_bytes = key.to_bytes();
+            match self.notes_partition.get(&key_bytes) {
+                Ok(Some(value_bytes)) => {
+                    if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+                        continue; // Skip invalid entries
+                    }
+                    let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+                    let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+                    let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
+                    let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
+                    let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
 
-        tracing::debug!("Looking for notes from issuer: {:?}", issuer_pubkey);
-        tracing::debug!("Partition item count: {:?}", self.partition.iter().count());
-
-        // Debug: log the actual issuer pubkey we're looking for
-        tracing::debug!("Searching for issuer: {:?}", issuer_pubkey);
-
-        for item in self.partition.iter() {
-            let (_key_bytes, value_bytes) = item.map_err(|e| {
-                NoteError::StorageError(format!("Failed to iterate partition: {}", e))
-            })?;
-
-            // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
-                continue; // Skip invalid entries
-            }
-
-            let stored_issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
-
-            if stored_issuer_pubkey == *issuer_pubkey {
-                let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-                let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
-                let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
-                let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
-
-                let note = IouNote {
-                    recipient_pubkey,
-                    amount_collected,
-                    amount_redeemed,
-                    timestamp,
-                    signature,
-                };
-
-                notes.push(note);
+                    notes.push(IouNote {
+                        recipient_pubkey,
+                        amount_collected,
+                        amount_redeemed,
+                        timestamp,
+                        signature,
+                    });
+                }
+                Ok(None) => {}
+                Err(_) => {}
             }
         }
-
         Ok(notes)
     }
 
-    /// Get all notes for a specific recipient
+    /// Get all notes for a specific issuer (uses issuer index for O(1) lookup)
+    pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
+        tracing::debug!("Looking for notes from issuer using index: {:?}", issuer_pubkey);
+
+        // Use the issuer index for efficient lookup
+        match self.issuer_index.get(issuer_pubkey) {
+            Ok(Some(bytes)) => {
+                let keys = Self::deserialize_note_keys(&bytes)?;
+                tracing::debug!("Found {} note keys in issuer index", keys.len());
+                self.get_notes_by_keys(&keys)
+            }
+            Ok(None) => {
+                tracing::debug!("No notes found in issuer index");
+                Ok(Vec::new())
+            }
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to read issuer index: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Get all notes for a specific recipient (uses recipient index for O(1) lookup)
     pub fn get_recipient_notes(
         &self,
         recipient_pubkey: &PubKey,
     ) -> Result<Vec<IouNote>, NoteError> {
-        let mut notes = Vec::new();
+        tracing::debug!("Looking for notes for recipient using index: {:?}", recipient_pubkey);
 
-        for item in self.partition.iter() {
-            let (_key_bytes, value_bytes) = item.map_err(|e| {
+        // Use the recipient index for efficient lookup
+        match self.recipient_index.get(recipient_pubkey) {
+            Ok(Some(bytes)) => {
+                let keys = Self::deserialize_note_keys(&bytes)?;
+                tracing::debug!("Found {} note keys in recipient index", keys.len());
+                self.get_notes_by_keys(&keys)
+            }
+            Ok(None) => {
+                tracing::debug!("No notes found in recipient index");
+                Ok(Vec::new())
+            }
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to read recipient index: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Rebuild secondary indices from existing notes in the database
+    /// This should be called after upgrading to a version with indices when
+    /// existing data may not have index entries
+    pub fn rebuild_indices(&self) -> Result<usize, NoteError> {
+        tracing::info!("Rebuilding note indices from existing data...");
+        let mut count = 0;
+
+        for item in self.notes_partition.iter() {
+            let (key_bytes, value_bytes) = item.map_err(|e| {
                 NoteError::StorageError(format!("Failed to iterate partition: {}", e))
             })?;
 
-            // Manual deserialization
+            // Manual deserialization to extract issuer and recipient
             if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
                 continue; // Skip invalid entries
             }
 
-            let note_recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+            let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
+            let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
 
-            if note_recipient_pubkey == *recipient_pubkey {
-                let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-                let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
-                let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
+            // Reconstruct the note key from the stored key bytes
+            let note_key = if key_bytes.len() == 32 {
+                NoteKey::from_bytes(&key_bytes.as_ref().try_into().unwrap())
+            } else {
+                // Fallback: compute from pubkeys
+                NoteKey::from_keys(&issuer_pubkey, &recipient_pubkey)
+            };
 
-                let note = IouNote {
-                    recipient_pubkey: note_recipient_pubkey,
-                    amount_collected,
-                    amount_redeemed,
-                    timestamp,
-                    signature,
-                };
-
-                notes.push(note);
-            }
+            // Rebuild indices
+            Self::add_to_index(&self.issuer_index, &issuer_pubkey, &note_key)?;
+            Self::add_to_index(&self.recipient_index, &recipient_pubkey, &note_key)?;
+            count += 1;
         }
 
-        Ok(notes)
+        tracing::info!("Index rebuild complete: {} notes indexed", count);
+        Ok(count)
     }
 
     /// Get all notes in the database
     pub fn get_all_notes(&self) -> Result<Vec<IouNote>, NoteError> {
         let mut notes = Vec::new();
 
-        for item in self.partition.iter() {
+        for item in self.notes_partition.iter() {
             let (_key_bytes, value_bytes) = item.map_err(|e| {
                 NoteError::StorageError(format!("Failed to iterate partition: {}", e))
             })?;
@@ -297,7 +444,7 @@ impl NoteStorage {
     pub fn get_all_notes_with_issuer(&self) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
         let mut notes_with_issuer = Vec::new();
 
-        for item in self.partition.iter() {
+        for item in self.notes_partition.iter() {
             let (_key_bytes, value_bytes) = item.map_err(|e| {
                 NoteError::StorageError(format!("Failed to iterate partition: {}", e))
             })?;
@@ -326,6 +473,23 @@ impl NoteStorage {
         }
 
         Ok(notes_with_issuer)
+    }
+
+    /// Delete a note and update indices
+    pub fn delete_note(&self, issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Result<(), NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+
+        // Remove from main storage
+        self.notes_partition
+            .remove(&key_bytes)
+            .map_err(|e| NoteError::StorageError(format!("Failed to remove note: {}", e)))?;
+
+        // Update indices
+        Self::remove_from_index(&self.issuer_index, issuer_pubkey, &key)?;
+        Self::remove_from_index(&self.recipient_index, recipient_pubkey, &key)?;
+
+        Ok(())
     }
 }
 

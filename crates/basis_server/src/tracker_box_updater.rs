@@ -86,8 +86,6 @@ pub struct TrackerBoxUpdateConfig {
     pub update_interval_seconds: u64,
     /// Flag to enable/disable the tracker box updater (default: true)
     pub enabled: bool,
-    /// Flag to enable actual transaction submission (default: false for logging-only mode)
-    pub submit_transaction: bool,
     /// Ergo node URL for API requests
     pub ergo_node_url: String,
     /// API key for Ergo node authentication (if required)
@@ -99,7 +97,6 @@ impl Default for TrackerBoxUpdateConfig {
         Self {
             update_interval_seconds: 600, // 10 minutes
             enabled: true,
-            submit_transaction: false,
             ergo_node_url: "".to_string(), // Must be provided in config
             ergo_api_key: None,
         }
@@ -184,40 +181,29 @@ impl TrackerBoxUpdater {
 
                     let r5_hex = hex::encode(&r5_bytes);
 
-                    if config.submit_transaction {
-                        // Submit transaction to Ergo node via wallet payment API
-                        match Self::submit_tracker_box_update(
-                            &client,
-                            &config.ergo_node_url,
-                            config.ergo_api_key.as_deref(),
-                            &r4_hex,
-                            &r5_hex,
-                            network_prefix,  // Use the network_prefix passed to the start function
-                            tracker_nft_id.as_str(),  // Pass the required tracker NFT ID
-                        ).await {
-                            Ok(tx_id) => {
-                                info!(
-                                    "Tracker Box Update Transaction Submitted: R4={} (GroupElement), R5={} (SAvlTree), timestamp={}, root_digest={}, tx_id={}",
-                                    r4_hex,
-                                    r5_hex,
-                                    current_timestamp(),
-                                    hex::encode(&current_root),
-                                    tx_id
-                                );
-                            }
-                            Err(e) => {
-                                error!("Failed to submit tracker box update transaction: {}", e);
-                            }
+                    // Always submit transaction to Ergo node via wallet payment API
+                    match Self::submit_tracker_box_update(
+                        &client,
+                        &config.ergo_node_url,
+                        config.ergo_api_key.as_deref(),
+                        &r4_hex,
+                        &r5_hex,
+                        network_prefix,
+                        tracker_nft_id.as_str(),
+                    ).await {
+                        Ok(tx_id) => {
+                            info!(
+                                "Tracker Box Update Transaction Submitted: R4={} (GroupElement), R5={} (SAvlTree), timestamp={}, root_digest={}, tx_id={}",
+                                r4_hex,
+                                r5_hex,
+                                current_timestamp(),
+                                hex::encode(&current_root),
+                                tx_id
+                            );
                         }
-                    } else {
-                        // Log register values for testing/development
-                        info!(
-                            "Tracker Box Update: R4={} (GroupElement), R5={} (SAvlTree), timestamp={}, root_digest={}",
-                            r4_hex,
-                            r5_hex,
-                            current_timestamp(),
-                            hex::encode(&current_root)
-                        );
+                        Err(e) => {
+                            error!("Failed to submit tracker box update transaction: {}", e);
+                        }
                     }
                 }
                 _ = shutdown_rx.recv() => {
@@ -402,7 +388,6 @@ mod tests {
         let config = TrackerBoxUpdateConfig::default();
         assert_eq!(config.update_interval_seconds, 600);
         assert!(config.enabled);
-        assert!(!config.submit_transaction);
     }
 
     #[test]

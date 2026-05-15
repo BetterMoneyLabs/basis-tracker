@@ -49,7 +49,7 @@ mod tests {
                     let mut registers = std::collections::HashMap::new();
                     // Use a valid hex-encoded compressed public key (33 bytes = 66 hex chars)
                     registers.insert("R4".to_string(), "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb".to_string());
-                    registers.insert("R6".to_string(), "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string()); // 32-byte tracker NFT ID (64 hex chars)
+                    registers.insert("R6".to_string(), "0e201af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string()); // 32-byte tracker NFT ID with Ergo prefix
                     registers
                 },
             },
@@ -64,7 +64,7 @@ mod tests {
                     let mut registers = std::collections::HashMap::new();
                     // Use a valid hex-encoded compressed public key (33 bytes = 66 hex chars)
                     registers.insert("R4".to_string(), "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc".to_string());
-                    registers.insert("R6".to_string(), "2bf34e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f30415".to_string()); // 32-byte tracker NFT ID (64 hex chars)
+                    registers.insert("R6".to_string(), "0e202bf34e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f30415".to_string()); // 32-byte tracker NFT ID with Ergo prefix
                     registers
                 },
             },
@@ -100,9 +100,15 @@ mod tests {
 
                     // Check tracker NFT extraction (if present) - now comes from R6 register according to spec
                     if let Some(expected_tracker_nft) = scan_box.additional_registers.get("R6") {
+                        // The parser strips the Ergo Coll[Byte] prefix (0e20) from R6
+                        let expected_stripped = if expected_tracker_nft.len() >= 4 {
+                            &expected_tracker_nft[4..]
+                        } else {
+                            expected_tracker_nft.as_str()
+                        };
                         assert_eq!(
                             reserve_info.base_info.tracker_nft_id,
-                            *expected_tracker_nft  // Compare directly since we're using raw hex strings
+                            expected_stripped
                         );
                     } else {
                         // If no R6 register, the tracker_nft_id should be empty (handled by the parsing logic)
@@ -290,15 +296,16 @@ mod tests {
                         _ => "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb", // default
                     };
                     registers.insert("R4".to_string(), owner_key.to_string());
-                    // Always include R6 register with a 32-byte tracker NFT ID
+                    // Always include R6 register with a 32-byte tracker NFT ID (with Ergo Coll[Byte] prefix)
                     let tracker_nft_id = match nft {
                         Some(nft_val) => {
                             // Generate a 32-byte hex string based on the nft value
                             let nft_bytes = hex::encode(nft_val.as_bytes());
                             // Pad or truncate to ensure exactly 64 hex chars (32 bytes)
-                            format!("{:0<64}", nft_bytes.get(..64).unwrap_or(&nft_bytes))
+                            let padded = format!("{:0<64}", nft_bytes.get(..64).unwrap_or(&nft_bytes));
+                            format!("0e20{}", padded)
                         },
-                        None => "0000000000000000000000000000000000000000000000000000000000000000".to_string(), // 32 zero bytes
+                        None => "0e200000000000000000000000000000000000000000000000000000000000000000".to_string(), // 32 zero bytes with prefix
                     };
                     registers.insert("R6".to_string(), tracker_nft_id);
                     registers

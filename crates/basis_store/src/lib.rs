@@ -163,6 +163,13 @@ impl NoteKey {
     pub fn to_bytes(&self) -> Vec<u8> {
         self.key_hash.to_vec()
     }
+
+    /// Create a note key from bytes (32-byte hash)
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self {
+            key_hash: *bytes,
+        }
+    }
 }
 
 
@@ -223,6 +230,12 @@ impl TrackerStateManager {
         let storage = match persistence::NoteStorage::open(&storage_path) {
             Ok(storage) => {
                 tracing::debug!("Note storage opened successfully at: {:?}", storage_path);
+                // Rebuild indices to ensure all existing notes are indexed
+                // (especially important after upgrading to indexed storage)
+                match storage.rebuild_indices() {
+                    Ok(count) => tracing::info!("Note indices rebuilt: {} notes indexed", count),
+                    Err(e) => tracing::warn!("Failed to rebuild note indices: {:?}", e),
+                }
                 storage
             }
             Err(e) => {

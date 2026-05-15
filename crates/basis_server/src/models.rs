@@ -135,6 +135,8 @@ pub struct RedeemResponse {
     /// Prepared transaction data that can be submitted to Ergo node
     /// Contains all necessary fields for wallet payment API
     pub transaction_data: Option<TransactionData>,
+    /// Raw Ergo transaction JSON (hex encoded) that can be signed and submitted
+    pub transaction_bytes: Option<String>,
 }
 
 // Transaction data that can be submitted to Ergo node

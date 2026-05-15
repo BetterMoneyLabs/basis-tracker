@@ -52,6 +52,7 @@ mod create_reserve_tests {
                 basis_reserve_contract_p2s: "test".to_string(),
                 tracker_nft_id: Some("69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string()),
                 tracker_public_key: Some("9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string()),
+                tracker_secret_key: None,
             },
             transaction: crate::config::TransactionConfig {
                 fee: 1000000,
