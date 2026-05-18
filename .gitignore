@@ -44,3 +44,9 @@ alice_keys_output.txt
 scala/
 
 secrets/
+
+# Demo output files
+demo/output/
+
+# Test output files
+test_output/

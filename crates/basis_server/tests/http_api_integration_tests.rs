@@ -176,7 +176,14 @@ mod http_api_tests {
             },
         });
 
-        let temp_dir = std::env::temp_dir().join(format!("basis_test_tracker_storage_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "basis_test_tracker_storage_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
         let tracker_storage = basis_store::persistence::TrackerStorage::open(
             &temp_dir

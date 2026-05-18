@@ -173,7 +173,7 @@ impl TrackerBoxUpdater {
                     let ec_point = EcPoint::sigma_parse_bytes(&tracker_pubkey)
                         .map_err(|e| TrackerBoxUpdaterError::ConfigurationError(format!("Failed to parse EcPoint from tracker public key: {}", e)))?;
                     tracing::info!("Successfully created EcPoint from tracker public key");
-                    let r4_constant = Constant::from(ec_point);
+                    let r4_constant = Constant::from(ec_point.clone());
                     let r4_bytes = r4_constant.sigma_serialize_bytes();
                     let r4_hex = hex::encode(&r4_bytes);
 
@@ -218,6 +218,18 @@ impl TrackerBoxUpdater {
                     let tracker_box_id = tracker_box_id.unwrap();
                     let tracker_secret_key = tracker_secret_key.unwrap();
                     
+                    // Derive tracker address from public key for the output
+                    let tracker_address = {
+                        let encoder = ergo_lib::ergotree_ir::address::AddressEncoder::new(
+                            ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet
+                        );
+                        encoder.address_to_str(&ergo_lib::ergotree_ir::address::Address::P2Pk(
+                            ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog::from(
+                                ec_point.clone()
+                            )
+                        ))
+                    };
+                    
                     // Build, sign, and submit transaction locally using tracker secret key
                     match Self::submit_tracker_box_update(
                         &client,
@@ -228,6 +240,8 @@ impl TrackerBoxUpdater {
                         &r4_constant,
                         &r5_bytes,
                         tracker_nft_id.as_str(),
+                        &tracker_address,
+                        &r4_hex,
                     ).await {
                         Ok(tx_id) => {
                             info!(
@@ -269,18 +283,20 @@ impl TrackerBoxUpdater {
         _r4_constant: &ergo_lib::ergotree_ir::mir::constant::Constant,
         r5_bytes: &[u8],
         tracker_nft_id: &str,
+        tracker_address: &str,
+        r4_hex: &str,
     ) -> Result<String, TrackerBoxUpdaterError> {
         let r5_hex = hex::encode(r5_bytes);
-        
+
         // Try wallet auto-selection first (no inputsRaw specified)
         let wallet_request = serde_json::json!({
             "requests": [
                 {
-                    "address": "9f7ZXamnfaDZL7EWLKLuBZgWMuHCusQYK6yow2d7p2eES9oRRRe",
+                    "address": tracker_address,
                     "value": 100000000,
                     "assets": [{"tokenId": tracker_nft_id, "amount": 1}],
                     "registers": {
-                        "R4": "07024e564477ff457c601c01ad1cc31903f8b27b7d5e515bd03138891d8152d787b2",
+                        "R4": r4_hex,
                         "R5": r5_hex
                     }
                 }
@@ -346,11 +362,11 @@ impl TrackerBoxUpdater {
                 let self_fund_request = serde_json::json!({
                     "requests": [
                         {
-                            "address": "9f7ZXamnfaDZL7EWLKLuBZgWMuHCusQYK6yow2d7p2eES9oRRRe",
+                            "address": tracker_address,
                             "value": 99000000,
                             "assets": [{"tokenId": tracker_nft_id, "amount": 1}],
                             "registers": {
-                                "R4": "07024e564477ff457c601c01ad1cc31903f8b27b7d5e515bd03138891d8152d787b2",
+                                "R4": r4_hex,
                                 "R5": r5_hex
                             }
                         }
