@@ -1,5 +1,6 @@
 use axum::{extract::State, http::StatusCode, Json};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     models::{
@@ -1159,19 +1160,29 @@ pub async fn initiate_redemption(
         };
         drop(scanner_guard); // Release lock early
 
-        // Get tracker box ID from tracker_storage (if available)
+        // Get tracker box ID from tracker_storage (required for redemption)
         let tracker_box_id = match tracker_storage_ref.get_latest_tracker_box_id() {
             Ok(Some(box_id)) => {
                 tracing::debug!("Found latest tracker box: {}", box_id);
                 box_id
             }
             Ok(None) => {
-                tracing::warn!("No tracker boxes found in storage");
-                "tracker_box_placeholder".to_string()
+                tracing::error!("No tracker boxes found in storage - cannot initiate redemption");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        "No tracker boxes found in storage".to_string()
+                    )),
+                );
             }
             Err(e) => {
                 tracing::error!("Failed to get tracker box ID from storage: {:?}", e);
-                "tracker_box_placeholder".to_string()
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        format!("Failed to get tracker box ID: {:?}", e)
+                    )),
+                );
             }
         };
 
@@ -1468,61 +1479,6 @@ pub async fn complete_redemption(
             )
         }
     }
-}
-
-// Get proof for a specific note
-#[axum::debug_handler]
-pub async fn get_proof(
-    State(_state): State<AppState>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> (StatusCode, Json<ApiResponse<ProofResponse>>) {
-    tracing::debug!("Getting proof with params: {:?}", params);
-
-    let empty_string = "".to_string();
-    let issuer_pubkey = params.get("issuer_pubkey").unwrap_or(&empty_string);
-    let recipient_pubkey = params.get("recipient_pubkey").unwrap_or(&empty_string);
-
-    if issuer_pubkey.is_empty() || recipient_pubkey.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(crate::models::error_response(
-                "issuer_pubkey and recipient_pubkey parameters are required".to_string(),
-            )),
-        );
-    }
-
-    // Validate hex encoding
-    if hex::decode(issuer_pubkey).is_err() || hex::decode(recipient_pubkey).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(crate::models::error_response(
-                "Invalid hex encoding for public keys".to_string(),
-            )),
-        );
-    }
-
-    // In a real implementation, this would:
-    // 1. Generate AVL tree proof for the note
-    // 2. Include tracker state commitment
-    // 3. Return the complete proof
-
-    // Mock implementation for now
-    let proof = ProofResponse {
-        issuer_pubkey: issuer_pubkey.clone(),
-        recipient_pubkey: recipient_pubkey.clone(),
-        proof_data: format!("proof_{}_{}", &issuer_pubkey[..16], &recipient_pubkey[..16]),
-        tracker_state_digest: "mock_digest_1234567890abcdef".to_string(),
-        block_height: 1500,
-        timestamp: 1672531200,
-    };
-
-    tracing::info!(
-        "Proof generated for {} -> {}",
-        issuer_pubkey,
-        recipient_pubkey
-    );
-
-    (StatusCode::OK, Json(crate::models::success_response(proof)))
 }
 
 // Get tracker lookup proof for context var #8
@@ -2399,13 +2355,30 @@ pub async fn prepare_redemption(
     let avl_proof = proof_result;
     let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
 
+    // Get current blockchain height from scanner
+    let block_height = {
+        let scanner_guard = state.ergo_scanner.lock().await;
+        match scanner_guard.get_current_height().await {
+            Ok(height) => height,
+            Err(e) => {
+                tracing::error!("Failed to get current blockchain height: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        format!("Failed to get blockchain height: {}", e)
+                    )),
+                );
+            }
+        }
+    };
+
     let response = RedemptionPreparationResponse {
         redemption_id,
         avl_proof,
         tracker_signature,
         tracker_pubkey,
         tracker_state_digest,
-        block_height: 1500,
+        block_height,
     };
 
     tracing::info!(
@@ -2563,13 +2536,36 @@ pub async fn get_redemption_proof(
         }
     };
 
+    // Get current blockchain height from scanner
+    let block_height = {
+        let scanner_guard = state.ergo_scanner.lock().await;
+        match scanner_guard.get_current_height().await {
+            Ok(height) => height,
+            Err(e) => {
+                tracing::error!("Failed to get current blockchain height: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        format!("Failed to get blockchain height: {}", e)
+                    )),
+                );
+            }
+        }
+    };
+
+    // Get current timestamp in milliseconds (Java time format)
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
     let proof = ProofResponse {
         issuer_pubkey: issuer_pubkey.clone(),
         recipient_pubkey: recipient_pubkey.clone(),
         proof_data: proof_result,
         tracker_state_digest,
-        block_height: 1500,
-        timestamp: 1672531200,
+        block_height,
+        timestamp,
     };
 
     tracing::info!(
@@ -2648,7 +2644,7 @@ pub async fn get_latest_tracker_box_id(
 // Create a reserve creation payload for Ergo node's /wallet/payment/send API
 #[axum::debug_handler]
 pub async fn create_reserve_payload(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(payload): Json<CreateReserveRequest>,
 ) -> (StatusCode, Json<ApiResponse<ReserveCreationResponse>>) {
     tracing::debug!("Creating reserve payload: {:?}", payload);
@@ -2761,11 +2757,23 @@ pub async fn create_reserve_payload(
         registers,
     };
 
+    // Get change address from configuration
+    let change_address = state.config.get_change_address()
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to get change address from config: {}", e);
+            // Fallback: derive from tracker public key directly
+            if let Some(ref pubkey) = config.ergo.tracker_public_key {
+                pubkey.clone()
+            } else {
+                payload.owner_pubkey.clone() // Use owner address as fallback (not ideal but safe)
+            }
+        });
+
     // Create the response following Ergo node's /wallet/payment/send format
     let response = ReserveCreationResponse {
         requests: vec![payment_request],
         fee: config.transaction.fee, // Get fee from configuration
-        change_address: "default".to_string(), // This will be filled by the wallet
+        change_address,
     };
 
     tracing::info!(

@@ -524,26 +524,6 @@ impl TrackerClient {
         }
     }
 
-    pub async fn get_proof(&self, issuer: &str, recipient: &str) -> Result<ProofResponse> {
-        let url = format!(
-            "{}/proof?issuer_pubkey={}&recipient_pubkey={}",
-            self.base_url, issuer, recipient
-        );
-        let response = ureq::get(&url).call()?;
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<ProofResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!("Failed to get proof: {}", error_text))
-        }
-    }
-
     // Reserve operations
     pub async fn create_reserve(&self, request: CreateReserveRequest) -> Result<ReserveCreationResponse> {
         let url = format!("{}/reserves/create", self.base_url);
@@ -591,7 +571,7 @@ impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
         let base_info = ReserveInfo {
             collateral_amount: flattened.collateral_amount,
             last_updated_height: flattened.last_updated_height,
-            contract_address: "placeholder".to_string(), // The actual contract address might need to be retrieved differently
+            contract_address: String::new(), // Set by get_reserves_by_issuer() after fetching from server config
             tracker_nft_id: flattened.tracker_nft_id.unwrap_or_default(),
         };
 
@@ -617,9 +597,23 @@ impl TrackerClient {
             let api_response: ApiResponse<Vec<FlattenedReserveInfo>> = response.into_json()?;
             if api_response.success {
                 let flattened_reserves = api_response.data.unwrap_or_default();
+                
+                // Fetch reserve contract P2S address from server config
+                let contract_address = match self.get_basis_reserve_contract_p2s().await {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        eprintln!("⚠️  Failed to get reserve contract P2S address: {}", e);
+                        String::new()
+                    }
+                };
+                
                 let extended_reserves: Vec<basis_store::ExtendedReserveInfo> = flattened_reserves
                     .into_iter()
-                    .map(basis_store::ExtendedReserveInfo::from)
+                    .map(|flattened| {
+                        let mut reserve = basis_store::ExtendedReserveInfo::from(flattened);
+                        reserve.base_info.contract_address = contract_address.clone();
+                        reserve
+                    })
                     .collect();
                 Ok(extended_reserves)
             } else {
@@ -702,20 +696,28 @@ impl TrackerClient {
         }
     }
 
-    /// Get the serialized bytes of a box from the Ergo node via the tracker server
-    /// This method calls the Ergo node through the tracker server to retrieve the serialized box
+    /// Get the serialized bytes of a box from the Ergo node
+    /// Makes direct request to Ergo node's /utxo/byId/{box_id} endpoint
     pub async fn get_box_bytes(&self, box_id: &str, node_url: &str, api_key: Option<&str>) -> Result<String> {
-        // In a real implementation, this would call the Ergo node's API to get the serialized box
-        // For example: GET /utxo/byId/{box_id} to get the box details
-        // Then serialize the box to bytes and return the hex-encoded string
-
-        // Since we don't have direct access to the Ergo node from this client,
-        // the server would need to proxy this request or provide an endpoint that returns
-        // the serialized box bytes
-
-        // For now, returning a placeholder but in a real implementation this would
-        // fetch the actual serialized box from the Ergo node via the tracker server
-        Ok(format!("serialized_box_{}", box_id))
+        let url = format!("{}/utxo/byId/{}", node_url, box_id);
+        
+        let mut request = ureq::get(&url);
+        
+        // Add API key if provided
+        if let Some(key) = api_key {
+            request = request.set("api_key", key);
+        }
+        
+        let response = request.call()?;
+        
+        if response.status() == 200 {
+            // Return the box JSON as string (the Ergo node /wallet/transaction/sign 
+            // accepts box IDs in inputsRaw/dataInputsRaw, not full serialized bytes)
+            let box_json = response.into_string()?;
+            Ok(box_json)
+        } else {
+            Err(anyhow::anyhow!("Failed to get box {} from Ergo node: status {}", box_id, response.status()))
+        }
     }
 
     pub async fn get_all_notes(&self) -> Result<Vec<SerializableIouNoteWithAge>> {

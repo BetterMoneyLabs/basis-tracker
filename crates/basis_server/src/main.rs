@@ -104,6 +104,25 @@ async fn main() {
         tracing::info!("Ergo scanner started successfully");
     }
 
+    // Get tracker public key from config early, needed for shared state
+    let tracker_pubkey = if let Some(tracker_pubkey_bytes) = match config.tracker_public_key_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!("Invalid tracker public key format: {}. Please set 'ergo.tracker_public_key' as either a hex-encoded public key or a P2PK address in your configuration file.", e);
+            std::process::exit(1);
+        }
+    } {
+        tracing::info!("Using tracker public key from configuration");
+        tracker_pubkey_bytes
+    } else {
+        tracing::error!("No tracker public key found in configuration. Please set 'ergo.tracker_public_key' as either a hex-encoded public key or a P2PK address in your configuration file.");
+        std::process::exit(1);
+    };
+
+    // Create shared tracker state for the updater (before scanner so scanner can set box ID)
+    tracing::info!("Initializing shared tracker state...");
+    let shared_tracker_state_for_updater = SharedTrackerState::new_with_tracker_key(tracker_pubkey);
+
     // Initialize tracker scanner for monitoring tracker state commitment boxes
     tracing::debug!("Tracker NFT ID from config: {:?}", config.ergo.tracker_nft_id);
     let _tracker_scanner_initialized = 
@@ -147,6 +166,12 @@ async fn main() {
                                         tracing::info!("Processed {} tracker boxes", tracker_boxes.len());
                                         if let Err(e) = tracker_scanner.update_tracker_state(&tracker_boxes).await {
                                             tracing::error!("Failed to update tracker state: {}", e);
+                                        }
+                                        
+                                        // Set the latest tracker box ID in shared state for the updater
+                                        if let Some(latest_box) = tracker_boxes.iter().max_by_key(|b| b.last_verified_height) {
+                                            tracing::info!("Setting latest tracker box ID in shared state: {}", latest_box.box_id);
+                                            shared_tracker_state_for_updater.set_tracker_box_id(latest_box.box_id.clone());
                                         }
                                     }
                                     Err(e) => {
@@ -195,26 +220,6 @@ async fn main() {
     use basis_store::{RedemptionManager, TrackerStateManager};
     let shared_tracker_state = std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new()));
 
-    // Create shared tracker state for the updater
-    tracing::info!("Initializing shared tracker state...");
-
-    // Get tracker public key from config, exit with error if not provided
-    let tracker_pubkey = if let Some(tracker_pubkey_bytes) = match config.tracker_public_key_bytes() {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::error!("Invalid tracker public key format: {}. Please set 'ergo.tracker_public_key' as either a hex-encoded public key or a P2PK address in your configuration file.", e);
-            std::process::exit(1);
-        }
-    } {
-        tracing::info!("Using tracker public key from configuration");
-        tracker_pubkey_bytes
-    } else {
-        tracing::error!("No tracker public key found in configuration. Please set 'ergo.tracker_public_key' as either a hex-encoded public key or a P2PK address in your configuration file.");
-        std::process::exit(1);
-    };
-
-    let shared_tracker_state_for_updater = SharedTrackerState::new_with_tracker_key(tracker_pubkey);
-
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
     let shared_tracker_state_clone = shared_tracker_state.clone();
     let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
@@ -223,6 +228,12 @@ async fn main() {
 
         tracing::debug!("Tracker thread started");
         let mut tracker = TrackerStateManager::new();
+        
+        // Update shared state with the rebuilt AVL root digest after initialization
+        let initial_root = tracker.get_state().avl_root_digest;
+        shared_state_for_tracker.set_avl_root_digest(initial_root);
+        tracing::info!("Tracker thread initialized with AVL root digest: {}", hex::encode(&initial_root));
+        
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         while let Some(cmd) = rx.blocking_recv() {
@@ -359,6 +370,7 @@ async fn main() {
         enabled: true,
         ergo_node_url: config.ergo.node.node_url.clone(),
         ergo_api_key: config.ergo.node.api_key.clone(),
+        tracker_secret_key: config.tracker_secret_key_bytes(),
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
@@ -535,7 +547,6 @@ async fn main() {
         .route("/notes", post(create_note).options(handle_options))
         .route("/redeem", post(initiate_redemption).options(handle_options))
         .route("/redeem/complete", post(complete_redemption).options(handle_options))
-        .route("/proof", get(get_proof))
         .route("/proof/redemption", get(get_redemption_proof))
         .route("/tracker/proof", get(get_tracker_proof))
         .route("/reserve/proof", get(get_reserve_proof))
@@ -582,7 +593,6 @@ async fn main() {
     tracing::debug!("  GET /events/paginated");
     tracing::debug!("  GET /key-status/{{pubkey}}");
     tracing::debug!("  POST /redeem");
-    tracing::debug!("  GET /proof");
     tracing::debug!("  GET /tracker/latest-box-id");
 
     // Run our app with hyper

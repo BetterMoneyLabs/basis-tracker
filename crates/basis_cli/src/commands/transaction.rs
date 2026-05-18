@@ -1,4 +1,4 @@
-use crate::api::{TrackerClient, ErgoBoxDetails};
+use crate::api::TrackerClient;
 use anyhow::Result;
 use clap::Subcommand;
 use serde_json::json;
@@ -157,22 +157,10 @@ async fn generate_redemption_transaction(
         (lookup_proof, insert_proof)
     };
 
-    // Retrieve the actual tracker box from the Ergo node
-    println!("🔍 Retrieving tracker box from Ergo node...");
-    let tracker_box_details = client.get_box_from_node(&tracker_box_id, "http://159.89.116.15:11088", Some("hello")).await
-        .unwrap_or_else(|_| {
-            println!("⚠️  Tracker box not found, using placeholder.");
-            ErgoBoxDetails {
-                box_id: tracker_box_id.clone(),
-                value: 0,
-                ergo_tree: String::new(),
-                assets: vec![],
-                additional_registers: HashMap::new(),
-                creation_height: 0,
-                transaction_id: String::new(),
-                index: 0,
-            }
-        });
+    // Verify tracker box exists on Ergo node
+    println!("🔍 Verifying tracker box on Ergo node...");
+    client.get_box_from_node(&tracker_box_id, "http://159.89.116.15:11088", Some("hello")).await
+        .map_err(|e| anyhow::anyhow!("Failed to retrieve tracker box {} from Ergo node: {}. Cannot generate redemption transaction.", tracker_box_id, e))?;
 
     // Retrieve the actual reserve box from the Ergo node
     println!("🔍 Retrieving reserve box from Ergo node...");
@@ -183,7 +171,7 @@ async fn generate_redemption_transaction(
     // The Ergo node expects inputsRaw and dataInputsRaw to contain hex-encoded box IDs
     // The node will fetch the full box details internally
     println!("📦 Preparing box IDs for transaction...");
-    let tracker_box_bytes = tracker_box_details.box_id.clone();
+    let tracker_box_bytes = tracker_box_id.clone();
     let reserve_box_bytes = reserve_box_details.box_id.clone();
 
     // Get issuer signature from CLI wallet

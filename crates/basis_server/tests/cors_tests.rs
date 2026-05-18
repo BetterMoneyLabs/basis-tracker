@@ -210,7 +210,7 @@ use tower_http::cors::{Any, CorsLayer};
             .route("/notes", post(create_note))
             .route("/redeem", post(initiate_redemption))
             .route("/redeem/complete", post(complete_redemption))
-            .route("/proof", get(get_proof))
+            .route("/proof/redemption", get(get_redemption_proof))
             // Most specific parameterized routes first
             .route(
                 "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",

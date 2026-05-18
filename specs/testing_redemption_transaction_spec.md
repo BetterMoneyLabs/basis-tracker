@@ -261,7 +261,7 @@ For this testing scenario, we will use the following predetermined keys for Alic
 - Deal with transaction assembly errors
 - Manage file I/O errors during JSON output
 - Handle Schnorr signature generation failures from the Ergo node at `159.89.116.15:11088`
-- Handle tracker box not found errors (gracefully use placeholder if needed)
+- Handle tracker box not found errors (returns 500 error if no tracker boxes in storage)
 
 ## Post-Processing
 

@@ -303,7 +303,7 @@ Prepare a complete redemption with real AVL proofs and tracker signatures from E
     "tracker_pubkey": "hex_encoded_tracker_public_key",
     "tracker_state_digest": "hex_encoded_tracker_state_digest",
     "reserve_state_digest": "hex_encoded_reserve_state_digest",
-    "block_height": 1500,
+    "block_height": 1234567,
     "is_first_redemption": true
   },
   "error": null

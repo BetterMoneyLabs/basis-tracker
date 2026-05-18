@@ -200,10 +200,9 @@ fn generate_unsigned_transaction(
     redemption_data: &crate::api::RedemptionPreparationResponse,
     reserve_info: &basis_store::ExtendedReserveInfo,
 ) -> serde_json::Value {
-    // Create a placeholder address based on the public key
-    // In a real implementation, this would call the Ergo node's /utils/rawToAddress API
-    let recipient_address = format!("9{}", &recipient_pubkey[..30]);
-    let issuer_address = format!("9{}", &issuer_pubkey[..30]);
+    // Convert public keys to proper P2PK addresses
+    let recipient_address = pubkey_to_address(recipient_pubkey)
+        .unwrap_or_else(|_| format!("invalid_recipient_{}", &recipient_pubkey[..16]));
     
     // Calculate remaining collateral after redemption
     let remaining_collateral = reserve_info.base_info.collateral_amount - amount;
@@ -219,7 +218,7 @@ fn generate_unsigned_transaction(
                 "registers": {}
             },
             {
-                "address": issuer_address,
+                "address": &reserve_info.base_info.contract_address,
                 "value": remaining_collateral - transaction_fee,
                 "assets": [
                     {
@@ -228,17 +227,18 @@ fn generate_unsigned_transaction(
                     }
                 ],
                 "registers": {
-                    "R4": issuer_pubkey,
-                    "R5": redemption_data.tracker_state_digest // Use the tracker state digest from redemption preparation
+                    "R4": format!("07{}", issuer_pubkey),
+                    "R5": format!("64{}", redemption_data.tracker_state_digest),
+                    "R6": format!("0e20{}", &reserve_info.base_info.tracker_nft_id)
                 }
             }
         ],
         "fee": transaction_fee,
         "inputsRaw": [
-            format!("serialized_reserve_box_{}", reserve_info.box_id)
+            &reserve_info.box_id
         ],
         "dataInputsRaw": [
-            format!("serialized_tracker_box_{}", redemption_data.tracker_box_id) // Assuming this field exists
+            &redemption_data.tracker_box_id
         ],
         "metadata": {
             "source": "159.89.116.15:11088",
@@ -252,4 +252,28 @@ fn generate_unsigned_transaction(
             "block_height": redemption_data.block_height
         }
     })
+}
+
+// Helper function to convert public key to a P2PK address using ergo-lib
+fn pubkey_to_address(pubkey_hex: &str) -> Result<String> {
+    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
+    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+    let pubkey_bytes = hex::decode(pubkey_hex)
+        .map_err(|e| anyhow::anyhow!("Invalid public key hex: {}", e))?;
+
+    if pubkey_bytes.len() != 33 {
+        return Err(anyhow::anyhow!("Public key must be 33 bytes"));
+    }
+
+    let ec_point = EcPoint::sigma_parse_bytes(&pubkey_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid public key format: {}", e))?;
+
+    let prove_dlog = ProveDlog::new(ec_point);
+    let address = Address::P2Pk(prove_dlog);
+
+    let encoder = ergo_lib::ergotree_ir::address::AddressEncoder::new(NetworkPrefix::Mainnet);
+    Ok(encoder.address_to_str(&address))
 }

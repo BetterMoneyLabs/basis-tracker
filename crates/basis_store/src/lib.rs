@@ -270,8 +270,8 @@ impl TrackerStateManager {
             }
         };
 
-        tracing::debug!("TrackerStateManager created successfully");
-        Self {
+        // Rebuild AVL tree from all stored notes to ensure consistency after restart
+        let mut manager = Self {
             avl_state,
             current_state: TrackerState {
                 avl_root_digest: [0u8; 33],
@@ -280,7 +280,52 @@ impl TrackerStateManager {
             },
             storage,
             reserve_avl_state,
+        };
+
+        if let Err(e) = manager.rebuild_avl_tree() {
+            tracing::warn!("Failed to rebuild AVL tree from storage: {:?}", e);
         }
+
+        tracing::debug!("TrackerStateManager created successfully");
+        manager
+    }
+
+    /// Rebuild the AVL tree from all notes stored in the database.
+    /// This is critical after server restart to ensure the AVL tree matches
+    /// the on-chain commitment. AVL trees are insertion-order sensitive,
+    /// so notes must be inserted in chronological order (by timestamp).
+    pub fn rebuild_avl_tree(&mut self) -> Result<(), NoteError> {
+        tracing::info!("Rebuilding AVL tree from stored notes...");
+
+        let mut notes_with_issuer = self.storage.get_all_notes_with_issuer()
+            .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
+
+        if notes_with_issuer.is_empty() {
+            tracing::info!("No stored notes found, AVL tree remains empty");
+            return Ok(());
+        }
+
+        // Sort notes by timestamp ascending to ensure deterministic insertion order
+        // AVL tree structure depends on insertion order, so we must insert in the
+        // same order as when notes were originally created
+        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
+
+        tracing::info!("Inserting {} notes into AVL tree in chronological order...", notes_with_issuer.len());
+
+        for (issuer_pubkey, note) in &notes_with_issuer {
+            let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
+            let key_bytes = key.to_bytes();
+            let value_bytes = note.amount_collected.to_be_bytes().to_vec();
+
+            self.avl_state.update(key_bytes, value_bytes)
+                .map_err(|e| NoteError::StorageError(format!("AVL tree update failed during rebuild: {:?}", e)))?;
+        }
+
+        self.update_state();
+        let root_digest = self.current_state.avl_root_digest;
+        tracing::info!("AVL tree rebuilt successfully with root digest: {}", hex::encode(&root_digest));
+
+        Ok(())
     }
 
     /// Create a new tracker state manager with temporary storage (used in tests only)

@@ -1,0 +1,18 @@
+{
+  "payerKey": "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83",
+  "payeeKey": "03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea",
+  "totalDebt": 100000000,
+  "totalDebtERG": 0.1,
+  "timestamp": 1778838566795,
+  "payerSignature": {
+    "a": "03903429163299cfd5deb68a3d19b8d0d00b18231134fd15fdf06977d4c7c95f5d",
+    "z": "d8947bbf2f19926b32f335ad141e28de69e3d97a4791e9ed8f93809123aec439"
+  },
+  "trackerSignature": {
+    "a": "02e92b2fed9e601ec6ea2f5e35272fdf1d1dde8ef1736896fe2cee587fd3bcd90a",
+    "z": "1c05e1980ea76867beda360c99d0c1c5d1eada7ae60b55fa820cd35b9c5a3bec"
+  },
+  "message": "6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a40000000005f5e1000000019e2b0a778b",
+  "messageFormat": "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes)",
+  "noteKey": "6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4"
+}

@@ -46,7 +46,6 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get specific note between two parties
 - `POST /redeem` - Initiate redemption process
 - `POST /redeem/complete` - Complete redemption process
-- `GET /proof` - Get proof for a specific note
 - `POST /tracker/signature` - Request tracker signature for redemption (real Schnorr signature generation)
 - `POST /redemption/prepare` - Prepare redemption with all necessary data (real AVL proofs + tracker signature)
 - `GET /proof/redemption` - Get redemption-specific proof with tracker state digest
@@ -176,12 +175,13 @@ The `/proof/redemption` endpoint returns responses with the following structure:
 The server now implements real cryptographic functionality using the Ergo node's Schnorr signing API instead of mock implementations:
 
 #### Schnorr Signature Generation
-- **Remote Signatures**: All signature endpoints now use the Ergo node's `/utils/schnorrSign` API for actual Schnorr signature generation
+- **Local Signing (Primary)**: If `tracker_secret_key` is configured in server config, signatures are generated locally using the tracker's secret key
+- **Remote Fallback**: If no secret key is configured, falls back to Ergo node's `/utils/schnorrSign` API
 - **Format**: 65-byte signatures (33 bytes for 'a' component + 32 bytes for 'z' component)
 - **Structure**: Properly formatted with compressed public key prefix (0x02 or 0x03) followed by the signature components
-- **Security**: Private keys remain secured within the Ergo node, with the tracker only requesting signatures for specific messages
-- **Authentication**: Requests to the signing API are authenticated using the tracker API key
-- **Implementation**: Tracker signature endpoints (`/tracker/signature` and `/redemption/prepare`) now make HTTP requests to the Ergo node API instead of performing local signing
+- **Security**: Supports both local signing (secret key in config) and remote signing (private keys secured within Ergo node)
+- **Authentication**: Remote requests to the signing API are authenticated using the tracker API key
+- **Implementation**: Tracker signature endpoints (`/tracker/signature` and `/redemption/prepare`) try local signing first, then fall back to Ergo node API
 - **Message Format**: 
   - Normal and emergency: `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
   - Emergency redemption (after 3 days): same 48-byte message format, tracker signature becomes optional
@@ -223,7 +223,7 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
       - `R5`: Initial AVL tree (empty tree for new reserve)
       - `R6`: Tracker NFT ID (bytes) - identifies which tracker server this reserve is linked to
   - `fee`: Transaction fee amount from configuration
-  - `change_address`: "default" placeholder (filled by wallet)
+  - `change_address`: Change address derived from tracker public key configuration (fallback to owner pubkey if unavailable)
 
 ### Debt Transfer Support
 
@@ -302,6 +302,20 @@ The server implements comprehensive error handling:
 - Channel-based communication to ensure thread safety
 - Remote signature generation to protect private keys
 - AVL tree proof verification to prevent fraud
+
+## Blockchain Height Caching
+
+The server implements intelligent blockchain height caching to reduce Ergo node API calls:
+
+- **Cache Storage**: Blockchain height and fetch timestamp stored in `scanner_metadata` database partition
+- **TTL**: 10 minutes (600,000 milliseconds)
+- **Cache Key**: `"blockchain_height"`
+- **Cache Value**: 16 bytes (8 bytes height + 8 bytes timestamp, both big-endian u64)
+- **Behavior**: 
+  - Returns cached height if < 10 minutes old
+  - Fetches from Ergo node `/info` endpoint if cache expired or missing
+  - Stores new height with current timestamp after fetching
+  - Implemented in both `ergo_scanner.rs` and `tracker_scanner.rs`
 
 ## Current State Summary
 

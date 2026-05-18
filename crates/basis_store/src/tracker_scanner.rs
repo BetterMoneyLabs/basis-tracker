@@ -2,6 +2,7 @@
 //! This module provides blockchain integration using /scan API with containsAsset rule
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -641,8 +642,35 @@ impl TrackerServerState {
         inner.last_scanned_height
     }
 
-    /// Get current blockchain height
+    /// Get current blockchain height from cache or Ergo node
+    /// Uses cached value if less than 10 minutes old, otherwise fetches from node
     pub async fn get_current_height(&self) -> Result<u64, TrackerScannerError> {
+        const CACHE_TTL_MS: u64 = 600_000; // 10 minutes in milliseconds
+
+        // Check if we have a cached height
+        match self.metadata_storage.get_blockchain_height() {
+            Ok(Some((cached_height, cached_timestamp))) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+
+                if now.saturating_sub(cached_timestamp) < CACHE_TTL_MS {
+                    debug!("Using cached blockchain height: {}", cached_height);
+                    return Ok(cached_height);
+                }
+
+                debug!("Cached blockchain height expired, fetching from node");
+            }
+            Ok(None) => {
+                debug!("No cached blockchain height found, fetching from node");
+            }
+            Err(e) => {
+                warn!("Failed to read cached blockchain height: {:?}", e);
+            }
+        }
+
+        // Fetch from node
         let url = format!("{}/info", self.config.node_url);
 
         let response = self
@@ -666,6 +694,16 @@ impl TrackerServerState {
         let height = info["fullHeight"]
             .as_u64()
             .ok_or_else(|| TrackerScannerError::JsonError("Missing fullHeight in response".to_string()))?;
+
+        // Store in cache with current timestamp
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        if let Err(e) = self.metadata_storage.store_blockchain_height(height, now) {
+            warn!("Failed to cache blockchain height: {:?}", e);
+        }
 
         Ok(height)
     }

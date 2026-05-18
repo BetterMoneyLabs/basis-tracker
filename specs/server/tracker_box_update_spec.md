@@ -264,7 +264,7 @@ The redemption transaction builder now properly implements the transaction build
 pub struct RedemptionTransactionBuilder;
 
 impl RedemptionTransactionBuilder {
-    /// Build unsigned Ergo redemption transaction with complete validation
+    /// Build unsigned Ergo redemption transaction data with complete validation
     pub fn build_unsigned_redemption_transaction(
         reserve_box_id: &str,
         tracker_box_id: &str,
@@ -274,24 +274,21 @@ impl RedemptionTransactionBuilder {
         avl_proof: &[u8],
         issuer_sig: &[u8],
         tracker_sig: &[u8],
+        issuer_pubkey: &crate::PubKey,
         context: &TxContext,
+        reserve_lookup_proof: Option<Vec<u8>>,
+        tracker_lookup_proof: Vec<u8>,
     ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
         // Implementation that creates proper Ergo transaction structure
         // with full validation, inputs, outputs, data inputs, and context extensions
         // including R6 register preservation with tracker NFT ID
     }
 
-    /// Build actual Ergo redemption transaction with all required components
+    /// Build actual Ergo redemption transaction JSON from transaction data
     pub fn build_redemption_transaction(
-        reserve_box_id: &str,
-        tracker_box_id: &str,
-        tracker_nft_id: &str,
-        recipient_address: &str,
-        redemption_amount: u64,
-        fee: u64,
-        current_height: u32,
+        tx_data: &RedemptionTransactionData,
     ) -> Result<Vec<u8>, TransactionBuilderError> {
-        // Implementation that creates proper Ergo transaction structure
+        // Implementation that creates proper Ergo transaction JSON
         // with inputs, outputs, data inputs, and context extensions
         // including R6 register preservation with tracker NFT ID
     }

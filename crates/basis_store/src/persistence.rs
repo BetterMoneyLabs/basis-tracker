@@ -88,6 +88,41 @@ impl ScannerMetadataStorage {
             .map_err(|e| NoteError::StorageError(format!("Failed to remove scan ID: {}", e)))?;
         Ok(())
     }
+
+    /// Store blockchain height with fetch timestamp
+    /// Key: "blockchain_height", Value: 8 bytes height + 8 bytes timestamp (u64 BE)
+    pub fn store_blockchain_height(&self, height: u64, timestamp: u64) -> Result<(), NoteError> {
+        let mut value = Vec::with_capacity(16);
+        value.extend_from_slice(&height.to_be_bytes());
+        value.extend_from_slice(&timestamp.to_be_bytes());
+        self.partition
+            .insert("blockchain_height", &value)
+            .map_err(|e| NoteError::StorageError(format!("Failed to store blockchain height: {}", e)))?;
+        Ok(())
+    }
+
+    /// Retrieve cached blockchain height and fetch timestamp
+    /// Returns Some((height, timestamp)) if present, None otherwise
+    pub fn get_blockchain_height(&self) -> Result<Option<(u64, u64)>, NoteError> {
+        match self.partition.get("blockchain_height") {
+            Ok(Some(value_bytes)) => {
+                if value_bytes.len() == 16 {
+                    let height = u64::from_be_bytes(value_bytes[0..8].try_into().unwrap());
+                    let timestamp = u64::from_be_bytes(value_bytes[8..16].try_into().unwrap());
+                    Ok(Some((height, timestamp)))
+                } else {
+                    Err(NoteError::StorageError(
+                        "Invalid blockchain height format".to_string(),
+                    ))
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get blockchain height: {}",
+                e
+            ))),
+        }
+    }
 }
 
 impl NoteStorage {

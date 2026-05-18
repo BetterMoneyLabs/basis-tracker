@@ -51,40 +51,26 @@ let tracker_lookup_proof = vec![0u8; 64]; // Placeholder
 
 ---
 
-### 2. Redemption Manager - Placeholder Blockchain Data 🔴
+### 2. Redemption Manager - Placeholder Blockchain Data ✅ FIXED
 
-**File:** `crates/basis_store/src/redemption.rs`  
-**Lines:** 351-364
+**File:** `crates/basis_store/src/redemption.rs`, `crates/basis_server/src/api.rs`  
+**Status:** Resolved in May 2026
 
-**Issue:**
-```rust
-let transaction_data = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
-    &request.reserve_box_id,
-    "tracker_box_placeholder", // TODO: Get actual tracker box ID from blockchain
-    "tracker_nft_placeholder", // TODO: Get actual tracker NFT ID from blockchain
-    note,
-    &request.recipient_address,
-    &proof.avl_proof,
-    &[0u8; 65], // Placeholder issuer signature
-    &[0u8; 65], // Placeholder tracker signature
-    &TxContext {
-        current_height: 1000, // TODO: Get actual current height from blockchain
-        fee: 1000000,
-        change_address: "change_address_placeholder".to_string(),
-        network_prefix: 0,
-    },
-```
+**Previous Issue:**
+Redemption was using hardcoded placeholder values:
+- `tracker_box_placeholder` for tracker box ID
+- `tracker_nft_placeholder` for tracker NFT ID  
+- `current_height: 1000` for blockchain height
+- `change_address_placeholder` for change address
 
-**Impact:** Redemption transactions will fail validation due to incorrect tracker box ID, NFT ID, and blockchain height.
+**Fix Applied:**
+1. ✅ API layer (`api.rs`) now fetches actual tracker box ID from `tracker_storage`
+2. ✅ Tracker NFT ID retrieved from server configuration
+3. ✅ Blockchain height fetched from Ergo node with 10-minute database caching
+4. ✅ Change address derived from tracker public key configuration
+5. ✅ All values passed via `RedemptionRequest` to transaction builder
 
-**Fix Required:**
-1. Fetch actual tracker box ID from blockchain scanner
-2. Retrieve tracker NFT ID from reserve box R6 register
-3. Get current blockchain height from Ergo node
-4. Generate actual issuer signature from wallet
-5. Use proper change address from configuration
-
-**Priority:** 🔴 CRITICAL - Blocks server-side redemption functionality
+**Priority:** ✅ RESOLVED
 
 ---
 
