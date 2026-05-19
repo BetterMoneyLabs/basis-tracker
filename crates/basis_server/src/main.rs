@@ -665,11 +665,17 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                     let owner_pubkey = match ergo_box.get_register("R4") {
                         Some(pubkey_hex) => {
                             // Parse hex-encoded public key from register
-                            hex::decode(pubkey_hex).unwrap_or_default()
+                            match hex::decode(pubkey_hex) {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    tracing::warn!("Invalid R4 register hex for box {}: {}", ergo_box.box_id, e);
+                                    continue; // Skip this box
+                                }
+                            }
                         }
                         None => {
-                            // Fallback to placeholder if register not found
-                            format!("owner_of_{}", &ergo_box.box_id[..16]).into_bytes()
+                            tracing::warn!("Box {} missing R4 register, skipping", ergo_box.box_id);
+                            continue; // Skip boxes without owner pubkey
                         }
                     };
 
@@ -681,13 +687,16 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                         }
                     };
 
-                    let reserve_info = basis_store::ExtendedReserveInfo::new(
+                    let mut reserve_info = basis_store::ExtendedReserveInfo::new(
                         ergo_box.box_id.as_bytes(),
                         &owner_pubkey,
                         ergo_box.value,
                         tracker_nft_bytes_option.as_deref(),
                         scanner.last_scanned_height().await,
                     );
+
+                    // Set contract address from configuration
+                    reserve_info.set_contract_address(config.basis_reserve_contract_p2s().to_string());
 
                     if let Err(e) = tracker.update_reserve(reserve_info) {
                         tracing::warn!(
@@ -754,13 +763,14 @@ async fn process_reserve_event(
                     return Err("Invalid owner public key format".into());
                 }
             };
-            let reserve_info = basis_store::ExtendedReserveInfo::new(
+            let mut reserve_info = basis_store::ExtendedReserveInfo::new(
                 box_id.as_bytes(),
                 &owner_pubkey_bytes,
                 collateral_amount,
                 tracker_nft_bytes_option.as_deref(),
                 height,
             );
+            reserve_info.set_contract_address(config.basis_reserve_contract_p2s().to_string());
             tracker.update_reserve(reserve_info)?;
 
             TrackerEvent {

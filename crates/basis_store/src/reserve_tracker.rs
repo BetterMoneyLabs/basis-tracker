@@ -223,7 +223,7 @@ impl ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount,
                 last_updated_height,
-                contract_address: "".to_string(), // Placeholder
+                contract_address: String::new(), // Must be set separately via set_contract_address()
                 tracker_nft_id: tracker_nft_id.map(|id| hex::encode(id)).unwrap_or_else(|| "".to_string()),
             },
             total_debt: 0,
@@ -234,6 +234,11 @@ impl ExtendedReserveInfo {
                 .unwrap()
                 .as_millis() as u64,
         }
+    }
+
+    /// Set the reserve contract P2S address
+    pub fn set_contract_address(&mut self, address: String) {
+        self.base_info.contract_address = address;
     }
 }
 
