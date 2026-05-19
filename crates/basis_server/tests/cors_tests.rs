@@ -177,6 +177,7 @@ use tower_http::cors::{Any, CorsLayer};
                 fee: 1000000,
                 change_address: None,
             },
+            acceptance: basis_server::acceptance::config::AcceptanceConfig::empty()
         });
 
         // Use a unique temporary directory for each test invocation using a counter
@@ -198,6 +199,7 @@ use tower_http::cors::{Any, CorsLayer};
                 basis_server::tracker_box_updater::SharedTrackerState::new()
             )),
             tracker_storage,
+            acceptance_predicate: None,
         };
 
         // Build the app with CORS enabled (same as main server)

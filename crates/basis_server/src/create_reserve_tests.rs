@@ -58,29 +58,22 @@ mod create_reserve_tests {
                 fee: 1000000,
                         change_address: None,
             },
+            acceptance: crate::acceptance::config::AcceptanceConfig::empty(),
         });
 
-        // Initialize tracker storage for testing
-        let tracker_storage_path = std::path::Path::new("data").join("tracker_boxes_test");
-        let tracker_storage = match basis_store::persistence::TrackerStorage::open(tracker_storage_path) {
-            Ok(storage) => storage,
-            Err(_) => {
-                // For testing, create an in-memory equivalent or use a temporary directory
-                let temp_path = std::env::temp_dir().join("tracker_boxes_test");
-                basis_store::persistence::TrackerStorage::open(temp_path).unwrap()
-            }
-        };
+        let reserve_tracker = Arc::new(Mutex::new(basis_store::ReserveTracker::new()));
 
         AppState {
             tx,
             event_store,
             ergo_scanner: Arc::new(Mutex::new(scanner)),
-            reserve_tracker: Arc::new(Mutex::new(basis_store::ReserveTracker::new())),
+            reserve_tracker,
             config: test_config,
-            shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(
-                crate::tracker_box_updater::SharedTrackerState::new()
-            )),
-            tracker_storage,
+            shared_tracker_state: Arc::new(tokio::sync::Mutex::new(crate::tracker_box_updater::SharedTrackerState::new())),
+            tracker_storage: basis_store::persistence::TrackerStorage::open("test_tracker").unwrap_or_else(|_| {
+                basis_store::persistence::TrackerStorage::open("test_tracker_fallback").unwrap()
+            }),
+            acceptance_predicate: None,
         }
     }
 

@@ -16,6 +16,8 @@ hex = "0.4"
 ergo-lib = { workspace = true }
 blake2 = "0.10"
 generic-array = "0.14"
+thiserror = { workspace = true }
+toml = "0.8"
 
 [dependencies.basis_store]
 path = "../basis_store"

@@ -50,3 +50,6 @@ demo/output/
 
 # Test output files
 test_output/
+
+# Test tracker storage (created during integration tests)
+test_tracker/

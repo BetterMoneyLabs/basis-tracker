@@ -1,5 +1,6 @@
 //! Configuration management for Basis Server
 
+use crate::acceptance::config::AcceptanceConfig;
 use basis_store::ergo_scanner::NodeConfig;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -16,6 +17,9 @@ pub struct AppConfig {
     pub ergo: ErgoConfig,
     /// Transaction configuration
     pub transaction: TransactionConfig,
+    /// Acceptance predicate configuration
+    #[serde(default)]
+    pub acceptance: AcceptanceConfig,
 }
 
 /// Server-specific configuration
@@ -84,6 +88,9 @@ impl AppConfig {
             .set_default("ergo.tracker_public_key", "")?
             // Tracker secret key (optional - for local signing)
             .set_default("ergo.tracker_secret_key", "")?
+            // Acceptance predicate configuration (optional)
+            .set_default("acceptance.default", "reject")?
+            .set_default("acceptance.predicates", Vec::<String>::new())?
             // Environment variables
             .add_source(config::Environment::with_prefix("BASIS"))
             // Configuration file
@@ -321,6 +328,7 @@ mod tests {
                 fee: 1000000,
                         change_address: None,
             },
+            acceptance: AcceptanceConfig::empty(),
         };
 
         // Test hex format

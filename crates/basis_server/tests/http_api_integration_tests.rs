@@ -174,6 +174,7 @@ mod http_api_tests {
                 fee: 1000000,
                 change_address: None,
             },
+            acceptance: basis_server::acceptance::config::AcceptanceConfig::empty()
         });
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -199,6 +200,7 @@ mod http_api_tests {
                 basis_server::tracker_box_updater::SharedTrackerState::new()
             )),
             tracker_storage,
+            acceptance_predicate: None,
         }
     }
 

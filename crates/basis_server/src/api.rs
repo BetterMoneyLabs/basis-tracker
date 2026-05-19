@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     models::{
-        ApiResponse, CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest,
+        ApiResponse, CheckAcceptanceRequest, CheckAcceptanceResponse,
+        CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest,
         KeyStatusResponse, ProofResponse, RedeemRequest, RedeemResponse,
         ReserveCreationResponse, ReservePaymentRequest, Asset,
         SerializableIouNote, TrackerEvent, TrackerSignatureRequest,
@@ -769,6 +770,91 @@ pub async fn get_all_notes(
             )
         }
     }
+}
+
+/// Check if a note would be accepted by the server's acceptance policy
+#[axum::debug_handler]
+pub async fn check_acceptance(
+    State(state): State<AppState>,
+    Json(payload): Json<CheckAcceptanceRequest>,
+) -> (StatusCode, Json<ApiResponse<CheckAcceptanceResponse>>) {
+    tracing::debug!("Checking acceptance for issuer: {}", payload.issuer_pubkey);
+
+    // Parse issuer public key
+    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be hex-encoded".to_string(),
+                )),
+            )
+        }
+    };
+
+    let issuer_pubkey: PubKey = match issuer_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes".to_string(),
+                )),
+            )
+        }
+    };
+
+        // Get the acceptance predicate from state
+        let result = if let Some(predicate) = &state.acceptance_predicate {
+            // Clone reserve tracker from mutex
+            let reserve_tracker = state.reserve_tracker.lock().await.clone();
+            
+            // Build context
+            let ctx = crate::acceptance::PredicateContext {
+                issuer_pubkey,
+                recipient_pubkey: [0u8; 33], // Server's own key - TODO: use actual server key
+                total_debt: payload.total_debt,
+                reserve_tracker: Some(reserve_tracker),
+            };
+
+        let acceptable = predicate.acceptable(&ctx);
+        let reason = if acceptable {
+            None
+        } else {
+            Some(format!("Note rejected by '{}' policy", predicate.name()))
+        };
+
+        CheckAcceptanceResponse {
+            acceptable,
+            reason,
+        }
+    } else {
+        // No predicate configured - use default from config
+        let acceptable = state.config.acceptance.default.acceptable();
+        let reason = if acceptable {
+            None
+        } else {
+            Some("No acceptance policy configured - rejecting by default".to_string())
+        };
+
+        CheckAcceptanceResponse {
+            acceptable,
+            reason,
+        }
+    };
+
+    tracing::info!(
+        "Acceptance check for {}: acceptable={}, total_debt={}",
+        payload.issuer_pubkey,
+        result.acceptable,
+        payload.total_debt
+    );
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(result)),
+    )
 }
 
 // Get paginated tracker events from event store

@@ -53,6 +53,7 @@ async fn main() {
                         fee: 1000000, // 0.001 ERG
                         change_address: None, // Will be derived from tracker public key
                     },
+                    acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
                 }
             })
         }
@@ -527,6 +528,22 @@ async fn main() {
         }
     };
 
+    // Build acceptance predicate from configuration
+    let acceptance_predicate = match basis_server::acceptance::builder::build_predicate_tree(config.acceptance.clone()) {
+        Ok(Some(pred)) => {
+            tracing::info!("Acceptance predicate loaded: '{}'", pred.name());
+            Some(std::sync::Arc::from(pred))
+        }
+        Ok(None) => {
+            tracing::info!("No acceptance predicates configured");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Failed to build acceptance predicate: {}", e);
+            None
+        }
+    };
+
     let app_state = AppState {
         tx,
         event_store,
@@ -535,6 +552,7 @@ async fn main() {
         config: std::sync::Arc::new(config.clone()),
         shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(shared_tracker_state_for_updater)),
         tracker_storage,
+        acceptance_predicate,
     };
 
     // Build our application with routes - FIXED ROUTE ORDER
@@ -545,6 +563,7 @@ async fn main() {
         .route("/events", get(get_events))
         .route("/events/paginated", get(get_events_paginated))
         .route("/notes", post(create_note).options(handle_options))
+        .route("/acceptance/check", post(check_acceptance).options(handle_options))
         .route("/redeem", post(initiate_redemption).options(handle_options))
         .route("/redeem/complete", post(complete_redemption).options(handle_options))
         .route("/proof/redemption", get(get_redemption_proof))

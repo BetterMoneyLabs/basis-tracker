@@ -1,5 +1,6 @@
 //! Basis Server library
 
+pub mod acceptance;
 pub mod api;
 pub mod config;
 pub mod models;
@@ -13,6 +14,7 @@ mod create_reserve_tests;
 use tokio::sync::Mutex;
 
 // Re-export main types for external use
+pub use acceptance::*;
 pub use api::*;
 pub use config::*;
 pub use models::*;
@@ -38,6 +40,7 @@ pub struct AppState {
     pub config: std::sync::Arc<AppConfig>,
     pub shared_tracker_state: std::sync::Arc<tokio::sync::Mutex<tracker_box_updater::SharedTrackerState>>,
     pub tracker_storage: basis_store::persistence::TrackerStorage,
+    pub acceptance_predicate: Option<std::sync::Arc<dyn acceptance::NotePredicate>>,
     // Note: tracker_scanner is not stored here due to Send trait bounds
     // Tracker box ID is fetched from tracker_storage directly
 }

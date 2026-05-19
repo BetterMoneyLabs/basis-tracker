@@ -344,6 +344,24 @@ pub struct TrackerBoxIdResponse {
     pub height: u64,
 }
 
+// Request for checking note acceptance
+#[derive(Debug, Deserialize)]
+pub struct CheckAcceptanceRequest {
+    /// Hex-encoded issuer public key (33 bytes)
+    pub issuer_pubkey: String,
+    /// Total cumulative debt amount
+    pub total_debt: u64,
+}
+
+// Response for checking note acceptance
+#[derive(Debug, Serialize)]
+pub struct CheckAcceptanceResponse {
+    /// Whether the note is acceptable
+    pub acceptable: bool,
+    /// Optional reason for rejection
+    pub reason: Option<String>,
+}
+
 // Success response helper
 pub fn success_response<T>(data: T) -> ApiResponse<T> {
     ApiResponse {
