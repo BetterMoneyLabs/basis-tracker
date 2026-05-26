@@ -321,3 +321,109 @@ Message breakdown:
 - Proper validation of all inputs
 - Clear error messages for invalid signatures
 - Secure handling of cryptographic failures
+
+## Cross-Validation Test Vectors
+
+The following test vectors were generated using the Scala reference implementation
+(`scala/scala-utils/SigUtils.scala`) with the `z.bitLength <= 255` constraint.
+They are hardcoded in the Rust test suite and verify cross-compatibility between
+Scala and Rust implementations.
+
+### TV001 - Standard valid signature
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `1000000000`
+- **Timestamp**: `1743379200000`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800`
+- **Signature**: `0389ec7df5ff00fcdf83f41ad41ef1813cfd64a87b6c7f219bcd1ecfae9b82a1041af95c9171d4ad63e29513701cdeb5cc9f45798276947c8a8b361dae0f94ab93`
+- **Expected verify**: `true`
+
+### TV002 - All-zero signature should fail
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `1000000000`
+- **Timestamp**: `1743379200000`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800`
+- **Signature**: `0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000`
+- **Expected verify**: `false`
+
+### TV003 - Valid tracker signature
+- **Issuer pubkey**: `037c3f0429768437a942f1818ef1616c609b7a6d8a8dd245e179c8c0838e7d169d`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `500000000`
+- **Timestamp**: `1743379201000`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000001dcd650000000195e97f7be8`
+- **Signature**: `024900b6f2a6c83c9158420e7e15bc211e761f5157fe84f2a25499340e731c420624c6b3f14a59b811d50ab0492e53784b541a53688452898924142a313cb64a37`
+- **Expected verify**: `true`
+
+### TV004 - Wrong signer signature should fail
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `1000000000`
+- **Timestamp**: `1743379200000`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800`
+- **Signature**: `03896bab104009190272b8f99808d3d04654f3a882c04aa4119fdffe352e7d496e31f2cc1a52fb60cd3ea7eb5919929584b83f4e9fd7122ea28c9a5ff20090e782`
+- **Expected verify**: `false`
+
+### TV005 - Corrupted signature should fail
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `1000000000`
+- **Timestamp**: `1743379200000`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800`
+- **Signature**: `0224f5a465dc99fe66177dbb503363bcd12a679b260783adc2305dfa996feb5e9564afadb695cf16d8ff1500f557bc0fff7cfb28e418bac449748a09a5ffb7dce3`
+- **Expected verify**: `false`
+
+### TV006 - Wrong amount should fail
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `1000000000`
+- **Timestamp**: `1743379200000`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0100000195e97f7800`
+- **Signature**: `028fd39a0481ab31003d979a8276655c020530038ee18046a441296c4f4b8bbebf38fdbd14ac7fedbfef993d02ef3941dd9fb1f3f287e7bf56a93bf0dd6af67456`
+- **Expected verify**: `false`
+
+### TV007 - Wrong timestamp should fail
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `1000000000`
+- **Timestamp**: `1743379200000`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7801`
+- **Signature**: `03a3d6e4435fb29955452a59d568395b4d46423adbdd46de707c21468dcad159aa6a6a09dff6065b03a54069037c3e37a71186bcc8df20728424d214373c708c12`
+- **Expected verify**: `false`
+
+### TV008 - Wrong recipient should fail
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `1000000000`
+- **Timestamp**: `1743379200000`
+- **Message**: `55df4d11e0afb42e8137dab457fd76f46a00b6abb753c85cdef64493263c9900000000003b9aca0000000195e97f7800`
+- **Signature**: `023c0b5e1235b762dc62f27938ada133422ecd4e94ebdfc875cf8af05c30f67a7b751806f0a0d4d92a65be6e5c84de819a45a31720453f8fdb348e2c9ed857226c`
+- **Expected verify**: `false`
+
+### TV009 - Maximum u64 values
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `18446744073709551615`
+- **Timestamp**: `18446744073709551615`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220bffffffffffffffffffffffffffffffff`
+- **Signature**: `03ac2d20f2aceedc94fd621ce5fa0f42926da94d6b673296e24c4a63c7f5178c6f7645dd84cd50f6c5bed74a8aeaacceba442a5008ca0eeb17c8008ae7d3c58dec`
+- **Expected verify**: `true`
+
+### TV010 - Zero amount and timestamp
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `0`
+- **Timestamp**: `0`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b00000000000000000000000000000000`
+- **Signature**: `022d591f919b441f3a3fa671560ef3e7dffa9cf2fb51ed02a7e64e9da203be38905096f698e4c8e49bf4bf03d1f38e4c4554e22df4d334167c0cc59d6747a2501e`
+- **Expected verify**: `true`
+
+### TV011 - Emergency redemption valid reserve signature
+- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
+- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Amount**: `500000000`
+- **Timestamp**: `1743379202000`
+- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000001dcd650000000195e97f7fd0`
+- **Signature**: `03517ac544f2d87d1ae0731b9c992d7359bfb09b41d18337b9c24dd59b6919b3f26d73531d00d7ba3ae8cf36168a9b9f652eed6cb6a5c7f68c8e9d8fd36641e5a5`
+- **Expected verify**: `true`

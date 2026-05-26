@@ -98,6 +98,12 @@
 - **Security**: Strong Fiat-Shamir transform with proper challenge computation
 - **Module structure**: Schnorr operations extracted to dedicated `schnorr.rs` module
 
+### Scala Compatibility
+- **bitLength constraint**: Both Scala and Rust implementations enforce `z.bitLength <= 255`
+- **Retry logic**: Signatures with `z.bitLength > 255` are automatically regenerated with a new nonce (no retry limit)
+- **Cross-validation**: All signatures verified against hardcoded Scala test vectors (see specs/SCHNORR_SIGNATURE_SPEC.md)
+- **Ergo node compatibility**: Basis server signatures are compatible with ErgoScript contract verification
+
 ## Ergo Blockchain Scanner
 
 ### Scanner Implementation

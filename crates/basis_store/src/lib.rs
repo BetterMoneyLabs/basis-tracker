@@ -14,6 +14,7 @@ pub mod redemption_blockchain_tests;
 pub mod redemption_simple_tests;
 pub mod reserve_tracker;
 pub mod schnorr;
+pub mod schnorr_test_vectors;
 pub mod schnorr_tests;
 pub mod transaction_builder;
 #[cfg(test)]
