@@ -19,9 +19,6 @@ api_key = ""
 timeout_secs = 30
 ```
 
-### 2. `config/ergo_nodes.toml`
-- Already includes `213.239.193.208:9053` as the first mainnet node
-
 ## Testing Instructions
 
 ### Start the Server

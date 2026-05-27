@@ -9,9 +9,33 @@ This tutorial walks through the complete Basis protocol using real keys from `se
 **Prerequisites:**
 - Ergo node access (public node or local)
 - Tracker server running
-- `basis_cli` compiled
+- `basis_cli` compiled (see below)
 - Alice has ERG for reserve collateral and fees
 - Bob has an Ergo wallet for receiving payments
+
+**Building the CLI:**
+
+```bash
+# Build debug version
+cargo build -p basis_cli
+
+# Or build release version (recommended for production)
+cargo build --release -p basis_cli
+```
+
+**Using the CLI:**
+
+The binary is located at `target/debug/basis_cli` (or `target/release/basis_cli`).
+Run it from the project root directory:
+
+```bash
+# From project root
+./target/debug/basis_cli --help
+
+# Or add to your PATH
+export PATH="$PATH:/home/kushti/chaincash/basis-tracker/target/debug"
+./target/debug/basis_cli --help
+```
 
 **Key Participants:**
 | Role | Name | Address | Secret Key |
@@ -31,25 +55,27 @@ Copy and run these commands in order:
 ```bash
 # 1. Check environment
 curl http://localhost:3048/health
-curl http://159.89.116.15:11088/info | jq '.name'
+curl http://localhost:9053/info | jq '.name'
 
 # 2. Deploy reserve (Alice)
-basis_cli reserve create \
+# Note: You need a Reserve NFT (not the tracker NFT).
+# Create one via Ergo node or use an existing token ID.
+./target/debug/basis_cli reserve create \
   --owner 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
   --amount 100000000 \
-  --nft-id <TRACKER_NFT_ID>
+  --nft-id <YOUR_RESERVE_NFT_ID>
 # Submit returned payload to Ergo node, wait for confirmation
 
 # 3. Create IOU note (Alice → Bob)
-basis_cli note create --demo --amount 50000000 --output alice_to_bob_note.json
+./target/debug/basis_cli note create --demo --amount 50000000 --output alice_to_bob_note.json
 
 # 4. Verify note
-basis_cli note get \
+./target/debug/basis_cli note get \
   --issuer 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
   --recipient 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea
 
 # 5. Generate redemption transaction (Bob)
-basis_cli transaction generate-redemption \
+./target/debug/basis_cli transaction generate-redemption \
   --issuer-pubkey 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
   --recipient-pubkey 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea \
   --amount 25000000 \
@@ -68,7 +94,7 @@ curl -X POST http://localhost:9053/wallet/transaction/send \
   -d @signed_tx.json
 
 # 8. Verify
-basis_cli reserve status \
+./target/debug/basis_cli reserve status \
   --issuer 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83
 ```
 
@@ -92,14 +118,14 @@ Expected response:
 
 ```bash
 # Check node connectivity (using public testnet node)
-curl http://159.89.116.15:11088/info | jq '.name'
+curl http://localhost:9053/info | jq '.name'
 ```
 
 ### 1.3 Verify Alice's Keys
 
 ```bash
-# Show Alice's public key (from participants.csv)
-basis_cli key info --name alice
+# Show Alice's public key from participants.csv
+grep "^alice," secrets/participants.csv
 ```
 
 **Alice's public key:** `0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83`
@@ -114,14 +140,36 @@ Alice must create an on-chain reserve with collateral before issuing IOU notes.
 
 ```bash
 # Deploy reserve with 0.1 ERG (100M nanoERG) collateral
-# Using tracker NFT from configuration
-basis_cli reserve create \
+# IMPORTANT: --nft-id is the RESERVE NFT (not tracker NFT)
+# You must create or obtain a reserve NFT first (see below)
+./target/debug/basis_cli reserve create \
   --owner 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
   --amount 100000000 \
-  --nft-id <TRACKER_NFT_ID>
+  --nft-id <YOUR_RESERVE_NFT_ID>
 ```
 
-**Note:** The tracker NFT ID is configured on the server. Check server logs or ask the tracker operator.
+**Creating a Reserve NFT:**
+
+You need an NFT to identify your reserve. Create one using the Ergo node:
+
+```bash
+# Create a new NFT (replace with your address)
+curl -X POST http://localhost:9053/wallet/transaction/send \
+  -H "api_key: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requests": [{
+      "address": "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ",
+      "value": 1000000,
+      "assets": [{
+        "tokenId": "<new-token-id>",
+        "amount": 1
+      }]
+    }]
+  }'
+```
+
+**Note:** The tracker NFT ID is configured on the server and goes into R6 register automatically. You only need to provide the reserve NFT ID here.
 
 **Example output:**
 ```
@@ -170,7 +218,7 @@ curl -X POST http://localhost:9053/wallet/transaction/send \
 
 ```bash
 # Check reserve status
-basis_cli reserve status \
+./target/debug/basis_cli reserve status \
   --issuer 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83
 ```
 
@@ -194,7 +242,7 @@ Alice creates an IOU note for Bob using demo mode (uses keys from `participants.
 
 ```bash
 # Create IOU note for 0.05 ERG (50M nanoERG)
-basis_cli note create \
+./target/debug/basis_cli note create \
   --demo \
   --amount 50000000 \
   --output alice_to_bob_note.json
@@ -226,7 +274,7 @@ basis_cli note create \
 ```bash
 # The note is automatically sent to the tracker server during creation
 # Verify it was accepted:
-basis_cli note get \
+./target/debug/basis_cli note get \
   --issuer 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
   --recipient 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea
 ```
@@ -245,7 +293,7 @@ curl "http://localhost:3048/notes?issuer=0377709166937fcdc08bf7e841b31684e2377f4
 ### 4.2 Verify Reserve Collateralization
 
 ```bash
-basis_cli reserve collateralization \
+./target/debug/basis_cli reserve collateralization \
   --issuer 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83
 ```
 
@@ -272,7 +320,7 @@ curl "http://localhost:3048/proof/redemption?issuer_pubkey=0377709166937fcdc08bf
 Bob generates an unsigned redemption transaction using the CLI:
 
 ```bash
-basis_cli transaction generate-redemption \
+./target/debug/basis_cli transaction generate-redemption \
   --issuer-pubkey 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
   --recipient-pubkey 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea \
   --amount 25000000 \
@@ -399,7 +447,7 @@ curl -X POST http://localhost:9053/wallet/transaction/send \
 If Bob has configured his Ergo node in the CLI:
 
 ```bash
-basis_cli transaction sign \
+./target/debug/basis_cli transaction sign \
   --input redemption_tx.json \
   --node-url http://localhost:9053 \
   --api-key bob-api-key
@@ -420,7 +468,7 @@ curl http://localhost:9053/wallet/balances \
 ### 7.2 Check Reserve Status
 
 ```bash
-basis_cli reserve status \
+./target/debug/basis_cli reserve status \
   --issuer 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83
 ```
 
@@ -437,7 +485,7 @@ Reserve Status for 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6
 ### 7.3 Verify Note Updated
 
 ```bash
-basis_cli note get \
+./target/debug/basis_cli note get \
   --issuer 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
   --recipient 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea
 ```
@@ -523,7 +571,7 @@ curl http://localhost:9053/transactions/pool | grep <tx_id>
 curl http://localhost:3048/health
 
 # Re-submit note
-basis_cli note create --demo --amount 50000000
+./target/debug/basis_cli note create --demo --amount 50000000
 ```
 
 ### "Insufficient collateral"
@@ -533,7 +581,7 @@ basis_cli note create --demo --amount 50000000
 **Solution:**
 ```bash
 # Top up reserve
-basis_cli reserve topup \
+./target/debug/basis_cli reserve topup \
   --amount 50000000 \
   --issuer 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83
 ```
@@ -580,7 +628,7 @@ If you see errors about context extension variables:
 If tracker becomes unavailable, emergency redemption is possible after 3 days:
 
 ```bash
-basis_cli transaction generate-redemption \
+./target/debug/basis_cli transaction generate-redemption \
   --issuer-pubkey <ALICE_PUBKEY> \
   --recipient-pubkey <BOB_PUBKEY> \
   --amount <AMOUNT> \
@@ -599,10 +647,10 @@ Bob can redeem partial amounts multiple times:
 
 ```bash
 # First redemption: 25M nanoERG
-basis_cli transaction generate-redemption --amount 25000000 ...
+./target/debug/basis_cli transaction generate-redemption --amount 25000000 ...
 
 # Second redemption: remaining 25M nanoERG
-basis_cli transaction generate-redemption --amount 25000000 ...
+./target/debug/basis_cli transaction generate-redemption --amount 25000000 ...
 ```
 
 Each redemption updates the reserve's AVL tree to track cumulative redeemed amounts.

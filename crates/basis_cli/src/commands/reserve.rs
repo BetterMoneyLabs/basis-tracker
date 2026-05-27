@@ -7,7 +7,7 @@ use clap::Subcommand;
 pub enum ReserveCommands {
     /// Create a new reserve
     Create {
-        /// NFT ID for the tracker (hex-encoded)
+        /// Reserve NFT ID (hex-encoded, 64 chars) - identifies this reserve instance
         #[arg(long)]
         nft_id: String,
 

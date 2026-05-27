@@ -188,7 +188,7 @@ This is a minimal utility that runs `basis_store::tests::run_all_tests()` and ex
 | File | Purpose |
 |------|---------|
 | `~/.basis/cli.toml` | CLI account storage (TOML format with private keys) |
-| `config/ergo_nodes.toml` | Ergo node configurations |
+| `config/basis.toml` | Server configuration (Ergo node, tracker settings) |
 | `server.pid` | Runtime PID file for server management |
 | `server.log` | Server log output |
 

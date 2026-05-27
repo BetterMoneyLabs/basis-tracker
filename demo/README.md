@@ -104,10 +104,12 @@ cargo build -p basis_cli
 Alice creates an on-chain reserve with 0.1 ERG collateral:
 
 ```bash
-basis_cli reserve create \
+# IMPORTANT: --nft-id is the RESERVE NFT (not tracker NFT)
+# Create one first using Ergo node, then provide it here
+./target/debug/basis_cli reserve create \
   --owner 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
   --amount 100000000 \
-  --nft-id <TRACKER_NFT_ID>
+  --nft-id <YOUR_RESERVE_NFT_ID>
 ```
 
 ### Step 2: Create IOU Note
@@ -115,7 +117,7 @@ basis_cli reserve create \
 Alice issues a note to Bob for 0.05 ERG:
 
 ```bash
-basis_cli note create \
+./target/debug/basis_cli note create \
   --demo \
   --amount 50000000 \
   --output alice_to_bob_note.json
@@ -126,7 +128,7 @@ basis_cli note create \
 Bob creates an unsigned transaction to redeem 0.025 ERG:
 
 ```bash
-basis_cli transaction generate-redemption \
+./target/debug/basis_cli transaction generate-redemption \
   --issuer-pubkey 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
   --recipient-pubkey 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea \
   --amount 25000000 \

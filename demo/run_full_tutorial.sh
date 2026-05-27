@@ -19,7 +19,7 @@ DEFAULT_COLLATERAL=100000000  # 0.1 ERG in nanoERG
 DEFAULT_NOTE_AMOUNT=50000000  # 0.05 ERG in nanoERG
 DEFAULT_REDEEM_AMOUNT=25000000 # 0.025 ERG in nanoERG
 SERVER_URL="http://localhost:3048"
-NODE_URL="http://159.89.116.15:11088"
+NODE_URL="http://localhost:9053"
 
 # Parse arguments
 STEP="all"
@@ -98,11 +98,16 @@ check_prerequisites() {
     log_info "Checking prerequisites..."
     
     # Check basis_cli exists
-    if ! command -v basis_cli &> /dev/null; then
-        log_error "basis_cli not found in PATH"
+    if [ -f "./target/debug/basis_cli" ]; then
+        BASIS_CLI="./target/debug/basis_cli"
+    elif [ -f "./target/release/basis_cli" ]; then
+        BASIS_CLI="./target/release/basis_cli"
+    else
+        log_error "basis_cli not found"
         log_info "Please build the CLI first: cargo build -p basis_cli"
         exit 1
     fi
+    log_info "Using CLI: $BASIS_CLI"
     
     # Check tracker server
     if ! curl -s "$SERVER_URL/health" > /dev/null 2>&1; then
@@ -153,7 +158,7 @@ step_reserve() {
     log_info "Creating reserve with NFT ID: $NFT_ID"
     
     # Generate reserve creation payload
-    basis_cli reserve create \
+    $BASIS_CLI reserve create \
         --owner "$ALICE_PUBKEY" \
         --amount "$DEFAULT_COLLATERAL" \
         --nft-id "$NFT_ID" \
@@ -169,7 +174,7 @@ step_reserve() {
         log_info "       -H 'api_key: YOUR_API_KEY' \\"
         log_info "       -d @reserve_payload.json"
         log_info "  3. Wait for confirmation"
-        log_info "  4. Verify: basis_cli reserve status --issuer $ALICE_PUBKEY"
+        log_info "  4. Verify: $BASIS_CLI reserve status --issuer $ALICE_PUBKEY"
     else
         log_error "Failed to generate reserve payload"
         cat reserve_payload.json
@@ -183,7 +188,7 @@ step_note() {
     log_info "Amount: $DEFAULT_NOTE_AMOUNT nanoERG"
     
     # Create note using demo mode (keys from participants.csv)
-    basis_cli note create \
+    $BASIS_CLI note create \
         --demo \
         --amount "$DEFAULT_NOTE_AMOUNT" \
         --output alice_to_bob_note.json
@@ -195,7 +200,7 @@ step_note() {
         
         log_info "Next steps:"
         log_info "  1. Note has been sent to tracker server"
-        log_info "  2. Verify: basis_cli note get --issuer $ALICE_PUBKEY --recipient $BOB_PUBKEY"
+        log_info "  2. Verify: $BASIS_CLI note get --issuer $ALICE_PUBKEY --recipient $BOB_PUBKEY"
     else
         log_error "Failed to create IOU note"
         return 1
@@ -209,7 +214,7 @@ step_redeem() {
     
     # Check if note exists
     log_info "Checking note status..."
-    basis_cli note get \
+    $BASIS_CLI note get \
         --issuer "$ALICE_PUBKEY" \
         --recipient "$BOB_PUBKEY" > /dev/null 2>&1
     
@@ -219,7 +224,7 @@ step_redeem() {
     fi
     
     # Generate redemption transaction
-    basis_cli transaction generate-redemption \
+    $BASIS_CLI transaction generate-redemption \
         --issuer-pubkey "$ALICE_PUBKEY" \
         --recipient-pubkey "$BOB_PUBKEY" \
         --amount "$DEFAULT_REDEEM_AMOUNT" \
@@ -238,7 +243,7 @@ step_redeem() {
         log_info "       -H 'api_key: BOB_API_KEY' \\"
         log_info "       -d @redemption_tx.json"
         log_info "  3. Broadcast signed transaction"
-        log_info "  4. Verify: basis_cli reserve status --issuer $ALICE_PUBKEY"
+        log_info "  4. Verify: $BASIS_CLI reserve status --issuer $ALICE_PUBKEY"
     else
         log_error "Failed to generate redemption transaction"
         return 1

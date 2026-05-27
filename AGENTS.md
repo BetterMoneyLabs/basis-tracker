@@ -160,7 +160,7 @@ println!("Current blockchain height: {}", height);
 - **Local**: `http://localhost:9053` (development)
 
 ### Configuration
-- Node configurations stored in `config/ergo_nodes.toml`
+- Node configuration stored in `config/basis.toml` under `[ergo.node]`
 - Supports multiple networks (mainnet, testnet, local)
 - Configurable timeouts and contract templates
 - API key support for authenticated nodes
