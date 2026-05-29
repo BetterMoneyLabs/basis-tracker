@@ -63,6 +63,11 @@ pub enum TrackerCommand {
         response_tx:
             tokio::sync::oneshot::Sender<Result<Vec<basis_store::IouNote>, basis_store::NoteError>>,
     },
+    GetNotesByRecipientWithIssuer {
+        recipient_pubkey: basis_store::PubKey,
+        response_tx:
+            tokio::sync::oneshot::Sender<Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>>,
+    },
     GetNoteByIssuerAndRecipient {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,

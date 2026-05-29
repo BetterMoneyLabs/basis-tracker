@@ -274,6 +274,13 @@ async fn main() {
                     let result = redemption_manager.tracker.get_recipient_notes(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
+                TrackerCommand::GetNotesByRecipientWithIssuer {
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.get_recipient_notes_with_issuer(&recipient_pubkey);
+                    let _ = response_tx.send(result);
+                }
                 TrackerCommand::GetNoteByIssuerAndRecipient {
                     issuer_pubkey,
                     recipient_pubkey,

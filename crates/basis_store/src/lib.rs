@@ -761,6 +761,14 @@ impl TrackerStateManager {
         self.storage.get_recipient_notes(recipient_pubkey)
     }
 
+    /// Get all notes for a specific recipient with issuer information
+    pub fn get_recipient_notes_with_issuer(
+        &self,
+        recipient_pubkey: &PubKey,
+    ) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
+        self.storage.get_recipient_notes_with_issuer(recipient_pubkey)
+    }
+
     /// Get all notes in the tracker
     pub fn get_all_notes(&self) -> Result<Vec<IouNote>, NoteError> {
         self.storage.get_all_notes()

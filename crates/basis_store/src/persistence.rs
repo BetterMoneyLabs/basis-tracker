@@ -355,6 +355,38 @@ impl NoteStorage {
         Ok(notes)
     }
 
+    fn get_notes_by_keys_with_issuer(
+        &self, keys: &[NoteKey]) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
+        let mut notes = Vec::new();
+        for key in keys {
+            let key_bytes = key.to_bytes();
+            match self.notes_partition.get(&key_bytes) {
+                Ok(Some(value_bytes)) => {
+                    if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+                        continue; // Skip invalid entries
+                    }
+                    let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
+                    let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+                    let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+                    let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
+                    let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
+                    let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+
+                    notes.push((issuer_pubkey, IouNote {
+                        recipient_pubkey,
+                        amount_collected,
+                        amount_redeemed,
+                        timestamp,
+                        signature,
+                    }));
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        }
+        Ok(notes)
+    }
+
     /// Get all notes for a specific issuer (uses issuer index for O(1) lookup)
     pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
         tracing::debug!("Looking for notes from issuer using index: {:?}", issuer_pubkey);
@@ -390,6 +422,31 @@ impl NoteStorage {
                 let keys = Self::deserialize_note_keys(&bytes)?;
                 tracing::debug!("Found {} note keys in recipient index", keys.len());
                 self.get_notes_by_keys(&keys)
+            }
+            Ok(None) => {
+                tracing::debug!("No notes found in recipient index");
+                Ok(Vec::new())
+            }
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to read recipient index: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Get all notes for a specific recipient with issuer information
+    pub fn get_recipient_notes_with_issuer(
+        &self,
+        recipient_pubkey: &PubKey,
+    ) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
+        tracing::debug!("Looking for notes for recipient with issuer using index: {:?}", recipient_pubkey);
+
+        // Use the recipient index for efficient lookup
+        match self.recipient_index.get(recipient_pubkey) {
+            Ok(Some(bytes)) => {
+                let keys = Self::deserialize_note_keys(&bytes)?;
+                tracing::debug!("Found {} note keys in recipient index", keys.len());
+                self.get_notes_by_keys_with_issuer(&keys)
             }
             Ok(None) => {
                 tracing::debug!("No notes found in recipient index");

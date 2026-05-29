@@ -81,6 +81,10 @@ fn print_banner() {
     );
     println!();
     println!(
+        "{}  Free Banking For Everyone{}",
+        RED, RESET
+    );
+    println!(
         "{}  Interactive Terminal Wallet for Basis Tracker{}",
         GRAY, RESET
     );
@@ -728,13 +732,16 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
                     })
                     .collect();
             }
-            Err(_) => {}
+            Err(e) => {
+                println!("{}  Error loading notes: {}{}", RED, e, RESET);
+            }
         }
     }
 
     if app.received_notes.is_empty() {
-        println!("{}  No notes received.{}\n", GRAY, RESET);
-        println!("  {}[b]{} Back to Notes\n", YELLOW, RESET);
+        println!("{}  No notes received.{}", GRAY, RESET);
+        println!("  {}Tip:{} Create a note from another account first.\n", YELLOW, RESET);
+        println!("  Press Enter to go back...\n");
         read_input("");
         app.navigate_to(Screen::Notes);
         return Ok(());

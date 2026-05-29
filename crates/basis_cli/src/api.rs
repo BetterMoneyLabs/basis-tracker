@@ -289,7 +289,19 @@ impl TrackerClient {
     // Redemption
     pub async fn initiate_redemption(&self, request: RedeemRequest) -> Result<RedeemResponse> {
         let url = format!("{}/redeem", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(code, resp)) => {
+                let error_text = resp.into_string().unwrap_or_else(|_| format!("HTTP {}", code));
+                return Err(anyhow::anyhow!(
+                    "Failed to initiate redemption: {}",
+                    error_text
+                ));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Request failed: {}", e));
+            }
+        };
 
         if response.status() == 200 {
             let api_response: ApiResponse<RedeemResponse> = response.into_json()?;
@@ -309,7 +321,19 @@ impl TrackerClient {
 
     pub async fn complete_redemption(&self, request: CompleteRedemptionRequest) -> Result<()> {
         let url = format!("{}/redeem/complete", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(code, resp)) => {
+                let error_text = resp.into_string().unwrap_or_else(|_| format!("HTTP {}", code));
+                return Err(anyhow::anyhow!(
+                    "Failed to complete redemption: {}",
+                    error_text
+                ));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Request failed: {}", e));
+            }
+        };
 
         if response.status() == 200 {
             Ok(())

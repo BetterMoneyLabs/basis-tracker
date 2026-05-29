@@ -478,7 +478,7 @@ pub async fn get_notes_by_recipient(
 
     if let Err(e) = state
         .tx
-        .send(crate::TrackerCommand::GetNotesByRecipient {
+        .send(crate::TrackerCommand::GetNotesByRecipientWithIssuer {
             recipient_pubkey,
             response_tx,
         })
@@ -495,19 +495,19 @@ pub async fn get_notes_by_recipient(
 
     // Wait for response from tracker thread
     match response_rx.await {
-        Ok(Ok(notes)) => {
+        Ok(Ok(notes_with_issuer)) => {
             tracing::info!(
                 "Successfully retrieved {} notes for recipient {}",
-                notes.len(),
+                notes_with_issuer.len(),
                 pubkey_hex
             );
 
-            // Convert to serializable format with issuer pubkey
-            let serializable_notes: Vec<SerializableIouNote> = notes
+            // Convert to serializable format with correct issuer pubkey
+            let serializable_notes: Vec<SerializableIouNote> = notes_with_issuer
                 .into_iter()
-                .map(|note| {
+                .map(|(issuer_pubkey, note)| {
                     let mut serializable_note = SerializableIouNote::from(note);
-                    serializable_note.issuer_pubkey = pubkey_hex.clone();
+                    serializable_note.issuer_pubkey = hex::encode(issuer_pubkey);
                     serializable_note
                 })
                 .collect();

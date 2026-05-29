@@ -169,7 +169,7 @@ impl App {
 
     pub fn navigate_to(&mut self, screen: Screen) {
         self.screen = screen;
-        self.notification = None;
+        // Don't clear notification here - let it be displayed on the next screen
     }
 
     pub fn quit(&mut self) {
