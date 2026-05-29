@@ -85,7 +85,7 @@ fn print_banner() {
         RED, RESET
     );
     println!(
-        "{}  Interactive Terminal Wallet for Basis Tracker{}",
+        "{}  Interactive Terminal Basis Wallet{}",
         GRAY, RESET
     );
     println!();
