@@ -222,6 +222,22 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 [[package]]
 name = "basis_app"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "basis_cli",
+ "basis_store",
+ "blake2 0.10.6",
+ "ergo-lib",
+ "generic-array",
+ "hex",
+ "num-bigint",
+ "rand 0.8.5",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
 
 [[package]]
 name = "basis_cli"

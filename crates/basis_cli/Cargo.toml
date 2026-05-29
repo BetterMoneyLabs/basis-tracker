@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 license = "CC0-1.0"
 
+[lib]
+name = "basis_cli_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "basis_cli"
+path = "src/main.rs"
+required-features = ["bin"]
+
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
 ureq = { version = "2.9", features = ["json"] }
@@ -37,8 +46,3 @@ bin = []
 [dev-dependencies]
 basis_store = { path = "../basis_store" }
 secp256k1 = "0.27"
-
-[[bin]]
-name = "basis_cli"
-path = "src/main.rs"
-required-features = ["bin"]
