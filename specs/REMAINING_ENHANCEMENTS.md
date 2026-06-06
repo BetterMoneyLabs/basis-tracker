@@ -20,6 +20,16 @@ This document specifies the remaining enhancements for the Basis Tracker system.
 | LOW Priority | 5 | 3 | 2 |
 | **TOTAL** | **24** | **22** | **2** |
 
+### Recently Completed (Post-CLI Wallet Implementation)
+
+The following enhancements were completed as part of the CLI wallet prototype implementation:
+
+- ✅ **Interactive CLI Mode** (`basis_cli interactive`) - REPL with account-aware prompt
+- ✅ **TUI Wallet** (`basis_app` / `basis-ui`) - Full-screen terminal wallet application
+- ✅ **Redemption Transaction Generation** - `basis-cli transaction generate-redemption` with full Ergo node integration
+- ✅ **Demo Mode** - Pre-configured Alice/Bob/Tracker keys loaded from `secrets/participants.csv`
+- ✅ **Account Import/Export** - Private key import and export functionality
+
 ---
 
 ## Enhancement 1: Debt Transfer (Novation)
@@ -164,6 +174,7 @@ Response (Error):
 - [ ] 1.4.2 Implement debtor signing of transfer authorization
 - [ ] 1.4.3 Submit transfer request to server
 - [ ] 1.4.4 Display transfer result
+- [ ] 1.4.5 Add TUI support in `basis_app` for debt transfer workflow
 
 #### Phase 5: Documentation (0.5 days)
 - [ ] 1.5.1 Update `specs/spec.md` with debt transfer workflow

@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This repository contains **2 compiled CLI binaries** and **6 shell scripts** that provide command-line interfaces for the Basis Tracker system. The primary CLI tool is `basis_cli` (Rust-based), and the secondary is `basis_server` (also Rust-based, but primarily a daemon). Supporting shell scripts handle server lifecycle management, database cleanup, and deployment. Integration testing is covered by Rust test suite (`cargo test`).
+This repository contains **3 compiled CLI binaries** and **6 shell scripts** that provide command-line interfaces for the Basis Tracker system. The primary CLI tool is `basis_cli` (Rust-based), the secondary is `basis_server` (Rust-based daemon), and the third is `basis_app` (TUI wallet, also Rust-based). Supporting shell scripts handle server lifecycle management, database cleanup, and deployment. Integration testing is covered by Rust test suite (`cargo test`).
 
 ---
 
@@ -11,29 +11,34 @@ This repository contains **2 compiled CLI binaries** and **6 shell scripts** tha
 ### 1. `basis_cli` - Primary CLI Client
 
 **Location**: `crates/basis_cli/`
+**Library name**: `basis_cli_lib`
 **Binary name**: `basis_cli`
 **Language**: Rust (Edition 2021)
 **Dependencies**: clap, tokio, secp256k1, serde, ureq, anyhow, ergo-lib
 
 #### Architecture
-The CLI uses a modular command structure with clap derive macros for argument parsing:
+The CLI is structured as a library crate with an optional binary feature. It uses a modular command structure with clap derive macros for argument parsing:
 
 ```
-main.rs (entry point, command routing)
-├── commands/
-│   ├── account.rs      (Account management)
-│   ├── keypair.rs      (Keypair generation)
-│   ├── note.rs         (Note operations)
-│   ├── reserve.rs      (Reserve operations)
-│   ├── status.rs       (Server status)
-│   ├── transaction.rs  (Transaction generation)
-│   └── test_redemption.rs (Test utilities)
-├── account.rs          (Account model & manager)
-├── api.rs              (HTTP client for server API)
-├── config.rs           (Configuration management)
-├── crypto.rs           (Schnorr signature implementation)
-├── demo_keys.rs        (Demo key fixtures)
-└── interactive.rs      (Interactive REPL mode)
+Cargo.toml (lib + bin configuration)
+src/
+├── lib.rs              (module declarations: account, api, commands, config, crypto, demo_keys, interactive)
+├── main.rs             (entry point, command routing)
+├── account.rs          (Account model & manager with persistent storage)
+├── api.rs              (HTTP client for server API with redemption support)
+├── config.rs           (Configuration management for ~/.basis/cli.toml)
+├── crypto.rs           (Schnorr signature implementation using secp256k1)
+├── demo_keys.rs        (Demo key fixtures loaded from secrets/participants.csv)
+├── interactive.rs      (Interactive REPL mode)
+└── commands/
+    ├── mod.rs          (Module declarations)
+    ├── account.rs      (Account management: create, list, switch, info, export, import)
+    ├── keypair.rs      (Keypair generation)
+    ├── note.rs         (Note operations: create, list, get, redeem)
+    ├── reserve.rs      (Reserve operations: create, status, collateralization)
+    ├── status.rs       (Server status and recent events)
+    ├── test_redemption.rs (Polling-based redemption test utility)
+    └── transaction.rs  (Transaction generation: generate-redemption)
 ```
 
 #### Command Reference
@@ -42,19 +47,21 @@ main.rs (entry point, command routing)
 |---------|------------|-------------|
 | `account` | `create <name>`, `list`, `switch <name>`, `info`, `export <name>`, `import <name> <key>` | Account management with persistent storage |
 | `generate-keypair` | - | Generate secp256k1 keypair (33-byte pubkey, 32-byte privkey) |
-| `note` | `create`, `list`, `get`, `redeem` | IOU note lifecycle management |
-| `reserve` | `create`, `status`, `collateralization` | Reserve creation and monitoring |
-| `transaction` | `generate-redemption` | Generate unsigned redemption transactions |
-| `test` | `test-redemption` | Polling-based redemption test utility |
+| `note` | `create --recipient <pubkey> --amount <amount> [--demo]`, `list --issuer\|--recipient`, `get --issuer <pubkey> --recipient <pubkey>`, `redeem --issuer <pubkey> --amount <amount>` | IOU note lifecycle management |
+| `reserve` | `create --nft-id <id> [--owner <pubkey>] --amount <amount>`, `status [--issuer <pubkey>]`, `collateralization [--issuer <pubkey>]` | Reserve creation and monitoring |
+| `transaction` | `generate-redemption --issuer-pubkey <hex> --recipient-pubkey <hex> --amount <nanoERG> [--output-file <path>] [--emergency]` | Generate unsigned redemption transactions with Ergo node integration |
+| `test` | `test-redemption [--output-file <path>] [--amount <nanoERG>] [--poll-interval <secs>]` | Polling-based redemption test utility |
 | `interactive` | - | REPL mode with account-aware prompt |
 | `status` | - | Check server health and display recent events |
 
 #### Key Features
 - **Account Management**: Persistent accounts stored in `~/.basis/cli.toml` with private keys
 - **Schnorr Signatures**: 65-byte signatures (33-byte a + 32-byte z) with Blake2b256 challenge
-- **Ergo Blockchain Integration**: P2PK address generation, box serialization, transaction building
+- **Ergo Blockchain Integration**: P2PK address generation, box serialization, transaction building with context extension variables
 - **Interactive Mode**: REPL with command history and contextual help
-- **Demo Mode**: Pre-configured Alice/Bob/Tracker keys for testing
+- **Demo Mode**: Pre-configured Alice/Bob/Tracker keys for testing (loaded from `secrets/participants.csv`)
+- **Redemption Transaction Generation**: Full unsigned transaction generation with AVL proofs, signatures, and Ergo node box retrieval
+- **Polling Test Utility**: Automated polling for redeemable notes with sufficient collateral
 
 #### Cryptographic Details
 - **Curve**: secp256k1
@@ -72,11 +79,53 @@ main.rs (entry point, command routing)
 **Language**: Rust
 **Primary Role**: HTTP API server and blockchain scanner (not primarily CLI-interactive)
 
-While `basis_server` is a compiled binary, it functions primarily as a background daemon with an HTTP API. It is not an interactive CLI tool but is included here for completeness as it provides the server that `basis_cli` communicates with.
+While `basis_server` is a compiled binary, it functions primarily as a background daemon with an HTTP API. It is not an interactive CLI tool but is included here for completeness as it provides the server that `basis_cli` and `basis_app` communicate with.
 
 ---
 
-### 3. `basis_store` - Test Runner
+### 3. `basis_app` - TUI Wallet Application
+
+**Location**: `crates/basis_app/`
+**Library name**: `basis_app`
+**Binary name**: `basis-ui`
+**Language**: Rust (Edition 2021)
+**Dependencies**: tokio, serde, secp256k1, blake2, ergo-lib, basis_cli_lib, basis_store
+
+#### Architecture
+The TUI wallet is a terminal-based interactive application built on top of `basis_cli_lib`:
+
+```
+Cargo.toml (lib + bin configuration)
+src/
+├── main.rs             (Entry point: creates App and runs UI)
+├── app.rs              (Application state: screens, accounts, notes, reserves, notifications)
+└── ui.rs               (Terminal UI rendering: menus, forms, banners, ANSI colors)
+```
+
+#### Screens
+- **MainMenu**: Primary navigation menu
+- **Accounts**: Account management (create, list, switch)
+- **Notes**: Note listing and management
+- **Reserves**: Reserve status and collateralization display
+- **Transactions**: Transaction history and generation
+- **AddressBook**: Contact management (with demo contacts: bob, charlie)
+- **Settings**: Server URL and configuration
+- **CreateNote**: Interactive note creation form
+- **RedeemNote**: Interactive redemption workflow
+- **CreateReserve**: Reserve creation form
+- **GenerateTransaction**: Transaction generation interface
+
+#### Key Features
+- **Terminal UI**: Full-screen interactive interface with ANSI colors and banners
+- **Free Banking Branding**: "Free Banking For Everyone" tagline
+- **Real-time Data**: Auto-refreshes reserve status, issued notes, and received notes
+- **Address Book**: Pre-configured demo contacts for quick payments
+- **Server Connectivity**: Health check and connection status display
+- **Notification System**: Success/error messages with visual indicators
+
+---
+
+### 4. `basis_store` - Test Runner
 
 **Location**: `crates/basis_store/src/main.rs`
 **Binary name**: Not explicitly defined in Cargo.toml `[[bin]]`, but has a `main.rs`
@@ -169,15 +218,21 @@ This is a minimal utility that runs `basis_store::tests::run_all_tests()` and ex
 │  (User CLI)     │                   │  (HTTP Daemon)  │
 └─────────────────┘                   └─────────────────┘
          │                                     │
-         │ Shell scripts                       │ Ergo Node API
+         │                                     │ Ergo Node API
          ▼                                     ▼
 ┌─────────────────┐                   ┌─────────────────┐
-│ run_server.sh   │                   │  Ergo Node      │
-│ stop_server.sh  │                   │  (Blockchain)   │
-│ server_status.sh│                   └─────────────────┘
+│   basis_app     │                   │  Ergo Node      │
+│  (TUI Wallet)   │                   │  (Blockchain)   │
+└─────────────────┘                   └─────────────────┘
+         │
+         │ Shell scripts
+         ▼
+┌─────────────────┐
+│ run_server.sh   │
+│ stop_server.sh  │
+│ server_status.sh│
 │ clean_database  │
 │ redeploy.sh     │
-└─────────────────┘
 └─────────────────┘
 ```
 
@@ -191,6 +246,7 @@ This is a minimal utility that runs `basis_store::tests::run_all_tests()` and ex
 | `config/basis.toml` | Server configuration (Ergo node, tracker settings) |
 | `server.pid` | Runtime PID file for server management |
 | `server.log` | Server log output |
+| `secrets/participants.csv` | Demo participant keys (Alice, Bob, Tracker) - not committed |
 
 ---
 
@@ -198,7 +254,7 @@ This is a minimal utility that runs `basis_store::tests::run_all_tests()` and ex
 
 1. **Private Key Storage**: `basis_cli` stores private keys in plaintext in `~/.basis/cli.toml`
 2. **No Encryption**: No key derivation or encryption for stored accounts
-3. **Demo Keys**: Hardcoded demo keys exist in `demo_keys.rs` for testing
+3. **Demo Keys**: Hardcoded demo keys exist in `demo_keys.rs` for testing (loaded from `secrets/participants.csv`)
 
 ---
 
