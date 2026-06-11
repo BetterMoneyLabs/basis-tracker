@@ -61,71 +61,8 @@ impl SignatureVerifier for SchnorrVerifier {
     }
 
     fn sign_message(&self, message: &[u8], secret_key: &[u8; 32], public_key: &PubKey) -> Result<Signature, CryptoError> {
-        use secp256k1::Secp256k1;
-
-        let secp = Secp256k1::new();
-
-        // Parse the secret key
-        let secret_key = SecretKey::from_slice(secret_key).map_err(|_| CryptoError::InvalidSignature)?;
-
-        // Curve order for secp256k1
-        let n = num_bigint::BigUint::from_bytes_be(&[
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
-            0x41, 0x41,
-        ]);
-
-        loop {
-            // Generate a random nonce for the Schnorr signature
-            let nonce_secret = SecretKey::new(&mut secp256k1::rand::thread_rng());
-            let a_point = secp256k1::PublicKey::from_secret_key(&secp, &nonce_secret);
-            let a_bytes = a_point.serialize();
-
-            // Compute challenge e = H(a || message || issuer_pubkey)
-            let e_scalar = compute_challenge(&a_bytes, message, public_key)?;
-
-            // Convert scalars to their big integer representations for modular arithmetic
-            let k_big = num_bigint::BigUint::from_bytes_be(&nonce_secret.secret_bytes());
-            let s_big = num_bigint::BigUint::from_bytes_be(&secret_key.secret_bytes());
-            let e_big = num_bigint::BigUint::from_bytes_be(&e_scalar.to_be_bytes());
-
-            // Compute z = k + e * s (mod n)
-            let e_times_s = (&e_big * &s_big) % &n;
-            let z_big = (&k_big + &e_times_s) % &n;
-
-            // Ensure z is in the valid range [1, n-1] and bitLength <= 255
-            // Scala compatibility: reject signatures where z.bitLength > 255 and retry
-            let z_bit_length = z_big.bits();
-            if z_bit_length > 255 || z_big == num_bigint::BigUint::from(0u32) || z_big >= n {
-                // Retry with new nonce (matching Scala behavior)
-                continue;
-            }
-
-            // Convert back to scalar
-            let z_vec = z_big.to_bytes_be();
-            let mut z_bytes = [0u8; 32];
-            if z_vec.len() > 32 {
-                z_bytes.copy_from_slice(&z_vec[z_vec.len() - 32..]);
-            } else if z_vec.len() < 32 {
-                let start_idx = 32 - z_vec.len();
-                z_bytes[start_idx..].copy_from_slice(&z_vec);
-            } else {
-                z_bytes.copy_from_slice(&z_vec);
-            }
-
-            let z_scalar =
-                secp256k1::Scalar::from_be_bytes(z_bytes).map_err(|_| CryptoError::InvalidSignature)?;
-
-            // Convert z to bytes (32 bytes for Schnorr signatures - following chaincash-rs)
-            let z_bytes_full = z_scalar.to_be_bytes();
-
-            // Create the signature (a || z) - 33 bytes for a, 32 bytes for z
-            let mut signature = [0u8; 65];
-            signature[0..33].copy_from_slice(&a_bytes);
-            signature[33..65].copy_from_slice(&z_bytes_full);
-
-            return Ok(signature);
-        }
+        // Delegate to the canonical schnorr_sign function to avoid code duplication
+        schnorr_sign(message, secret_key, public_key)
     }
 }
 
