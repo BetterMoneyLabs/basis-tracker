@@ -18,6 +18,8 @@ pub mod schnorr_test_vectors;
 pub mod schnorr_tests;
 pub mod transaction_builder;
 #[cfg(test)]
+pub mod cross_validation_tests;
+#[cfg(test)]
 pub mod simple_integration_tests;
 pub mod tests;
 

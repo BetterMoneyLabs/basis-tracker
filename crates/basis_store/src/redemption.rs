@@ -131,19 +131,10 @@ impl RedemptionManager {
             ));
         }
 
-        // Check redemption time lock (for testing, reduce from 1 week to 1 minute)
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        let min_redemption_time = note.timestamp + 60_000; // 60 seconds in milliseconds for testing
-        if current_time < min_redemption_time {
-            return Err(RedemptionError::RedemptionTooEarly(
-                current_time,
-                min_redemption_time,
-            ));
-        }
+        // Note: Time lock validation is handled by the ErgoScript contract (basis.es).
+        // Normal redemption requires valid signatures (no time restriction).
+        // Emergency redemption requires (HEIGHT - trackerCreationHeight) > 2160.
+        // The transaction builder and manager do NOT enforce time locks.
 
         // Generate proof for the note
         let proof = self
@@ -213,6 +204,7 @@ impl RedemptionManager {
             context,
             reserve_lookup_proof.proof,
             tracker_lookup_proof.proof,
+            request.amount,
         ).map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
         // Generate unique redemption ID for tracking
@@ -460,6 +452,7 @@ fn build_redemption_transaction(
         },
         reserve_lookup_proof_bytes,
         tracker_lookup_proof_bytes,
+        request.amount,
     ).map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
     // Use real transaction builder to create the actual transaction bytes
@@ -478,7 +471,8 @@ fn build_redemption_transaction(
     // Estimated fee (0.001 ERG)
     let estimated_fee = 1000000;
 
-    // Redemption can happen immediately since we checked the time lock
+    // Redemption time is recorded for tracking purposes
+    // Note: Time lock validation is handled by the ErgoScript contract
     let redemption_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

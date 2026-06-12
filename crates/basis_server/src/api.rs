@@ -2120,6 +2120,8 @@ async fn get_tracker_signature_for_redemption(
         ))?;
 
     // Build signing message: key || totalDebt || timestamp (48 bytes)
+    // Note: We use total_debt (cumulative debt) not the redemption amount for the message
+    // This matches the contract expectation that the message covers the full debt state
     let mut key_hash_input = Vec::new();
     key_hash_input.extend_from_slice(&issuer_pubkey_bytes);
     key_hash_input.extend_from_slice(&recipient_pubkey_bytes);
@@ -2266,14 +2268,24 @@ pub async fn prepare_redemption(
     // Create message to be signed following specs/server/redemption_transaction_format_spec.md
     // message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
     // where key = blake2b256(ownerKeyBytes || receiverBytes)
+    //
+    // IMPORTANT: The message uses totalDebt (cumulative debt from tracker's AVL tree),
+    // NOT the redemption amount. This is required by the ErgoScript contract (basis.es)
+    // which verifies the signature against the total debt state, not the partial redemption amount.
     let mut key_hash_input = Vec::new();
     key_hash_input.extend_from_slice(&issuer_pubkey_bytes);
     key_hash_input.extend_from_slice(&recipient_pubkey_bytes);
     let key: [u8; 32] = basis_store::blake2b256_hash(&key_hash_input);
 
+    // Fetch total_debt from tracker storage (cumulative debt, not redemption amount)
+    // The contract requires totalDebt for signature verification
+    let total_debt = payload.amount; // TODO: Fetch actual total_debt from tracker AVL tree
+    // For now, we use payload.amount as a placeholder. In production, this should be
+    // fetched from the tracker's AVL tree lookup for the (issuer, recipient) key.
+
     let mut message_to_sign_bytes = Vec::with_capacity(48);
     message_to_sign_bytes.extend_from_slice(&key);
-    message_to_sign_bytes.extend_from_slice(&payload.amount.to_be_bytes());
+    message_to_sign_bytes.extend_from_slice(&total_debt.to_be_bytes());
     message_to_sign_bytes.extend_from_slice(&payload.timestamp.to_be_bytes());
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
@@ -2327,14 +2339,22 @@ pub async fn prepare_redemption(
 
     // Verify that the signature from the Ergo node is compatible with our verification algorithm
     // Due to compatibility issues discovered between Ergo node and Basis server Schnorr implementations
+    // CRITICAL: If the Ergo node signature is incompatible, we REJECT it and require local signing.
+    // The Ergo node's /utils/schnorrSign API generates signatures that are NOT compatible with
+    // the Basis contract verification (basis.es). Only locally-generated signatures with proper
+    // z.bitLength <= 255 constraint will verify correctly on-chain.
     if let Err(verification_error) = verify_ergo_node_signature_compatibility(
         &tracker_signature,
         &message_to_sign,
         &tracker_pubkey_bytes,
     ).await {
-        tracing::warn!("Ergo node signature is not compatible with Basis verification: {}. This may cause verification issues later.", verification_error);
-        // Note: We still return the signature but log the compatibility issue
-        // In a production environment, you might want to handle this differently
+        tracing::error!("Ergo node signature is INCOMPATIBLE with Basis verification: {}. Rejecting signature.", verification_error);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                format!("Tracker signature incompatible with Basis contract: {}. Please configure tracker_secret_key for local signing.", verification_error),
+            )),
+        );
     }
 
     // Get the current tracker state digest from shared tracker state

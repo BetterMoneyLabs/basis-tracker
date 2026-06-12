@@ -222,6 +222,7 @@ impl RedemptionTransactionBuilder {
         context: &TxContext,
         reserve_lookup_proof: Option<Vec<u8>>,
         tracker_lookup_proof: Vec<u8>,
+        redemption_amount: u64,
     ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
         // Validate all required transaction components
         // Reserve box validation
@@ -274,8 +275,18 @@ impl RedemptionTransactionBuilder {
             return Err(TransactionBuilderError::Configuration("Tracker signature must be 65 bytes".to_string()));
         }
 
-        // Calculate the debt amount being redeemed
-        let redemption_amount = note.outstanding_debt();
+        // Validate redemption amount
+        if redemption_amount == 0 {
+            return Err(TransactionBuilderError::Configuration(
+                "Redemption amount must be greater than 0".to_string()
+            ));
+        }
+        if redemption_amount > note.outstanding_debt() {
+            return Err(TransactionBuilderError::InsufficientFunds(
+                format!("Redemption amount {} exceeds outstanding debt {}",
+                    redemption_amount, note.outstanding_debt())
+            ));
+        }
 
         // Check if reserve has sufficient collateral for redemption + fee
         // The reserve must cover both the debt being redeemed and the transaction fee
@@ -431,11 +442,16 @@ impl RedemptionTransactionBuilder {
         let reserve_ergo_tree = crate::contract_compiler::get_basis_reserve_ergo_tree_hex()
             .map_err(|e| TransactionBuilderError::TransactionBuilding(format!("Failed to get reserve contract: {}", e)))?;
         
-        // Reserve NFT ID (the token that identifies the reserve)
-        let reserve_nft_id = "01e6778e8ca93d888a7ae50ef07446904ad97ca01265558632f77279fa16adfb";
+        // Reserve NFT ID from the transaction data (from reserve box R6)
+        let reserve_nft_id = &tx_data.tracker_nft_id;
         
         // Calculate remaining reserve value after redemption and fee
-        let reserve_remaining = 49000000u64; // 100M - 50M - 1M fee
+        // In a real implementation, this would be fetched from the actual reserve box value
+        // For now, we use a placeholder calculation: reserve_value - redemption_amount - fee
+        // TODO: Fetch actual reserve value from the reserve box when blockchain integration is complete
+        let reserve_remaining = tx_data.redemption_amount.saturating_add(tx_data.fee);
+        // Note: The actual reserve_remaining should be: reserve_box_value - redemption_amount - fee
+        // This is a placeholder until we have access to the actual reserve box value
         
         let tx = serde_json::json!({
             "tx": {

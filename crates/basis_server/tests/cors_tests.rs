@@ -152,6 +152,13 @@ use tower_http::cors::{Any, CorsLayer};
                         // Mock reserve insert proof
                         let _ = response_tx.send(Ok(vec![1, 2, 3, 4]));
                     }
+                    TrackerCommand::GetNotesByRecipientWithIssuer {
+                        recipient_pubkey: _,
+                        response_tx,
+                    } => {
+                        // Mock response - return empty list for testing
+                        let _ = response_tx.send(Ok(Vec::new()));
+                    }
                 }
             }
         });
