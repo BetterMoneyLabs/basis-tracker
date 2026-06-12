@@ -31,37 +31,7 @@ impl KeyPair {
         use generic_array::typenum::U32;
 
         let secp = Secp256k1::new();
-
-        // Generate a random nonce for the Schnorr signature
-        let nonce_secret = SecretKey::new(&mut secp256k1::rand::thread_rng());
-        let a_point = secp256k1::PublicKey::from_secret_key(&secp, &nonce_secret);
-        let a_bytes = a_point.serialize();
-
-        // Compute challenge e = H(a || message || issuer_pubkey)
         let issuer_pubkey_bytes = self.get_public_key_bytes();
-        let mut hasher = Blake2b::<U32>::new();
-        hasher.update(&a_bytes);
-        hasher.update(message);
-        hasher.update(&issuer_pubkey_bytes);
-        let e_bytes = hasher.finalize();
-
-        // Take first 32 bytes for the scalar
-        let e_bytes_32: [u8; 32] = e_bytes[..32]
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Failed to convert challenge to 32 bytes"))?;
-
-        // Convert to Scalar using the same approach as in basis_store
-        let e_scalar = secp256k1::Scalar::from_be_bytes(e_bytes_32)
-            .map_err(|_| anyhow::anyhow!("Failed to create scalar from challenge"))?;
-
-        // Get the secret key scalar
-        let secret_key_scalar = secp256k1::Scalar::from_be_bytes(self.keypair.secret_bytes())
-            .map_err(|_| anyhow::anyhow!("Failed to create scalar from secret key"))?;
-
-        // Convert scalars to their big integer representations for modular arithmetic
-        let k_big = num_bigint::BigUint::from_bytes_be(&nonce_secret.secret_bytes());
-        let s_big = num_bigint::BigUint::from_bytes_be(&self.keypair.secret_bytes());
-        let e_big = num_bigint::BigUint::from_bytes_be(&e_scalar.to_be_bytes());
 
         // Curve order for secp256k1
         let n = num_bigint::BigUint::from_bytes_be(&[
@@ -70,33 +40,71 @@ impl KeyPair {
             0x41, 0x41,
         ]);
 
-        // Compute z = k + e * s (mod n)
-        let e_times_s = (&e_big * &s_big) % &n;
-        let z_big = (&k_big + &e_times_s) % &n;
+        // Retry loop: regenerate nonce until z.bitLength <= 255 (Scala/ErgoScript constraint)
+        // This matches the behavior in basis_core/src/impls.rs schnorr_sign()
+        loop {
+            // Generate a random nonce for the Schnorr signature
+            let nonce_secret = SecretKey::new(&mut secp256k1::rand::thread_rng());
+            let a_point = secp256k1::PublicKey::from_secret_key(&secp, &nonce_secret);
+            let a_bytes = a_point.serialize();
 
-        // Ensure z is in the valid range [1, n-1]
-        if z_big == num_bigint::BigUint::from(0u32) || z_big >= n {
-            return Err(anyhow::anyhow!("Invalid signature"));
+            // Compute challenge e = H(a || message || issuer_pubkey)
+            let mut hasher = Blake2b::<U32>::new();
+            hasher.update(&a_bytes);
+            hasher.update(message);
+            hasher.update(&issuer_pubkey_bytes);
+            let e_bytes = hasher.finalize();
+
+            // Take first 32 bytes for the scalar
+            let e_bytes_32: [u8; 32] = e_bytes[..32]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Failed to convert challenge to 32 bytes"))?;
+
+            // Convert to Scalar using the same approach as in basis_store
+            let e_scalar = secp256k1::Scalar::from_be_bytes(e_bytes_32)
+                .map_err(|_| anyhow::anyhow!("Failed to create scalar from challenge"))?;
+
+            // Get the secret key scalar
+            let secret_key_scalar = secp256k1::Scalar::from_be_bytes(self.keypair.secret_bytes())
+                .map_err(|_| anyhow::anyhow!("Failed to create scalar from secret key"))?;
+
+            // Convert scalars to their big integer representations for modular arithmetic
+            let k_big = num_bigint::BigUint::from_bytes_be(&nonce_secret.secret_bytes());
+            let s_big = num_bigint::BigUint::from_bytes_be(&self.keypair.secret_bytes());
+            let e_big = num_bigint::BigUint::from_bytes_be(&e_scalar.to_be_bytes());
+
+            // Compute z = k + e * s (mod n)
+            let e_times_s = (&e_big * &s_big) % &n;
+            let z_big = (&k_big + &e_times_s) % &n;
+
+            // CRITICAL: Check z.bitLength <= 255 (Scala/ErgoScript constraint)
+            // Both Scala and Rust implementations enforce this constraint.
+            // Signatures with z.bitLength > 255 are automatically regenerated with a new nonce.
+            let z_bit_length = z_big.bits();
+            if z_bit_length > 255 || z_big == num_bigint::BigUint::from(0u32) || z_big >= n {
+                // Retry with new nonce - no retry limit
+                continue;
+            }
+
+            // Convert back to bytes
+            let z_vec = z_big.to_bytes_be();
+            let mut z_bytes = [0u8; 32];
+            if z_vec.len() > 32 {
+                z_bytes.copy_from_slice(&z_vec[z_vec.len() - 32..]);
+            } else if z_vec.len() < 32 {
+                let start_idx = 32 - z_vec.len();
+                z_bytes[start_idx..].copy_from_slice(&z_vec);
+            } else {
+                z_bytes.copy_from_slice(&z_vec);
+            }
+
+            // Create the signature (a || z) - 33 bytes for a, 32 bytes for z
+            let mut signature = [0u8; 65];
+            signature[0..33].copy_from_slice(&a_bytes);
+            signature[33..65].copy_from_slice(&z_bytes);
+
+            return Ok(signature);
         }
-
-        // Convert back to bytes
-        let z_vec = z_big.to_bytes_be();
-        let mut z_bytes = [0u8; 32];
-        if z_vec.len() > 32 {
-            z_bytes.copy_from_slice(&z_vec[z_vec.len() - 32..]);
-        } else if z_vec.len() < 32 {
-            let start_idx = 32 - z_vec.len();
-            z_bytes[start_idx..].copy_from_slice(&z_vec);
-        } else {
-            z_bytes.copy_from_slice(&z_vec);
-        }
-
-        // Create the signature (a || z) - 33 bytes for a, 32 bytes for z
-        let mut signature = [0u8; 65];
-        signature[0..33].copy_from_slice(&a_bytes);
-        signature[33..65].copy_from_slice(&z_bytes);
-
-        Ok(signature)
     }
 
     pub fn verify_signature(
