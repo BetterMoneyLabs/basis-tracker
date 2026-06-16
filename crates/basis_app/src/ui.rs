@@ -1,6 +1,8 @@
 use crate::app::{App, NoteInfo, ReserveInfo, Screen};
 use anyhow::Result;
 use std::io::{self, Write};
+use std::collections::HashSet;
+use basis_core::acceptance::{AcceptanceConfig, PredicateConfig, DefaultPolicy};
 
 // ANSI Color codes
 pub const RESET: &str = "\x1b[0m";
@@ -35,6 +37,7 @@ pub async fn run(app: &mut App) -> Result<()> {
             Screen::RedeemNote => draw_redeem_note(app).await?,
             Screen::CreateReserve => draw_create_reserve(app).await?,
             Screen::GenerateTransaction => draw_generate_transaction(app).await?,
+            Screen::AcceptancePolicy => draw_acceptance_policy(app).await?,
         }
     }
 
@@ -142,6 +145,7 @@ async fn draw_main_menu(app: &mut App) -> Result<()> {
     println!("  {}[4]{} Transactions & Redemptions", CYAN, RESET);
     println!("  {}[5]{} Address Book", CYAN, RESET);
     println!("  {}[6]{} Settings", CYAN, RESET);
+    println!("  {}[7]{} Acceptance Policy", CYAN, RESET);
     println!();
     println!("  {}[r]{} Refresh Data", YELLOW, RESET);
     println!("  {}[q]{} Quit\n", RED, RESET);
@@ -153,6 +157,7 @@ async fn draw_main_menu(app: &mut App) -> Result<()> {
         "4" => app.navigate_to(Screen::Transactions),
         "5" => app.navigate_to(Screen::AddressBook),
         "6" => app.navigate_to(Screen::Settings),
+        "7" => app.navigate_to(Screen::AcceptancePolicy),
         "r" | "R" => {
             app.refresh_data().await?;
             if app.server_connected {
@@ -419,7 +424,7 @@ async fn draw_notes(app: &mut App) -> Result<()> {
 
     match read_choice("Select option: ").as_str() {
         "1" => {
-            println!("\n{}  Notes Issued:{}", BOLD, RESET);
+            println!("\n  {}Notes Issued:{}", BOLD, RESET);
             if app.issued_notes.is_empty() {
                 println!("  {}None{}\n", GRAY, RESET);
             } else {
@@ -438,7 +443,7 @@ async fn draw_notes(app: &mut App) -> Result<()> {
             wait_for_enter("Press Enter to continue...");
         }
         "2" => {
-            println!("\n{}  Notes Received:{}", BOLD, RESET);
+            println!("\n  {}Notes Received:{}", BOLD, RESET);
             if app.received_notes.is_empty() {
                 println!("  {}None{}\n", GRAY, RESET);
             } else {
@@ -1258,4 +1263,423 @@ fn ratio_status(ratio: f64) -> &'static str {
         r if r < 3.0 => "GOOD",
         _ => "EXCELLENT",
     }
+}
+
+async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
+    use basis_core::acceptance::{AcceptanceConfig, PredicateConfig, DefaultPolicy};
+    use std::collections::HashSet;
+
+    println!("{}  ACCEPTANCE POLICY{}", BOLD, RESET);
+    println!("{}  ─────────────────{}\n", CYAN, RESET);
+
+    // Display current policy summary
+    let (collateral_pct, whitelist_count, blacklist_count) = get_policy_summary(&app.acceptance_config);
+    println!("  Current Mode: {}[{}% Collateral Required]{}", BOLD, collateral_pct, RESET);
+    println!("  Whitelist: {} entries", whitelist_count);
+    println!("  Blacklist: {} entries", blacklist_count);
+    println!();
+
+    println!("  {}[1]{} Set Collateral Level (0-1000%)", CYAN, RESET);
+    println!("  {}[2]{} Add to Whitelist (trust issuer)", CYAN, RESET);
+    println!("  {}[3]{} Remove from Whitelist", CYAN, RESET);
+    println!("  {}[4]{} Add to Blacklist (block issuer)", CYAN, RESET);
+    println!("  {}[5]{} Remove from Blacklist", CYAN, RESET);
+    println!("  {}[6]{} Reset to Default (100% Collateral)", CYAN, RESET);
+    println!("  {}[7]{} View Current Policy", CYAN, RESET);
+    println!("  {}[8]{} Test Policy Against Issuer", CYAN, RESET);
+    println!();
+    println!("  {}[b]{} Back to Menu\n", YELLOW, RESET);
+
+    match read_choice("Select option: ").as_str() {
+        "1" => {
+            let input = read_input("Enter collateral percentage (0-1000, default=100): ");
+            let pct = if input.is_empty() { 100 } else { input.parse::<u16>().unwrap_or(100) };
+            let ratio = (pct as f64) / 100.0;
+            
+            // Update collateral predicate
+            let mut config = AcceptanceConfig::default_collateral();
+            config.predicates[0] = PredicateConfig::Collateralization {
+                name: "require_full_collateral".to_string(),
+                min_ratio: ratio,
+            };
+            app.acceptance_config = config;
+            
+            // Save to disk and upload to server
+            if let Err(e) = save_and_upload_policy(app).await {
+                app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+            } else {
+                app.set_notification(format!("✅ Policy updated: {}% collateral required", pct), false);
+            }
+        }
+        "2" => {
+            println!("\n  Add issuer to whitelist:");
+            println!("  {}[1]{} Select from Address Book", CYAN, RESET);
+            println!("  {}[2]{} Enter pubkey manually\n", CYAN, RESET);
+            
+            let choice = read_choice("Select: ");
+            let pubkey = if choice == "1" {
+                select_pubkey_from_address_book(app, "Select contact")
+            } else {
+                let pk = read_input("Enter pubkey (66 hex chars): ");
+                if pk.len() == 66 { Some(pk) } else { None }
+            };
+            
+            if let Some(pubkey) = pubkey {
+                let debt_limit = read_input("Add debt limit? (nanoERG, Press Enter for none): ");
+                let max_debt = if debt_limit.is_empty() { None } else { debt_limit.parse::<u64>().ok() };
+                
+                // Add to whitelist
+                let mut holders = HashSet::new();
+                holders.insert(pubkey.clone());
+                
+                app.acceptance_config = create_policy(
+                    &app.acceptance_config,
+                    Some(holders),
+                    None,
+                    None,
+                );
+                
+                // Save to disk and upload to server
+                if let Err(e) = save_and_upload_policy(app).await {
+                    app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                } else {
+                    app.set_notification("✅ Added to whitelist and uploaded".to_string(), false);
+                }
+            }
+        }
+        "3" => {
+            // Remove from whitelist
+            let whitelist = get_whitelist_entries(&app.acceptance_config);
+            if whitelist.is_empty() {
+                app.set_notification("Whitelist is empty".to_string(), true);
+            } else {
+                println!("\n  Select issuer to remove:");
+                for (i, (name, pubkey)) in whitelist.iter().enumerate() {
+                    println!("  [{}] {}: {}...{}", i + 1, name, &pubkey[..16], &pubkey[56..66]);
+                }
+                let idx = read_choice("Select: ");
+                if let Ok(n) = idx.parse::<usize>() {
+                    if n > 0 && n <= whitelist.len() {
+                        let pubkey = whitelist[n - 1].1.clone();
+                        // Remove from whitelist
+                        app.acceptance_config = remove_from_whitelist(&app.acceptance_config, &pubkey);
+                        
+                        // Save to disk and upload to server
+                        if let Err(e) = save_and_upload_policy(app).await {
+                            app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                        } else {
+                            app.set_notification("✅ Removed from whitelist and uploaded".to_string(), false);
+                        }
+                    }
+                }
+            }
+        }
+        "4" => {
+            println!("\n  Add issuer to blacklist:");
+            println!("  {}[1]{} Select from Address Book", CYAN, RESET);
+            println!("  {}[2]{} Enter pubkey manually\n", CYAN, RESET);
+            
+            let choice = read_choice("Select: ");
+            let pubkey = if choice == "1" {
+                select_pubkey_from_address_book(app, "Select contact")
+            } else {
+                let pk = read_input("Enter pubkey (66 hex chars): ");
+                if pk.len() == 66 { Some(pk) } else { None }
+            };
+            
+            if let Some(pubkey) = pubkey {
+                let mut holders = HashSet::new();
+                holders.insert(pubkey);
+                
+                app.acceptance_config = create_policy(
+                    &app.acceptance_config,
+                    None,
+                    Some(holders),
+                    None,
+                );
+                
+                // Save to disk and upload to server
+                if let Err(e) = save_and_upload_policy(app).await {
+                    app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                } else {
+                    app.set_notification("✅ Added to blacklist and uploaded".to_string(), false);
+                }
+            }
+        }
+        "5" => {
+            // Remove from blacklist
+            let blacklist = get_blacklist_entries(&app.acceptance_config);
+            if blacklist.is_empty() {
+                app.set_notification("Blacklist is empty".to_string(), true);
+            } else {
+                println!("\n  Select issuer to remove:");
+                for (i, pubkey) in blacklist.iter().enumerate() {
+                    println!("  [{}] {}...{}", i + 1, &pubkey[..16], &pubkey[56..66]);
+                }
+                let idx = read_choice("Select: ");
+                if let Ok(n) = idx.parse::<usize>() {
+                    if n > 0 && n <= blacklist.len() {
+                        let pubkey = blacklist[n - 1].clone();
+                        app.acceptance_config = remove_from_blacklist(&app.acceptance_config, &pubkey);
+                        
+                        // Save to disk and upload to server
+                        if let Err(e) = save_and_upload_policy(app).await {
+                            app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                        } else {
+                            app.set_notification("✅ Removed from blacklist and uploaded".to_string(), false);
+                        }
+                    }
+                }
+            }
+        }
+        "6" => {
+            app.acceptance_config = AcceptanceConfig::default_collateral();
+            
+            // Save to disk and upload to server
+            if let Err(e) = save_and_upload_policy(app).await {
+                app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+            } else {
+                app.set_notification("✅ Reset to 100% Collateral Required and uploaded".to_string(), false);
+            }
+        }
+        "7" => {
+            // View current policy
+            println!("\n  {}Current Policy:{}", BOLD, RESET);
+            println!("  Default: Reject");
+            println!("  Collateral: {}%", collateral_pct);
+            
+            let whitelist = get_whitelist_entries(&app.acceptance_config);
+            if !whitelist.is_empty() {
+                println!("\n  Whitelist ({}):", whitelist.len());
+                for (i, (name, pubkey)) in whitelist.iter().enumerate() {
+                    println!("  [{}] {}: {}...{}", i + 1, name, &pubkey[..16], &pubkey[56..66]);
+                }
+            }
+            
+            let blacklist = get_blacklist_entries(&app.acceptance_config);
+            if !blacklist.is_empty() {
+                println!("\n  Blacklist ({}):", blacklist.len());
+                for (i, pubkey) in blacklist.iter().enumerate() {
+                    println!("  [{}] {}...{}", i + 1, &pubkey[..16], &pubkey[56..66]);
+                }
+            }
+            
+            println!("\n  Policy Logic: NOT blacklisted AND (whitelisted OR collateralized)");
+            wait_for_enter("\nPress Enter to continue...");
+        }
+        "8" => {
+            // Test policy against issuer
+            let input = read_input("Enter issuer pubkey (or contact name): ");
+            let pubkey = if let Some(pk) = app.address_book.get(&input) {
+                pk.clone()
+            } else {
+                input
+            };
+            
+            if pubkey.len() == 66 {
+                // Simple test - just check whitelist/blacklist for now
+                let whitelist = get_whitelist_entries(&app.acceptance_config);
+                let blacklist = get_blacklist_entries(&app.acceptance_config);
+                
+                let is_blacklisted = blacklist.contains(&pubkey);
+                let is_whitelisted = whitelist.iter().any(|(_, pk)| pk == &pubkey);
+                
+                if is_blacklisted {
+                    println!("\n  {}❌ REJECTED{}", RED, RESET);
+                    println!("  Reason: Blacklisted (blacklist takes precedence)");
+                } else if is_whitelisted {
+                    println!("\n  {}✅ ACCEPTED{}", GREEN, RESET);
+                    println!("  Reason: In whitelist");
+                } else {
+                    println!("\n  {}❌ REJECTED{}", RED, RESET);
+                    println!("  Reason: Not in whitelist, collateral insufficient");
+                }
+                wait_for_enter("\nPress Enter to continue...");
+            } else {
+                app.set_notification("Invalid pubkey length (must be 66 hex chars)".to_string(), true);
+            }
+        }
+        "b" | "B" => app.navigate_to(Screen::MainMenu),
+        _ => {
+            app.set_notification("Invalid option".to_string(), true);
+        }
+    }
+
+    Ok(())
+}
+
+/// Save policy to disk and upload to server
+async fn save_and_upload_policy(app: &mut App) -> Result<()> {
+    // 1. Save to local config file
+    app.tui_config_manager.update_acceptance(app.acceptance_config.clone())?;
+    
+    // 2. Upload to server if connected and account exists
+    if app.server_connected {
+        if let Some(ref account) = app.current_account {
+            // Get the account's signing key
+            if let Some(account_obj) = app.account_manager.get_account(&account.name) {
+                // Serialize policy to JSON
+                let policy_json = serde_json::to_string(&app.acceptance_config)?;
+                
+                // Sign the policy JSON with the account's private key
+                let signature = account_obj.sign_message(policy_json.as_bytes())?;
+                let signature_hex = hex::encode(&signature);
+                
+                // Create upload request
+                let request = basis_cli_lib::api::UploadPolicyRequest {
+                    recipient_pubkey: account.pubkey.clone(),
+                    policy_json,
+                    signature: signature_hex,
+                };
+                
+                // Upload to server
+                match app.client.upload_policy(request).await {
+                    Ok(_) => {
+                        app.policy_uploaded = true;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Policy saved locally but upload failed
+                        app.policy_uploaded = false;
+                        Err(e)
+                    }
+                }
+            } else {
+                Err(anyhow::anyhow!("Account not found for signing"))
+            }
+        } else {
+            Err(anyhow::anyhow!("No current account selected"))
+        }
+    } else {
+        Err(anyhow::anyhow!("Server not connected"))
+    }
+}
+
+// Helper functions for policy management
+
+fn get_policy_summary(config: &AcceptanceConfig) -> (u16, usize, usize) {
+    let collateral_pct = config.predicates.iter()
+        .find_map(|p| match p {
+            PredicateConfig::Collateralization { min_ratio, .. } => Some((*min_ratio * 100.0) as u16),
+            _ => None,
+        })
+        .unwrap_or(100);
+    
+    let whitelist_count = get_whitelist_entries(config).len();
+    let blacklist_count = get_blacklist_entries(config).len();
+    
+    (collateral_pct, whitelist_count, blacklist_count)
+}
+
+fn get_whitelist_entries(config: &AcceptanceConfig) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    for predicate in &config.predicates {
+        if let PredicateConfig::Whitelist { holders, .. } = predicate {
+            for pubkey in holders {
+                entries.push(("Unknown".to_string(), pubkey.clone()));
+            }
+        }
+    }
+    entries
+}
+
+fn get_blacklist_entries(config: &AcceptanceConfig) -> Vec<String> {
+    let mut entries = Vec::new();
+    for predicate in &config.predicates {
+        if let PredicateConfig::Blacklist { holders, .. } = predicate {
+            for pubkey in holders {
+                entries.push(pubkey.clone());
+            }
+        }
+    }
+    entries
+}
+
+fn remove_from_whitelist(config: &AcceptanceConfig, pubkey: &str) -> AcceptanceConfig {
+    let mut new_config = config.clone();
+    for predicate in &mut new_config.predicates {
+        if let PredicateConfig::Whitelist { holders, .. } = predicate {
+            holders.retain(|p| p != pubkey);
+        }
+    }
+    new_config
+}
+
+fn remove_from_blacklist(config: &AcceptanceConfig, pubkey: &str) -> AcceptanceConfig {
+    let mut new_config = config.clone();
+    for predicate in &mut new_config.predicates {
+        if let PredicateConfig::Blacklist { holders, .. } = predicate {
+            holders.retain(|p| p != pubkey);
+        }
+    }
+    new_config
+}
+
+fn create_policy(
+    existing: &AcceptanceConfig,
+    whitelist_add: Option<HashSet<String>>,
+    blacklist_add: Option<HashSet<String>>,
+    collateral_pct: Option<u16>,
+) -> AcceptanceConfig {
+    let mut config = existing.clone();
+    
+    // Add whitelist entries
+    if let Some(new_holders) = whitelist_add {
+        let mut found = false;
+        for predicate in &mut config.predicates {
+            if let PredicateConfig::Whitelist { holders, .. } = predicate {
+                holders.extend(new_holders.iter().cloned());
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            let holders: Vec<String> = new_holders.iter().cloned().collect();
+            config.predicates.push(PredicateConfig::Whitelist {
+                name: "whitelist".to_string(),
+                holders,
+                max_debt: None,
+            });
+        }
+    }
+    
+    // Add blacklist entries
+    if let Some(new_holders) = blacklist_add {
+        let mut found = false;
+        for predicate in &mut config.predicates {
+            if let PredicateConfig::Blacklist { holders, .. } = predicate {
+                holders.extend(new_holders.iter().cloned());
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            let holders: Vec<String> = new_holders.iter().cloned().collect();
+            config.predicates.push(PredicateConfig::Blacklist {
+                name: "blacklist".to_string(),
+                holders,
+            });
+        }
+    }
+    
+    // Update collateral
+    if let Some(pct) = collateral_pct {
+        let ratio = (pct as f64) / 100.0;
+        let mut found = false;
+        for predicate in &mut config.predicates {
+            if let PredicateConfig::Collateralization { min_ratio, .. } = predicate {
+                *min_ratio = ratio;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            config.predicates.push(PredicateConfig::Collateralization {
+                name: "collateral".to_string(),
+                min_ratio: ratio,
+            });
+        }
+    }
+    
+    config
 }

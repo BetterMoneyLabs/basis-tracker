@@ -36,6 +36,11 @@ rand = "0.8"
 # Ergo
 ergo-lib = { workspace = true }
 
+# Config and directories
+dirs = "5.0"
+toml = "0.8"
+
 # Internal
 basis_cli = { path = "../basis_cli" }
 basis_store = { path = "../basis_store" }
+basis_core = { path = "../basis_core" }

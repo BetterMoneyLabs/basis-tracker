@@ -551,6 +551,19 @@ async fn main() {
         }
     };
 
+    // Initialize policy storage for per-recipient acceptance policies
+    let policy_storage_path = std::path::Path::new("data").join("acceptance_policies");
+    let policy_storage = match basis_store::persistence::AcceptancePolicyStorage::open(policy_storage_path) {
+        Ok(storage) => {
+            tracing::info!("Acceptance policy storage initialized successfully");
+            storage
+        }
+        Err(e) => {
+            tracing::error!("Failed to initialize acceptance policy storage: {:?}", e);
+            std::process::exit(1);
+        }
+    };
+
     let app_state = AppState {
         tx,
         event_store,
@@ -560,6 +573,7 @@ async fn main() {
         shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(shared_tracker_state_for_updater)),
         tracker_storage,
         acceptance_predicate,
+        policy_storage,
     };
 
     // Build our application with routes - FIXED ROUTE ORDER
@@ -571,6 +585,8 @@ async fn main() {
         .route("/events/paginated", get(get_events_paginated))
         .route("/notes", post(create_note).options(handle_options))
         .route("/acceptance/check", post(check_acceptance).options(handle_options))
+        .route("/acceptance/policy", post(upload_policy).options(handle_options))
+        .route("/acceptance/policy/{pubkey}", get(get_policy_by_recipient).options(handle_options))
         .route("/redeem", post(initiate_redemption).options(handle_options))
         .route("/redeem/complete", post(complete_redemption).options(handle_options))
         .route("/proof/redemption", get(get_redemption_proof))
@@ -619,6 +635,8 @@ async fn main() {
     tracing::debug!("  GET /events/paginated");
     tracing::debug!("  GET /key-status/{{pubkey}}");
     tracing::debug!("  POST /redeem");
+    tracing::debug!("  POST /acceptance/check");
+    tracing::debug!("  POST /acceptance/policy");
     tracing::debug!("  GET /tracker/latest-box-id");
 
     // Run our app with hyper

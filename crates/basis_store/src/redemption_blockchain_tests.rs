@@ -93,7 +93,6 @@ impl MockContractValidator {
         redeemed_amount: u64,
         already_redeemed: u64,
         blockchain: &MockBlockchain,
-        emergency: bool,
     ) -> ContractValidationResult {
         // Build message: key || totalDebt || timestamp (48 bytes)
         let message = signing_message(owner_pubkey, receiver_pubkey, total_debt, timestamp);
@@ -111,9 +110,12 @@ impl MockContractValidator {
             if schnorr::schnorr_verify(tracker_signature, &message, tracker_pubkey).is_err() {
                 return ContractValidationResult::InvalidTrackerSignature;
             }
-        } else if !emergency || !blockchain.is_emergency_available() {
-            // No signature and not in emergency period
-            return ContractValidationResult::TrackerSignatureRequired;
+        } else {
+            // No signature provided - only allowed after emergency period
+            let enough_time_spent = (blockchain.current_height - blockchain.tracker_creation_height) > 3 * 720;
+            if !enough_time_spent {
+                return ContractValidationResult::TrackerSignatureRequired;
+            }
         }
 
         // 4. Timestamp verification (new timestamp > stored timestamp)
@@ -272,7 +274,6 @@ mod tests {
             total_debt, // Redeem full amount
             0,          // First redemption: already_redeemed = 0
             &blockchain,
-            false, // Not emergency
         );
         assert_eq!(
             validation,
@@ -362,7 +363,6 @@ mod tests {
             total_debt,
             0,
             &blockchain,
-            false,
         );
         assert_eq!(
             validation,
@@ -407,7 +407,6 @@ mod tests {
             total_debt,
             0,
             &blockchain,
-            false,
         );
         assert_eq!(
             validation,
@@ -453,7 +452,6 @@ mod tests {
             redeemed_amount,
             0,
             &blockchain,
-            false,
         );
         assert_eq!(
             validation,
@@ -504,7 +502,6 @@ mod tests {
             total_debt,
             0,
             &blockchain,
-            true, // Emergency mode
         );
         assert_eq!(
             validation,
@@ -555,7 +552,6 @@ mod tests {
             total_debt,
             0,
             &blockchain,
-            true, // Emergency mode requested
         );
         assert_eq!(
             validation,
@@ -601,7 +597,6 @@ mod tests {
             redeemed_amount,
             0, // First redemption
             &blockchain,
-            false,
         );
         assert_eq!(
             validation,

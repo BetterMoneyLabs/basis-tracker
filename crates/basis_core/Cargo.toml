@@ -17,3 +17,6 @@ rand = "0.8"
 hex = "0.4"
 thiserror = { workspace = true }
 ergo_avltree_rust = { workspace = true }
+serde = { workspace = true }
+toml = "0.8"
+serde_json = { workspace = true }

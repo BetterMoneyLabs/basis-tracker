@@ -225,8 +225,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "basis_cli",
+ "basis_core",
  "basis_store",
  "blake2 0.10.6",
+ "dirs",
  "ergo-lib",
  "generic-array",
  "hex",
@@ -237,6 +239,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -275,7 +278,10 @@ dependencies = [
  "num-bigint",
  "rand 0.8.5",
  "secp256k1",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -299,6 +305,7 @@ name = "basis_server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "basis_core",
  "basis_offchain",
  "basis_store",
  "blake2 0.10.6",

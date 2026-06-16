@@ -351,6 +351,9 @@ pub struct CheckAcceptanceRequest {
     pub issuer_pubkey: String,
     /// Total cumulative debt amount
     pub total_debt: u64,
+    /// Optional hex-encoded recipient public key (33 bytes) for per-recipient policy lookup
+    #[serde(default)]
+    pub recipient_pubkey: Option<String>,
 }
 
 // Response for checking note acceptance
@@ -360,6 +363,39 @@ pub struct CheckAcceptanceResponse {
     pub acceptable: bool,
     /// Optional reason for rejection
     pub reason: Option<String>,
+}
+
+// Request for uploading acceptance policy
+#[derive(Debug, Deserialize)]
+pub struct UploadPolicyRequest {
+    /// Hex-encoded recipient public key (33 bytes)
+    pub recipient_pubkey: String,
+    /// Policy JSON string (serialized AcceptanceConfig)
+    pub policy_json: String,
+    /// Schnorr signature over policy_json (65 bytes, hex encoded)
+    pub signature: String,
+}
+
+// Response for uploading acceptance policy
+#[derive(Debug, Serialize)]
+pub struct UploadPolicyResponse {
+    /// Unix timestamp when policy was uploaded
+    pub uploaded_at: u64,
+    /// Hash of the policy for verification
+    pub policy_hash: String,
+}
+
+// Response for getting a recipient's acceptance policy
+#[derive(Debug, Serialize)]
+pub struct GetPolicyResponse {
+    /// Recipient public key (hex encoded)
+    pub recipient_pubkey: String,
+    /// Policy JSON string
+    pub policy_json: String,
+    /// Hex-encoded Schnorr signature (65 bytes = 130 hex chars)
+    pub signature: String,
+    /// Unix timestamp when policy was uploaded
+    pub uploaded_at: u64,
 }
 
 // Success response helper

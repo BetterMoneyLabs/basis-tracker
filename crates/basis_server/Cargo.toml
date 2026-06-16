@@ -25,6 +25,9 @@ path = "../basis_store"
 [dependencies.basis_offchain]
 path = "../basis_offchain"
 
+[dependencies.basis_core]
+path = "../basis_core"
+
 [dependencies.secp256k1]
 version = "0.27"
 features = ["rand-std"]

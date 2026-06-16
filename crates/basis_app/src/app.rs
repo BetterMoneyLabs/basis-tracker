@@ -5,6 +5,80 @@ use basis_cli_lib::{
     config::ConfigManager,
 };
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use basis_core::acceptance::AcceptanceConfig;
+use basis_store::ExtendedReserveInfo;
+
+/// TUI-specific configuration including acceptance policy
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TuiConfig {
+    pub server_url: String,
+    pub current_account: Option<String>,
+    #[serde(default = "AcceptanceConfig::default_collateral")]
+    pub acceptance: AcceptanceConfig,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            server_url: "http://127.0.0.1:3048".to_string(),
+            current_account: None,
+            acceptance: AcceptanceConfig::default_collateral(),
+        }
+    }
+}
+
+/// Manages TUI-specific configuration file at ~/.basis/ui.toml
+#[derive(Debug, Clone)]
+pub struct TuiConfigManager {
+    config_path: std::path::PathBuf,
+    config: TuiConfig,
+}
+
+impl TuiConfigManager {
+    pub fn new() -> Result<Self> {
+        let mut config_path = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        config_path.push(".basis");
+        std::fs::create_dir_all(&config_path)?;
+        config_path.push("ui.toml");
+
+        let config = if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            toml::from_str(&content).unwrap_or_default()
+        } else {
+            TuiConfig::default()
+        };
+
+        Ok(Self {
+            config_path,
+            config,
+        })
+    }
+
+    pub fn get_config(&self) -> &TuiConfig {
+        &self.config
+    }
+
+    pub fn get_config_mut(&mut self) -> &mut TuiConfig {
+        &mut self.config
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let content = toml::to_string_pretty(&self.config)?;
+        std::fs::write(&self.config_path, content)?;
+        Ok(())
+    }
+
+    pub fn update_acceptance(&mut self, config: AcceptanceConfig) -> Result<()> {
+        self.config.acceptance = config;
+        self.save()
+    }
+
+    pub fn get_acceptance(&self) -> &AcceptanceConfig {
+        &self.config.acceptance
+    }
+}
 
 pub enum Screen {
     MainMenu,
@@ -18,6 +92,7 @@ pub enum Screen {
     RedeemNote,
     CreateReserve,
     GenerateTransaction,
+    AcceptancePolicy,
 }
 
 pub struct App {
@@ -33,6 +108,39 @@ pub struct App {
     pub running: bool,
     pub server_connected: bool,
     pub address_book: HashMap<String, String>,
+    pub acceptance_config: AcceptanceConfig,
+    pub reserve_cache: Option<ReserveCache>,
+    pub policy_uploaded: bool,
+    pub tui_config_manager: TuiConfigManager,
+}
+
+pub struct ReserveCache {
+    pub reserves: HashMap<String, ExtendedReserveInfo>,
+    pub last_updated: Instant,
+    pub ttl: Duration,
+}
+
+impl ReserveCache {
+    pub fn new() -> Self {
+        Self {
+            reserves: HashMap::new(),
+            last_updated: Instant::now(),
+            ttl: Duration::from_secs(30 * 60), // 30 minutes
+        }
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.last_updated.elapsed() > self.ttl
+    }
+
+    pub fn get_reserve(&self, pubkey: &str) -> Option<&ExtendedReserveInfo> {
+        self.reserves.get(pubkey)
+    }
+
+    pub fn update(&mut self, reserves: HashMap<String, ExtendedReserveInfo>) {
+        self.reserves = reserves;
+        self.last_updated = Instant::now();
+    }
 }
 
 #[derive(Clone)]
@@ -85,6 +193,10 @@ impl App {
             "02a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3b5c".to_string(),
         );
 
+        // Load TUI config (acceptance policy)
+        let tui_config_manager = TuiConfigManager::new()?;
+        let acceptance_config = tui_config_manager.get_config().acceptance.clone();
+
         let mut app = Self {
             screen: Screen::MainMenu,
             account_manager,
@@ -98,6 +210,10 @@ impl App {
             running: true,
             server_connected: false,
             address_book,
+            acceptance_config,
+            reserve_cache: None,
+            policy_uploaded: false,
+            tui_config_manager,
         };
 
         app.refresh_data().await?;

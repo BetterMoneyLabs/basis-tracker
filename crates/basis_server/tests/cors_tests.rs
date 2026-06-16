@@ -207,6 +207,9 @@ use tower_http::cors::{Any, CorsLayer};
             )),
             tracker_storage,
             acceptance_predicate: None,
+            policy_storage: basis_store::persistence::AcceptancePolicyStorage::open(
+                temp_dir.join("policies")
+            ).expect("Failed to create policy storage"),
         };
 
         // Build the app with CORS enabled (same as main server)

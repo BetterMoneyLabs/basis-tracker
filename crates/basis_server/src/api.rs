@@ -10,7 +10,7 @@ use crate::{
         ReserveCreationResponse, ReservePaymentRequest, Asset,
         SerializableIouNote, TrackerEvent, TrackerSignatureRequest,
         TrackerSignatureResponse, RedemptionPreparationRequest,
-        RedemptionPreparationResponse,
+        RedemptionPreparationResponse, UploadPolicyRequest, UploadPolicyResponse,
     },
     AppState, TrackerCommand,
 };
@@ -773,6 +773,9 @@ pub async fn get_all_notes(
 }
 
 /// Check if a note would be accepted by the server's acceptance policy
+/// 
+/// First checks for a per-recipient policy in the database. If found, uses that policy.
+/// Otherwise falls back to the server's global acceptance predicate.
 #[axum::debug_handler]
 pub async fn check_acceptance(
     State(state): State<AppState>,
@@ -805,42 +808,165 @@ pub async fn check_acceptance(
         }
     };
 
-        // Get the acceptance predicate from state
-        let result = if let Some(predicate) = &state.acceptance_predicate {
-            // Clone reserve tracker from mutex
-            let reserve_tracker = state.reserve_tracker.lock().await.clone();
-            
-            // Build context
-            let ctx = crate::acceptance::PredicateContext {
-                issuer_pubkey,
-                recipient_pubkey: [0u8; 33], // Server's own key - TODO: use actual server key
-                total_debt: payload.total_debt,
-                reserve_tracker: Some(reserve_tracker),
-            };
-
-        let acceptable = predicate.acceptable(&ctx);
-        let reason = if acceptable {
-            None
-        } else {
-            Some(format!("Note rejected by '{}' policy", predicate.name()))
+    // Parse recipient public key (if provided, otherwise use server default)
+    let recipient_pubkey = if let Some(ref recipient_hex) = payload.recipient_pubkey {
+        let recipient_bytes = match hex::decode(recipient_hex) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(
+                        "recipient_pubkey must be hex-encoded".to_string(),
+                    )),
+                )
+            }
         };
-
-        CheckAcceptanceResponse {
-            acceptable,
-            reason,
+        match recipient_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(
+                        "recipient_pubkey must be 33 bytes".to_string(),
+                    )),
+                )
+            }
         }
     } else {
-        // No predicate configured - use default from config
-        let acceptable = state.config.acceptance.default.acceptable();
-        let reason = if acceptable {
-            None
-        } else {
-            Some("No acceptance policy configured - rejecting by default".to_string())
-        };
+        [0u8; 33] // Default: no specific recipient
+    };
 
-        CheckAcceptanceResponse {
-            acceptable,
-            reason,
+    // Try to find per-recipient policy first
+    let result = match state.policy_storage.get_policy(&recipient_pubkey) {
+        Ok(Some(stored_policy)) => {
+            tracing::debug!("Found per-recipient policy for {}", 
+                payload.recipient_pubkey.as_ref().unwrap_or(&"default".to_string()));
+            
+            // Parse the stored policy
+            match serde_json::from_str::<basis_core::acceptance::AcceptanceConfig>(&stored_policy.policy_json) {
+                Ok(policy_config) => {
+                    // Build predicate tree from stored policy
+                    match crate::acceptance::builder::build_predicate_tree(policy_config) {
+                        Ok(Some(predicate)) => {
+                            // Clone reserve tracker from mutex
+                            let reserve_tracker = state.reserve_tracker.lock().await.clone();
+                            
+                            // Build context
+                            let ctx = crate::acceptance::PredicateContext {
+                                issuer_pubkey,
+                                recipient_pubkey,
+                                total_debt: payload.total_debt,
+                                reserve_tracker: Some(reserve_tracker),
+                            };
+
+                            let acceptable = predicate.acceptable(&ctx);
+                            let reason = if acceptable {
+                                None
+                            } else {
+                                Some(format!("Note rejected by per-recipient policy '{}'", predicate.name()))
+                            };
+
+                            CheckAcceptanceResponse {
+                                acceptable,
+                                reason,
+                            }
+                        }
+                        Ok(None) => {
+                            // Empty policy - use default
+                            CheckAcceptanceResponse {
+                                acceptable: false,
+                                reason: Some("Empty per-recipient policy - rejecting by default".to_string()),
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to build predicate from stored policy: {}", e);
+                            // Fall through to global policy
+                            CheckAcceptanceResponse {
+                                acceptable: false,
+                                reason: Some("Invalid stored policy - rejecting by default".to_string()),
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse stored policy JSON: {}", e);
+                    // Fall through to global policy
+                    CheckAcceptanceResponse {
+                        acceptable: false,
+                        reason: Some("Corrupted stored policy - rejecting by default".to_string()),
+                    }
+                }
+            }
+        }
+        Ok(None) => {
+            // No per-recipient policy found, use global policy
+            tracing::debug!("No per-recipient policy found, using global policy");
+            
+            if let Some(predicate) = &state.acceptance_predicate {
+                // Clone reserve tracker from mutex
+                let reserve_tracker = state.reserve_tracker.lock().await.clone();
+                
+                // Build context
+                let ctx = crate::acceptance::PredicateContext {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    total_debt: payload.total_debt,
+                    reserve_tracker: Some(reserve_tracker),
+                };
+
+                let acceptable = predicate.acceptable(&ctx);
+                let reason = if acceptable {
+                    None
+                } else {
+                    Some(format!("Note rejected by global policy '{}'", predicate.name()))
+                };
+
+                CheckAcceptanceResponse {
+                    acceptable,
+                    reason,
+                }
+            } else {
+                // No predicate configured - use default from config
+                let acceptable = state.config.acceptance.default.acceptable();
+                let reason = if acceptable {
+                    None
+                } else {
+                    Some("No acceptance policy configured - rejecting by default".to_string())
+                };
+
+                CheckAcceptanceResponse {
+                    acceptable,
+                    reason,
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to read policy from storage: {:?}", e);
+            // Fall back to global policy on error
+            if let Some(predicate) = &state.acceptance_predicate {
+                let reserve_tracker = state.reserve_tracker.lock().await.clone();
+                let ctx = crate::acceptance::PredicateContext {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    total_debt: payload.total_debt,
+                    reserve_tracker: Some(reserve_tracker),
+                };
+                let acceptable = predicate.acceptable(&ctx);
+                let reason = if acceptable {
+                    None
+                } else {
+                    Some(format!("Note rejected by global policy '{}'", predicate.name()))
+                };
+                CheckAcceptanceResponse {
+                    acceptable,
+                    reason,
+                }
+            } else {
+                CheckAcceptanceResponse {
+                    acceptable: false,
+                    reason: Some("Policy storage error - rejecting by default".to_string()),
+                }
+            }
         }
     };
 
@@ -855,6 +981,226 @@ pub async fn check_acceptance(
         StatusCode::OK,
         Json(crate::models::success_response(result)),
     )
+}
+
+/// Upload a signed acceptance policy for a recipient
+#[axum::debug_handler]
+pub async fn upload_policy(
+    State(state): State<AppState>,
+    Json(payload): Json<UploadPolicyRequest>,
+) -> (StatusCode, Json<ApiResponse<UploadPolicyResponse>>) {
+    tracing::debug!("Uploading acceptance policy for: {}", payload.recipient_pubkey);
+
+    // Parse recipient public key
+    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be hex-encoded".to_string(),
+                )),
+            )
+        }
+    };
+
+    let recipient_pubkey: PubKey = match recipient_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes".to_string(),
+                )),
+            )
+        }
+    };
+
+    // Verify signature over policy_json
+    let signature_bytes = match hex::decode(&payload.signature) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "signature must be hex-encoded".to_string(),
+                )),
+            )
+        }
+    };
+
+    if signature_bytes.len() != 65 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                format!("signature must be 65 bytes (130 hex chars), got {} bytes", signature_bytes.len()),
+            )),
+        );
+    }
+
+    let mut signature: Signature = [0u8; 65];
+    signature.copy_from_slice(&signature_bytes);
+
+    // Parse policy JSON to validate structure
+    let policy_config: basis_core::acceptance::AcceptanceConfig = match serde_json::from_str(&payload.policy_json) {
+        Ok(config) => config,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    format!("Invalid policy JSON: {}", e),
+                )),
+            )
+        }
+    };
+
+    // Verify Schnorr signature over policy_json using recipient_pubkey
+    // The policy is signed by the recipient to prove ownership
+    let policy_message = payload.policy_json.as_bytes();
+    match basis_offchain::schnorr::schnorr_verify(&signature, policy_message, &recipient_pubkey) {
+        Ok(()) => {
+            tracing::info!("Signature verified for policy upload from {}", payload.recipient_pubkey);
+        }
+        Err(e) => {
+            tracing::warn!("Signature verification failed for policy upload from {}: {:?}", payload.recipient_pubkey, e);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(crate::models::error_response(
+                    "Invalid signature: policy signature verification failed".to_string(),
+                )),
+            );
+        }
+    }
+
+    // Store policy in database
+    let policy_hash = format!("{:x}", {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        payload.policy_json.hash(&mut hasher);
+        hasher.finish()
+    });
+
+    let uploaded_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Store the policy in the database
+    match state.policy_storage.store_policy(&recipient_pubkey, &payload.policy_json, &payload.signature) {
+        Ok(()) => {
+            tracing::info!(
+                "Policy stored for recipient {}: hash={}",
+                payload.recipient_pubkey,
+                policy_hash
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to store policy: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Failed to store policy".to_string(),
+                )),
+            );
+        }
+    }
+
+    // Build a new predicate tree from the uploaded policy for validation
+    match crate::acceptance::builder::build_predicate_tree(policy_config) {
+        Ok(Some(predicate)) => {
+            tracing::info!("Built predicate tree from uploaded policy: '{}'", predicate.name());
+        }
+        Ok(None) => {
+            tracing::info!("Empty policy uploaded for {}", payload.recipient_pubkey);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to build predicate tree from uploaded policy: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    format!("Invalid policy structure: {}", e),
+                )),
+            )
+        }
+    }
+
+    let response = UploadPolicyResponse {
+        uploaded_at,
+        policy_hash,
+    };
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(response)),
+    )
+}
+
+/// Get acceptance policy for a specific recipient
+#[axum::debug_handler]
+pub async fn get_policy_by_recipient(
+    State(state): State<AppState>,
+    axum::extract::Path(pubkey_hex): axum::extract::Path<String>,
+) -> (StatusCode, Json<ApiResponse<crate::models::GetPolicyResponse>>) {
+    tracing::debug!("Getting acceptance policy for: {}", pubkey_hex);
+
+    // Parse recipient public key
+    let recipient_pubkey_bytes = match hex::decode(&pubkey_hex) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "pubkey must be hex-encoded".to_string(),
+                )),
+            )
+        }
+    };
+
+    let recipient_pubkey: PubKey = match recipient_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "pubkey must be 33 bytes".to_string(),
+                )),
+            )
+        }
+    };
+
+    // Retrieve policy from storage
+    match state.policy_storage.get_policy(&recipient_pubkey) {
+        Ok(Some(stored_policy)) => {
+            let response = crate::models::GetPolicyResponse {
+                recipient_pubkey: pubkey_hex,
+                policy_json: stored_policy.policy_json,
+                signature: stored_policy.signature,
+                uploaded_at: stored_policy.timestamp,
+            };
+            (
+                StatusCode::OK,
+                Json(crate::models::success_response(response)),
+            )
+        }
+        Ok(None) => {
+            (
+                StatusCode::NOT_FOUND,
+                Json(crate::models::error_response(
+                    "No policy found for this recipient".to_string(),
+                )),
+            )
+        }
+        Err(e) => {
+            tracing::error!("Failed to retrieve policy: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Failed to retrieve policy".to_string(),
+                )),
+            )
+        }
+    }
 }
 
 // Get paginated tracker events from event store

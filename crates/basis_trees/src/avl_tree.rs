@@ -45,10 +45,6 @@ impl BasisAvlTree {
         })
     }
 
-
-
-
-
     /// Insert a key-value pair into the AVL tree
     pub fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), TreeError> {
         let operation = Operation::Insert(KeyValue {

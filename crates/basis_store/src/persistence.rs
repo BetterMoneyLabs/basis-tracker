@@ -37,6 +37,26 @@ pub struct TrackerStorage {
     partition: fjall::Partition,
 }
 
+/// Database storage for per-recipient acceptance policies
+///
+/// Stores signed acceptance policies uploaded by recipients.
+/// Key: recipient_pubkey (33 bytes), Value: (timestamp, policy_json, signature)
+#[derive(Clone)]
+pub struct AcceptancePolicyStorage {
+    partition: fjall::Partition,
+}
+
+/// Stored acceptance policy record
+#[derive(Debug, Clone)]
+pub struct StoredPolicy {
+    /// Unix timestamp when the policy was uploaded
+    pub timestamp: u64,
+    /// Serialized policy JSON string
+    pub policy_json: String,
+    /// Hex-encoded Schnorr signature (65 bytes = 130 hex chars)
+    pub signature: String,
+}
+
 impl ScannerMetadataStorage {
     /// Open or create a new scanner metadata storage database
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, NoteError> {
@@ -748,5 +768,135 @@ impl TrackerStorage {
             .map_err(|e| NoteError::StorageError(format!("Failed to remove tracker box: {}", e)))?;
 
         Ok(())
+    }
+}
+
+impl AcceptancePolicyStorage {
+    /// Open or create a new acceptance policy storage database
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, NoteError> {
+        let keyspace = Config::new(path)
+            .open()
+            .map_err(|e| NoteError::StorageError(format!("Failed to open policy database: {}", e)))?;
+
+        let partition = keyspace
+            .open_partition("acceptance_policies", PartitionCreateOptions::default())
+            .map_err(|e| NoteError::StorageError(format!("Failed to open policy partition: {}", e)))?;
+
+        Ok(Self { partition })
+    }
+
+    /// Store a signed acceptance policy for a recipient
+    ///
+    /// Key: recipient_pubkey (33 bytes)
+    /// Value: 8 bytes timestamp (u64 BE) + 4 bytes policy_json_len (u32 BE) + policy_json bytes + 4 bytes sig_len (u32 BE) + signature bytes
+    pub fn store_policy(
+        &self,
+        recipient_pubkey: &PubKey,
+        policy_json: &str,
+        signature: &str,
+    ) -> Result<(), NoteError> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let policy_json_bytes = policy_json.as_bytes();
+        let signature_bytes = signature.as_bytes();
+
+        let mut value = Vec::with_capacity(8 + 4 + policy_json_bytes.len() + 4 + signature_bytes.len());
+        value.extend_from_slice(&timestamp.to_be_bytes());
+        value.extend_from_slice(&(policy_json_bytes.len() as u32).to_be_bytes());
+        value.extend_from_slice(policy_json_bytes);
+        value.extend_from_slice(&(signature_bytes.len() as u32).to_be_bytes());
+        value.extend_from_slice(signature_bytes);
+
+        self.partition
+            .insert(recipient_pubkey, &value)
+            .map_err(|e| NoteError::StorageError(format!("Failed to store policy: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Retrieve a stored acceptance policy for a recipient
+    pub fn get_policy(&self, recipient_pubkey: &PubKey) -> Result<Option<StoredPolicy>, NoteError> {
+        match self.partition.get(recipient_pubkey) {
+            Ok(Some(value_bytes)) => {
+                if value_bytes.len() < 12 {
+                    return Err(NoteError::StorageError(
+                        "Invalid policy record format (too short)".to_string(),
+                    ));
+                }
+
+                let mut offset = 0;
+                let timestamp = u64::from_be_bytes(value_bytes[offset..offset + 8].try_into().unwrap());
+                offset += 8;
+
+                let policy_len = u32::from_be_bytes(value_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+
+                if value_bytes.len() < offset + policy_len + 4 {
+                    return Err(NoteError::StorageError(
+                        "Invalid policy record format (policy length mismatch)".to_string(),
+                    ));
+                }
+
+                let policy_json = String::from_utf8(value_bytes[offset..offset + policy_len].to_vec())
+                    .map_err(|e| NoteError::StorageError(format!("Invalid policy JSON encoding: {}", e)))?;
+                offset += policy_len;
+
+                let sig_len = u32::from_be_bytes(value_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+
+                if value_bytes.len() < offset + sig_len {
+                    return Err(NoteError::StorageError(
+                        "Invalid policy record format (signature length mismatch)".to_string(),
+                    ));
+                }
+
+                let signature = String::from_utf8(value_bytes[offset..offset + sig_len].to_vec())
+                    .map_err(|e| NoteError::StorageError(format!("Invalid signature encoding: {}", e)))?;
+
+                Ok(Some(StoredPolicy {
+                    timestamp,
+                    policy_json,
+                    signature,
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get policy: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Remove a stored policy for a recipient
+    pub fn remove_policy(&self, recipient_pubkey: &PubKey) -> Result<(), NoteError> {
+        self.partition
+            .remove(recipient_pubkey)
+            .map_err(|e| NoteError::StorageError(format!("Failed to remove policy: {}", e)))?;
+        Ok(())
+    }
+
+    /// List all stored policies with their recipient pubkeys
+    ///
+    /// Returns a vector of (recipient_pubkey_hex, timestamp) tuples
+    pub fn list_policies(&self) -> Result<Vec<(String, u64)>, NoteError> {
+        let mut policies = Vec::new();
+        for item in self.partition.iter() {
+            match item {
+                Ok((key, value)) => {
+                    if key.len() == 33 && value.len() >= 8 {
+                        let pubkey_hex = hex::encode(&key);
+                        let timestamp = u64::from_be_bytes(value[0..8].try_into().unwrap());
+                        policies.push((pubkey_hex, timestamp));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Error iterating policies: {}", e);
+                }
+            }
+        }
+        Ok(policies)
     }
 }
