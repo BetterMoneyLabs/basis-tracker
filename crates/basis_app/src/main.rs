@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::io::{self, Write};
 
 mod app;
 mod ui;

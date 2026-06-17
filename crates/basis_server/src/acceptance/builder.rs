@@ -69,7 +69,7 @@ impl PredicateBuilder {
     /// Build a specific predicate by name
     fn build_predicate(&mut self, name: &str) -> Result<Box<dyn NotePredicate>, BuilderError> {
         // Check if already built
-        if let Some(pred) = self.predicates.get(name) {
+        if let Some(_pred) = self.predicates.get(name) {
             // We need to clone here, but NotePredicate doesn't support Clone
             // So we rebuild - this is inefficient but safe
             // For production, we could use Arc<dyn NotePredicate> to share
@@ -158,7 +158,7 @@ impl PredicateBuilder {
     }
     
     /// Clone a predicate (needed for caching)
-    fn clone_predicate(pred: &dyn NotePredicate) -> Box<dyn NotePredicate> {
+    fn clone_predicate(_pred: &dyn NotePredicate) -> Box<dyn NotePredicate> {
         // Since we can't easily clone dyn NotePredicate, we just rebuild
         // For production, we could use Arc<dyn NotePredicate> to avoid cloning
         // For now, we'll just create a placeholder - this is only used for caching

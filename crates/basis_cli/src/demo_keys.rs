@@ -14,6 +14,7 @@ use std::fs;
 use std::path::Path;
 
 /// Demo participant with known keys
+#[allow(dead_code)]
 pub struct DemoParticipant {
     pub name: &'static str,
     pub keypair: KeyPair,
@@ -38,6 +39,7 @@ impl DemoParticipant {
     }
 
     /// Get secret key bytes
+    #[allow(dead_code)]
     pub fn secret_key_bytes(&self) -> [u8; 32] {
         self.keypair.keypair.secret_bytes()
     }
@@ -110,7 +112,7 @@ pub fn bob() -> DemoParticipant {
     
     // Create participant with a dummy keypair (Bob doesn't need to sign)
     // but override the public_key method to return the correct pubkey
-    let secp = secp256k1::Secp256k1::new();
+    let _secp = secp256k1::Secp256k1::new();
     let dummy_secret = secp256k1::SecretKey::new(&mut rand::thread_rng());
     let keypair = KeyPair::from_private_key(dummy_secret).unwrap();
     
@@ -130,6 +132,7 @@ pub fn tracker() -> DemoParticipant {
 }
 
 /// Print demo participant information
+#[allow(dead_code)]
 pub fn print_demo_keys() {
     println!("=== Demo Participant Keys ===\n");
     

@@ -7,7 +7,6 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio::time::Duration;
 use tracing::{error, info};
-use serde_json::{json, to_string};
 use basis_store::reqwest;
 use hex;
 use ergo_lib::ergotree_ir::address::NetworkPrefix;
@@ -136,7 +135,7 @@ impl TrackerBoxUpdater {
     pub async fn start(
         config: TrackerBoxUpdateConfig,
         shared_tracker_state: SharedTrackerState,
-        network_prefix: NetworkPrefix,
+        _network_prefix: NetworkPrefix,
         tracker_nft_id: String,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) -> Result<(), TrackerBoxUpdaterError> {
@@ -278,7 +277,7 @@ impl TrackerBoxUpdater {
         client: &reqwest::Client,
         node_url: &str,
         api_key: Option<&str>,
-        tracker_box_id: &str,
+        _tracker_box_id: &str,
         _tracker_secret_key: &[u8; 32],
         _r4_constant: &ergo_lib::ergotree_ir::mir::constant::Constant,
         r5_bytes: &[u8],
@@ -409,6 +408,7 @@ impl TrackerBoxUpdater {
         )))
     }
     
+    #[allow(dead_code)]
     /// Fetch tracker box JSON from Ergo node
     async fn fetch_tracker_box(
         client: &reqwest::Client,
@@ -444,6 +444,7 @@ impl TrackerBoxUpdater {
         Ok(box_json)
     }
     
+    #[allow(dead_code)]
     /// Fetch current blockchain height from Ergo node
     async fn fetch_blockchain_height(
         client: &reqwest::Client,
@@ -471,6 +472,7 @@ impl TrackerBoxUpdater {
         Ok(height)
     }
     
+    #[allow(dead_code)]
     /// Submit hex-encoded transaction bytes to Ergo node
     async fn submit_transaction_bytes(
         client: &reqwest::Client,
@@ -505,6 +507,7 @@ impl TrackerBoxUpdater {
         Ok(submit_text)
     }
     
+    #[allow(dead_code)]
     /// Build and sign transaction using ergo-lib (blocking, non-Send types)
     fn build_and_sign_transaction(
         box_json_str: &str,
@@ -706,6 +709,7 @@ impl TrackerBoxUpdater {
         Ok(tx_hex)
     }
     
+    #[allow(dead_code)]
     /// Helper to get tracker P2PK address from R4 constant (EcPoint)
     fn get_tracker_address_from_pubkey(r4_constant: &ergo_lib::ergotree_ir::mir::constant::Constant) -> Result<String, TrackerBoxUpdaterError> {
         use ergo_lib::ergotree_ir::mir::constant::TryExtractInto;

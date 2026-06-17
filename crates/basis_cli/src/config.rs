@@ -66,6 +66,7 @@ impl ConfigManager {
         &self.config
     }
 
+    #[allow(dead_code)]
     pub fn get_config_mut(&mut self) -> &mut CliConfig {
         &mut self.config
     }
@@ -96,6 +97,7 @@ impl ConfigManager {
         self.save()
     }
 
+    #[allow(dead_code)]
     pub fn get_account(&self, name: &str) -> Option<&AccountConfig> {
         self.config.accounts.get(name)
     }
@@ -104,6 +106,7 @@ impl ConfigManager {
         self.config.accounts.values().collect()
     }
 
+    #[allow(dead_code)]
     pub fn get_current_account(&self) -> Option<&AccountConfig> {
         self.config
             .current_account

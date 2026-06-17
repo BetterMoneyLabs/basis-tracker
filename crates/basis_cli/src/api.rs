@@ -26,6 +26,7 @@ impl SerializableIouNote {
         self.amount_collected.saturating_sub(self.amount_redeemed)
     }
 
+    #[allow(dead_code)]
     pub fn is_fully_redeemed(&self) -> bool {
         self.amount_collected == self.amount_redeemed
     }
@@ -547,6 +548,7 @@ impl TrackerClient {
     }
 
     // Events & Status
+    #[allow(dead_code)]
     pub async fn get_events(&self, page: usize, page_size: usize) -> Result<Vec<TrackerEvent>> {
         let url = format!(
             "{}/events/paginated?page={}&page_size={}",
@@ -606,6 +608,7 @@ impl TrackerClient {
     }
 
     /// Upload acceptance policy to server
+    #[allow(dead_code)]
     pub async fn upload_policy(&self, request: UploadPolicyRequest) -> Result<UploadPolicyResponse> {
         let url = format!("{}/acceptance/policy", self.base_url);
         let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
@@ -624,6 +627,7 @@ impl TrackerClient {
     }
 
     /// Get acceptance policy for a recipient from the server
+    #[allow(dead_code)]
     pub async fn get_policy(&self, recipient_pubkey: &str) -> Result<GetPolicyResponse> {
         let url = format!("{}/acceptance/policy/{}", self.base_url, recipient_pubkey);
         let response = ureq::get(&url).call()?;
@@ -644,6 +648,7 @@ impl TrackerClient {
     }
 
     /// Check if a note would be accepted by the server's acceptance policy
+    #[allow(dead_code)]
     pub async fn check_acceptance(
         &self,
         issuer_pubkey: &str,
@@ -831,6 +836,7 @@ impl TrackerClient {
 
     /// Get the serialized bytes of a box from the Ergo node
     /// Makes direct request to Ergo node's /utxo/byId/{box_id} endpoint
+    #[allow(dead_code)]
     pub async fn get_box_bytes(&self, box_id: &str, node_url: &str, api_key: Option<&str>) -> Result<String> {
         let url = format!("{}/utxo/byId/{}", node_url, box_id);
         

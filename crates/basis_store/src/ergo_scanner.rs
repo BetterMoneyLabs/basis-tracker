@@ -123,7 +123,7 @@ pub struct NodeConfig {
 
 /// Inner state for scanner that requires synchronization
 #[derive(Clone)]
-struct ServerStateInner {
+pub struct ServerStateInner {
     pub current_height: u64,
     pub last_scanned_height: u64,
     pub scan_active: bool,
@@ -945,7 +945,7 @@ impl ServerState {
     }
 
     /// Get the reserve contract P2S for scan registration
-    async fn get_reserve_contract_p2s(&self) -> Result<String, ScannerError> {
+    async fn _get_reserve_contract_p2s(&self) -> Result<String, ScannerError> {
         self.config.reserve_contract_p2s.clone().ok_or_else(|| {
             ScannerError::Generic("No reserve contract P2S configured in node config".to_string())
         })

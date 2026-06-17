@@ -1,6 +1,6 @@
 use anyhow::Result;
 use basis_cli_lib::{
-    account::{Account, AccountManager},
+    account::AccountManager,
     api::TrackerClient,
     config::ConfigManager,
 };
@@ -60,10 +60,6 @@ impl TuiConfigManager {
         &self.config
     }
 
-    pub fn get_config_mut(&mut self) -> &mut TuiConfig {
-        &mut self.config
-    }
-
     pub fn save(&self) -> Result<()> {
         let content = toml::to_string_pretty(&self.config)?;
         std::fs::write(&self.config_path, content)?;
@@ -73,10 +69,6 @@ impl TuiConfigManager {
     pub fn update_acceptance(&mut self, config: AcceptanceConfig) -> Result<()> {
         self.config.acceptance = config;
         self.save()
-    }
-
-    pub fn get_acceptance(&self) -> &AcceptanceConfig {
-        &self.config.acceptance
     }
 }
 
@@ -109,37 +101,36 @@ pub struct App {
     pub server_connected: bool,
     pub address_book: HashMap<String, String>,
     pub acceptance_config: AcceptanceConfig,
-    pub reserve_cache: Option<ReserveCache>,
     pub policy_uploaded: bool,
     pub tui_config_manager: TuiConfigManager,
 }
 
-pub struct ReserveCache {
-    pub reserves: HashMap<String, ExtendedReserveInfo>,
-    pub last_updated: Instant,
-    pub ttl: Duration,
+pub struct _ReserveCache {
+    pub _reserves: HashMap<String, ExtendedReserveInfo>,
+    pub _last_updated: Instant,
+    pub _ttl: Duration,
 }
 
-impl ReserveCache {
-    pub fn new() -> Self {
+impl _ReserveCache {
+    pub fn _new() -> Self {
         Self {
-            reserves: HashMap::new(),
-            last_updated: Instant::now(),
-            ttl: Duration::from_secs(30 * 60), // 30 minutes
+            _reserves: HashMap::new(),
+            _last_updated: Instant::now(),
+            _ttl: Duration::from_secs(30 * 60), // 30 minutes
         }
     }
 
-    pub fn is_stale(&self) -> bool {
-        self.last_updated.elapsed() > self.ttl
+    pub fn _is_stale(&self) -> bool {
+        self._last_updated.elapsed() > self._ttl
     }
 
-    pub fn get_reserve(&self, pubkey: &str) -> Option<&ExtendedReserveInfo> {
-        self.reserves.get(pubkey)
+    pub fn _get_reserve(&self, pubkey: &str) -> Option<&ExtendedReserveInfo> {
+        self._reserves.get(pubkey)
     }
 
-    pub fn update(&mut self, reserves: HashMap<String, ExtendedReserveInfo>) {
-        self.reserves = reserves;
-        self.last_updated = Instant::now();
+    pub fn _update(&mut self, reserves: HashMap<String, ExtendedReserveInfo>) {
+        self._reserves = reserves;
+        self._last_updated = Instant::now();
     }
 }
 
@@ -147,7 +138,7 @@ impl ReserveCache {
 pub struct AccountInfo {
     pub name: String,
     pub pubkey: String,
-    pub created_at: u64,
+    pub _created_at: u64,
 }
 
 #[derive(Clone)]
@@ -156,7 +147,7 @@ pub struct NoteInfo {
     pub recipient: String,
     pub amount: u64,
     pub redeemed: u64,
-    pub timestamp: u64,
+    pub _timestamp: u64,
 }
 
 #[derive(Clone)]
@@ -166,7 +157,7 @@ pub struct ReserveInfo {
     pub collateral: u64,
     pub ratio: f64,
     pub note_count: usize,
-    pub last_updated: u64,
+    pub _last_updated: u64,
 }
 
 impl App {
@@ -179,19 +170,15 @@ impl App {
         let current_account = account_manager.get_current().map(|acc| AccountInfo {
             name: acc.name.clone(),
             pubkey: acc.get_pubkey_hex(),
-            created_at: acc.created_at,
+            _created_at: acc.created_at,
         });
 
         let mut address_book = HashMap::new();
-        // Add demo contacts with correct pubkeys
-        address_book.insert(
-            "bob".to_string(),
-            "03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea".to_string(),
-        );
-        address_book.insert(
-            "charlie".to_string(),
-            "02a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3b5c".to_string(),
-        );
+        
+        // Auto-populate address book with existing accounts (accounts are source of truth)
+        for account in account_manager.list_accounts() {
+            address_book.insert(account.name.clone(), account.get_pubkey_hex());
+        }
 
         // Load TUI config (acceptance policy)
         let tui_config_manager = TuiConfigManager::new()?;
@@ -211,7 +198,6 @@ impl App {
             server_connected: false,
             address_book,
             acceptance_config,
-            reserve_cache: None,
             policy_uploaded: false,
             tui_config_manager,
         };
@@ -233,7 +219,7 @@ impl App {
                         collateral: status.collateral,
                         ratio: status.collateralization_ratio,
                         note_count: status.note_count,
-                        last_updated: status.last_updated,
+                        _last_updated: status.last_updated,
                     });
                 }
                 Err(_) => {}
@@ -249,7 +235,7 @@ impl App {
                             recipient: n.recipient_pubkey,
                             amount: n.amount_collected,
                             redeemed: n.amount_redeemed,
-                            timestamp: n.timestamp,
+                            _timestamp: n.timestamp,
                         })
                         .collect();
                 }
@@ -265,7 +251,7 @@ impl App {
                             recipient: n.recipient_pubkey,
                             amount: n.amount_collected,
                             redeemed: n.amount_redeemed,
-                            timestamp: n.timestamp,
+                            _timestamp: n.timestamp,
                         })
                         .collect();
                 }
@@ -277,10 +263,6 @@ impl App {
 
     pub fn set_notification(&mut self, message: String, is_error: bool) {
         self.notification = Some((message, is_error));
-    }
-
-    pub fn clear_notification(&mut self) {
-        self.notification = None;
     }
 
     pub fn navigate_to(&mut self, screen: Screen) {

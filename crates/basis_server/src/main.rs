@@ -12,8 +12,6 @@ use basis_store::{
     tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
     ReserveTracker,
 };
-use basis_store::persistence::{TrackerStorage, ScannerMetadataStorage};
-use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -211,24 +209,24 @@ async fn main() {
 
     // Initialize reserve tracker
     tracing::info!("Initializing reserve tracker...");
-    let reserve_tracker = ReserveTracker::new();
+    let _reserve_tracker = ReserveTracker::new();
     tracing::info!("Reserve tracker initialized successfully");
 
     // Create channel for communicating with tracker thread
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
 
     // Initialize tracker manager outside of the blocking task so it can be shared
-    use basis_store::{RedemptionManager, TrackerStateManager};
+    use basis_store::TrackerStateManager;
     let shared_tracker_state = std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new()));
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
-    let shared_tracker_state_clone = shared_tracker_state.clone();
+    let _shared_tracker_state_clone = shared_tracker_state.clone();
     let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
     tokio::task::spawn_blocking(move || {
         use basis_store::RedemptionManager;
 
         tracing::debug!("Tracker thread started");
-        let mut tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new();
         
         // Update shared state with the rebuilt AVL root digest after initialization
         let initial_root = tracker.get_state().avl_root_digest;
@@ -665,6 +663,7 @@ async fn main() {
 }
 
 /// Background task that continuously scans the blockchain for reserve events
+#[allow(dead_code)]
 async fn background_scanner_task(state: AppState, config: AppConfig) {
     tracing::info!("Starting background blockchain scanner task");
 
@@ -770,6 +769,7 @@ async fn handle_options() -> impl axum::response::IntoResponse {
 }
 
 /// Process a reserve event and store it in the event store
+#[allow(dead_code)]
 async fn process_reserve_event(
     state: &AppState,
     event: ReserveEvent,

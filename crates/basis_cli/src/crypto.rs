@@ -65,7 +65,7 @@ impl KeyPair {
                 .map_err(|_| anyhow::anyhow!("Failed to create scalar from challenge"))?;
 
             // Get the secret key scalar
-            let secret_key_scalar = secp256k1::Scalar::from_be_bytes(self.keypair.secret_bytes())
+            let _secret_key_scalar = secp256k1::Scalar::from_be_bytes(self.keypair.secret_bytes())
                 .map_err(|_| anyhow::anyhow!("Failed to create scalar from secret key"))?;
 
             // Convert scalars to their big integer representations for modular arithmetic
@@ -107,6 +107,7 @@ impl KeyPair {
         }
     }
 
+    #[allow(dead_code)]
     pub fn verify_signature(
         message: &[u8],
         signature: &Signature,
@@ -139,7 +140,9 @@ impl KeyPair {
     }
 }
 
-fn blake2b_hash(data: &[u8]) -> [u8; 32] {
+    // This function is available for future use but currently unused
+    #[allow(dead_code)]
+    fn blake2b_hash(data: &[u8]) -> [u8; 32] {
     use blake2::{Blake2b, Digest};
 
     let mut hasher = Blake2b::<blake2::digest::consts::U32>::new();

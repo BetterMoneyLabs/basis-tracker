@@ -24,6 +24,7 @@ impl Account {
         })
     }
 
+    #[allow(dead_code)]
     pub fn from_config(config: &AccountConfig, keypair: KeyPair) -> Self {
         Self {
             name: config.name.clone(),
@@ -141,6 +142,7 @@ impl AccountManager {
         self.accounts.get(name)
     }
 
+    #[allow(dead_code)]
     pub fn get_current_pubkey(&self) -> Option<PubKey> {
         self.get_current()
             .map(|account| account.keypair.get_public_key_bytes())
@@ -150,6 +152,7 @@ impl AccountManager {
         self.get_current().map(|account| account.get_pubkey_hex())
     }
 
+    #[allow(dead_code)]
     pub fn sign_with_current(&self, message: &[u8]) -> Result<[u8; 65]> {
         let current = self
             .get_current()

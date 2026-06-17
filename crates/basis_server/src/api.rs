@@ -29,10 +29,10 @@ struct SchnorrSignRequest {
 #[derive(Deserialize)]
 struct SchnorrSignResponse {
     #[serde(rename = "signedMessage")]
-    signed_message: String,
+    _signed_message: String,
     signature: String,
     #[serde(rename = "publicKey")]
-    public_key: String,
+    _public_key: String,
 }
 
 #[derive(Deserialize)]
@@ -1550,7 +1550,7 @@ pub async fn initiate_redemption(
             }
 
             // Return a failed redemption response
-            let response = crate::models::RedeemResponse {
+            let _response = crate::models::RedeemResponse {
                 redemption_id: "failed_no_matching_reserve".to_string(),
                 amount: payload.amount,
                 timestamp: payload.timestamp,
@@ -1773,7 +1773,7 @@ pub async fn initiate_redemption(
             };
 
             // Return a response with more specific failure information
-            let failure_response = RedeemResponse {
+            let _failure_response = RedeemResponse {
                 redemption_id, // Use specific failure ID
                 amount: payload.amount,
                 timestamp: payload.timestamp,
@@ -3244,7 +3244,7 @@ pub async fn create_reserve_payload(
 // Get the Basis reserve contract P2S address from server configuration
 #[axum::debug_handler]
 pub async fn get_basis_reserve_contract_p2s(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
 ) -> (StatusCode, Json<ApiResponse<String>>) {
     tracing::debug!("Getting Basis reserve contract P2S address from configuration");
 
