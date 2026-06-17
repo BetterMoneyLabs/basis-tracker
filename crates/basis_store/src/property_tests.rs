@@ -1,6 +1,7 @@
 use crate::{
     schnorr::{self, generate_keypair},
-    IouNote,
+    transaction_builder::{RedemptionTransactionBuilder, TxContext},
+    IouNote, RedemptionRequest, RedemptionManager, TrackerStateManager,
 };
 
 #[cfg(test)]
@@ -213,6 +214,195 @@ mod property_tests {
                 let verification = note.verify_signature(&pubkey);
                 prop_assert!(verification.is_err(), "Zero signature should fail verification");
             }
+        }
+    }
+
+    // ============================================================================
+    // Redemption-specific property tests
+    // ============================================================================
+
+    proptest! {
+        #[test]
+        fn test_redemption_request_validation_proptest(
+            amount in 1u64..1000000,
+            timestamp in 1000000000u64..2000000000,
+            issuer_sig_prefix in prop::collection::vec(any::<u8>(), 1..10)
+        ) {
+            // Test that RedemptionRequest with various valid inputs can be created
+            let (_, issuer_pubkey) = generate_keypair();
+            let (_, recipient_pubkey) = generate_keypair();
+
+            let issuer_sig = format!("{}{}", hex::encode(&issuer_sig_prefix), "0".repeat(130usize.saturating_sub(issuer_sig_prefix.len() * 2)));
+            let issuer_sig = if issuer_sig.len() > 130 { issuer_sig[..130].to_string() } else { issuer_sig };
+
+            let request = RedemptionRequest {
+                issuer_pubkey: hex::encode(issuer_pubkey),
+                recipient_pubkey: hex::encode(recipient_pubkey),
+                amount,
+                timestamp,
+                reserve_box_id: "test_reserve_box_1".to_string(),
+                tracker_box_id: "test_tracker_box_1".to_string(),
+                tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+                current_height: 1000,
+                recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+                change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
+                issuer_signature: issuer_sig,
+                emergency: false,
+                tracker_signature: Some("02".repeat(65)),
+            };
+
+            // Basic validation: amount should be positive
+            prop_assert!(request.amount > 0);
+            // Public keys should be valid hex and 66 chars (33 bytes)
+            prop_assert_eq!(request.issuer_pubkey.len(), 66);
+            prop_assert_eq!(request.recipient_pubkey.len(), 66);
+            // Reserve and tracker box IDs should not be empty
+            prop_assert!(!request.reserve_box_id.is_empty());
+            prop_assert!(!request.tracker_box_id.is_empty());
+        }
+
+        #[test]
+        fn test_transaction_building_random_amounts_proptest(
+            redemption_amount in 1u64..1000000u64,
+            fee in 100000u64..5000000u64
+        ) {
+            // Test transaction building with random valid amounts
+            let (secret, issuer_pubkey) = generate_keypair();
+            let (_, recipient_pubkey) = generate_keypair();
+
+            // Create a note with sufficient outstanding debt
+            let total_debt = redemption_amount + 1; // Ensure outstanding_debt >= redemption_amount
+            let note = IouNote::create_and_sign(recipient_pubkey, total_debt, 1234567890, &secret).unwrap();
+
+            prop_assume!(redemption_amount <= note.outstanding_debt());
+
+            let context = TxContext {
+                current_height: 1000,
+                fee,
+                change_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+                network_prefix: 0,
+            };
+
+            let result = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
+                "test_reserve_box_1234567890abcdef",
+                "test_tracker_box_abcdef1234567890",
+                "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304",
+                &note,
+                "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
+                &[0x01, 0x02, 0x03],
+                &[0u8; 65],
+                &[0u8; 65],
+                &issuer_pubkey,
+                &context,
+                None, // First redemption: no reserve lookup proof
+                vec![0x03, 0x04],
+                redemption_amount,
+            );
+
+            prop_assert!(result.is_ok(), "Transaction building should succeed for valid amounts: {:?}", result.err());
+
+            let tx_data = result.unwrap();
+            prop_assert_eq!(tx_data.redemption_amount, redemption_amount);
+            prop_assert_eq!(tx_data.fee, fee);
+            prop_assert!(tx_data.context_extension.is_some());
+        }
+
+        #[test]
+        fn test_transaction_building_invalid_amounts_proptest(
+            redemption_amount in 1u64..u64::MAX,
+            note_amount in 1u64..1000000u64
+        ) {
+            // Test that transaction builder rejects amounts exceeding outstanding debt
+            prop_assume!(redemption_amount > note_amount);
+
+            let (secret, issuer_pubkey) = generate_keypair();
+            let (_, recipient_pubkey) = generate_keypair();
+
+            let note = IouNote::create_and_sign(recipient_pubkey, note_amount, 1234567890, &secret).unwrap();
+
+            let context = TxContext {
+                current_height: 1000,
+                fee: 1000000,
+                change_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+                network_prefix: 0,
+            };
+
+            let result = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
+                "test_reserve_box_1234567890abcdef",
+                "test_tracker_box_abcdef1234567890",
+                "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304",
+                &note,
+                "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
+                &[0x01, 0x02, 0x03],
+                &[0u8; 65],
+                &[0u8; 65],
+                &issuer_pubkey,
+                &context,
+                None,
+                vec![0x03, 0x04],
+                redemption_amount,
+            );
+
+            prop_assert!(result.is_err(), "Transaction building should fail when redemption amount {} exceeds outstanding debt {}", redemption_amount, note_amount);
+        }
+
+        #[test]
+        fn test_multiple_redemption_sequence_proptest(
+            initial_amount in 1000u64..10000000u64,
+            num_redemptions in 1usize..10usize
+        ) {
+            // Test that a sequence of partial redemptions maintains invariants
+            let tracker = TrackerStateManager::new_with_temp_storage();
+            let mut redemption_manager = RedemptionManager::new(tracker);
+
+            let (secret, issuer_pubkey) = generate_keypair();
+            let (_, recipient_pubkey) = generate_keypair();
+
+            // Create and add a note
+            let note = IouNote::create_and_sign(recipient_pubkey, initial_amount, 1234567890, &secret).unwrap();
+            redemption_manager.tracker.add_note(&issuer_pubkey, &note).unwrap();
+
+            let mut total_redeemed: u64 = 0;
+
+            for i in 0..num_redemptions {
+                let remaining = initial_amount - total_redeemed;
+                prop_assume!(remaining > 0);
+
+                // Redeem a random portion of the remaining amount
+                let redeem_amount = if remaining > 1 { (i as u64 + 1) * (remaining / (num_redemptions as u64 + 1)).max(1) } else { remaining };
+                let redeem_amount = redeem_amount.min(remaining);
+
+                let request = RedemptionRequest {
+                    issuer_pubkey: hex::encode(issuer_pubkey),
+                    recipient_pubkey: hex::encode(recipient_pubkey),
+                    amount: redeem_amount,
+                    timestamp: 1234567890 + i as u64,
+                    reserve_box_id: "test_reserve_box_1".to_string(),
+                    tracker_box_id: "test_tracker_box_1".to_string(),
+                    tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+                    current_height: 1000,
+                    recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+                    change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
+                    issuer_signature: "01".repeat(65),
+                    emergency: false,
+                    tracker_signature: Some("02".repeat(65)),
+                };
+
+                let result = redemption_manager.initiate_redemption(&request);
+                if result.is_ok() {
+                    total_redeemed += redeem_amount;
+                    let _ = redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount);
+                }
+            }
+
+            // Verify that total redeemed never exceeds initial amount
+            prop_assert!(total_redeemed <= initial_amount, "Total redeemed {} should not exceed initial amount {}", total_redeemed, initial_amount);
+
+            // Verify final state
+            let final_note = redemption_manager.tracker.lookup_note(&issuer_pubkey, &recipient_pubkey).unwrap();
+            prop_assert_eq!(final_note.amount_redeemed, total_redeemed, "Final redeemed amount should match total redeemed");
+            prop_assert!(final_note.outstanding_debt() == initial_amount - total_redeemed || final_note.outstanding_debt() == 0,
+                "Outstanding debt should be initial - total_redeemed or 0");
         }
     }
 }
