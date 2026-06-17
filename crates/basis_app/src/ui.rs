@@ -1,8 +1,10 @@
 use crate::app::{App, NoteInfo, Screen};
+use crate::acceptance_policy::{
+    get_policy_summary, get_whitelist_entries, get_blacklist_entries,
+    remove_from_whitelist, remove_from_blacklist, create_policy,
+};
 use anyhow::Result;
 use std::io::{self, Write};
-use std::collections::HashSet;
-use basis_core::acceptance::{AcceptanceConfig, PredicateConfig};
 
 // ANSI Color codes
 pub const RESET: &str = "\x1b[0m";
@@ -1662,131 +1664,4 @@ async fn save_and_upload_policy(app: &mut App) -> Result<()> {
     }
 }
 
-// Helper functions for policy management
-
-fn get_policy_summary(config: &AcceptanceConfig) -> (u16, usize, usize) {
-    let collateral_pct = config.predicates.iter()
-        .find_map(|p| match p {
-            PredicateConfig::Collateralization { min_ratio, .. } => Some((*min_ratio * 100.0) as u16),
-            _ => None,
-        })
-        .unwrap_or(100);
-    
-    let whitelist_count = get_whitelist_entries(config).len();
-    let blacklist_count = get_blacklist_entries(config).len();
-    
-    (collateral_pct, whitelist_count, blacklist_count)
-}
-
-fn get_whitelist_entries(config: &AcceptanceConfig) -> Vec<(String, String)> {
-    let mut entries = Vec::new();
-    for predicate in &config.predicates {
-        if let PredicateConfig::Whitelist { holders, .. } = predicate {
-            for pubkey in holders {
-                entries.push(("Unknown".to_string(), pubkey.clone()));
-            }
-        }
-    }
-    entries
-}
-
-fn get_blacklist_entries(config: &AcceptanceConfig) -> Vec<String> {
-    let mut entries = Vec::new();
-    for predicate in &config.predicates {
-        if let PredicateConfig::Blacklist { holders, .. } = predicate {
-            for pubkey in holders {
-                entries.push(pubkey.clone());
-            }
-        }
-    }
-    entries
-}
-
-fn remove_from_whitelist(config: &AcceptanceConfig, pubkey: &str) -> AcceptanceConfig {
-    let mut new_config = config.clone();
-    for predicate in &mut new_config.predicates {
-        if let PredicateConfig::Whitelist { holders, .. } = predicate {
-            holders.retain(|p| p != pubkey);
-        }
-    }
-    new_config
-}
-
-fn remove_from_blacklist(config: &AcceptanceConfig, pubkey: &str) -> AcceptanceConfig {
-    let mut new_config = config.clone();
-    for predicate in &mut new_config.predicates {
-        if let PredicateConfig::Blacklist { holders, .. } = predicate {
-            holders.retain(|p| p != pubkey);
-        }
-    }
-    new_config
-}
-
-fn create_policy(
-    existing: &AcceptanceConfig,
-    whitelist_add: Option<HashSet<String>>,
-    blacklist_add: Option<HashSet<String>>,
-    collateral_pct: Option<u16>,
-) -> AcceptanceConfig {
-    let mut config = existing.clone();
-    
-    // Add whitelist entries
-    if let Some(new_holders) = whitelist_add {
-        let mut found = false;
-        for predicate in &mut config.predicates {
-            if let PredicateConfig::Whitelist { holders, .. } = predicate {
-                holders.extend(new_holders.iter().cloned());
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            let holders: Vec<String> = new_holders.iter().cloned().collect();
-            config.predicates.push(PredicateConfig::Whitelist {
-                name: "whitelist".to_string(),
-                holders,
-                max_debt: None,
-            });
-        }
-    }
-    
-    // Add blacklist entries
-    if let Some(new_holders) = blacklist_add {
-        let mut found = false;
-        for predicate in &mut config.predicates {
-            if let PredicateConfig::Blacklist { holders, .. } = predicate {
-                holders.extend(new_holders.iter().cloned());
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            let holders: Vec<String> = new_holders.iter().cloned().collect();
-            config.predicates.push(PredicateConfig::Blacklist {
-                name: "blacklist".to_string(),
-                holders,
-            });
-        }
-    }
-    
-    // Update collateral
-    if let Some(pct) = collateral_pct {
-        let ratio = (pct as f64) / 100.0;
-        let mut found = false;
-        for predicate in &mut config.predicates {
-            if let PredicateConfig::Collateralization { min_ratio, .. } = predicate {
-                *min_ratio = ratio;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            config.predicates.push(PredicateConfig::Collateralization {
-                name: "collateral".to_string(),
-                min_ratio: ratio,
-            });
-        }
-    }
-    
-    config
-}
+// Helper functions are now in crate::acceptance_policy module

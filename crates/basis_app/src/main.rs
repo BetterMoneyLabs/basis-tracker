@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+mod acceptance_policy;
 mod app;
 mod ui;
 
