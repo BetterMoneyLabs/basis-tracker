@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::{IouNote, NoteError, PubKey, TrackerStateManager};
+use crate::{blake2b256_hash, IouNote, NoteError, PubKey, TrackerStateManager};
 use crate::transaction_builder::{RedemptionTransactionBuilder, TxContext};
 
 #[derive(Error, Debug)]
@@ -276,19 +276,53 @@ impl RedemptionManager {
     }
 
     /// Verify redemption proof against on-chain state
+    ///
+    /// This verifies:
+    /// 1. The note signature (Schnorr signature from issuer)
+    /// 2. The AVL proof that the note exists in the tracker's AVL tree
+    ///
+    /// # Arguments
+    /// * `proof` - The AVL proof bytes for the note lookup
+    /// * `note` - The IOU note being redeemed
+    /// * `issuer_pubkey` - The issuer's public key (33 bytes compressed secp256k1)
+    /// * `avl_root_digest` - The expected AVL tree root digest (33 bytes) from on-chain state
+    ///
+    /// # Returns
+    /// `true` if both the signature and AVL proof are valid, `false` otherwise
     pub fn verify_redemption_proof(
         &self,
-        _proof: &[u8],
+        proof: &[u8],
         note: &IouNote,
         issuer_pubkey: &PubKey,
+        avl_root_digest: &[u8; 33],
     ) -> Result<bool, RedemptionError> {
-        // In a real implementation, this would verify the AVL proof against
-        // the on-chain commitment stored in the reserve contract
-
-        // For now, just verify the note signature
+        // Step 1: Verify the note signature (Schnorr signature from issuer)
         note.verify_signature(issuer_pubkey)
-            .map(|_| true)
-            .map_err(|_| RedemptionError::InvalidNoteSignature)
+            .map_err(|_| RedemptionError::InvalidNoteSignature)?;
+
+        // Step 2: Verify the AVL proof that the note exists in the tracker's tree
+        // The key is blake2b256(issuer_pubkey || recipient_pubkey)
+        let mut key_data = Vec::with_capacity(66);
+        key_data.extend_from_slice(issuer_pubkey);
+        key_data.extend_from_slice(&note.recipient_pubkey);
+        let key = blake2b256_hash(&key_data);
+
+        // The value is total_debt (amount_collected - amount_redeemed) as 8-byte big-endian
+        let total_debt = note.outstanding_debt();
+        let value = total_debt.to_be_bytes().to_vec();
+
+        let avl_valid = basis_trees::BasisAvlTree::verify_proof(
+            avl_root_digest,
+            proof,
+            &key,
+            &value,
+        );
+
+        if !avl_valid {
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 }
 
@@ -329,28 +363,461 @@ mod tests {
     }
 
     #[test]
-    fn test_redemption_request_validation() {
+    fn test_build_unsigned_redemption_transaction_invalid_issuer_pubkey() {
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        // Create a valid note first
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret);
+        let issuer_pubkey_bytes = issuer_pubkey.serialize();
+
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let recipient_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret);
+        let recipient_pubkey_bytes = recipient_pubkey.serialize();
+
+        let note = IouNote {
+            recipient_pubkey: recipient_pubkey_bytes,
+            amount_collected: 10000,
+            amount_redeemed: 0,
+            timestamp: 1672531200,
+            signature: [0u8; 65], // dummy signature
+        };
+
         let request = RedemptionRequest {
-            issuer_pubkey: "02".to_string() + &"0".repeat(64),
-            recipient_pubkey: "02".to_string() + &"1".repeat(64),
+            issuer_pubkey: "invalid_hex".to_string(),
+            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
             amount: 1000,
-            timestamp: 1672531200, // Jan 1, 2023
+            timestamp: 1672531200,
             reserve_box_id: "box123".to_string(),
             tracker_box_id: "tracker123".to_string(),
             tracker_nft_id: "nft123".to_string(),
             current_height: 1000,
-            recipient_address: "9".repeat(51), // Ergo address format
+            recipient_address: "9".repeat(51),
             change_address: "9".repeat(51),
             issuer_signature: "01".repeat(65),
             emergency: false,
             tracker_signature: Some("02".repeat(65)),
         };
 
-        // Should parse valid public keys
-        let issuer = parse_pubkey(&request.issuer_pubkey);
-        let recipient = parse_pubkey(&request.recipient_pubkey);
-        assert!(issuer.is_ok());
-        assert!(recipient.is_ok());
+        let proof = crate::NoteProof {
+            note: note.clone(),
+            avl_proof: vec![],
+            operations: vec![],
+        };
+
+        let result = redemption_manager.build_unsigned_redemption_transaction(
+            &note,
+            &proof,
+            &request,
+            "box123",
+            "tracker123",
+            "nft123",
+            &[0u8; 65],
+            &[0u8; 65],
+            &TxContext {
+                current_height: 1000,
+                fee: 1000000,
+                change_address: "9".repeat(51),
+                network_prefix: 0,
+            },
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, RedemptionError::TransactionError(_)));
+    }
+
+    #[test]
+    fn test_build_unsigned_redemption_transaction_invalid_recipient_pubkey() {
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret);
+        let issuer_pubkey_bytes = issuer_pubkey.serialize();
+
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let recipient_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret);
+        let recipient_pubkey_bytes = recipient_pubkey.serialize();
+
+        let note = IouNote {
+            recipient_pubkey: recipient_pubkey_bytes,
+            amount_collected: 10000,
+            amount_redeemed: 0,
+            timestamp: 1672531200,
+            signature: [0u8; 65],
+        };
+
+        let request = RedemptionRequest {
+            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
+            recipient_pubkey: "invalid_hex".to_string(),
+            amount: 1000,
+            timestamp: 1672531200,
+            reserve_box_id: "box123".to_string(),
+            tracker_box_id: "tracker123".to_string(),
+            tracker_nft_id: "nft123".to_string(),
+            current_height: 1000,
+            recipient_address: "9".repeat(51),
+            change_address: "9".repeat(51),
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+            tracker_signature: Some("02".repeat(65)),
+        };
+
+        let proof = crate::NoteProof {
+            note: note.clone(),
+            avl_proof: vec![],
+            operations: vec![],
+        };
+
+        let result = redemption_manager.build_unsigned_redemption_transaction(
+            &note,
+            &proof,
+            &request,
+            "box123",
+            "tracker123",
+            "nft123",
+            &[0u8; 65],
+            &[0u8; 65],
+            &TxContext {
+                current_height: 1000,
+                fee: 1000000,
+                change_address: "9".repeat(51),
+                network_prefix: 0,
+            },
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, RedemptionError::TransactionError(_)));
+    }
+
+    #[test]
+    fn test_build_unsigned_redemption_transaction_empty_reserve_box_id() {
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret);
+        let issuer_pubkey_bytes = issuer_pubkey.serialize();
+
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let recipient_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret);
+        let recipient_pubkey_bytes = recipient_pubkey.serialize();
+
+        let note = IouNote {
+            recipient_pubkey: recipient_pubkey_bytes,
+            amount_collected: 10000,
+            amount_redeemed: 0,
+            timestamp: 1672531200,
+            signature: [0u8; 65],
+        };
+
+        let request = RedemptionRequest {
+            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            amount: 1000,
+            timestamp: 1672531200,
+            reserve_box_id: "".to_string(),
+            tracker_box_id: "tracker123".to_string(),
+            tracker_nft_id: "nft123".to_string(),
+            current_height: 1000,
+            recipient_address: "9".repeat(51),
+            change_address: "9".repeat(51),
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+            tracker_signature: Some("02".repeat(65)),
+        };
+
+        let proof = crate::NoteProof {
+            note: note.clone(),
+            avl_proof: vec![],
+            operations: vec![],
+        };
+
+        let result = redemption_manager.build_unsigned_redemption_transaction(
+            &note,
+            &proof,
+            &request,
+            "",
+            "tracker123",
+            "nft123",
+            &[0u8; 65],
+            &[0u8; 65],
+            &TxContext {
+                current_height: 1000,
+                fee: 1000000,
+                change_address: "9".repeat(51),
+                network_prefix: 0,
+            },
+        );
+
+        // Empty reserve box ID should be rejected
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_unsigned_redemption_transaction_empty_tracker_box_id() {
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret);
+        let issuer_pubkey_bytes = issuer_pubkey.serialize();
+
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let recipient_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret);
+        let recipient_pubkey_bytes = recipient_pubkey.serialize();
+
+        let note = IouNote {
+            recipient_pubkey: recipient_pubkey_bytes,
+            amount_collected: 10000,
+            amount_redeemed: 0,
+            timestamp: 1672531200,
+            signature: [0u8; 65],
+        };
+
+        let request = RedemptionRequest {
+            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            amount: 1000,
+            timestamp: 1672531200,
+            reserve_box_id: "box123".to_string(),
+            tracker_box_id: "".to_string(),
+            tracker_nft_id: "nft123".to_string(),
+            current_height: 1000,
+            recipient_address: "9".repeat(51),
+            change_address: "9".repeat(51),
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+            tracker_signature: Some("02".repeat(65)),
+        };
+
+        let proof = crate::NoteProof {
+            note: note.clone(),
+            avl_proof: vec![],
+            operations: vec![],
+        };
+
+        let result = redemption_manager.build_unsigned_redemption_transaction(
+            &note,
+            &proof,
+            &request,
+            "box123",
+            "",
+            "nft123",
+            &[0u8; 65],
+            &[0u8; 65],
+            &TxContext {
+                current_height: 1000,
+                fee: 1000000,
+                change_address: "9".repeat(51),
+                network_prefix: 0,
+            },
+        );
+
+        // Empty tracker box ID should be rejected
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_unsigned_redemption_transaction_invalid_issuer_signature_length() {
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret);
+        let issuer_pubkey_bytes = issuer_pubkey.serialize();
+
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let recipient_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret);
+        let recipient_pubkey_bytes = recipient_pubkey.serialize();
+
+        let note = IouNote {
+            recipient_pubkey: recipient_pubkey_bytes,
+            amount_collected: 10000,
+            amount_redeemed: 0,
+            timestamp: 1672531200,
+            signature: [0u8; 65],
+        };
+
+        let request = RedemptionRequest {
+            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            amount: 1000,
+            timestamp: 1672531200,
+            reserve_box_id: "box123".to_string(),
+            tracker_box_id: "tracker123".to_string(),
+            tracker_nft_id: "nft123".to_string(),
+            current_height: 1000,
+            recipient_address: "9".repeat(51),
+            change_address: "9".repeat(51),
+            issuer_signature: "01".repeat(64), // 64 bytes instead of 65
+            emergency: false,
+            tracker_signature: Some("02".repeat(65)),
+        };
+
+        let proof = crate::NoteProof {
+            note: note.clone(),
+            avl_proof: vec![],
+            operations: vec![],
+        };
+
+        let result = redemption_manager.build_unsigned_redemption_transaction(
+            &note,
+            &proof,
+            &request,
+            "box123",
+            "tracker123",
+            "nft123",
+            &[0u8; 65],
+            &[0u8; 65],
+            &TxContext {
+                current_height: 1000,
+                fee: 1000000,
+                change_address: "9".repeat(51),
+                network_prefix: 0,
+            },
+        );
+
+        // Invalid issuer signature length should be rejected
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_unsigned_redemption_transaction_zero_amount() {
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret);
+        let issuer_pubkey_bytes = issuer_pubkey.serialize();
+
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let recipient_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret);
+        let recipient_pubkey_bytes = recipient_pubkey.serialize();
+
+        let note = IouNote {
+            recipient_pubkey: recipient_pubkey_bytes,
+            amount_collected: 10000,
+            amount_redeemed: 0,
+            timestamp: 1672531200,
+            signature: [0u8; 65],
+        };
+
+        let request = RedemptionRequest {
+            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            amount: 0, // Zero amount
+            timestamp: 1672531200,
+            reserve_box_id: "box123".to_string(),
+            tracker_box_id: "tracker123".to_string(),
+            tracker_nft_id: "nft123".to_string(),
+            current_height: 1000,
+            recipient_address: "9".repeat(51),
+            change_address: "9".repeat(51),
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+            tracker_signature: Some("02".repeat(65)),
+        };
+
+        let proof = crate::NoteProof {
+            note: note.clone(),
+            avl_proof: vec![],
+            operations: vec![],
+        };
+
+        let result = redemption_manager.build_unsigned_redemption_transaction(
+            &note,
+            &proof,
+            &request,
+            "box123",
+            "tracker123",
+            "nft123",
+            &[0u8; 65],
+            &[0u8; 65],
+            &TxContext {
+                current_height: 1000,
+                fee: 1000000,
+                change_address: "9".repeat(51),
+                network_prefix: 0,
+            },
+        );
+
+        // Zero amount should be rejected
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_unsigned_redemption_transaction_excessive_amount() {
+        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret);
+        let issuer_pubkey_bytes = issuer_pubkey.serialize();
+
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let recipient_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret);
+        let recipient_pubkey_bytes = recipient_pubkey.serialize();
+
+        let note = IouNote {
+            recipient_pubkey: recipient_pubkey_bytes,
+            amount_collected: 10000,
+            amount_redeemed: 0,
+            timestamp: 1672531200,
+            signature: [0u8; 65],
+        };
+
+        let request = RedemptionRequest {
+            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            amount: 20000, // Exceeds outstanding debt
+            timestamp: 1672531200,
+            reserve_box_id: "box123".to_string(),
+            tracker_box_id: "tracker123".to_string(),
+            tracker_nft_id: "nft123".to_string(),
+            current_height: 1000,
+            recipient_address: "9".repeat(51),
+            change_address: "9".repeat(51),
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+            tracker_signature: Some("02".repeat(65)),
+        };
+
+        let proof = crate::NoteProof {
+            note: note.clone(),
+            avl_proof: vec![],
+            operations: vec![],
+        };
+
+        let result = redemption_manager.build_unsigned_redemption_transaction(
+            &note,
+            &proof,
+            &request,
+            "box123",
+            "tracker123",
+            "nft123",
+            &[0u8; 65],
+            &[0u8; 65],
+            &TxContext {
+                current_height: 1000,
+                fee: 1000000,
+                change_address: "9".repeat(51),
+                network_prefix: 0,
+            },
+        );
+
+        // Excessive amount should be rejected
+        assert!(result.is_err());
     }
 }
 
