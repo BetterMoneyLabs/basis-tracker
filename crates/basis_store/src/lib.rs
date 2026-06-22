@@ -719,23 +719,19 @@ impl TrackerStateManager {
         recipient_pubkey: &PubKey,
     ) -> Result<NoteProof, NoteError> {
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let _key_bytes = key.to_bytes();
+        let key_bytes = key.to_bytes();
 
-        // For AVL trees, the proof is generated during lookup operations
-        // In a real implementation, we'd need to track operations for proof generation
-        let proof = self.avl_state.generate_proof();
-
-        // Placeholder for operations - in real implementation, this would track
-        // the specific operations that led to the current state
-        let operations = Vec::new();
+        // Generate a lookup proof for the key in the AVL tree
+        // This captures the path to the key, which can be verified against the root digest
+        let (avl_proof, _value) = self.avl_state.generate_lookup_proof(key_bytes.to_vec());
 
         // Lookup the note to include in proof
         let note = self.lookup_note(issuer_pubkey, recipient_pubkey)?;
 
         Ok(NoteProof {
             note,
-            avl_proof: proof,
-            operations,
+            avl_proof,
+            operations: Vec::new(),
         })
     }
 

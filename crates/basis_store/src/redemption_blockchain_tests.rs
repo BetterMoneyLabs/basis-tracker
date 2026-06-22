@@ -235,6 +235,10 @@ mod tests {
             .tracker
             .lookup_note(&alice_pubkey, &bob_pubkey)
             .expect("Note not found");
+        let stored_note = redemption_manager
+            .tracker
+            .lookup_note(&alice_pubkey, &bob_pubkey)
+            .expect("Note not found");
         assert_eq!(stored_note.amount_collected, total_debt);
         assert_eq!(stored_note.amount_redeemed, 0);
         assert_eq!(stored_note.outstanding_debt(), total_debt);

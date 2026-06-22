@@ -123,6 +123,27 @@ impl RedemptionManager {
         note.verify_signature(&issuer_pubkey)
             .map_err(|_| RedemptionError::InvalidNoteSignature)?;
 
+        // Verify the AVL proof that the note exists in the tracker's tree.
+        // This ensures the note is committed to the current on-chain state.
+        let avl_root_digest = self.tracker.get_state().avl_root_digest;
+        let avl_proof = self
+            .tracker
+            .generate_proof(&issuer_pubkey, &recipient_pubkey)
+            .map_err(|e| RedemptionError::StorageError(format!("Proof generation failed: {:?}", e)))?;
+
+        let proof_valid = self.verify_redemption_proof(
+            &avl_proof.avl_proof,
+            &note,
+            &issuer_pubkey,
+            &avl_root_digest,
+        )?;
+
+        if !proof_valid {
+            return Err(RedemptionError::StorageError(
+                "AVL proof verification failed: note not found in tracker state".to_string()
+            ));
+        }
+
         // Check if there's sufficient outstanding debt to redeem
         if note.outstanding_debt() < request.amount {
             return Err(RedemptionError::InsufficientCollateral(
@@ -136,14 +157,9 @@ impl RedemptionManager {
         // Emergency redemption requires (HEIGHT - trackerCreationHeight) > 2160.
         // The transaction builder and manager do NOT enforce time locks.
 
-        // Generate proof for the note
-        let proof = self
-            .tracker
-            .generate_proof(&issuer_pubkey, &recipient_pubkey)?;
-
         // Build redemption transaction using the transaction builder directly
         // The reserve_box_id should already be set in the request from the API layer
-        let redemption_data = build_redemption_transaction(&mut self.tracker, &note, &proof, request)?;
+        let redemption_data = build_redemption_transaction(&mut self.tracker, &note, &avl_proof, request)?;
 
         Ok(redemption_data)
     }

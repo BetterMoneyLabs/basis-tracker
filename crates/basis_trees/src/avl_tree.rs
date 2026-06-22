@@ -73,6 +73,10 @@ impl BasisAvlTree {
         // Update cache
         self.cache.insert(key.clone(), value.clone());
 
+        // Generate a proof to commit the changes and update old_top_node
+        // This ensures subsequent lookup proofs are anchored to the correct root
+        let _ = self.prover.generate_proof();
+
         // Update state
         self.update_state();
 
@@ -91,6 +95,8 @@ impl BasisAvlTree {
             Ok(_) => {
                 // Update cache
                 self.cache.insert(key.clone(), value.clone());
+                // Generate a proof to commit the changes and update old_top_node
+                let _ = self.prover.generate_proof();
                 self.update_state();
                 Ok(())
             },
@@ -107,6 +113,8 @@ impl BasisAvlTree {
 
                 // Update cache
                 self.cache.insert(key.clone(), value.clone());
+                // Generate a proof to commit the changes and update old_top_node
+                let _ = self.prover.generate_proof();
                 self.update_state();
                 Ok(())
             }
