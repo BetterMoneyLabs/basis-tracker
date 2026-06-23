@@ -53,3 +53,6 @@ test_output/
 
 # Test tracker storage (created during integration tests)
 test_tracker/
+
+# Test policies directories (created during acceptance tests)
+test_policies_*/
