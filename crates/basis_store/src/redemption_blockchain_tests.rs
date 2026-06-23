@@ -301,6 +301,7 @@ mod tests {
             issuer_signature: hex::encode(&issuer_sig),
             emergency: false,
             tracker_signature: Some(hex::encode(&tracker_sig)),
+            reserve_box_value: total_debt + 1000000, // Reserve must cover debt + fee
         };
 
         // Initiate redemption through manager
@@ -659,6 +660,7 @@ mod tests {
             issuer_signature: hex::encode(&issuer_sig),
             emergency: false,
             tracker_signature: Some(hex::encode(&tracker_sig)),
+            reserve_box_value: total_debt + 1000000, // Reserve must cover debt + fee
         };
 
         // Initiate redemption

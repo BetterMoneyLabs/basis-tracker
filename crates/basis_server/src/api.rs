@@ -1473,8 +1473,8 @@ pub async fn initiate_redemption(
         }
     };
 
-    // Find the reserve box ID for the issuer using normalized key matching
-    let reserve_box_id = {
+    // Find the reserve box ID and value for the issuer using normalized key matching
+    let (reserve_box_id, reserve_box_value) = {
         // Read reserves directly from database (not in-memory tracker) to avoid
         // issues with scanner removing manually-inserted reserves
         let scanner = state.ergo_scanner.lock().await;
@@ -1498,7 +1498,7 @@ pub async fn initiate_redemption(
         let normalized_issuer_key = basis_store::normalize_public_key(&payload.issuer_pubkey);
 
         // Find a reserve where the owner key matches (considering normalized forms)
-        let mut found_box_id = String::new();
+        let mut found_reserve: Option<(String, u64)> = None;
         for reserve in &all_reserves {
             // Handle the case where the owner key might be double-encoded
             // The database might store the hex string as ASCII characters, which are hex-encoded again
@@ -1536,17 +1536,17 @@ pub async fn initiate_redemption(
             let matches = normalized_issuer_key == normalized_actual_key;
 
             if matches {
-                tracing::debug!("Key match found! Reserve box ID: {}", reserve.box_id);
-                found_box_id = reserve.box_id.clone();
+                tracing::debug!("Key match found! Reserve box ID: {}, value: {}", reserve.box_id, reserve.base_info.collateral_amount);
+                found_reserve = Some((reserve.box_id.clone(), reserve.base_info.collateral_amount));
                 break;
             }
         }
 
-        if found_box_id.is_empty() {
+        if found_reserve.is_none() {
             tracing::warn!("No reserve found for issuer: {}", payload.issuer_pubkey);
             tracing::debug!("Available reserves for debugging:");
             for reserve in &all_reserves {
-                tracing::debug!("  Reserve box: {}, owner key: {}", reserve.box_id, reserve.owner_pubkey);
+                tracing::debug!("  Reserve box: {}, owner key: {}, value: {}", reserve.box_id, reserve.owner_pubkey, reserve.base_info.collateral_amount);
             }
 
             // Return a failed redemption response
@@ -1566,7 +1566,7 @@ pub async fn initiate_redemption(
             );
         }
 
-        found_box_id
+        found_reserve.unwrap()
     };
 
     // Fetch blockchain data from Ergo node
@@ -1680,6 +1680,7 @@ pub async fn initiate_redemption(
         issuer_signature: payload.issuer_signature.clone(),
         emergency: payload.emergency,
         tracker_signature: tracker_signature_hex,
+        reserve_box_value, // Actual reserve box value from blockchain
     };
 
     // Send command to tracker thread to initiate redemption

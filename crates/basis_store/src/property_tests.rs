@@ -249,6 +249,7 @@ mod property_tests {
                 issuer_signature: issuer_sig,
                 emergency: false,
                 tracker_signature: Some("02".repeat(65)),
+                reserve_box_value: amount + 1000000 + 1000000, // Reserve must cover debt + fee + buffer
             };
 
             // Basic validation: amount should be positive
@@ -294,6 +295,7 @@ mod property_tests {
                 &[0u8; 65],
                 &issuer_pubkey,
                 &context,
+                redemption_amount + fee + 1000000, // Reserve box value: enough to cover redemption + fee + buffer
                 None, // First redemption: no reserve lookup proof
                 vec![0x03, 0x04],
                 redemption_amount,
@@ -338,6 +340,7 @@ mod property_tests {
                 &[0u8; 65],
                 &issuer_pubkey,
                 &context,
+                note_amount + 1000000 + 1000000, // Reserve box value: enough to cover max debt + fee + buffer
                 None,
                 vec![0x03, 0x04],
                 redemption_amount,
@@ -372,21 +375,22 @@ mod property_tests {
                 let redeem_amount = if remaining > 1 { (i as u64 + 1) * (remaining / (num_redemptions as u64 + 1)).max(1) } else { remaining };
                 let redeem_amount = redeem_amount.min(remaining);
 
-                let request = RedemptionRequest {
-                    issuer_pubkey: hex::encode(issuer_pubkey),
-                    recipient_pubkey: hex::encode(recipient_pubkey),
-                    amount: redeem_amount,
-                    timestamp: 1234567890 + i as u64,
-                    reserve_box_id: "test_reserve_box_1".to_string(),
-                    tracker_box_id: "test_tracker_box_1".to_string(),
-                    tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
-                    current_height: 1000,
-                    recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
-                    change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
-                    issuer_signature: "01".repeat(65),
-                    emergency: false,
-                    tracker_signature: Some("02".repeat(65)),
-                };
+            let request = RedemptionRequest {
+                issuer_pubkey: hex::encode(issuer_pubkey),
+                recipient_pubkey: hex::encode(recipient_pubkey),
+                amount: redeem_amount,
+                timestamp: 1234567890 + i as u64,
+                reserve_box_id: "test_reserve_box_1234567890abcdef".to_string(),
+                tracker_box_id: "test_tracker_box_abcdef1234567890".to_string(),
+                tracker_nft_id: "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
+                current_height: 1000,
+                recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+                change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
+                issuer_signature: "01".repeat(65),
+                emergency: false,
+                tracker_signature: Some("02".repeat(65)),
+                reserve_box_value: initial_amount + 1000000 + 1000000, // Reserve must cover max debt + fee + buffer
+            };
 
                 let result = redemption_manager.initiate_redemption(&request);
                 if result.is_ok() {
