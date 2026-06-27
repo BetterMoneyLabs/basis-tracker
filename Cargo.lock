@@ -313,6 +313,7 @@ dependencies = [
  "ergo-lib",
  "generic-array",
  "hex",
+ "reqwest",
  "secp256k1",
  "serde",
  "serde_json",

@@ -18,6 +18,7 @@ blake2 = "0.10"
 generic-array = "0.14"
 thiserror = { workspace = true }
 toml = "0.8"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 [dependencies.basis_store]
 path = "../basis_store"

@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod integration_tests {
     use basis_server::{TrackerBoxUpdateConfig, TrackerBoxUpdater, SharedTrackerState};
-    use ergo_lib::ergotree_ir::address::NetworkPrefix;
 
     #[tokio::test]
     async fn test_tracker_box_updater_integration() {
@@ -20,41 +19,36 @@ mod integration_tests {
         
         // Test creating and starting the updater
         let config = TrackerBoxUpdateConfig::default();
-        let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
-        let updater_shutdown_rx = shutdown_tx.subscribe();
 
-        // Spawn the updater in a separate task so we can send shutdown signal
-        let updater_task = tokio::spawn(TrackerBoxUpdater::start(
-            config,
-            shared_state,
-            NetworkPrefix::Mainnet,
-            "test_tracker_nft_1234567890abcdef".to_string(), // tracker_nft_id - required parameter
-            updater_shutdown_rx,
-        ));
+        // Create shutdown channel
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
 
-        // Give the updater a moment to start, then send shutdown signal
+        // Start the updater in a background task
+        let updater_handle = tokio::spawn(async move {
+            TrackerBoxUpdater::start(config, shared_state, shutdown_rx).await
+        });
+
+        // Give it a moment to start, then send shutdown
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let _ = shutdown_tx.send(()); // Send shutdown signal
+        let _ = shutdown_tx.send(());
 
-        // Wait for the updater task to complete
-        let result = match tokio::time::timeout(std::time::Duration::from_secs(2), updater_task).await {
-            Ok(task_result) => task_result.unwrap(), // Get the actual result from the task
-            Err(_) => {
-                // If timeout occurs, the function is hanging - return an error
-                Err(basis_server::TrackerBoxUpdaterError::LoggingError("Updater did not shut down in time".to_string()))
-            }
-        };
+        // Wait for the updater to finish with timeout
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            updater_handle
+        ).await;
 
-        // Should return Ok(()) when shutdown signal is received
-        // For this test, we're mainly validating that the types work together
-        assert!(result.is_ok());
+        // Should complete without error
+        assert!(result.is_ok(), "Updater should complete within timeout");
+        let inner_result = result.unwrap();
+        assert!(inner_result.is_ok(), "Updater task should succeed");
+        let updater_result = inner_result.unwrap();
+        assert!(updater_result.is_ok(), "Updater should return Ok");
     }
 
     #[tokio::test]
     async fn test_tracker_box_updates_avl_digest() {
-        use std::sync::Arc;
-        use tokio::sync::Mutex;
-        use basis_store::{TrackerStateManager, IouNote, PubKey, Signature};
+        use basis_store::{TrackerStateManager, IouNote};
         use secp256k1::{Secp256k1, SecretKey};
 
         // Create shared state
@@ -67,10 +61,10 @@ mod integration_tests {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
         let issuer_pubkey_obj = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
-        let issuer_pubkey: PubKey = issuer_pubkey_obj.serialize();
+        let issuer_pubkey = issuer_pubkey_obj.serialize();
 
         // Create a test recipient pubkey
-        let recipient_pubkey: PubKey = [0x03u8; 33]; // Valid compressed public key
+        let recipient_pubkey = [0x03u8; 33]; // Valid compressed public key
 
         // Create a properly signed test note
         let note = IouNote::create_and_sign(
@@ -93,5 +87,48 @@ mod integration_tests {
         // Verify that the shared state was updated
         assert_eq!(shared_state.get_avl_root_digest(), new_root);
         assert_ne!(shared_state.get_avl_root_digest(), [0u8; 33]); // Should not be all zeros
+    }
+
+    #[tokio::test]
+    async fn test_shared_tracker_state_nft_id() {
+        let shared_state = SharedTrackerState::new();
+        
+        // Initially no NFT ID
+        assert!(shared_state.get_tracker_nft_id().is_none());
+        
+        // Set NFT ID
+        shared_state.set_tracker_nft_id("test_nft_123".to_string());
+        assert_eq!(shared_state.get_tracker_nft_id(), Some("test_nft_123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_shared_tracker_state_box_id() {
+        let shared_state = SharedTrackerState::new();
+        
+        // Initially no box ID
+        assert!(shared_state.get_tracker_box_id().is_none());
+        
+        // Set box ID
+        shared_state.set_tracker_box_id("box_123".to_string());
+        assert_eq!(shared_state.get_tracker_box_id(), Some("box_123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_transaction_confirmation_check_not_found() {
+        // Test that check_transaction_confirmation handles a non-existent tx gracefully
+        // Using a local/mock URL that will definitely timeout/fail
+        let config = TrackerBoxUpdateConfig {
+            node_url: "http://localhost:99999".to_string(), // Invalid port - will fail fast
+            api_key: None,
+            update_interval_seconds: 600,
+        };
+
+        // Check a non-existent transaction ID (64 hex chars)
+        let fake_tx_id = "0000000000000000000000000000000000000000000000000000000000000000";
+        
+        let result = TrackerBoxUpdater::check_transaction_confirmation(&config, fake_tx_id).await;
+        
+        // Should return an error since the node is unreachable
+        assert!(result.is_err(), "Should error when node is unreachable");
     }
 }

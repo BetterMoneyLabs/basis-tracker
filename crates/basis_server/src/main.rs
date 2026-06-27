@@ -368,33 +368,35 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Initialize tracker NFT ID in shared state if configured
+    if let Some(ref tracker_nft_id) = config.ergo.tracker_nft_id {
+        shared_tracker_state_for_updater.set_tracker_nft_id(tracker_nft_id.clone());
+        tracing::info!("Tracker NFT ID initialized: {}", tracker_nft_id);
+    } else {
+        tracing::warn!("No tracker NFT ID configured. Tracker box updater will be disabled until configured.");
+    }
+
     // Use mainnet network prefix for address encoding
-    let network_prefix = ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet;
+    let _network_prefix = ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet;
 
     let tracker_box_config = TrackerBoxUpdateConfig {
+        node_url: config.ergo.node.node_url.clone(),
+        api_key: config.ergo.node.api_key.clone(),
         update_interval_seconds: 600, // 10 minutes
-        enabled: true,
-        ergo_node_url: config.ergo.node.node_url.clone(),
-        ergo_api_key: config.ergo.node.api_key.clone(),
-        tracker_secret_key: config.tracker_secret_key_bytes(),
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
     // Clone the channel for the tracker updater
-    let updater_shutdown_rx = shutdown_tx.subscribe();
+    let _updater_shutdown_rx = shutdown_tx.subscribe();
 
     // Start the tracker box updater in the background
     let updater_config = tracker_box_config.clone();
     let shared_state_clone = shared_tracker_state_for_updater.clone();
-    let updater_network_prefix = network_prefix; // Use the network_prefix determined above
-    // Get the tracker NFT ID from config - it must be present since it's now required
-    let tracker_nft_id = config.ergo.tracker_nft_id.clone().expect("Tracker NFT ID must be configured in server configuration");
+    let updater_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
         if let Err(e) = TrackerBoxUpdater::start(
             updater_config,
             shared_state_clone,
-            updater_network_prefix,
-            tracker_nft_id, // Pass the required tracker NFT ID
             updater_shutdown_rx,
         ).await {
             tracing::error!("Tracker box updater failed: {}", e);

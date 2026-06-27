@@ -2626,9 +2626,82 @@ pub async fn prepare_redemption(
 
     // Fetch total_debt from tracker storage (cumulative debt, not redemption amount)
     // The contract requires totalDebt for signature verification
-    let total_debt = payload.amount; // TODO: Fetch actual total_debt from tracker AVL tree
-    // For now, we use payload.amount as a placeholder. In production, this should be
-    // fetched from the tracker's AVL tree lookup for the (issuer, recipient) key.
+    // Send command to tracker thread to look up the note and get the actual cumulative debt
+    let (note_response_tx, note_response_rx) = tokio::sync::oneshot::channel();
+
+    if let Err(e) = state.tx.send(TrackerCommand::GetNoteByIssuerAndRecipient {
+        issuer_pubkey: match issuer_pubkey_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(
+                        "issuer_pubkey must be 33 bytes".to_string(),
+                    )),
+                );
+            }
+        },
+        recipient_pubkey: match recipient_pubkey_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(
+                        "recipient_pubkey must be 33 bytes".to_string(),
+                    )),
+                );
+            }
+        },
+        response_tx: note_response_tx,
+    }).await {
+        tracing::error!("Failed to send note lookup command to tracker thread: {:?}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+
+    let total_debt = match note_response_rx.await {
+        Ok(Ok(Some(note))) => {
+            tracing::info!(
+                "Found note for total_debt lookup: issuer={}, recipient={}, total_debt={}",
+                &payload.issuer_pubkey[..8],
+                &payload.recipient_pubkey[..8],
+                note.amount_collected
+            );
+            note.amount_collected
+        }
+        Ok(Ok(None)) => {
+            tracing::warn!(
+                "No note found for total_debt lookup: issuer={}, recipient={}. Using redemption amount as fallback.",
+                &payload.issuer_pubkey[..8],
+                &payload.recipient_pubkey[..8]
+            );
+            // Fallback: if no note exists, use the redemption amount as the total debt
+            // This handles the case where a new note is being created
+            payload.amount
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Failed to look up note for total_debt: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    format!("Failed to look up note for total debt: {:?}", e),
+                )),
+            );
+        }
+        Err(_) => {
+            tracing::error!("Tracker thread response channel closed for total_debt lookup");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Internal server error during total debt lookup".to_string(),
+                )),
+            );
+        }
+    };
 
     let mut message_to_sign_bytes = Vec::with_capacity(48);
     message_to_sign_bytes.extend_from_slice(&key);
