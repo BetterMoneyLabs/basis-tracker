@@ -173,6 +173,9 @@ pub struct RedemptionTransactionData {
     /// Value of the reserve box being spent (in nanoERG)
     /// Used to calculate the remaining reserve after redemption and fee
     pub reserve_box_value: u64,
+    /// Updated reserve AVL tree digest after insert operation (for R5 register)
+    /// This is the serialized AVL tree that includes the new redemption entry
+    pub updated_reserve_tree: Option<Vec<u8>>,
 }
 
 /// Builder for redemption transactions following the Basis contract specification
@@ -363,6 +366,7 @@ impl RedemptionTransactionBuilder {
             current_height: context.current_height,
             issuer_pubkey: issuer_pubkey.to_vec(),
             reserve_box_value,
+            updated_reserve_tree: None, // Will be set by caller after generating insert proof
         })
     }
 
@@ -497,7 +501,10 @@ impl RedemptionTransactionBuilder {
                         ],
                         "additionalRegisters": {
                             "R4": format!("07{}", hex::encode(&tx_data.issuer_pubkey)),
-                            "R5": "64000000000000000000000000000000000000000000000000000000000000000000012000",
+                            "R5": match &tx_data.updated_reserve_tree {
+                                Some(tree_bytes) => format!("0e{:04x}{}", tree_bytes.len(), hex::encode(tree_bytes)),
+                                None => "64000000000000000000000000000000000000000000000000000000000000000000012000".to_string(),
+                            },
                             "R6": format!("0e20{}", tx_data.tracker_nft_id)
                         },
                         "creationHeight": tx_data.current_height
@@ -576,6 +583,7 @@ mod tests {
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
             reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -645,6 +653,7 @@ mod tests {
                 current_height: 1779469,
                 issuer_pubkey: vec![0x02; 33],
                 reserve_box_value: amount + 100000000, // Reserve must cover redemption + some buffer
+                updated_reserve_tree: None,
             };
 
             let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -695,8 +704,9 @@ mod tests {
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
             reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
-
+        
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
 
             assert!(result.is_ok(), "Failed to build transaction with {}: {:?}", description, result.err());
@@ -730,6 +740,7 @@ mod tests {
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
             reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
         
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -763,6 +774,7 @@ mod tests {
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
             reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
         
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -803,6 +815,7 @@ mod tests {
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
             reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);

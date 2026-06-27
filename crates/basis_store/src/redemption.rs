@@ -203,21 +203,33 @@ impl RedemptionManager {
         let recipient_pubkey_bytes = parse_pubkey(&request.recipient_pubkey)
             .map_err(|e| RedemptionError::TransactionError(format!("Invalid recipient pubkey: {}", e)))?;
         
-        // Generate reserve lookup proof (for already_redeemed)
+        // Generate reserve lookup proof FIRST (before inserting, for old state)
+        // For first redemption, this will return None proof
         let reserve_lookup_proof = self.tracker.generate_reserve_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
             .map_err(|e| RedemptionError::TransactionError(format!("Failed to generate reserve lookup proof: {:?}", e)))?;
+        
+        // Generate reserve insert proof (for inserting redeemed amount into reserve tree)
+        // This also updates the reserve AVL tree and returns the updated tree digest for R5
+        let new_already_redeemed = note.amount_redeemed + request.amount;
+        let (reserve_insert_proof, updated_reserve_tree) = self.tracker.generate_reserve_insert_proof(
+            &issuer_pubkey_bytes, 
+            &recipient_pubkey_bytes,
+            note.timestamp,
+            new_already_redeemed
+        )
+        .map_err(|e| RedemptionError::TransactionError(format!("Failed to generate reserve insert proof: {:?}", e)))?;
         
         // Generate tracker lookup proof (for totalDebt)
         let tracker_lookup_proof = self.tracker.generate_tracker_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
             .map_err(|e| RedemptionError::TransactionError(format!("Failed to generate tracker lookup proof: {:?}", e)))?;
         
-        let transaction_data = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
+        let mut transaction_data = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
             reserve_box_id,
             tracker_box_id,
             tracker_nft_id,
             note,
             &request.recipient_address,
-            &proof.avl_proof,
+            &reserve_insert_proof,
             issuer_sig,
             tracker_sig,
             &issuer_pubkey_bytes,
@@ -227,6 +239,9 @@ impl RedemptionManager {
             tracker_lookup_proof.proof,
             request.amount,
         ).map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
+        
+        // Set the updated reserve tree for R5 register
+        transaction_data.updated_reserve_tree = Some(updated_reserve_tree);
 
         // Generate unique redemption ID for tracking
         let redemption_id = format!(
@@ -923,9 +938,21 @@ fn build_redemption_transaction(
     let recipient_pubkey_bytes = parse_pubkey(&request.recipient_pubkey)
         .map_err(|e| RedemptionError::TransactionError(format!("Invalid recipient pubkey: {}", e)))?;
     
-    // Generate reserve lookup proof (for already_redeemed)
+    // Generate reserve lookup proof FIRST (before inserting, for old state)
+    // For first redemption, this will return None proof
     let reserve_lookup_proof = tracker.generate_reserve_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
         .map_err(|e| RedemptionError::TransactionError(format!("Failed to generate reserve lookup proof: {:?}", e)))?;
+    
+    // Generate reserve insert proof (for inserting redeemed amount into reserve tree)
+    // This also updates the reserve AVL tree and returns the updated tree digest for R5
+    let new_already_redeemed = note.amount_redeemed + request.amount;
+    let (reserve_insert_proof, updated_reserve_tree) = tracker.generate_reserve_insert_proof(
+        &issuer_pubkey_bytes, 
+        &recipient_pubkey_bytes,
+        note.timestamp,
+        new_already_redeemed
+    )
+    .map_err(|e| RedemptionError::TransactionError(format!("Failed to generate reserve insert proof: {:?}", e)))?;
     
     // Generate tracker lookup proof (for totalDebt)
     let tracker_lookup_proof = tracker.generate_tracker_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
@@ -936,13 +963,13 @@ fn build_redemption_transaction(
     let tracker_lookup_proof_bytes: Vec<u8> = tracker_lookup_proof.proof;
     
         // Pass proofs to transaction builder
-    let transaction_data = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
+    let mut transaction_data = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
         &request.reserve_box_id,
         &actual_tracker_box_id,
         &actual_tracker_nft_id,
         note,
         &request.recipient_address,
-        &proof.avl_proof,
+        &reserve_insert_proof,
         &issuer_signature_bytes,
         &tracker_signature_bytes,
         &issuer_pubkey_bytes,
@@ -957,6 +984,9 @@ fn build_redemption_transaction(
         tracker_lookup_proof_bytes,
         request.amount,
     ).map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
+    
+    // Set the updated reserve tree for R5 register
+    transaction_data.updated_reserve_tree = Some(updated_reserve_tree);
 
     // Use real transaction builder to create the actual transaction bytes
     let transaction_bytes = RedemptionTransactionBuilder::build_redemption_transaction(
