@@ -1,5 +1,9 @@
 # Plan: Fix Rust Redemption Code to Match Scala Reference Demo
 
+## Status: COMPLETED (2026-06-28)
+
+All phases have been implemented and verified. This document is preserved for historical reference.
+
 ## Overview
 
 This document outlines the plan to fix discrepancies between the Rust tracker server redemption code and the documented Scala reference demo / ErgoScript contract (`basis.es`).
@@ -122,6 +126,26 @@ Use Alice/Bob/Tracker keys from `demo_keys.rs` to generate a note and redemption
 7. **Phase 5** - Fix server API issues ✅ DONE
 8. **Phase 6** - Add cross-validation tests ✅ DONE
 
+## Post-Completion Additions (2026-06-28)
+
+The following additional work was completed after the original plan:
+
+- **Scala Test Vector Generator**: Added `scala/simple/src/TestVectorGenerator.scala` to generate deterministic test vectors from Scala reference code.
+- **Rust Scala Test Vectors Module**: Added `crates/basis_store/src/scala_test_vectors.rs` with 18 tests covering:
+  - Schnorr signature verification (all 11 existing test vectors)
+  - Message construction cross-validation (Rust-built vs Scala-hardcoded)
+  - Key hash computation verification
+  - Ergo constant serialization prefix validation
+  - Token ID format validation
+  - AVL tree proof generation and verification (tracker and reserve trees)
+  - Multiple insertion proof verification
+  - Update operation proof verification
+  - Negative tests (wrong value fails verification)
+- **AVL Tree Spec Corrections**: Updated `specs/ergo/avl_tree_spec.md` and `specs/server/avl_tree_spec.md` to reflect the correct value formats:
+  - Tracker tree: 8 bytes (`totalDebt` big-endian)
+  - Reserve tree: 16 bytes (`timestamp || cumulativeRedeemedAmount`)
+- **Emergency Redemption Clarification**: Updated `specs/server/redemption_transaction_format_spec.md` and `specs/server/redemption_state_spec.md` to clarify that tracker signature bytes must still be present in the transaction during emergency redemption (verification is bypassed, not the field itself).
+
 ## References
 
 - Scala test vectors: `crates/basis_store/src/schnorr_test_vectors.rs`
@@ -129,3 +153,5 @@ Use Alice/Bob/Tracker keys from `demo_keys.rs` to generate a note and redemption
 - Schnorr spec: `specs/SCHNORR_SIGNATURE_SPEC.md`
 - Scala demo keys: `crates/basis_cli/src/demo_keys.rs`
 - Basis spec tests: `crates/basis_store/src/basis_spec_tests.rs`
+- Scala test vector generator: `scala/simple/src/TestVectorGenerator.scala`
+- Rust scala test vectors: `crates/basis_store/src/scala_test_vectors.rs`

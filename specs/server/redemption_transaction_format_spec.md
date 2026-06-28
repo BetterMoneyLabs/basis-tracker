@@ -297,8 +297,9 @@ message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
 
 **Emergency Redemption:**
 - Uses the same 48-byte message format as normal redemption
-- Tracker signature becomes optional after 3 days (3*720 blocks)
+- Tracker signature bytes must still be provided in context var #6, but verification is bypassed after 3 days (3*720 blocks)
 - Reserve owner signature is always required
+- The contract checks `enoughTimeSpent` flag to bypass tracker signature verification
 
 ### Security Requirements
 - All required signatures must be provided
@@ -374,7 +375,7 @@ verify: trackerTotalDebt == totalDebt
 
 ### Signature Requirements
 - Reserve owner's signature on `key || totalDebt || timestamp` (48 bytes, always required)
-- Tracker's signature on `key || totalDebt || timestamp` (48 bytes, optional for emergency redemption after 3 days)
+- Tracker's signature on `key || totalDebt || timestamp` (48 bytes, required in transaction but verification bypassed for emergency redemption after 3 days)
 - Signatures must be provided as 65-byte Schnorr signatures (33 bytes 'a' + 32 bytes 'z')
 - Signatures are attached via context extension variables #2 and #6
 
@@ -383,7 +384,7 @@ verify: trackerTotalDebt == totalDebt
 ### Conditions
 - Emergency redemption is available after 3 days (3 * 720 blocks) from tracker creation
 - All debts associated with the tracker become eligible simultaneously
-- Tracker signature is still required but verification is bypassed
+- Tracker signature bytes must still be provided in context var #6, but verification is bypassed
 
 ### Message Format
 ```

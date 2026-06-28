@@ -59,20 +59,21 @@ When a new or updated note is submitted, the following algorithm is executed:
      - Verify sufficient collateralization if required
 
 2. **Storage Update**:
-   - Update the persistent note storage using the key hash:
-     - Insert or update the note in the note database partition
-      - Key format: blake2b256(issuer_pubkey || recipient_pubkey) (32 bytes)
-      - Value format: [issuer pubkey][amount collected][amount redeemed][timestamp][signature][recipient pubkey]
+    - Update the persistent note storage using the key hash:
+      - Insert or update the note in the note database partition
+       - Key format: blake2b256(issuer_pubkey || recipient_pubkey) (32 bytes)
+       - Value format: [amount collected] (8 bytes, big-endian) for tracker tree; [timestamp (8 bytes) || amount redeemed (8 bytes)] (16 bytes) for reserve tree
 
 ### 3. AVL Tree Update:
     - Generate the AVL tree key from issuer and recipient public keys:
       - Concatenate issuer_pubkey and recipient_pubkey (66 bytes total)
       - Calculate Blake2b256 hash of the concatenation to form a 32-byte key
-   - Serialize the note data for the tree value:
-     - Include note fields in a consistent format
-   - Insert or update the key-value pair in the AVL tree:
-     - If key doesn't exist: Perform INSERT operation
-     - If key exists: Perform UPDATE operation (no removal since system doesn't support it)
+    - Serialize the value for the tree:
+      - **Tracker tree**: `longToByteArray(totalDebt)` = 8 bytes (big-endian)
+      - **Reserve tree**: `longToByteArray(timestamp) || longToByteArray(cumulativeRedeemedAmount)` = 16 bytes
+    - Insert or update the key-value pair in the AVL tree:
+      - If key doesn't exist: Perform INSERT operation
+      - If key exists: Perform UPDATE operation (no removal since system doesn't support it)
 
 4. **State Commitment Update**:
    - Update the tracker state with the new AVL tree root digest
@@ -120,12 +121,8 @@ impl TrackerStateManager {
 
         // Update AVL tree state
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
-        let value_bytes = [
-            &note.amount_collected.to_be_bytes()[..],
-            &note.amount_redeemed.to_be_bytes()[..],
-            &note.timestamp.to_be_bytes()[..],
-        ]
-        .concat();
+        // Tracker tree value: totalDebt as 8-byte big-endian
+        let value_bytes = note.amount_collected.to_be_bytes().to_vec();
 
         self.avl_state
             .update(key.to_bytes(), value_bytes)

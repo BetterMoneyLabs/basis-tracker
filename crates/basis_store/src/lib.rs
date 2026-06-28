@@ -16,6 +16,7 @@ pub mod reserve_tracker;
 pub mod schnorr;
 pub mod schnorr_test_vectors;
 pub mod schnorr_tests;
+pub mod scala_test_vectors;
 pub mod transaction_builder;
 #[cfg(test)]
 pub mod cross_validation_tests;
