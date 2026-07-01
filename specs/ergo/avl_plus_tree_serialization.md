@@ -38,31 +38,60 @@ pub struct AvlTreeData {
 The serialization of `AvlTreeData` follows the Sigma serialization protocol:
 
 ### Serialized Fields Order
-1. **digest** (33 bytes): The ADDigest serialized using Scorex serialization
-2. **tree_flags** (1 byte): The AvlTreeFlags as a single byte
-3. **key_length** (4 bytes): The key length as a 32-bit unsigned integer (little-endian)
-4. **value_length_opt** (variable): Optional value length serialized as Option<Box<u32>>
+1. **type byte** (1 byte): The `SAvlTree` type identifier `0x64`
+2. **digest** (33 bytes): The `ADDigest` (root hash + tree height)
+3. **tree_flags** (1 byte): The `AvlTreeFlags` as a single byte
+4. **key_length** (VLQ): The key length encoded as a Variable-Length Quantity. For the common case of 32-byte keys this is a single byte `0x20`.
+5. **value_length_opt** (variable): Optional value length serialized as `Option<Box<u32>>`:
+   - `None` is serialized as a single byte `0x00` (variable value length)
+   - `Some(n)` is serialized as `0x01` followed by the 4-byte little-endian length
+
+### Total Size for Tracker Trees
+
+For a tracker AVL tree configured with `PlasmaParameters(32, None)` (32-byte keys, variable values):
+- Type byte: 1 byte
+- Digest: 33 bytes
+- Flags: 1 byte
+- Key length VLQ: 1 byte
+- Value length option (`None`): 1 byte
+- **Total: 37 bytes** (74 hex characters)
 
 ### Detailed Serialization Steps
 
-1. **Digest Serialization**:
+1. **Type Identifier Serialization**:
+   - The Sigma constant begins with the `SAvlTree` type byte `0x64`
+
+2. **Digest Serialization**:
    - The `ADDigest` is serialized using Scorex serialization protocol
    - Results in 33 bytes (32 bytes for hash + 1 byte for height)
 
-2. **Flags Serialization**:
+3. **Flags Serialization**:
    - The `AvlTreeFlags` is serialized as a single byte
    - The byte value is the raw internal value of the flags
 
-3. **Key Length Serialization**:
-   - The `key_length` is serialized as a 32-bit unsigned integer in little-endian format
-   - Always 4 bytes
+4. **Key Length Serialization**:
+   - The `key_length` is serialized using VLQ encoding
+   - For values ≤ 127 this is a single byte
+   - Example: 32-byte keys serialize as `0x20`
 
-4. **Value Length Option Serialization**:
+5. **Value Length Option Serialization**:
    - If `value_length_opt` is `Some(value)`:
-     - First byte: 1 (indicating Some)
+     - First byte: `0x01` (indicating Some)
      - Following 4 bytes: The value as a 32-bit unsigned integer in little-endian format
    - If `value_length_opt` is `None`:
-     - Single byte: 0 (indicating None)
+     - Single byte: `0x00` (indicating None / variable values)
+
+### Example Values
+
+Empty tree serialized as `SAvlTree` constant:
+```
+64000000000000000000000000000000000000000000000000000000000000000000012000
+```
+
+Real tracker tree example (digest: `d5d44e...6a01`):
+```
+64d5d44e152c7e42673dea178b918d9195c2ba689da94046384dc40c55a64c836a01012000
+```
 
 ## Type System Integration
 

@@ -185,7 +185,7 @@ Requests:
     address: "2iHkR7CWvD1R4j1yZg5bkeDRQavjAaVPeTDFGGLZduHyfWMuYpmhHocX8GJoaieTx78FntzJbCBVL6rf96ocJoZdmWBL2fci7NqWgAirppPQmZ7fN9V6z13Ay6brPriBKYqLp1bT2Fk4FkFLCfdPpe"
     value: 100000000
     assets: [
-      { token_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b", amount: 1 },
+      { tokenId: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b", amount: 1 },
     ]
     registers: {
       "R4": "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83",

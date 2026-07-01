@@ -98,16 +98,26 @@ let context_extension = ContextExtension {
 ### 4. Tracker Box Updater - Incorrect R5 Register Format ✅ FIXED
 
 **File:** `crates/basis_server/src/tracker_box_updater.rs`  
-**Status:** Resolved in May 2026
+**Status:** Resolved in May 2026; validated end-to-end against local Ergo node in July 2026
 
 **Previous Issue:**
-Tracker box updater was using hardcoded address and R4 values.
+Tracker box updater was using hardcoded address and R4 values, and later produced an incorrect 43-byte R5 serialization with 4-byte key/value length fields and snake_case `token_id` in payment asset JSON.
 
 **Fix Applied:**
 1. ✅ Tracker output address derived from configured public key
 2. ✅ R4 register uses actual serialized tracker public key
-3. ✅ R5 register uses proper SAvlTree serialization
-4. ✅ Fallback retry also uses correct address/R4
+3. ✅ R5 register uses proper 37-byte `SAvlTree` serialization matching Scala's `ValueSerializer.serialize(AvlTreeConstant(tree))`:
+   - `0x64` type byte
+   - 33-byte digest
+   - 1-byte flags
+   - VLQ key length (`0x20` for 32-byte keys)
+   - VLQ value length (`0x00` for variable / `None`)
+4. ✅ Payment request `assets` array uses camelCase `tokenId` as required by the Ergo node `/wallet/payment/send` API
+5. ✅ Fallback retry also uses correct address/R4
+
+**Validation:**
+- Live test on mainnet node `127.0.0.1:9053` successfully submitted and confirmed a tracker box update transaction.
+- On-chain R5 digest matched the server's current AVL root digest after note creation.
 
 **Priority:** ✅ RESOLVED
 

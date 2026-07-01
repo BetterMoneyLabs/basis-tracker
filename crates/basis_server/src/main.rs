@@ -353,7 +353,7 @@ async fn main() {
                     response_tx,
                 } => {
                     let result = redemption_manager.tracker.generate_reserve_insert_proof(&issuer_pubkey, &recipient_pubkey, timestamp, new_already_redeemed);
-                    let _ = response_tx.send(result);
+                    let _ = response_tx.send(result.map(|(proof, _digest)| proof));
                 }
             }
         }

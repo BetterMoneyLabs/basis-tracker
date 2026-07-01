@@ -181,6 +181,7 @@ pub struct PaymentRequest {
 
 /// Asset in a payment request
 #[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PaymentAsset {
     pub token_id: String,
     pub amount: i64,
@@ -395,12 +396,15 @@ impl TrackerBoxUpdater {
         let r4_value = hex::encode(&r4_bytes);
 
         // Build R5 register: SAvlTree
-        // Format: 0x64 + 33-byte digest + 0x01 (flags) + 4-byte key length (32) + 4-byte value length (0)
+        // Format follows Sigma serialization of AvlTreeConstant:
+        // 0x64 (type) || 33-byte digest || flags || key_length (VLQ) || value_length (VLQ, 0x00 for variable)
+        // Reference: scala/demo/src/TrackerBoxSetup.scala uses PlasmaParameters(32, None)
+        // and ValueSerializer.serialize(AvlTreeConstant(tree)), which produces this exact layout.
         let mut r5_bytes = vec![0x64u8];
         r5_bytes.extend_from_slice(avl_root_digest);
         r5_bytes.push(0x01u8); // flags: insert-only allowed
-        r5_bytes.extend_from_slice(&32u32.to_be_bytes()); // key length: 32 bytes
-        r5_bytes.extend_from_slice(&0u32.to_be_bytes()); // value length: 0 (variable)
+        r5_bytes.push(32u8);   // key length: 32 bytes (VLQ, single byte)
+        r5_bytes.push(0u8);    // value length: 0 (variable / None)
         let r5_value = hex::encode(&r5_bytes);
 
         // Build registers map

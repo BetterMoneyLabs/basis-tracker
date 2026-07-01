@@ -79,21 +79,10 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 
 The tracker box uses Ergo registers R4 and R5 to store commitment information:
 
-- **R4**: Contains the tracker's public key (GroupElement / 33-byte compressed secp256k1 point) that identifies the tracker server
-- **R5**: Contains the AVL tree root digest (33-byte commitment to all notes in the system)
-  - Stores: `hash(A_pubkey || B_pubkey) -> totalDebt`
-  - Updated whenever notes are added, modified, or transferred
-- **R6**: Reserved for future use (currently not used)
+- **R4**: Contains the tracker public key (33-byte compressed secp256k1 point, serialized as `GroupElement`)
+- **R5**: Contains the AVL tree root digest serialized as `SAvlTree` (37 bytes total: `0x64` type byte + 33-byte digest + 1-byte flags + VLQ key length + VLQ value length)
 
-### Tracker State Digest Format
-
-The tracker state digest follows the AVL tree format (33 bytes total):
-- **Byte 1**: Tree height (1 byte) - indicates the depth of the AVL tree
-- **Bytes 2-33**: 32-byte hash of the AVL tree root (64 hex characters when encoded)
-- **Total**: 33 bytes (66 hex characters when hex-encoded)
-- **Type Identifier**: When serialized as SAvlTree, includes a type identifier (0x64) as the first byte of the serialized format
-
-### Reserve Box Registers
+The tracker box must also preserve the tracker NFT token (identified by `tracker_nft_id`) in its assets.
 
 The reserve box uses Ergo registers R4, R5, and R6 to store commitment and identification information:
 
@@ -216,7 +205,7 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
     - `address`: Reserve contract P2S address (hardcoded in configuration)
     - `value`: ERG amount from request
     - `assets`: Array containing the NFT asset
-      - `token_id`: NFT ID from request
+      - `tokenId`: NFT ID from request (camelCase as required by Ergo node API)
       - `amount`: Always 1 for NFTs
     - `registers`: Map of register values
       - `R4`: Owner public key from request (GroupElement)

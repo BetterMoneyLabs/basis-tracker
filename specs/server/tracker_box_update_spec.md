@@ -22,10 +22,11 @@ The tracker box uses the following registers:
 - **R4**: Tracker's public key (GroupElement / 33-byte compressed secp256k1 point)
   - Identifies the tracker server
   - Used for verifying tracker signatures on redemption transactions
-- **R5**: AVL tree root digest (33 bytes: 1 byte height + 32 bytes hash)
+- **R5**: AVL tree root digest (33 bytes inside a 37-byte serialized `SAvlTree` constant)
   - Commitment to all debt records in the tracker's state
   - Stores: `hash(issuer_pubkey || recipient_pubkey) -> totalDebt`
   - Updated whenever notes are added, modified, or transferred
+  - See "R5 Register Serialization Format" below for exact byte layout
 - **R6**: Reserved for future use (currently not used)
 
 ## AVL Tree Commitment
@@ -168,9 +169,10 @@ The background task executes the following algorithm in a continuous loop:
 6. **Check On-Chain State**: If the on-chain tracker box already has the current AVL root digest in R5, skip the update
 7. **Create Register Constants**:
    - R4: Tracker public key as EcPoint constant (33 bytes, compressed secp256k1 point) - identifies the tracker server
-   - R5: Serialized AVL+ tree root digest as ByteArray constant - represents the current state of all IOU notes
+   - R5: Serialized `SAvlTree` constant containing the current AVL tree root digest (37 bytes total; see "R5 Register Serialization Format" below)
 8. **Submit Transaction**:
    - Construct a wallet payment request with R4 and R5 register values, preserving the tracker NFT token
+   - Use camelCase field names (`tokenId`, not `token_id`) for the `assets` array
    - Convert the tracker box's `ergoTree` (hex-encoded) to a P2S address for the wallet payment API
    - Submit transaction via Ergo node API at `/wallet/payment/send` endpoint
    - Log transaction ID on successful submission and mark it as pending confirmation
@@ -196,6 +198,53 @@ The tracker thread updates the shared state when tracker changes occur:
 2. **AVL Tree Updates**: After successful tracker operations, the AVL tree is updated and root digest recalculated
 3. **State Synchronization**: The shared AVL root digest is updated to match the current AVL tree state using RwLock for thread safety
 4. **Proof Generation**: Generate AVL tree proofs after each operation to ensure state is properly updated
+
+## R5 Register Serialization Format
+
+The tracker box R5 register contains a serialized `SAvlTree` constant. The exact byte layout follows the Sigma serialization produced by Scala's `ValueSerializer.serialize(AvlTreeConstant(tree))` (used in `scala/demo/src/TrackerBoxSetup.scala`):
+
+| Field | Size | Description |
+|-------|------|-------------|
+| Type identifier | 1 byte | `0x64` (SAvlTree type code) |
+| Root digest | 33 bytes | AVL tree root digest |
+| Flags | 1 byte | AVL tree flags (e.g. `0x01` for insert-only) |
+| Key length | VLQ | Key length in bytes (`0x20` for 32) |
+| Value length | VLQ | `0x00` for variable / `None` |
+
+For a tracker tree with `PlasmaParameters(32, None)` (32-byte keys, variable values) the serialized R5 is **37 bytes** (74 hex characters). The first 33 bytes after the type byte are the root digest.
+
+### Example R5 Values
+
+Empty tree (digest all zeros):
+```
+64000000000000000000000000000000000000000000000000000000000000000000012000
+```
+
+Real on-chain example observed during live testing:
+```
+64d5d44e152c7e42673dea178b918d9195c2ba689da94046384dc40c55a64c836a01012000
+```
+
+Bytes 1-33 of this example are the digest:
+```
+d5d44e152c7e42673dea178b918d9195c2ba689da94046384dc40c55a64c836a01
+```
+
+## Asset Serialization in Payment Request
+
+The `assets` array passed to `/wallet/payment/send` must use **camelCase** field names as required by the Ergo node API:
+
+```json
+{
+  "tokenId": "000b0695159e5f5c32c606385bd5f276d80133149c84c8b1325366381bf6f17f",
+  "amount": 1
+}
+```
+
+Using `token_id` instead of `tokenId` will result in a node error such as:
+```
+Attempt to decode value on failed cursor: DownField(tokenId),DownArray,DownField(assets),DownArray
+```
 
 ## Implementation Details
 
