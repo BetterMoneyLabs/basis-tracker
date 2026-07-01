@@ -1,4 +1,8 @@
-use crate::app::{App, NoteInfo, ReserveInfo, Screen};
+use crate::app::{App, NoteInfo, Screen};
+use crate::acceptance_policy::{
+    get_policy_summary, get_whitelist_entries, get_blacklist_entries,
+    remove_from_whitelist, remove_from_blacklist, create_policy,
+};
 use anyhow::Result;
 use std::io::{self, Write};
 
@@ -9,7 +13,7 @@ pub const CYAN: &str = "\x1b[36m";
 pub const GREEN: &str = "\x1b[32m";
 pub const YELLOW: &str = "\x1b[33m";
 pub const RED: &str = "\x1b[31m";
-pub const MAGENTA: &str = "\x1b[35m";
+pub const _MAGENTA: &str = "\x1b[35m";
 pub const WHITE: &str = "\x1b[37m";
 pub const GRAY: &str = "\x1b[90m";
 
@@ -35,6 +39,7 @@ pub async fn run(app: &mut App) -> Result<()> {
             Screen::RedeemNote => draw_redeem_note(app).await?,
             Screen::CreateReserve => draw_create_reserve(app).await?,
             Screen::GenerateTransaction => draw_generate_transaction(app).await?,
+            Screen::AcceptancePolicy => draw_acceptance_policy(app).await?,
         }
     }
 
@@ -142,6 +147,7 @@ async fn draw_main_menu(app: &mut App) -> Result<()> {
     println!("  {}[4]{} Transactions & Redemptions", CYAN, RESET);
     println!("  {}[5]{} Address Book", CYAN, RESET);
     println!("  {}[6]{} Settings", CYAN, RESET);
+    println!("  {}[7]{} Acceptance Policy", CYAN, RESET);
     println!();
     println!("  {}[r]{} Refresh Data", YELLOW, RESET);
     println!("  {}[q]{} Quit\n", RED, RESET);
@@ -153,6 +159,7 @@ async fn draw_main_menu(app: &mut App) -> Result<()> {
         "4" => app.navigate_to(Screen::Transactions),
         "5" => app.navigate_to(Screen::AddressBook),
         "6" => app.navigate_to(Screen::Settings),
+        "7" => app.navigate_to(Screen::AcceptancePolicy),
         "r" | "R" => {
             app.refresh_data().await?;
             if app.server_connected {
@@ -201,7 +208,7 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
 
             println!(
                 "      {}Pubkey: {}...{}{}",
-                GRAY, &account.get_pubkey_hex()[..16], &account.get_pubkey_hex()[50..56], RESET
+                GRAY, &account.get_pubkey_hex()[..16], &account.get_pubkey_hex()[56..66], RESET
             );
             println!();
         }
@@ -221,14 +228,17 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
             if !name.is_empty() {
                 match app.account_manager.create_account(&name) {
                     Ok(account) => {
+                        let pubkey = account.get_pubkey_hex();
+                        // Sync to address book
+                        app.address_book.insert(name.clone(), pubkey.clone());
                         app.set_notification(
                             format!("Created account '{}'", account.name),
                             false,
                         );
                         app.current_account = Some(crate::app::AccountInfo {
                             name: account.name.clone(),
-                            pubkey: account.get_pubkey_hex(),
-                            created_at: account.created_at,
+                            pubkey,
+                            _created_at: account.created_at,
                         });
                     }
                     Err(e) => {
@@ -248,7 +258,7 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
                                 app.current_account = Some(crate::app::AccountInfo {
                                     name: accounts[idx - 1].name.clone(),
                                     pubkey: accounts[idx - 1].get_pubkey_hex(),
-                                    created_at: accounts[idx - 1].created_at,
+                                    _created_at: accounts[idx - 1].created_at,
                                 });
                                 app.set_notification(
                                     format!("Switched to account '{}'", name),
@@ -277,6 +287,8 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
                         app.account_manager
                             .config_manager
                             .add_account(&name, &pubkey, &key)?;
+                        // Sync to address book
+                        app.address_book.insert(name.clone(), pubkey);
                         app.set_notification(
                             format!("Imported account '{}'", name),
                             false,
@@ -332,13 +344,32 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
         CYAN, RESET
     );
 
-    if app.address_book.is_empty() {
-        println!("{}  No contacts found.{}\n", GRAY, RESET);
-    } else {
-        println!("  {}Contacts:{}", BOLD, RESET);
-        let mut contacts: Vec<_> = app.address_book.iter().collect();
-        contacts.sort_by(|a, b| a.0.cmp(b.0));
-        for (i, (name, pubkey)) in contacts.iter().enumerate() {
+    // Show accounts (read-only, synced from account manager)
+    let accounts: Vec<_> = app.account_manager.list_accounts().into_iter().map(|a| a.clone()).collect();
+    if !accounts.is_empty() {
+        println!("  {}Accounts (auto-synced):{}", BOLD, RESET);
+        for (i, account) in accounts.iter().enumerate() {
+            let pubkey = account.get_pubkey_hex();
+            println!(
+                "  [{}] {}: {}...{} {}",
+                i + 1,
+                account.name,
+                &pubkey[..16],
+                &pubkey[56..66],
+                GRAY
+            );
+        }
+        println!();
+    }
+
+    // Show manual contacts
+    let manual_contacts: Vec<_> = app.address_book.iter()
+        .filter(|(name, _)| !accounts.iter().any(|a| &a.name == *name))
+        .collect();
+    
+    if !manual_contacts.is_empty() {
+        println!("  {}Additional Contacts:{}", BOLD, RESET);
+        for (i, (name, pubkey)) in manual_contacts.iter().enumerate() {
             println!(
                 "  [{}] {}: {}...{}",
                 i + 1,
@@ -348,6 +379,8 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
             );
         }
         println!();
+    } else if accounts.is_empty() {
+        println!("{}  No contacts found.{}\n", GRAY, RESET);
     }
 
     println!("  {}[a]{} Add Contact", CYAN, RESET);
@@ -359,25 +392,40 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
         "a" => {
             let name = read_input("Contact name: ");
             if !name.is_empty() {
-                let pubkey = read_input("Public key (66 hex chars): ");
-                if pubkey.len() == 66 {
-                    app.address_book.insert(name.clone(), pubkey);
+                // Check if name conflicts with an account
+                if let Some(account) = app.account_manager.get_account(&name) {
+                    let account_pubkey = account.get_pubkey_hex();
                     app.set_notification(
-                        format!("Added contact '{}'", name),
-                        false,
-                    );
-                } else {
-                    app.set_notification(
-                        "Invalid pubkey length (must be 66 hex chars)".to_string(),
+                        format!("'{}' is an account with pubkey {}...{}", name, &account_pubkey[..16], &account_pubkey[56..66]),
                         true,
                     );
+                } else {
+                    let pubkey = read_input("Public key (66 hex chars): ");
+                    if pubkey.len() == 66 {
+                        app.address_book.insert(name.clone(), pubkey);
+                        app.set_notification(
+                            format!("Added contact '{}'", name),
+                            false,
+                        );
+                    } else {
+                        app.set_notification(
+                            "Invalid pubkey length (must be 66 hex chars)".to_string(),
+                            true,
+                        );
+                    }
                 }
             }
         }
         "d" => {
             if !app.address_book.is_empty() {
                 let name = read_input("Contact name to delete: ");
-                if app.address_book.remove(&name).is_some() {
+                // Prevent deleting account entries from address book
+                if app.account_manager.get_account(&name).is_some() {
+                    app.set_notification(
+                        format!("Cannot delete '{}' - it's an account. Delete from Accounts instead.", name),
+                        true,
+                    );
+                } else if app.address_book.remove(&name).is_some() {
                     app.set_notification(
                         format!("Deleted contact '{}'", name),
                         false,
@@ -419,7 +467,7 @@ async fn draw_notes(app: &mut App) -> Result<()> {
 
     match read_choice("Select option: ").as_str() {
         "1" => {
-            println!("\n{}  Notes Issued:{}", BOLD, RESET);
+            println!("\n  {}Notes Issued:{}", BOLD, RESET);
             if app.issued_notes.is_empty() {
                 println!("  {}None{}\n", GRAY, RESET);
             } else {
@@ -438,7 +486,7 @@ async fn draw_notes(app: &mut App) -> Result<()> {
             wait_for_enter("Press Enter to continue...");
         }
         "2" => {
-            println!("\n{}  Notes Received:{}", BOLD, RESET);
+            println!("\n  {}Notes Received:{}", BOLD, RESET);
             if app.received_notes.is_empty() {
                 println!("  {}None{}\n", GRAY, RESET);
             } else {
@@ -728,7 +776,7 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
                         recipient: n.recipient_pubkey,
                         amount: n.amount_collected,
                         redeemed: n.amount_redeemed,
-                        timestamp: n.timestamp,
+                        _timestamp: n.timestamp,
                     })
                     .collect();
             }
@@ -868,7 +916,7 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
                             };
 
                             match app.client.initiate_redemption(request).await {
-                                Ok(response) => {
+                                Ok(_response) => {
                                     let complete_request = basis_cli_lib::api::CompleteRedemptionRequest {
                                         issuer_pubkey: issuer,
                                         recipient_pubkey: recipient,
@@ -1050,7 +1098,7 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
                         Ok(reserves) => {
                             if let Some(reserve) = reserves.first() {
                                 let reserve_box_id = reserve.box_id.clone();
-                                let tracker_nft_id =
+                                let _tracker_nft_id =
                                     reserve.base_info.tracker_nft_id.clone();
 
                                 // Get tracker box
@@ -1064,8 +1112,8 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
                                         {
                                             Ok(tracker_proof) => {
                                                 let total_debt = tracker_proof.total_debt;
-                                                let tracker_lookup_proof = tracker_proof.proof;
-                                                let tracker_state_digest =
+                                                let _tracker_lookup_proof = tracker_proof.proof;
+                                                let _tracker_state_digest =
                                                     tracker_proof.tracker_state_digest;
 
                                                 // Get issuer signature
@@ -1184,11 +1232,31 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
 
 // Address book helper
 fn select_pubkey_from_address_book(app: &App, prompt_prefix: &str) -> Option<String> {
-    if !app.address_book.is_empty() {
-        println!("\n  {}Address Book Contacts:{}", BOLD, RESET);
-        let mut contacts: Vec<_> = app.address_book.iter().collect();
-        contacts.sort_by(|a, b| a.0.cmp(b.0));
-        for (i, (name, pubkey)) in contacts.iter().enumerate() {
+    // Collect address book contacts
+    let mut all_contacts: Vec<(String, String)> = Vec::new();
+    
+    // Add accounts from account manager
+    for account in app.account_manager.list_accounts() {
+        let pubkey = account.get_pubkey_hex();
+        if pubkey.len() == 66 {
+            all_contacts.push((account.name.clone(), pubkey));
+        }
+    }
+    
+    // Add address book contacts (deduplicate by pubkey)
+    let mut seen_pubkeys: std::collections::HashSet<String> = all_contacts.iter().map(|(_, pk)| pk.clone()).collect();
+    for (name, pubkey) in app.address_book.iter() {
+        if pubkey.len() == 66 && !seen_pubkeys.contains(pubkey) {
+            all_contacts.push((name.clone(), pubkey.clone()));
+            seen_pubkeys.insert(pubkey.clone());
+        }
+    }
+    
+    all_contacts.sort_by(|a, b| a.0.cmp(&b.0));
+    
+    if !all_contacts.is_empty() {
+        println!("\n  {}Available Contacts ({}):{}", BOLD, all_contacts.len(), RESET);
+        for (i, (name, pubkey)) in all_contacts.iter().enumerate() {
             println!(
                 "    [{}] {}: {}...{}",
                 i + 1,
@@ -1200,16 +1268,38 @@ fn select_pubkey_from_address_book(app: &App, prompt_prefix: &str) -> Option<Str
         println!();
     }
 
-    let input = read_input(&format!("{} (or contact name): ", prompt_prefix));
+    let input = read_input(&format!("{} (or contact name, or number): ", prompt_prefix));
 
     if input.is_empty() {
         return None;
     }
 
+    // Check if input is a number (contact index)
+    if let Ok(idx) = input.parse::<usize>() {
+        if idx > 0 && idx <= all_contacts.len() {
+            let (name, pubkey) = &all_contacts[idx - 1];
+            println!("  {}Using contact '{}' pubkey: {}...{}{}", GREEN, name, &pubkey[..16], &pubkey[56..66], RESET);
+            return Some(pubkey.clone());
+        }
+    }
+
     // Check if it's a contact name
     if let Some(pubkey) = app.address_book.get(&input) {
-        println!("  {}Using contact '{}' pubkey: {}...{}{}", GREEN, input, &pubkey[..16], &pubkey[56..66], RESET);
-        return Some(pubkey.clone());
+        if pubkey.len() == 66 {
+            println!("  {}Using contact '{}' pubkey: {}...{}{}", GREEN, input, &pubkey[..16], &pubkey[56..66], RESET);
+            return Some(pubkey.clone());
+        }
+    }
+    
+    // Check if it's an account name
+    for account in app.account_manager.list_accounts() {
+        if account.name == input {
+            let pubkey = account.get_pubkey_hex();
+            if pubkey.len() == 66 {
+                println!("  {}Using account '{}' pubkey: {}...{}{}", GREEN, input, &pubkey[..16], &pubkey[56..66], RESET);
+                return Some(pubkey);
+            }
+        }
     }
 
     // Otherwise treat as raw pubkey
@@ -1259,3 +1349,319 @@ fn ratio_status(ratio: f64) -> &'static str {
         _ => "EXCELLENT",
     }
 }
+
+async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
+    use basis_core::acceptance::{AcceptanceConfig, PredicateConfig};
+    use std::collections::HashSet;
+
+    println!("{}  ACCEPTANCE POLICY{}", BOLD, RESET);
+    println!("{}  ─────────────────{}\n", CYAN, RESET);
+
+    // Display current policy summary
+    let (collateral_pct, whitelist_count, blacklist_count) = get_policy_summary(&app.acceptance_config);
+    println!("  Current Mode: {}[{}% Collateral Required]{}", BOLD, collateral_pct, RESET);
+    println!("  Whitelist: {} entries", whitelist_count);
+    println!("  Blacklist: {} entries", blacklist_count);
+    println!();
+
+    println!("  {}[1]{} Set Collateral Level (0-1000%)", CYAN, RESET);
+    println!("  {}[2]{} Add to Whitelist (trust issuer)", CYAN, RESET);
+    println!("  {}[3]{} Remove from Whitelist", CYAN, RESET);
+    println!("  {}[4]{} Add to Blacklist (block issuer)", CYAN, RESET);
+    println!("  {}[5]{} Remove from Blacklist", CYAN, RESET);
+    println!("  {}[6]{} Reset to Default (100% Collateral)", CYAN, RESET);
+    println!("  {}[7]{} View Current Policy", CYAN, RESET);
+    println!("  {}[8]{} Test Policy Against Issuer", CYAN, RESET);
+    println!();
+    println!("  {}[b]{} Back to Menu\n", YELLOW, RESET);
+
+    match read_choice("Select option: ").as_str() {
+        "1" => {
+            let input = read_input("Enter collateral percentage (0-1000, default=100): ");
+            let pct = if input.is_empty() { 100 } else { input.parse::<u16>().unwrap_or(100) };
+            let ratio = (pct as f64) / 100.0;
+            
+            // Update collateral predicate
+            let mut config = AcceptanceConfig::default_collateral();
+            config.predicates[0] = PredicateConfig::Collateralization {
+                name: "require_full_collateral".to_string(),
+                min_ratio: ratio,
+            };
+            app.acceptance_config = config;
+            
+            // Save to disk and upload to server
+            if let Err(e) = save_and_upload_policy(app).await {
+                app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+            } else {
+                app.set_notification(format!("✅ Policy updated: {}% collateral required", pct), false);
+            }
+        }
+        "2" => {
+            println!("\n  Add issuer to whitelist:");
+            println!("  {}[1]{} Select from Address Book", CYAN, RESET);
+            println!("  {}[2]{} Enter pubkey manually\n", CYAN, RESET);
+            
+            let choice = read_choice("Select: ");
+            let pubkey = if choice == "1" {
+                select_pubkey_from_address_book(app, "Select contact")
+            } else {
+                let pk = read_input("Enter pubkey (66 hex chars): ");
+                if pk.len() == 66 { Some(pk) } else { None }
+            };
+            
+            if let Some(pubkey) = pubkey {
+                if pubkey.len() != 66 {
+                    app.set_notification(format!("Invalid pubkey length: {} (must be 66 hex chars)", pubkey.len()), true);
+                } else {
+                    let debt_limit = read_input("Add debt limit? (nanoERG, Press Enter for none): ");
+                    let _max_debt = if debt_limit.is_empty() { None } else { debt_limit.parse::<u64>().ok() };
+                    
+                    // Add to whitelist
+                    let mut holders = HashSet::new();
+                    holders.insert(pubkey.clone());
+                    
+                    app.acceptance_config = create_policy(
+                        &app.acceptance_config,
+                        Some(holders),
+                        None,
+                        None,
+                    );
+                    
+                    // Save to disk and upload to server
+                    if let Err(e) = save_and_upload_policy(app).await {
+                        app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                    } else {
+                        app.set_notification("✅ Added to whitelist and uploaded".to_string(), false);
+                    }
+                }
+            }
+        }
+        "3" => {
+            // Remove from whitelist
+            let whitelist = get_whitelist_entries(&app.acceptance_config);
+            if whitelist.is_empty() {
+                app.set_notification("Whitelist is empty".to_string(), true);
+            } else {
+                println!("\n  Select issuer to remove:");
+                for (i, (name, pubkey)) in whitelist.iter().enumerate() {
+                    if pubkey.len() >= 66 {
+                        println!("  [{}] {}: {}...{}", i + 1, name, &pubkey[..16], &pubkey[56..66]);
+                    } else {
+                        println!("  [{}] {}: {} (invalid length)", i + 1, name, pubkey);
+                    }
+                }
+                let idx = read_choice("Select: ");
+                if let Ok(n) = idx.parse::<usize>() {
+                    if n > 0 && n <= whitelist.len() {
+                        let pubkey = whitelist[n - 1].1.clone();
+                        // Remove from whitelist
+                        app.acceptance_config = remove_from_whitelist(&app.acceptance_config, &pubkey);
+                        
+                        // Save to disk and upload to server
+                        if let Err(e) = save_and_upload_policy(app).await {
+                            app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                        } else {
+                            app.set_notification("✅ Removed from whitelist and uploaded".to_string(), false);
+                        }
+                    }
+                }
+            }
+        }
+        "4" => {
+            println!("\n  Add issuer to blacklist:");
+            println!("  {}[1]{} Select from Address Book", CYAN, RESET);
+            println!("  {}[2]{} Enter pubkey manually\n", CYAN, RESET);
+            
+            let choice = read_choice("Select: ");
+            let pubkey = if choice == "1" {
+                select_pubkey_from_address_book(app, "Select contact")
+            } else {
+                let pk = read_input("Enter pubkey (66 hex chars): ");
+                if pk.len() == 66 { Some(pk) } else { None }
+            };
+            
+            if let Some(pubkey) = pubkey {
+                if pubkey.len() != 66 {
+                    app.set_notification(format!("Invalid pubkey length: {} (must be 66 hex chars)", pubkey.len()), true);
+                } else {
+                    let mut holders = HashSet::new();
+                    holders.insert(pubkey);
+                    
+                    app.acceptance_config = create_policy(
+                        &app.acceptance_config,
+                        None,
+                        Some(holders),
+                        None,
+                    );
+                    
+                    // Save to disk and upload to server
+                    if let Err(e) = save_and_upload_policy(app).await {
+                        app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                    } else {
+                        app.set_notification("✅ Added to blacklist and uploaded".to_string(), false);
+                    }
+                }
+            }
+        }
+        "5" => {
+            // Remove from blacklist
+            let blacklist = get_blacklist_entries(&app.acceptance_config);
+            if blacklist.is_empty() {
+                app.set_notification("Blacklist is empty".to_string(), true);
+            } else {
+                println!("\n  Select issuer to remove:");
+                for (i, pubkey) in blacklist.iter().enumerate() {
+                    if pubkey.len() >= 66 {
+                        println!("  [{}] {}...{}", i + 1, &pubkey[..16], &pubkey[56..66]);
+                    } else {
+                        println!("  [{}] {} (invalid length)", i + 1, pubkey);
+                    }
+                }
+                let idx = read_choice("Select: ");
+                if let Ok(n) = idx.parse::<usize>() {
+                    if n > 0 && n <= blacklist.len() {
+                        let pubkey = blacklist[n - 1].clone();
+                        app.acceptance_config = remove_from_blacklist(&app.acceptance_config, &pubkey);
+                        
+                        // Save to disk and upload to server
+                        if let Err(e) = save_and_upload_policy(app).await {
+                            app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                        } else {
+                            app.set_notification("✅ Removed from blacklist and uploaded".to_string(), false);
+                        }
+                    }
+                }
+            }
+        }
+        "6" => {
+            app.acceptance_config = AcceptanceConfig::default_collateral();
+            
+            // Save to disk and upload to server
+            if let Err(e) = save_and_upload_policy(app).await {
+                app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+            } else {
+                app.set_notification("✅ Reset to 100% Collateral Required and uploaded".to_string(), false);
+            }
+        }
+        "7" => {
+            // View current policy
+            println!("\n  {}Current Policy:{}", BOLD, RESET);
+            println!("  Default: Reject");
+            println!("  Collateral: {}%", collateral_pct);
+            
+            let whitelist = get_whitelist_entries(&app.acceptance_config);
+            if !whitelist.is_empty() {
+                println!("\n  Whitelist ({}):", whitelist.len());
+                for (i, (name, pubkey)) in whitelist.iter().enumerate() {
+                    if pubkey.len() >= 66 {
+                        println!("  [{}] {}: {}...{}", i + 1, name, &pubkey[..16], &pubkey[56..66]);
+                    } else {
+                        println!("  [{}] {}: {} (invalid length)", i + 1, name, pubkey);
+                    }
+                }
+            }
+            
+            let blacklist = get_blacklist_entries(&app.acceptance_config);
+            if !blacklist.is_empty() {
+                println!("\n  Blacklist ({}):", blacklist.len());
+                for (i, pubkey) in blacklist.iter().enumerate() {
+                    if pubkey.len() >= 66 {
+                        println!("  [{}] {}...{}", i + 1, &pubkey[..16], &pubkey[56..66]);
+                    } else {
+                        println!("  [{}] {} (invalid length)", i + 1, pubkey);
+                    }
+                }
+            }
+            
+            println!("\n  Policy Logic: NOT blacklisted AND (whitelisted OR collateralized)");
+            wait_for_enter("\nPress Enter to continue...");
+        }
+        "8" => {
+            // Test policy against issuer
+            let input = read_input("Enter issuer pubkey (or contact name): ");
+            let pubkey = if let Some(pk) = app.address_book.get(&input) {
+                pk.clone()
+            } else {
+                input
+            };
+            
+            if pubkey.len() == 66 {
+                // Simple test - just check whitelist/blacklist for now
+                let whitelist = get_whitelist_entries(&app.acceptance_config);
+                let blacklist = get_blacklist_entries(&app.acceptance_config);
+                
+                let is_blacklisted = blacklist.contains(&pubkey);
+                let is_whitelisted = whitelist.iter().any(|(_, pk)| pk == &pubkey);
+                
+                if is_blacklisted {
+                    println!("\n  {}❌ REJECTED{}", RED, RESET);
+                    println!("  Reason: Blacklisted (blacklist takes precedence)");
+                } else if is_whitelisted {
+                    println!("\n  {}✅ ACCEPTED{}", GREEN, RESET);
+                    println!("  Reason: In whitelist");
+                } else {
+                    println!("\n  {}❌ REJECTED{}", RED, RESET);
+                    println!("  Reason: Not in whitelist, collateral insufficient");
+                }
+                wait_for_enter("\nPress Enter to continue...");
+            } else {
+                app.set_notification("Invalid pubkey length (must be 66 hex chars)".to_string(), true);
+            }
+        }
+        "b" | "B" => app.navigate_to(Screen::MainMenu),
+        _ => {
+            app.set_notification("Invalid option".to_string(), true);
+        }
+    }
+
+    Ok(())
+}
+
+/// Save policy to disk and upload to server
+async fn save_and_upload_policy(app: &mut App) -> Result<()> {
+    // 1. Save to local config file
+    app.tui_config_manager.update_acceptance(app.acceptance_config.clone())?;
+    
+    // 2. Upload to server if connected and account exists
+    if app.server_connected {
+        if let Some(ref account) = app.current_account {
+            // Get the account's signing key
+            if let Some(account_obj) = app.account_manager.get_account(&account.name) {
+                // Serialize policy to JSON
+                let policy_json = serde_json::to_string(&app.acceptance_config)?;
+                
+                // Sign the policy JSON with the account's private key
+                let signature = account_obj.sign_message(policy_json.as_bytes())?;
+                let signature_hex = hex::encode(&signature);
+                
+                // Create upload request
+                let request = basis_cli_lib::api::UploadPolicyRequest {
+                    recipient_pubkey: account.pubkey.clone(),
+                    policy_json,
+                    signature: signature_hex,
+                };
+                
+                // Upload to server
+                match app.client.upload_policy(request).await {
+                    Ok(_) => {
+                        app.policy_uploaded = true;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Policy saved locally but upload failed
+                        app.policy_uploaded = false;
+                        Err(e)
+                    }
+                }
+            } else {
+                Err(anyhow::anyhow!("Account not found for signing"))
+            }
+        } else {
+            Err(anyhow::anyhow!("No current account selected"))
+        }
+    } else {
+        Err(anyhow::anyhow!("Server not connected"))
+    }
+}
+
+// Helper functions are now in crate::acceptance_policy module

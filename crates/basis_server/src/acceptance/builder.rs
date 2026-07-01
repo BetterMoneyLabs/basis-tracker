@@ -69,7 +69,7 @@ impl PredicateBuilder {
     /// Build a specific predicate by name
     fn build_predicate(&mut self, name: &str) -> Result<Box<dyn NotePredicate>, BuilderError> {
         // Check if already built
-        if let Some(pred) = self.predicates.get(name) {
+        if let Some(_pred) = self.predicates.get(name) {
             // We need to clone here, but NotePredicate doesn't support Clone
             // So we rebuild - this is inefficient but safe
             // For production, we could use Arc<dyn NotePredicate> to share
@@ -158,7 +158,7 @@ impl PredicateBuilder {
     }
     
     /// Clone a predicate (needed for caching)
-    fn clone_predicate(pred: &dyn NotePredicate) -> Box<dyn NotePredicate> {
+    fn clone_predicate(_pred: &dyn NotePredicate) -> Box<dyn NotePredicate> {
         // Since we can't easily clone dyn NotePredicate, we just rebuild
         // For production, we could use Arc<dyn NotePredicate> to avoid cloning
         // For now, we'll just create a placeholder - this is only used for caching
@@ -608,6 +608,374 @@ mod tests {
             reserve_tracker: Some(tracker),
         };
         
+        assert!(pred.acceptable(&ctx));
+    }
+    
+    #[test]
+    fn test_collateralization_under_collateralized() {
+        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        
+        let mut tracker = ReserveTracker::new();
+        let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
+            base_info: ReserveInfo {
+                collateral_amount: 50, // Less than debt
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+            },
+            total_debt: 100,
+            box_id: "box1".to_string(),
+            owner_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                hex::encode(key)
+            },
+            last_updated_timestamp: 0,
+        };
+        tracker.update_reserve(reserve).unwrap();
+        
+        let config = AcceptanceConfig {
+            root: None,
+            default: DefaultPolicy::Reject,
+            predicates: vec![
+                PredicateConfig::Collateralization {
+                    name: "collat".to_string(),
+                    min_ratio: 1.0,
+                },
+            ],
+        };
+        
+        let pred = build_predicate_tree(config).unwrap().unwrap();
+        
+        let ctx = super::super::PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+        };
+        
+        // 50 collateral / 100 debt = 0.5 ratio, which is < 1.0 min_ratio
+        assert!(!pred.acceptable(&ctx));
+    }
+    
+    #[test]
+    fn test_collateralization_exactly_at_threshold() {
+        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        
+        let mut tracker = ReserveTracker::new();
+        let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
+            base_info: ReserveInfo {
+                collateral_amount: 100, // Exactly equal to debt
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+            },
+            total_debt: 100,
+            box_id: "box1".to_string(),
+            owner_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                hex::encode(key)
+            },
+            last_updated_timestamp: 0,
+        };
+        tracker.update_reserve(reserve).unwrap();
+        
+        let config = AcceptanceConfig {
+            root: None,
+            default: DefaultPolicy::Reject,
+            predicates: vec![
+                PredicateConfig::Collateralization {
+                    name: "collat".to_string(),
+                    min_ratio: 1.0,
+                },
+            ],
+        };
+        
+        let pred = build_predicate_tree(config).unwrap().unwrap();
+        
+        let ctx = super::super::PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+        };
+        
+        // 100 collateral / 100 debt = 1.0 ratio, which meets 1.0 min_ratio
+        assert!(pred.acceptable(&ctx));
+    }
+    
+    #[test]
+    fn test_collateralization_high_threshold() {
+        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        
+        let mut tracker = ReserveTracker::new();
+        let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
+            base_info: ReserveInfo {
+                collateral_amount: 250, // 2.5x debt
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+            },
+            total_debt: 100,
+            box_id: "box1".to_string(),
+            owner_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                hex::encode(key)
+            },
+            last_updated_timestamp: 0,
+        };
+        tracker.update_reserve(reserve).unwrap();
+        
+        let config = AcceptanceConfig {
+            root: None,
+            default: DefaultPolicy::Reject,
+            predicates: vec![
+                PredicateConfig::Collateralization {
+                    name: "collat".to_string(),
+                    min_ratio: 2.0, // Require 2x collateral
+                },
+            ],
+        };
+        
+        let pred = build_predicate_tree(config).unwrap().unwrap();
+        
+        let ctx = super::super::PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+        };
+        
+        // 250 collateral / 100 debt = 2.5 ratio, which exceeds 2.0 min_ratio
+        assert!(pred.acceptable(&ctx));
+    }
+    
+    #[test]
+    fn test_collateralization_zero_debt() {
+        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        
+        let mut tracker = ReserveTracker::new();
+        let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
+            base_info: ReserveInfo {
+                collateral_amount: 100,
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+            },
+            total_debt: 0, // Zero debt
+            box_id: "box1".to_string(),
+            owner_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                hex::encode(key)
+            },
+            last_updated_timestamp: 0,
+        };
+        tracker.update_reserve(reserve).unwrap();
+        
+        let config = AcceptanceConfig {
+            root: None,
+            default: DefaultPolicy::Reject,
+            predicates: vec![
+                PredicateConfig::Collateralization {
+                    name: "collat".to_string(),
+                    min_ratio: 1.0,
+                },
+            ],
+        };
+        
+        let pred = build_predicate_tree(config).unwrap().unwrap();
+        
+        let ctx = super::super::PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 0,
+            reserve_tracker: Some(tracker),
+        };
+        
+        // Zero debt should be acceptable (no liability)
+        assert!(pred.acceptable(&ctx));
+    }
+    
+    #[test]
+    fn test_collateralization_missing_reserve() {
+        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        
+        // Empty tracker - no reserve for this issuer
+        let tracker = ReserveTracker::new();
+        
+        let config = AcceptanceConfig {
+            root: None,
+            default: DefaultPolicy::Reject,
+            predicates: vec![
+                PredicateConfig::Collateralization {
+                    name: "collat".to_string(),
+                    min_ratio: 1.0,
+                },
+            ],
+        };
+        
+        let pred = build_predicate_tree(config).unwrap().unwrap();
+        
+        let ctx = super::super::PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+        };
+        
+        // No reserve found, should be rejected
+        assert!(!pred.acceptable(&ctx));
+    }
+    
+    #[test]
+    fn test_collateralization_different_issuer() {
+        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        
+        let mut tracker = ReserveTracker::new();
+        // Reserve for issuer 1
+        let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
+            base_info: ReserveInfo {
+                collateral_amount: 150,
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+            },
+            total_debt: 100,
+            box_id: "box1".to_string(),
+            owner_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1; // Issuer 1
+                hex::encode(key)
+            },
+            last_updated_timestamp: 0,
+        };
+        tracker.update_reserve(reserve).unwrap();
+        
+        let config = AcceptanceConfig {
+            root: None,
+            default: DefaultPolicy::Reject,
+            predicates: vec![
+                PredicateConfig::Collateralization {
+                    name: "collat".to_string(),
+                    min_ratio: 1.0,
+                },
+            ],
+        };
+        
+        let pred = build_predicate_tree(config).unwrap().unwrap();
+        
+        // Check issuer 1 (has reserve)
+        let ctx1 = super::super::PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker.clone()),
+        };
+        assert!(pred.acceptable(&ctx1));
+        
+        // Check issuer 2 (no reserve)
+        let ctx2 = super::super::PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 2; // Different issuer
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+        };
+        assert!(!pred.acceptable(&ctx2));
+    }
+    
+    #[test]
+    fn test_collateralization_low_threshold() {
+        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        
+        let mut tracker = ReserveTracker::new();
+        let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
+            base_info: ReserveInfo {
+                collateral_amount: 51, // Just barely over 50% of debt
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+            },
+            total_debt: 100,
+            box_id: "box1".to_string(),
+            owner_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                hex::encode(key)
+            },
+            last_updated_timestamp: 0,
+        };
+        tracker.update_reserve(reserve).unwrap();
+        
+        let config = AcceptanceConfig {
+            root: None,
+            default: DefaultPolicy::Reject,
+            predicates: vec![
+                PredicateConfig::Collateralization {
+                    name: "collat".to_string(),
+                    min_ratio: 0.5, // Only require 50%
+                },
+            ],
+        };
+        
+        let pred = build_predicate_tree(config).unwrap().unwrap();
+        
+        let ctx = super::super::PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+        };
+        
+        // 51 collateral / 100 debt = 0.51 ratio, which exceeds 0.5 min_ratio
         assert!(pred.acceptable(&ctx));
     }
     

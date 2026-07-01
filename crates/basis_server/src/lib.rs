@@ -41,6 +41,7 @@ pub struct AppState {
     pub shared_tracker_state: std::sync::Arc<tokio::sync::Mutex<tracker_box_updater::SharedTrackerState>>,
     pub tracker_storage: basis_store::persistence::TrackerStorage,
     pub acceptance_predicate: Option<std::sync::Arc<dyn acceptance::NotePredicate>>,
+    pub policy_storage: basis_store::persistence::AcceptancePolicyStorage,
     // Note: tracker_scanner is not stored here due to Send trait bounds
     // Tracker box ID is fetched from tracker_storage directly
 }

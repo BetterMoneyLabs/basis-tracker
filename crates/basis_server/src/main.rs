@@ -12,8 +12,6 @@ use basis_store::{
     tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
     ReserveTracker,
 };
-use basis_store::persistence::{TrackerStorage, ScannerMetadataStorage};
-use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -211,24 +209,24 @@ async fn main() {
 
     // Initialize reserve tracker
     tracing::info!("Initializing reserve tracker...");
-    let reserve_tracker = ReserveTracker::new();
+    let _reserve_tracker = ReserveTracker::new();
     tracing::info!("Reserve tracker initialized successfully");
 
     // Create channel for communicating with tracker thread
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
 
     // Initialize tracker manager outside of the blocking task so it can be shared
-    use basis_store::{RedemptionManager, TrackerStateManager};
+    use basis_store::TrackerStateManager;
     let shared_tracker_state = std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new()));
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
-    let shared_tracker_state_clone = shared_tracker_state.clone();
+    let _shared_tracker_state_clone = shared_tracker_state.clone();
     let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
     tokio::task::spawn_blocking(move || {
         use basis_store::RedemptionManager;
 
         tracing::debug!("Tracker thread started");
-        let mut tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new();
         
         // Update shared state with the rebuilt AVL root digest after initialization
         let initial_root = tracker.get_state().avl_root_digest;
@@ -370,33 +368,35 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Initialize tracker NFT ID in shared state if configured
+    if let Some(ref tracker_nft_id) = config.ergo.tracker_nft_id {
+        shared_tracker_state_for_updater.set_tracker_nft_id(tracker_nft_id.clone());
+        tracing::info!("Tracker NFT ID initialized: {}", tracker_nft_id);
+    } else {
+        tracing::warn!("No tracker NFT ID configured. Tracker box updater will be disabled until configured.");
+    }
+
     // Use mainnet network prefix for address encoding
-    let network_prefix = ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet;
+    let _network_prefix = ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet;
 
     let tracker_box_config = TrackerBoxUpdateConfig {
+        node_url: config.ergo.node.node_url.clone(),
+        api_key: config.ergo.node.api_key.clone(),
         update_interval_seconds: 600, // 10 minutes
-        enabled: true,
-        ergo_node_url: config.ergo.node.node_url.clone(),
-        ergo_api_key: config.ergo.node.api_key.clone(),
-        tracker_secret_key: config.tracker_secret_key_bytes(),
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
     // Clone the channel for the tracker updater
-    let updater_shutdown_rx = shutdown_tx.subscribe();
+    let _updater_shutdown_rx = shutdown_tx.subscribe();
 
     // Start the tracker box updater in the background
     let updater_config = tracker_box_config.clone();
     let shared_state_clone = shared_tracker_state_for_updater.clone();
-    let updater_network_prefix = network_prefix; // Use the network_prefix determined above
-    // Get the tracker NFT ID from config - it must be present since it's now required
-    let tracker_nft_id = config.ergo.tracker_nft_id.clone().expect("Tracker NFT ID must be configured in server configuration");
+    let updater_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
         if let Err(e) = TrackerBoxUpdater::start(
             updater_config,
             shared_state_clone,
-            updater_network_prefix,
-            tracker_nft_id, // Pass the required tracker NFT ID
             updater_shutdown_rx,
         ).await {
             tracing::error!("Tracker box updater failed: {}", e);
@@ -551,6 +551,19 @@ async fn main() {
         }
     };
 
+    // Initialize policy storage for per-recipient acceptance policies
+    let policy_storage_path = std::path::Path::new("data").join("acceptance_policies");
+    let policy_storage = match basis_store::persistence::AcceptancePolicyStorage::open(policy_storage_path) {
+        Ok(storage) => {
+            tracing::info!("Acceptance policy storage initialized successfully");
+            storage
+        }
+        Err(e) => {
+            tracing::error!("Failed to initialize acceptance policy storage: {:?}", e);
+            std::process::exit(1);
+        }
+    };
+
     let app_state = AppState {
         tx,
         event_store,
@@ -560,6 +573,7 @@ async fn main() {
         shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(shared_tracker_state_for_updater)),
         tracker_storage,
         acceptance_predicate,
+        policy_storage,
     };
 
     // Build our application with routes - FIXED ROUTE ORDER
@@ -571,6 +585,8 @@ async fn main() {
         .route("/events/paginated", get(get_events_paginated))
         .route("/notes", post(create_note).options(handle_options))
         .route("/acceptance/check", post(check_acceptance).options(handle_options))
+        .route("/acceptance/policy", post(upload_policy).options(handle_options))
+        .route("/acceptance/policy/{pubkey}", get(get_policy_by_recipient).options(handle_options))
         .route("/redeem", post(initiate_redemption).options(handle_options))
         .route("/redeem/complete", post(complete_redemption).options(handle_options))
         .route("/proof/redemption", get(get_redemption_proof))
@@ -619,6 +635,8 @@ async fn main() {
     tracing::debug!("  GET /events/paginated");
     tracing::debug!("  GET /key-status/{{pubkey}}");
     tracing::debug!("  POST /redeem");
+    tracing::debug!("  POST /acceptance/check");
+    tracing::debug!("  POST /acceptance/policy");
     tracing::debug!("  GET /tracker/latest-box-id");
 
     // Run our app with hyper
@@ -647,6 +665,7 @@ async fn main() {
 }
 
 /// Background task that continuously scans the blockchain for reserve events
+#[allow(dead_code)]
 async fn background_scanner_task(state: AppState, config: AppConfig) {
     tracing::info!("Starting background blockchain scanner task");
 
@@ -752,6 +771,7 @@ async fn handle_options() -> impl axum::response::IntoResponse {
 }
 
 /// Process a reserve event and store it in the event store
+#[allow(dead_code)]
 async fn process_reserve_event(
     state: &AppState,
     event: ReserveEvent,

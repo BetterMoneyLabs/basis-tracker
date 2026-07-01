@@ -170,6 +170,12 @@ pub struct RedemptionTransactionData {
     pub current_height: u32,
     /// Issuer's public key (33 bytes compressed) for reserve output R4 register
     pub issuer_pubkey: Vec<u8>,
+    /// Value of the reserve box being spent (in nanoERG)
+    /// Used to calculate the remaining reserve after redemption and fee
+    pub reserve_box_value: u64,
+    /// Updated reserve AVL tree digest after insert operation (for R5 register)
+    /// This is the serialized AVL tree that includes the new redemption entry
+    pub updated_reserve_tree: Option<Vec<u8>>,
 }
 
 /// Builder for redemption transactions following the Basis contract specification
@@ -204,6 +210,7 @@ impl RedemptionTransactionBuilder {
     /// - `issuer_sig`: 65-byte Schnorr signature from issuer
     /// - `tracker_sig`: 65-byte Schnorr signature from tracker
     /// - `context`: Transaction context (fee, height, network)
+    /// - `reserve_box_value`: Value of the reserve box being spent (in nanoERG)
     /// - `reserve_lookup_proof`: Optional AVL proof for looking up already_redeemed in reserve tree (None for first redemption)
     /// - `tracker_lookup_proof`: AVL proof for looking up totalDebt in tracker tree
     ///
@@ -220,8 +227,10 @@ impl RedemptionTransactionBuilder {
         tracker_sig: &[u8],
         issuer_pubkey: &crate::PubKey,
         context: &TxContext,
+        reserve_box_value: u64,
         reserve_lookup_proof: Option<Vec<u8>>,
         tracker_lookup_proof: Vec<u8>,
+        redemption_amount: u64,
     ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
         // Validate all required transaction components
         // Reserve box validation
@@ -274,14 +283,36 @@ impl RedemptionTransactionBuilder {
             return Err(TransactionBuilderError::Configuration("Tracker signature must be 65 bytes".to_string()));
         }
 
-        // Calculate the debt amount being redeemed
-        let redemption_amount = note.outstanding_debt();
+        // Validate redemption amount
+        if redemption_amount == 0 {
+            return Err(TransactionBuilderError::Configuration(
+                "Redemption amount must be greater than 0".to_string()
+            ));
+        }
+        if redemption_amount > note.outstanding_debt() {
+            return Err(TransactionBuilderError::InsufficientFunds(
+                format!("Redemption amount {} exceeds outstanding debt {}",
+                    redemption_amount, note.outstanding_debt())
+            ));
+        }
+
+        // Validate reserve box value
+        if reserve_box_value == 0 {
+            return Err(TransactionBuilderError::Configuration(
+                "Reserve box value must be greater than 0".to_string()
+            ));
+        }
 
         // Check if reserve has sufficient collateral for redemption + fee
-        // The reserve must cover both the debt being redeemed and the transaction fee
-        let _total_required = redemption_amount + context.fee;
-        // Note: In a real implementation, we would check the actual reserve value
-        // For now, we assume the caller has verified sufficient funds
+        let total_required = redemption_amount.saturating_add(context.fee);
+        if reserve_box_value < total_required {
+            return Err(TransactionBuilderError::InsufficientFunds(
+                format!(
+                    "Reserve box value {} is insufficient for redemption amount {} + fee {}",
+                    reserve_box_value, redemption_amount, context.fee
+                )
+            ));
+        }
 
         // Note: Time lock enforcement is handled by the contract, not the transaction builder.
         // Emergency redemption is available after 3 days (3*720 blocks) from tracker creation height.
@@ -334,6 +365,8 @@ impl RedemptionTransactionBuilder {
             is_first_redemption,
             current_height: context.current_height,
             issuer_pubkey: issuer_pubkey.to_vec(),
+            reserve_box_value,
+            updated_reserve_tree: None, // Will be set by caller after generating insert proof
         })
     }
 
@@ -431,11 +464,17 @@ impl RedemptionTransactionBuilder {
         let reserve_ergo_tree = crate::contract_compiler::get_basis_reserve_ergo_tree_hex()
             .map_err(|e| TransactionBuilderError::TransactionBuilding(format!("Failed to get reserve contract: {}", e)))?;
         
-        // Reserve NFT ID (the token that identifies the reserve)
-        let reserve_nft_id = "01e6778e8ca93d888a7ae50ef07446904ad97ca01265558632f77279fa16adfb";
+        // Reserve NFT ID from the transaction data (from reserve box R6)
+        let reserve_nft_id = &tx_data.tracker_nft_id;
         
         // Calculate remaining reserve value after redemption and fee
-        let reserve_remaining = 49000000u64; // 100M - 50M - 1M fee
+        // The reserve box value must cover both the redemption amount and the transaction fee
+        // Reserve box value is not directly available here; it should be validated by the caller
+        // (e.g., via the contract or blockchain state) before calling this function.
+        let reserve_remaining = tx_data
+            .reserve_box_value
+            .saturating_sub(tx_data.redemption_amount)
+            .saturating_sub(tx_data.fee);
         
         let tx = serde_json::json!({
             "tx": {
@@ -462,7 +501,10 @@ impl RedemptionTransactionBuilder {
                         ],
                         "additionalRegisters": {
                             "R4": format!("07{}", hex::encode(&tx_data.issuer_pubkey)),
-                            "R5": "64000000000000000000000000000000000000000000000000000000000000000000012000",
+                            "R5": match &tx_data.updated_reserve_tree {
+                                Some(tree_bytes) => format!("0e{:04x}{}", tree_bytes.len(), hex::encode(tree_bytes)),
+                                None => "64000000000000000000000000000000000000000000000000000000000000000000012000".to_string(),
+                            },
                             "R6": format!("0e20{}", tx_data.tracker_nft_id)
                         },
                         "creationHeight": tx_data.current_height
@@ -540,6 +582,8 @@ mod tests {
             is_first_redemption: true,
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
+            reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -606,8 +650,10 @@ mod tests {
                 total_debt: amount,
                 already_redeemed: 0,
                 is_first_redemption: true,
-            current_height: 1779469,
-            issuer_pubkey: vec![0x02; 33],
+                current_height: 1779469,
+                issuer_pubkey: vec![0x02; 33],
+                reserve_box_value: amount + 100000000, // Reserve must cover redemption + some buffer
+                updated_reserve_tree: None,
             };
 
             let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -657,8 +703,10 @@ mod tests {
             is_first_redemption: true,
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
+            reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
-
+        
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
 
             assert!(result.is_ok(), "Failed to build transaction with {}: {:?}", description, result.err());
@@ -691,6 +739,8 @@ mod tests {
             is_first_redemption: true,
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
+            reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
         
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -723,6 +773,8 @@ mod tests {
             is_first_redemption: true,
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
+            reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
         
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -762,6 +814,8 @@ mod tests {
             is_first_redemption: true,
             current_height: 1779469,
             issuer_pubkey: vec![0x02; 33],
+            reserve_box_value: 200000000, // 0.2 ERG reserve box value
+            updated_reserve_tree: None,
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);

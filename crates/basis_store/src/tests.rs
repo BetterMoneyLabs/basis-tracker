@@ -285,7 +285,7 @@ fn test_multiple_signatures() -> Result<(), String> {
 }
 
 fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
-    use crate::{TrackerStateManager, IouNote, PubKey, NoteError};
+    use crate::{TrackerStateManager, IouNote, PubKey};
 
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer_pubkey: PubKey = [1u8; 33];
@@ -309,7 +309,7 @@ fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
 }
 
 fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
-    use crate::{TrackerStateManager, IouNote, PubKey, Signature};
+    use crate::{TrackerStateManager, IouNote, PubKey};
     use secp256k1::{Secp256k1, SecretKey};
 
     let secp = Secp256k1::new();
@@ -341,7 +341,7 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
 }
 
 fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
-    use crate::{TrackerStateManager, IouNote, PubKey, NoteError};
+    use crate::{TrackerStateManager, IouNote, PubKey};
     use secp256k1::{Secp256k1, SecretKey};
 
     let secp = Secp256k1::new();

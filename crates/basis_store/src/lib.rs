@@ -16,7 +16,10 @@ pub mod reserve_tracker;
 pub mod schnorr;
 pub mod schnorr_test_vectors;
 pub mod schnorr_tests;
+pub mod scala_test_vectors;
 pub mod transaction_builder;
+#[cfg(test)]
+pub mod cross_validation_tests;
 #[cfg(test)]
 pub mod simple_integration_tests;
 pub mod tests;
@@ -681,17 +684,21 @@ impl TrackerStateManager {
         }
     }
 
-    /// Generate a reserve insert proof for context var #5
-    /// This proof will be used to INSERT the new (timestamp, already_redeemed) into the reserve's AVL tree
-    /// The insert proof contains the necessary neighbor nodes to verify the insertion
+    /// Generate a reserve insert proof for context var #5 and return updated tree digest for R5
+    /// This performs the INSERT of (timestamp, already_redeemed) into the reserve's AVL tree
+    /// and returns both the insert proof and the updated tree digest.
+    /// 
     /// Value format: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE) = 16 bytes
+    /// 
+    /// # Returns
+    /// * `(insert_proof, updated_tree_digest)` - Proof bytes and serialized tree digest
     pub fn generate_reserve_insert_proof(
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
         timestamp: u64,
         new_already_redeemed: u64,
-    ) -> Result<Vec<u8>, NoteError> {
+    ) -> Result<(Vec<u8>, Vec<u8>), NoteError> {
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
         // Value: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE)
@@ -699,15 +706,18 @@ impl TrackerStateManager {
         value_bytes.extend_from_slice(&timestamp.to_be_bytes());
         value_bytes.extend_from_slice(&new_already_redeemed.to_be_bytes());
 
-        // Generate AVL proof for the insert operation
-        // The proof contains neighbor nodes needed to verify the insertion
+        // Perform the insert operation into the reserve AVL tree
+        // This updates the tree state and generates a proof
+        self.reserve_avl_state.update(key_bytes, value_bytes)
+            .map_err(|e| NoteError::StorageError(format!("Reserve AVL tree update failed: {}", e)))?;
+
+        // Generate the insert proof (contains neighbor nodes for verification)
         let insert_proof = self.reserve_avl_state.generate_proof();
+        
+        // Get the updated tree digest for R5 register
+        let updated_digest = self.reserve_avl_state.root_digest().to_vec();
 
-        // Note: The value_bytes are used to construct the insert proof
-        // In a full implementation, the insert_proof would include the value
-        let _ = (key_bytes, value_bytes);
-
-        Ok(insert_proof)
+        Ok((insert_proof, updated_digest))
     }
 
     /// Generate proof for a specific note
@@ -717,23 +727,19 @@ impl TrackerStateManager {
         recipient_pubkey: &PubKey,
     ) -> Result<NoteProof, NoteError> {
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let _key_bytes = key.to_bytes();
+        let key_bytes = key.to_bytes();
 
-        // For AVL trees, the proof is generated during lookup operations
-        // In a real implementation, we'd need to track operations for proof generation
-        let proof = self.avl_state.generate_proof();
-
-        // Placeholder for operations - in real implementation, this would track
-        // the specific operations that led to the current state
-        let operations = Vec::new();
+        // Generate a lookup proof for the key in the AVL tree
+        // This captures the path to the key, which can be verified against the root digest
+        let (avl_proof, _value) = self.avl_state.generate_lookup_proof(key_bytes.to_vec());
 
         // Lookup the note to include in proof
         let note = self.lookup_note(issuer_pubkey, recipient_pubkey)?;
 
         Ok(NoteProof {
             note,
-            avl_proof: proof,
-            operations,
+            avl_proof,
+            operations: Vec::new(),
         })
     }
 

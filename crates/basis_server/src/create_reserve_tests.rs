@@ -74,6 +74,9 @@ mod create_reserve_tests {
                 basis_store::persistence::TrackerStorage::open("test_tracker_fallback").unwrap()
             }),
             acceptance_predicate: None,
+            policy_storage: basis_store::persistence::AcceptancePolicyStorage::open("test_policies").unwrap_or_else(|_| {
+                basis_store::persistence::AcceptancePolicyStorage::open("test_policies_fallback").unwrap()
+            }),
         }
     }
 

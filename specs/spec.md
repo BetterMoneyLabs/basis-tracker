@@ -264,6 +264,32 @@ Where:
 - When credit limits are exceeded (i.e., no more trust could be given), on-chain reserves can be used, with redemption transactions to be collected by the tracker
 - Once there is even super-slow Internet connection, tracker can send them with getting lean confirmations via NiPoPoWs (similarly to https://www.ergoforum.org/t/e-mail-client-for-limited-or-blocked-internet/134)
 
+## Reference Clients
+
+The Basis protocol is implemented by the following reference client applications:
+
+### `basis_cli` - Command-Line Client
+
+A modular CLI tool for account management, note operations, reserve monitoring, and redemption transaction generation. Supports both interactive REPL mode and scripted commands. See `specs/CLI_TOOLS_ANALYSIS.md` for detailed documentation.
+
+**Key capabilities:**
+- Account creation and persistent key storage (`~/.basis/cli.toml`)
+- Note creation, listing, and redemption initiation
+- Reserve creation and collateralization monitoring
+- Unsigned redemption transaction generation with full Ergo node integration
+- Polling-based automated redemption testing
+- Demo mode with pre-configured Alice/Bob/Tracker keys
+
+### `basis_app` - TUI Wallet
+
+A terminal-based interactive wallet built on top of `basis_cli_lib`. Provides a full-screen menu-driven interface for all Basis operations with real-time data refresh and visual feedback.
+
+**Key capabilities:**
+- Interactive menus for accounts, notes, reserves, and transactions
+- Address book with demo contacts
+- Server connectivity monitoring
+- ANSI-colored terminal UI with "Free Banking For Everyone" branding
+
 ## Possible Extensions
 
 - Multiple tracker support via AVL tree in R6

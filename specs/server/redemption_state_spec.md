@@ -398,7 +398,7 @@ If the tracker becomes unavailable, emergency redemption is available after 3 da
 ### Conditions
 - **Time Lock**: `currentHeight - trackerCreationHeight > 3 * 720`
 - **Scope**: All debts associated with this tracker become eligible simultaneously
-- **Signature**: Tracker signature still required but verification is bypassed
+- **Signature**: Tracker signature bytes must still be provided in context var #6, but verification is bypassed
 
 ### Message Format
 ```

@@ -26,6 +26,7 @@ impl SerializableIouNote {
         self.amount_collected.saturating_sub(self.amount_redeemed)
     }
 
+    #[allow(dead_code)]
     pub fn is_fully_redeemed(&self) -> bool {
         self.amount_collected == self.amount_redeemed
     }
@@ -169,6 +170,45 @@ pub struct ApiResponse<T> {
     pub success: bool,
     pub data: Option<T>,
     pub error: Option<String>,
+}
+
+// Upload policy request/response for acceptance predicates
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadPolicyRequest {
+    pub recipient_pubkey: String,
+    pub policy_json: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadPolicyResponse {
+    pub uploaded_at: u64,
+    pub policy_hash: String,
+}
+
+// Response for getting a recipient's acceptance policy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetPolicyResponse {
+    pub recipient_pubkey: String,
+    pub policy_json: String,
+    pub signature: String,
+    pub uploaded_at: u64,
+}
+
+// Request for checking note acceptance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckAcceptanceRequest {
+    pub issuer_pubkey: String,
+    pub total_debt: u64,
+    #[serde(default)]
+    pub recipient_pubkey: Option<String>,
+}
+
+// Response for checking note acceptance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckAcceptanceResponse {
+    pub acceptable: bool,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -508,6 +548,7 @@ impl TrackerClient {
     }
 
     // Events & Status
+    #[allow(dead_code)]
     pub async fn get_events(&self, page: usize, page_size: usize) -> Result<Vec<TrackerEvent>> {
         let url = format!(
             "{}/events/paginated?page={}&page_size={}",
@@ -563,6 +604,79 @@ impl TrackerClient {
         } else {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to create reserve: {}", error_text))
+        }
+    }
+
+    /// Upload acceptance policy to server
+    #[allow(dead_code)]
+    pub async fn upload_policy(&self, request: UploadPolicyRequest) -> Result<UploadPolicyResponse> {
+        let url = format!("{}/acceptance/policy", self.base_url);
+        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<UploadPolicyResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("Failed to upload policy: {}", error_text))
+        }
+    }
+
+    /// Get acceptance policy for a recipient from the server
+    #[allow(dead_code)]
+    pub async fn get_policy(&self, recipient_pubkey: &str) -> Result<GetPolicyResponse> {
+        let url = format!("{}/acceptance/policy/{}", self.base_url, recipient_pubkey);
+        let response = ureq::get(&url).call()?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<GetPolicyResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else if response.status() == 404 {
+            Err(anyhow::anyhow!("No policy found for this recipient"))
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("Failed to get policy: {}", error_text))
+        }
+    }
+
+    /// Check if a note would be accepted by the server's acceptance policy
+    #[allow(dead_code)]
+    pub async fn check_acceptance(
+        &self,
+        issuer_pubkey: &str,
+        total_debt: u64,
+        recipient_pubkey: Option<&str>,
+    ) -> Result<CheckAcceptanceResponse> {
+        let request = CheckAcceptanceRequest {
+            issuer_pubkey: issuer_pubkey.to_string(),
+            total_debt,
+            recipient_pubkey: recipient_pubkey.map(|s| s.to_string()),
+        };
+
+        let url = format!("{}/acceptance/check", self.base_url);
+        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<CheckAcceptanceResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to check acceptance: {}",
+                error_text
+            ))
         }
     }
 }
@@ -722,6 +836,7 @@ impl TrackerClient {
 
     /// Get the serialized bytes of a box from the Ergo node
     /// Makes direct request to Ergo node's /utxo/byId/{box_id} endpoint
+    #[allow(dead_code)]
     pub async fn get_box_bytes(&self, box_id: &str, node_url: &str, api_key: Option<&str>) -> Result<String> {
         let url = format!("{}/utxo/byId/{}", node_url, box_id);
         

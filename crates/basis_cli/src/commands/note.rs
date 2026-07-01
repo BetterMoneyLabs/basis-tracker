@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 /// IOU Note structure matching Scala demo format
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(non_snake_case)]
 pub struct DemoNote {
     pub payerKey: String,
     pub payeeKey: String,

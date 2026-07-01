@@ -1,6 +1,6 @@
 use anyhow::Result;
-use std::io::{self, Write};
 
+mod acceptance_policy;
 mod app;
 mod ui;
 

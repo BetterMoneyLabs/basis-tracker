@@ -25,21 +25,21 @@ struct ApiScanBox {
     #[serde(rename = "box")]
     inner_box: ApiInnerBox,
     #[serde(rename = "confirmationsNum")]
-    confirmations_num: u32,
-    address: String,
+    _confirmations_num: u32,
+    _address: String,
     #[serde(rename = "creationTransaction")]
-    creation_transaction: String,
-    scans: Vec<i32>,
-    onchain: bool,
+    _creation_transaction: String,
+    _scans: Vec<i32>,
+    _onchain: bool,
     #[serde(rename = "creationOutIndex")]
-    creation_out_index: u32,
+    _creation_out_index: u32,
     #[serde(rename = "spendingTransaction")]
-    spending_transaction: Option<String>,
+    _spending_transaction: Option<String>,
     #[serde(rename = "spendingHeight")]
-    spending_height: Option<u64>,
+    _spending_height: Option<u64>,
     #[serde(rename = "inclusionHeight")]
-    inclusion_height: u64,
-    spent: bool,
+    _inclusion_height: u64,
+    _spent: bool,
 }
 
 /// The inner box structure from the API response
@@ -57,7 +57,7 @@ struct ApiInnerBox {
     #[serde(rename = "additionalRegisters")]
     additional_registers: HashMap<String, String>,
     assets: Vec<ApiBoxAsset>,
-    index: u32,
+    _index: u32,
 }
 
 /// Asset structure from the API response
@@ -113,8 +113,8 @@ pub struct TrackerNodeConfig {
 
 /// Inner state for tracker scanner that requires synchronization
 #[derive(Clone)]
-struct TrackerServerStateInner {
-    pub current_height: u64,
+pub struct TrackerServerStateInner {
+    pub _current_height: u64,
     pub last_scanned_height: u64,
     pub scan_active: bool,
     pub scan_id: Option<i32>,
@@ -897,7 +897,7 @@ pub fn create_tracker_server_state(
     tracker_storage: TrackerStorage,
 ) -> TrackerServerState {
     let inner = TrackerServerStateInner {
-        current_height: 0,
+        _current_height: 0,
         last_scanned_height: config.start_height.unwrap_or(0),
         scan_active: false,
         scan_id: None,

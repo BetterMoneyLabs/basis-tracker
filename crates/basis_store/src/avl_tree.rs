@@ -14,9 +14,19 @@ pub struct AvlTreeState {
 
 // Simple resolver function for AVL tree
 fn simple_resolver(_digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
-    // This is a placeholder implementation
-    // In a real implementation, this would fetch nodes from storage
-    panic!("Resolver not implemented - this is a placeholder");
+    // Return a dummy leaf node instead of panicking.
+    // In a real implementation, this would fetch nodes from storage.
+    // For testing with self-contained proofs, this should not be called.
+    ergo_avltree_rust::batch_node::Node::Leaf(ergo_avltree_rust::batch_node::LeafNode {
+        hdr: ergo_avltree_rust::batch_node::NodeHeader {
+            visited: false,
+            is_new: false,
+            label: None,
+            key: Some(ergo_avltree_rust::operation::ADKey::from(vec![0u8; 32])),
+        },
+        value: ergo_avltree_rust::operation::ADValue::from(vec![]),
+        next_node_key: ergo_avltree_rust::operation::ADKey::from(vec![0u8; 32]),
+    })
 }
 
 impl AvlTreeState {
@@ -90,9 +100,64 @@ impl AvlTreeState {
         Ok(())
     }
 
-    /// Generate a proof for the current tree state
+    /// Generate a proof for a lookup operation on the given key.
+    ///
+    /// This performs a `Lookup` operation and returns the proof bytes that
+    /// can be used to verify the key's existence (or non-existence) in the tree.
+    pub fn generate_lookup_proof(&mut self, key: Vec<u8>) -> (Vec<u8>, Option<Vec<u8>>) {
+        use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
+        let operation = Operation::Lookup(key.into());
+        let result = self.prover.perform_one_operation(&operation).ok().flatten();
+        let proof = self.prover.generate_proof().to_vec();
+        (proof, result.map(|b| b.to_vec()))
+    }
+
+    /// Generate a proof for the current tree state (all pending operations).
     pub fn generate_proof(&mut self) -> Vec<u8> {
         self.prover.generate_proof().to_vec()
+    }
+
+    /// Verify a proof by replaying a lookup operation against the given starting digest.
+    ///
+    /// This creates a `BatchAVLVerifier` with the provided digest and proof, then
+    /// performs a `Lookup` operation for `key`.  If the verifier succeeds and returns
+    /// the expected value, the proof is valid.
+    ///
+    /// # Arguments
+    /// * `starting_digest` – The 33-byte root digest the proof is anchored to.
+    /// * `proof`         – The serialized AVL proof bytes (must contain the lookup path).
+    /// * `key`           – The 32-byte lookup key.
+    /// * `expected_value`– The value that must be returned for the proof to be considered valid.
+    ///
+    /// # Returns
+    /// `true` if the proof verifies and yields `expected_value`, otherwise `false`.
+    pub fn verify_proof(
+        starting_digest: &[u8; 33],
+        proof: &[u8],
+        key: &[u8],
+        expected_value: &[u8],
+    ) -> bool {
+        use ergo_avltree_rust::batch_avl_verifier::BatchAVLVerifier;
+        use bytes::Bytes;
+
+        let tree = AVLTree::new(simple_resolver, 32, None);
+        let mut verifier = match BatchAVLVerifier::new(
+            &Bytes::copy_from_slice(starting_digest),
+            &Bytes::copy_from_slice(proof),
+            tree,
+            Some(1), // max one operation (lookup)
+            Some(0), // no deletes
+        ) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+
+        let operation = Operation::Lookup(key.to_vec().into());
+        match verifier.perform_one_operation(&operation) {
+            Ok(Some(value)) => value.as_ref() == expected_value,
+            Ok(None) => false, // key not found
+            Err(_) => false,   // proof invalid
+        }
     }
 
     /// Get the root digest of the AVL tree
@@ -104,6 +169,15 @@ impl AvlTreeState {
         } else {
             [0u8; 33] // Empty tree digest
         }
+    }
+
+    /// Generate a lookup proof and verify it immediately (for testing).
+    pub fn generate_and_verify_lookup(&mut self, key: &[u8], expected_value: &[u8]) -> bool {
+        let (proof, returned_value) = self.generate_lookup_proof(key.to_vec());
+        let digest = self.root_digest();
+        let value_matches = returned_value.as_ref().map(|v| v.as_slice()) == Some(expected_value);
+        let proof_valid = Self::verify_proof(&digest, &proof, key, expected_value);
+        value_matches && proof_valid
     }
 }
 
@@ -220,6 +294,263 @@ mod tests {
             digest_after_insertions, digest_after_removals,
             "Digest should change after multiple operations"
         );
+    }
+
+    #[test]
+    fn test_avl_tree_proof_verification() {
+        let mut tree = AvlTreeState::new();
+
+        let key = vec![1u8; 32];
+        let value = vec![2u8; 32];
+
+        // Insert data and capture the digest *after* the insertion
+        tree.insert(key.clone(), value.clone()).unwrap();
+        let digest_after = tree.root_digest();
+
+        // Generate a lookup proof for the key
+        let (proof, returned_value) = tree.generate_lookup_proof(key.clone());
+        assert_eq!(returned_value.as_ref(), Some(&value), "Lookup should return the correct value");
+
+        // Verify the proof against the digest we just captured.
+        let valid = AvlTreeState::verify_proof(
+            &digest_after,
+            &proof,
+            &key,
+            &value,
+        );
+        assert!(valid, "Proof should verify for the inserted key/value");
+
+        // Verify that a wrong key fails
+        let wrong_key = vec![2u8; 32];
+        let invalid = AvlTreeState::verify_proof(
+            &digest_after,
+            &proof,
+            &wrong_key,
+            &value,
+        );
+        assert!(!invalid, "Proof should NOT verify for a wrong key");
+
+        // Verify that a wrong value fails
+        let wrong_value = vec![3u8; 32];
+        let invalid = AvlTreeState::verify_proof(
+            &digest_after,
+            &proof,
+            &key,
+            &wrong_value,
+        );
+        assert!(!invalid, "Proof should NOT verify for a wrong value");
+    }
+
+    #[test]
+    fn test_avl_tree_proof_verification_empty_tree() {
+        let mut tree = AvlTreeState::new();
+        let digest = tree.root_digest();
+        let key = vec![1u8; 32];
+        let value = vec![2u8; 32];
+
+        // Generate a lookup proof for a non-existent key in an empty tree
+        let (proof, returned_value) = tree.generate_lookup_proof(key.clone());
+        assert!(returned_value.is_none(), "Lookup should return None for empty tree");
+
+        // Looking up a non-existent key in an empty tree should fail
+        let valid = AvlTreeState::verify_proof(
+            &digest,
+            &proof,
+            &key,
+            &value,
+        );
+        assert!(!valid, "Proof for empty tree should NOT verify a non-existent key");
+    }
+
+    #[test]
+    fn test_avl_tree_proof_verification_multiple_inserts() {
+        let mut tree = AvlTreeState::new();
+
+        let key1 = vec![1u8; 32];
+        let value1 = vec![10u8; 32];
+        let key2 = vec![2u8; 32];
+        let value2 = vec![20u8; 32];
+
+        tree.insert(key1.clone(), value1.clone()).unwrap();
+        tree.insert(key2.clone(), value2.clone()).unwrap();
+
+        let digest_after = tree.root_digest();
+
+        // Generate lookup proof for key1 and verify
+        let (proof1, returned1) = tree.generate_lookup_proof(key1.clone());
+        assert_eq!(returned1.as_ref(), Some(&value1));
+        let valid1 = AvlTreeState::verify_proof(
+            &digest_after,
+            &proof1,
+            &key1,
+            &value1,
+        );
+        assert!(valid1, "Proof should verify for key1");
+
+        // Generate lookup proof for key2 and verify
+        let (proof2, returned2) = tree.generate_lookup_proof(key2.clone());
+        assert_eq!(returned2.as_ref(), Some(&value2));
+        let valid2 = AvlTreeState::verify_proof(
+            &digest_after,
+            &proof2,
+            &key2,
+            &value2,
+        );
+        assert!(valid2, "Proof should verify for key2");
+    }
+
+    #[test]
+    fn test_avl_tree_proof_verification_after_update() {
+        let mut tree = AvlTreeState::new();
+
+        let key = vec![1u8; 32];
+        let value1 = vec![10u8; 32];
+        let value2 = vec![20u8; 32];
+
+        tree.insert(key.clone(), value1.clone()).unwrap();
+        let digest1 = tree.root_digest();
+
+        // Generate lookup proof for old value and verify
+        let (proof1, returned1) = tree.generate_lookup_proof(key.clone());
+        assert_eq!(returned1.as_ref(), Some(&value1));
+        let valid1 = AvlTreeState::verify_proof(
+            &digest1,
+            &proof1,
+            &key,
+            &value1,
+        );
+        assert!(valid1, "Proof should verify old value");
+
+        // Update value
+        tree.update(key.clone(), value2.clone()).unwrap();
+        let digest2 = tree.root_digest();
+
+        // Generate lookup proof for new value and verify
+        let (proof2, returned2) = tree.generate_lookup_proof(key.clone());
+        assert_eq!(returned2.as_ref(), Some(&value2));
+        let valid2 = AvlTreeState::verify_proof(
+            &digest2,
+            &proof2,
+            &key,
+            &value2,
+        );
+        assert!(valid2, "Proof should verify updated value");
+
+        // Old proof should NOT verify new value against old digest
+        let invalid = AvlTreeState::verify_proof(
+            &digest1,
+            &proof1,
+            &key,
+            &value2,
+        );
+        assert!(!invalid, "Old proof should NOT verify updated value");
+    }
+
+    #[test]
+    fn test_avl_tree_proof_verification_wrong_digest() {
+        let mut tree = AvlTreeState::new();
+
+        let key = vec![1u8; 32];
+        let value = vec![2u8; 32];
+
+        tree.insert(key.clone(), value.clone()).unwrap();
+        let _digest = tree.root_digest();
+
+        // Generate lookup proof
+        let (proof, returned) = tree.generate_lookup_proof(key.clone());
+        assert_eq!(returned.as_ref(), Some(&value));
+
+        // Use a wrong (all-zeros) digest
+        let wrong_digest = [0u8; 33];
+        let invalid = AvlTreeState::verify_proof(
+            &wrong_digest,
+            &proof,
+            &key,
+            &value,
+        );
+        assert!(!invalid, "Proof should NOT verify against wrong digest");
+    }
+
+    #[test]
+    fn test_avl_tree_proof_verification_tampered_proof() {
+        let mut tree = AvlTreeState::new();
+
+        let key = vec![1u8; 32];
+        let value = vec![2u8; 32];
+
+        tree.insert(key.clone(), value.clone()).unwrap();
+        let digest = tree.root_digest();
+        let (mut proof, returned) = tree.generate_lookup_proof(key.clone());
+        assert_eq!(returned.as_ref(), Some(&value));
+
+        // Tamper with the proof bytes
+        if !proof.is_empty() {
+            proof[0] ^= 0xFF;
+        }
+
+        // The ergo_avltree_rust library may panic on malformed proofs,
+        // so we catch_unwind to verify it doesn't return true.
+        let result = std::panic::catch_unwind(|| {
+            AvlTreeState::verify_proof(
+                &digest,
+                &proof,
+                &key,
+                &value,
+            )
+        });
+
+        // Either it returns false (correct behavior) or panics (library bug)
+        match result {
+            Ok(valid) => assert!(!valid, "Tampered proof should NOT verify"),
+            Err(_) => {
+                // Library panics on malformed proof - this is a known issue
+                // with the ergo_avltree_rust crate. The proof is still invalid.
+            }
+        }
+    }
+
+    #[test]
+    fn test_avl_tree_proof_verification_multiple_operations() {
+        let mut tree = AvlTreeState::new();
+
+        // Insert multiple keys
+        for i in 1..6 {
+            let mut key = vec![i; 32];
+            key[0] = i;
+            let value = vec![i * 2; 32];
+            tree.insert(key, value).unwrap();
+        }
+
+        let digest = tree.root_digest();
+
+        // Verify each key with a fresh lookup proof
+        for i in 1..6 {
+            let mut key = vec![i; 32];
+            key[0] = i;
+            let value = vec![i * 2; 32];
+            let (proof, returned) = tree.generate_lookup_proof(key.clone());
+            assert_eq!(returned.as_ref(), Some(&value));
+            let valid = AvlTreeState::verify_proof(
+                &digest,
+                &proof,
+                &key,
+                &value,
+            );
+            assert!(valid, "Proof should verify for key {}", i);
+        }
+
+        // Verify non-existent key fails
+        let non_existent_key = vec![99u8; 32];
+        let non_existent_value = vec![99u8; 32];
+        let (proof, returned) = tree.generate_lookup_proof(non_existent_key.clone());
+        assert!(returned.is_none(), "Non-existent key should return None");
+        let invalid = AvlTreeState::verify_proof(
+            &digest,
+            &proof,
+            &non_existent_key,
+            &non_existent_value,
+        );
+        assert!(!invalid, "Proof should NOT verify for non-existent key");
     }
 
     #[test]
