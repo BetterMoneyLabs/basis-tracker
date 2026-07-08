@@ -169,6 +169,8 @@ fn test_redemption_request_structure() {
         emergency: false,
         tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
         reserve_box_value: 100000000 + 1000000, // Reserve must cover debt + fee
+        fee_input_box_ids: Vec::new(),
+        fee_input_total_value: 0,
     };
 
     // Verify request structure
@@ -212,8 +214,8 @@ fn test_simulated_blockchain_data() {
     // Generate signatures
     use secp256k1::SecretKey;
 
-    let issuer_secret_key = SecretKey::from_slice(&issuer_secret,).unwrap();
-    let tracker_secret_key = SecretKey::from_slice(&tracker_secret,).unwrap();
+    let issuer_secret_key = SecretKey::from_slice(&issuer_secret).unwrap();
+    let tracker_secret_key = SecretKey::from_slice(&tracker_secret).unwrap();
 
     // Generate public keys
     let secp = secp256k1::Secp256k1::new();
@@ -222,10 +224,18 @@ fn test_simulated_blockchain_data() {
     let tracker_pubkey_bytes =
         secp256k1::PublicKey::from_secret_key(&secp, &tracker_secret_key).serialize();
 
-    let issuer_sig =
-        schnorr::schnorr_sign(&message, &issuer_secret_key.secret_bytes(), &issuer_pubkey_bytes).unwrap();
-    let tracker_sig =
-        schnorr::schnorr_sign(&message, &tracker_secret_key.secret_bytes(), &tracker_pubkey_bytes).unwrap();
+    let issuer_sig = schnorr::schnorr_sign(
+        &message,
+        &issuer_secret_key.secret_bytes(),
+        &issuer_pubkey_bytes,
+    )
+    .unwrap();
+    let tracker_sig = schnorr::schnorr_sign(
+        &message,
+        &tracker_secret_key.secret_bytes(),
+        &tracker_pubkey_bytes,
+    )
+    .unwrap();
 
     // Verify signatures
     let issuer_valid = schnorr::schnorr_verify(&issuer_sig, &message, &issuer_pubkey_bytes).is_ok();

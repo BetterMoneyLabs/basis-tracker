@@ -3,7 +3,9 @@
 //! This module provides efficient storage and retrieval of IOU notes with secondary indices
 //! for fast lookups by issuer, recipient, and timestamp without full partition scans.
 
-use crate::{reserve_tracker::ExtendedReserveInfo, IouNote, NoteError, NoteKey, PubKey, TrackerBoxInfo};
+use crate::{
+    reserve_tracker::ExtendedReserveInfo, IouNote, NoteError, NoteKey, PubKey, TrackerBoxInfo,
+};
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
 
@@ -117,7 +119,9 @@ impl ScannerMetadataStorage {
         value.extend_from_slice(&timestamp.to_be_bytes());
         self.partition
             .insert("blockchain_height", &value)
-            .map_err(|e| NoteError::StorageError(format!("Failed to store blockchain height: {}", e)))?;
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store blockchain height: {}", e))
+            })?;
         Ok(())
     }
 
@@ -154,17 +158,27 @@ impl NoteStorage {
 
         let notes_partition = keyspace
             .open_partition("iou_notes", PartitionCreateOptions::default())
-            .map_err(|e| NoteError::StorageError(format!("Failed to open notes partition: {}", e)))?;
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open notes partition: {}", e))
+            })?;
 
         let issuer_index = keyspace
             .open_partition("issuer_index", PartitionCreateOptions::default())
-            .map_err(|e| NoteError::StorageError(format!("Failed to open issuer index partition: {}", e)))?;
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open issuer index partition: {}", e))
+            })?;
 
         let recipient_index = keyspace
             .open_partition("recipient_index", PartitionCreateOptions::default())
-            .map_err(|e| NoteError::StorageError(format!("Failed to open recipient index partition: {}", e)))?;
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open recipient index partition: {}", e))
+            })?;
 
-        Ok(Self { notes_partition, issuer_index, recipient_index })
+        Ok(Self {
+            notes_partition,
+            issuer_index,
+            recipient_index,
+        })
     }
 
     /// Serialize a list of note keys to bytes
@@ -188,7 +202,9 @@ impl NoteStorage {
         let mut keys = Vec::with_capacity(count);
         let expected_len = 4 + count * 32; // NoteKey is 32 bytes (blake2b hash)
         if bytes.len() < expected_len {
-            return Err(NoteError::StorageError("Invalid note key list format".to_string()));
+            return Err(NoteError::StorageError(
+                "Invalid note key list format".to_string(),
+            ));
         }
         let mut offset = 4;
         for _ in 0..count {
@@ -206,9 +222,9 @@ impl NoteStorage {
         note_key: &NoteKey,
     ) -> Result<(), NoteError> {
         let pubkey_bytes = pubkey;
-        let existing = index.get(pubkey_bytes).map_err(|e| {
-            NoteError::StorageError(format!("Failed to read index: {}", e))
-        })?;
+        let existing = index
+            .get(pubkey_bytes)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read index: {}", e)))?;
 
         let mut keys = match existing {
             Some(bytes) => Self::deserialize_note_keys(&bytes)?,
@@ -220,9 +236,9 @@ impl NoteStorage {
         if !keys.iter().any(|k| k.to_bytes() == key_bytes) {
             keys.push(note_key.clone());
             let serialized = Self::serialize_note_keys(&keys);
-            index.insert(pubkey_bytes, &serialized).map_err(|e| {
-                NoteError::StorageError(format!("Failed to update index: {}", e))
-            })?;
+            index
+                .insert(pubkey_bytes, &serialized)
+                .map_err(|e| NoteError::StorageError(format!("Failed to update index: {}", e)))?;
         }
 
         Ok(())
@@ -235,9 +251,9 @@ impl NoteStorage {
         note_key: &NoteKey,
     ) -> Result<(), NoteError> {
         let pubkey_bytes = pubkey;
-        let existing = index.get(pubkey_bytes).map_err(|e| {
-            NoteError::StorageError(format!("Failed to read index: {}", e))
-        })?;
+        let existing = index
+            .get(pubkey_bytes)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read index: {}", e)))?;
 
         let mut keys = match existing {
             Some(bytes) => Self::deserialize_note_keys(&bytes)?,
@@ -253,9 +269,9 @@ impl NoteStorage {
             })?;
         } else {
             let serialized = Self::serialize_note_keys(&keys);
-            index.insert(pubkey_bytes, &serialized).map_err(|e| {
-                NoteError::StorageError(format!("Failed to update index: {}", e))
-            })?;
+            index
+                .insert(pubkey_bytes, &serialized)
+                .map_err(|e| NoteError::StorageError(format!("Failed to update index: {}", e)))?;
         }
 
         Ok(())
@@ -354,8 +370,10 @@ impl NoteStorage {
                     if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
                         continue; // Skip invalid entries
                     }
-                    let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                    let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+                    let amount_collected =
+                        u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+                    let amount_redeemed =
+                        u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
                     let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
                     let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
                     let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
@@ -376,7 +394,9 @@ impl NoteStorage {
     }
 
     fn get_notes_by_keys_with_issuer(
-        &self, keys: &[NoteKey]) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
+        &self,
+        keys: &[NoteKey],
+    ) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
         let mut notes = Vec::new();
         for key in keys {
             let key_bytes = key.to_bytes();
@@ -386,19 +406,24 @@ impl NoteStorage {
                         continue; // Skip invalid entries
                     }
                     let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
-                    let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                    let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+                    let amount_collected =
+                        u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+                    let amount_redeemed =
+                        u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
                     let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
                     let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
                     let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
 
-                    notes.push((issuer_pubkey, IouNote {
-                        recipient_pubkey,
-                        amount_collected,
-                        amount_redeemed,
-                        timestamp,
-                        signature,
-                    }));
+                    notes.push((
+                        issuer_pubkey,
+                        IouNote {
+                            recipient_pubkey,
+                            amount_collected,
+                            amount_redeemed,
+                            timestamp,
+                            signature,
+                        },
+                    ));
                 }
                 Ok(None) => {}
                 Err(_) => {}
@@ -409,7 +434,10 @@ impl NoteStorage {
 
     /// Get all notes for a specific issuer (uses issuer index for O(1) lookup)
     pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
-        tracing::debug!("Looking for notes from issuer using index: {:?}", issuer_pubkey);
+        tracing::debug!(
+            "Looking for notes from issuer using index: {:?}",
+            issuer_pubkey
+        );
 
         // Use the issuer index for efficient lookup
         match self.issuer_index.get(issuer_pubkey) {
@@ -434,7 +462,10 @@ impl NoteStorage {
         &self,
         recipient_pubkey: &PubKey,
     ) -> Result<Vec<IouNote>, NoteError> {
-        tracing::debug!("Looking for notes for recipient using index: {:?}", recipient_pubkey);
+        tracing::debug!(
+            "Looking for notes for recipient using index: {:?}",
+            recipient_pubkey
+        );
 
         // Use the recipient index for efficient lookup
         match self.recipient_index.get(recipient_pubkey) {
@@ -459,7 +490,10 @@ impl NoteStorage {
         &self,
         recipient_pubkey: &PubKey,
     ) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
-        tracing::debug!("Looking for notes for recipient with issuer using index: {:?}", recipient_pubkey);
+        tracing::debug!(
+            "Looking for notes for recipient with issuer using index: {:?}",
+            recipient_pubkey
+        );
 
         // Use the recipient index for efficient lookup
         match self.recipient_index.get(recipient_pubkey) {
@@ -588,7 +622,11 @@ impl NoteStorage {
     }
 
     /// Delete a note and update indices
-    pub fn delete_note(&self, issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Result<(), NoteError> {
+    pub fn delete_note(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<(), NoteError> {
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -697,8 +735,9 @@ impl TrackerStorage {
     /// Store tracker box information in the database
     pub fn store_tracker_box(&self, tracker_box: &TrackerBoxInfo) -> Result<(), NoteError> {
         let key = tracker_box.box_id.as_bytes();
-        let value = serde_json::to_vec(tracker_box)
-            .map_err(|e| NoteError::StorageError(format!("Failed to serialize tracker box: {}", e)))?;
+        let value = serde_json::to_vec(tracker_box).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize tracker box: {}", e))
+        })?;
 
         self.partition
             .insert(key, &value)
@@ -774,13 +813,15 @@ impl TrackerStorage {
 impl AcceptancePolicyStorage {
     /// Open or create a new acceptance policy storage database
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, NoteError> {
-        let keyspace = Config::new(path)
-            .open()
-            .map_err(|e| NoteError::StorageError(format!("Failed to open policy database: {}", e)))?;
+        let keyspace = Config::new(path).open().map_err(|e| {
+            NoteError::StorageError(format!("Failed to open policy database: {}", e))
+        })?;
 
         let partition = keyspace
             .open_partition("acceptance_policies", PartitionCreateOptions::default())
-            .map_err(|e| NoteError::StorageError(format!("Failed to open policy partition: {}", e)))?;
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open policy partition: {}", e))
+            })?;
 
         Ok(Self { partition })
     }
@@ -803,7 +844,8 @@ impl AcceptancePolicyStorage {
         let policy_json_bytes = policy_json.as_bytes();
         let signature_bytes = signature.as_bytes();
 
-        let mut value = Vec::with_capacity(8 + 4 + policy_json_bytes.len() + 4 + signature_bytes.len());
+        let mut value =
+            Vec::with_capacity(8 + 4 + policy_json_bytes.len() + 4 + signature_bytes.len());
         value.extend_from_slice(&timestamp.to_be_bytes());
         value.extend_from_slice(&(policy_json_bytes.len() as u32).to_be_bytes());
         value.extend_from_slice(policy_json_bytes);
@@ -828,10 +870,13 @@ impl AcceptancePolicyStorage {
                 }
 
                 let mut offset = 0;
-                let timestamp = u64::from_be_bytes(value_bytes[offset..offset + 8].try_into().unwrap());
+                let timestamp =
+                    u64::from_be_bytes(value_bytes[offset..offset + 8].try_into().unwrap());
                 offset += 8;
 
-                let policy_len = u32::from_be_bytes(value_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                let policy_len =
+                    u32::from_be_bytes(value_bytes[offset..offset + 4].try_into().unwrap())
+                        as usize;
                 offset += 4;
 
                 if value_bytes.len() < offset + policy_len + 4 {
@@ -840,11 +885,15 @@ impl AcceptancePolicyStorage {
                     ));
                 }
 
-                let policy_json = String::from_utf8(value_bytes[offset..offset + policy_len].to_vec())
-                    .map_err(|e| NoteError::StorageError(format!("Invalid policy JSON encoding: {}", e)))?;
+                let policy_json =
+                    String::from_utf8(value_bytes[offset..offset + policy_len].to_vec()).map_err(
+                        |e| NoteError::StorageError(format!("Invalid policy JSON encoding: {}", e)),
+                    )?;
                 offset += policy_len;
 
-                let sig_len = u32::from_be_bytes(value_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                let sig_len =
+                    u32::from_be_bytes(value_bytes[offset..offset + 4].try_into().unwrap())
+                        as usize;
                 offset += 4;
 
                 if value_bytes.len() < offset + sig_len {
@@ -854,7 +903,9 @@ impl AcceptancePolicyStorage {
                 }
 
                 let signature = String::from_utf8(value_bytes[offset..offset + sig_len].to_vec())
-                    .map_err(|e| NoteError::StorageError(format!("Invalid signature encoding: {}", e)))?;
+                    .map_err(|e| {
+                    NoteError::StorageError(format!("Invalid signature encoding: {}", e))
+                })?;
 
                 Ok(Some(StoredPolicy {
                     timestamp,

@@ -47,7 +47,9 @@ pub fn validate_public_key(pubkey: &PubKey) -> Result<(), NoteError> {
     match basis_core::impls::validate_public_key(pubkey) {
         Ok(()) => Ok(()),
         Err(basis_core::traits::CryptoError::InvalidPublicKey) => Err(NoteError::InvalidSignature),
-        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => Err(NoteError::InvalidSignature),
+        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => {
+            Err(NoteError::InvalidSignature)
+        }
         Err(basis_core::traits::CryptoError::InvalidSignature) => Err(NoteError::InvalidSignature),
         Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
     }
@@ -57,7 +59,9 @@ pub fn validate_public_key(pubkey: &PubKey) -> Result<(), NoteError> {
 pub fn validate_signature_format(signature: &Signature) -> Result<(), NoteError> {
     match basis_core::impls::validate_signature_format(signature) {
         Ok(()) => Ok(()),
-        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => Err(NoteError::InvalidSignature),
+        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => {
+            Err(NoteError::InvalidSignature)
+        }
         Err(basis_core::traits::CryptoError::InvalidSignature) => Err(NoteError::InvalidSignature),
         Err(basis_core::traits::CryptoError::InvalidPublicKey) => Err(NoteError::InvalidSignature),
         Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
@@ -141,27 +145,36 @@ mod tests {
 
         // Create signature using the core implementation
         let verifier = SchnorrVerifier;
-        let signature = verifier.sign_message(&message, &secret_key.secret_bytes(), &issuer_pubkey)
+        let signature = verifier
+            .sign_message(&message, &secret_key.secret_bytes(), &issuer_pubkey)
             .expect("Failed to create signature");
 
         // Verify signature using the core implementation
-        verifier.verify_signature(&signature, &message, &issuer_pubkey)
+        verifier
+            .verify_signature(&signature, &message, &issuer_pubkey)
             .expect("Verification should succeed");
 
         // Test with wrong total_debt
-        let wrong_message = signing_message(&owner_pubkey, &receiver_pubkey, total_debt + 1, timestamp);
-        assert!(verifier.verify_signature(&signature, &wrong_message, &issuer_pubkey).is_err());
+        let wrong_message =
+            signing_message(&owner_pubkey, &receiver_pubkey, total_debt + 1, timestamp);
+        assert!(verifier
+            .verify_signature(&signature, &wrong_message, &issuer_pubkey)
+            .is_err());
 
         // Test with wrong issuer
         let wrong_secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
         let wrong_public_key = secp256k1::PublicKey::from_secret_key(&secp, &wrong_secret_key);
         let wrong_issuer_pubkey = wrong_public_key.serialize();
-        assert!(verifier.verify_signature(&signature, &message, &wrong_issuer_pubkey).is_err());
+        assert!(verifier
+            .verify_signature(&signature, &message, &wrong_issuer_pubkey)
+            .is_err());
 
         // Test with corrupted signature
         let mut corrupted_signature = signature;
         corrupted_signature[50] ^= 0x01; // Flip one bit
-        assert!(verifier.verify_signature(&corrupted_signature, &message, &issuer_pubkey).is_err());
+        assert!(verifier
+            .verify_signature(&corrupted_signature, &message, &issuer_pubkey)
+            .is_err());
     }
 
     #[test]
@@ -188,7 +201,9 @@ pub fn schnorr_sign(
         Ok(signature) => Ok(signature),
         Err(basis_core::traits::CryptoError::InvalidSignature) => Err(NoteError::InvalidSignature),
         Err(basis_core::traits::CryptoError::InvalidPublicKey) => Err(NoteError::InvalidSignature),
-        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => Err(NoteError::InvalidSignature),
+        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => {
+            Err(NoteError::InvalidSignature)
+        }
         Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
     }
 }
@@ -204,7 +219,9 @@ pub fn schnorr_verify(
         Ok(()) => Ok(()),
         Err(basis_core::traits::CryptoError::InvalidSignature) => Err(NoteError::InvalidSignature),
         Err(basis_core::traits::CryptoError::InvalidPublicKey) => Err(NoteError::InvalidSignature),
-        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => Err(NoteError::InvalidSignature),
+        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => {
+            Err(NoteError::InvalidSignature)
+        }
         Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
     }
 }

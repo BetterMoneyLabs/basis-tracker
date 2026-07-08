@@ -1,7 +1,7 @@
 //! Offchain logic for Basis tracker
 
-pub mod transaction_builder;
 pub mod schnorr;
+pub mod transaction_builder;
 
 #[cfg(test)]
 pub mod test_helpers;

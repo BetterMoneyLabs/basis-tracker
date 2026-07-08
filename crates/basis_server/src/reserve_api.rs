@@ -59,10 +59,7 @@ pub async fn get_all_reserves(
                 })
                 .collect();
 
-            tracing::info!(
-                "Returning {} reserves (from database)",
-                reserves.len()
-            );
+            tracing::info!("Returning {} reserves (from database)", reserves.len());
 
             (StatusCode::OK, Json(success_response(reserves)))
         }
@@ -70,7 +67,9 @@ pub async fn get_all_reserves(
             tracing::error!("Failed to get reserves from database: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Failed to retrieve reserves from database".to_string())),
+                Json(crate::models::error_response(
+                    "Failed to retrieve reserves from database".to_string(),
+                )),
             )
         }
     }
@@ -121,7 +120,9 @@ pub async fn get_reserves_by_issuer(
             tracing::error!("Failed to get reserves from database: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Failed to retrieve reserves from database".to_string())),
+                Json(crate::models::error_response(
+                    "Failed to retrieve reserves from database".to_string(),
+                )),
             )
         }
     }
@@ -132,7 +133,10 @@ pub async fn get_reserves_by_issuer(
 pub async fn get_reserve_by_box_id(
     State(state): State<AppState>,
     axum::extract::Path(box_id): axum::extract::Path<String>,
-) -> (StatusCode, Json<ApiResponse<Option<SerializableReserveInfo>>>) {
+) -> (
+    StatusCode,
+    Json<ApiResponse<Option<SerializableReserveInfo>>>,
+) {
     tracing::debug!("Getting reserve by box ID: {}", box_id);
 
     // Get reserve storage from scanner and query database directly
@@ -156,7 +160,10 @@ pub async fn get_reserve_by_box_id(
 
             tracing::info!("Successfully retrieved reserve with box ID: {}", box_id);
 
-            (StatusCode::OK, Json(success_response(Some(serializable_reserve))))
+            (
+                StatusCode::OK,
+                Json(success_response(Some(serializable_reserve))),
+            )
         }
         Ok(None) => {
             tracing::info!("Reserve with box ID {} not found", box_id);
@@ -166,7 +173,9 @@ pub async fn get_reserve_by_box_id(
             tracing::error!("Failed to get reserve from database: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response("Failed to retrieve reserve from database".to_string())),
+                Json(crate::models::error_response(
+                    "Failed to retrieve reserve from database".to_string(),
+                )),
             )
         }
     }

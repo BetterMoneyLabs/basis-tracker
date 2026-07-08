@@ -1,10 +1,6 @@
 #[cfg(test)]
 mod create_reserve_tests {
-    use axum::{
-        extract::State,
-        http::StatusCode,
-        Json,
-    };
+    use axum::{extract::State, http::StatusCode, Json};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -50,13 +46,17 @@ mod create_reserve_tests {
                     ..Default::default()
                 },
                 basis_reserve_contract_p2s: "test".to_string(),
-                tracker_nft_id: Some("69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string()),
-                tracker_public_key: Some("9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string()),
+                tracker_nft_id: Some(
+                    "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+                ),
+                tracker_public_key: Some(
+                    "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+                ),
                 tracker_secret_key: None,
             },
             transaction: crate::config::TransactionConfig {
                 fee: 1000000,
-                        change_address: None,
+                change_address: None,
             },
             acceptance: crate::acceptance::config::AcceptanceConfig::empty(),
         });
@@ -69,13 +69,20 @@ mod create_reserve_tests {
             ergo_scanner: Arc::new(Mutex::new(scanner)),
             reserve_tracker,
             config: test_config,
-            shared_tracker_state: Arc::new(tokio::sync::Mutex::new(crate::tracker_box_updater::SharedTrackerState::new())),
-            tracker_storage: basis_store::persistence::TrackerStorage::open("test_tracker").unwrap_or_else(|_| {
-                basis_store::persistence::TrackerStorage::open("test_tracker_fallback").unwrap()
-            }),
+            shared_tracker_state: Arc::new(tokio::sync::Mutex::new(
+                crate::tracker_box_updater::SharedTrackerState::new(),
+            )),
+            tracker_storage: basis_store::persistence::TrackerStorage::open("test_tracker")
+                .unwrap_or_else(|_| {
+                    basis_store::persistence::TrackerStorage::open("test_tracker_fallback").unwrap()
+                }),
             acceptance_predicate: None,
-            policy_storage: basis_store::persistence::AcceptancePolicyStorage::open("test_policies").unwrap_or_else(|_| {
-                basis_store::persistence::AcceptancePolicyStorage::open("test_policies_fallback").unwrap()
+            policy_storage: basis_store::persistence::AcceptancePolicyStorage::open(
+                "test_policies",
+            )
+            .unwrap_or_else(|_| {
+                basis_store::persistence::AcceptancePolicyStorage::open("test_policies_fallback")
+                    .unwrap()
             }),
         }
     }
@@ -86,14 +93,12 @@ mod create_reserve_tests {
 
         let request_payload = CreateReserveRequest {
             nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12".to_string(), // 33-byte public key
+            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                .to_string(), // 33-byte public key
             erg_amount: 1000000000, // 1 ERG in nanoERG
         };
 
-        let result = create_reserve_payload(
-            State(state),
-            Json(request_payload),
-        ).await;
+        let result = create_reserve_payload(State(state), Json(request_payload)).await;
 
         let (status, response_json) = result;
 
@@ -116,8 +121,14 @@ mod create_reserve_tests {
             // Verify other fields after making sure the requests array is not empty
             if !reserve_response.requests.is_empty() {
                 assert_eq!(reserve_response.requests[0].value, 1000000000);
-                assert_eq!(reserve_response.requests[0].assets[0].token_id, "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-                assert_eq!(reserve_response.requests[0].registers.get("R4").unwrap(), "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12");
+                assert_eq!(
+                    reserve_response.requests[0].assets[0].token_id,
+                    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                );
+                assert_eq!(
+                    reserve_response.requests[0].registers.get("R4").unwrap(),
+                    "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                );
                 assert!(reserve_response.fee > 0); // Should be the configured fee amount
             }
         }
@@ -133,10 +144,7 @@ mod create_reserve_tests {
             erg_amount: 1000000000,
         };
 
-        let result = create_reserve_payload(
-            State(state),
-            Json(request_payload),
-        ).await;
+        let result = create_reserve_payload(State(state), Json(request_payload)).await;
 
         let (status, response_json) = result;
 
@@ -159,10 +167,7 @@ mod create_reserve_tests {
             erg_amount: 1000000000,
         };
 
-        let result = create_reserve_payload(
-            State(state),
-            Json(request_payload),
-        ).await;
+        let result = create_reserve_payload(State(state), Json(request_payload)).await;
 
         let (status, response_json) = result;
 
@@ -181,14 +186,12 @@ mod create_reserve_tests {
 
         let request_payload = CreateReserveRequest {
             nft_id: "".to_string(), // Empty NFT ID
-            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12".to_string(),
+            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                .to_string(),
             erg_amount: 1000000000,
         };
 
-        let result = create_reserve_payload(
-            State(state),
-            Json(request_payload),
-        ).await;
+        let result = create_reserve_payload(State(state), Json(request_payload)).await;
 
         let (status, response_json) = result;
 
@@ -197,7 +200,11 @@ mod create_reserve_tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(!response_json.success);
             assert!(response_json.error.is_some());
-            assert!(response_json.error.clone().unwrap().contains("cannot be empty"));
+            assert!(response_json
+                .error
+                .clone()
+                .unwrap()
+                .contains("cannot be empty"));
         }
     }
 
@@ -207,14 +214,12 @@ mod create_reserve_tests {
 
         let request_payload = CreateReserveRequest {
             nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12".to_string(),
+            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                .to_string(),
             erg_amount: 0, // Zero amount
         };
 
-        let result = create_reserve_payload(
-            State(state),
-            Json(request_payload),
-        ).await;
+        let result = create_reserve_payload(State(state), Json(request_payload)).await;
 
         let (status, response_json) = result;
 
@@ -223,7 +228,11 @@ mod create_reserve_tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(!response_json.success);
             assert!(response_json.error.is_some());
-            assert!(response_json.error.clone().unwrap().contains("greater than 0"));
+            assert!(response_json
+                .error
+                .clone()
+                .unwrap()
+                .contains("greater than 0"));
         }
     }
 }

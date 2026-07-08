@@ -14,8 +14,9 @@ mod tests {
     #[tokio::test]
     async fn test_tracker_scan_registration_payload() {
         // Test that the scan registration payload is correctly formatted
-        let tracker_nft_id = "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string();
-        
+        let tracker_nft_id =
+            "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string();
+
         // This would be the expected JSON payload
         let expected_payload = serde_json::json!({
             "scanName": "tracker_boxes",
@@ -30,11 +31,11 @@ mod tests {
         // Verify the payload structure
         assert_eq!(expected_payload["scanName"], "tracker_boxes");
         assert_eq!(expected_payload["walletInteraction"], "shared");
-        assert_eq!(expected_payload["trackingRule"]["predicate"], "containsAsset");
         assert_eq!(
-            expected_payload["trackingRule"]["assetId"],
-            tracker_nft_id
+            expected_payload["trackingRule"]["predicate"],
+            "containsAsset"
         );
+        assert_eq!(expected_payload["trackingRule"]["assetId"], tracker_nft_id);
     }
 
     #[test]
@@ -59,10 +60,10 @@ mod tests {
     async fn test_tracker_server_state_creation() {
         // Test creating tracker server state
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let metadata_storage = ScannerMetadataStorage::open(temp_dir.path().join("metadata"))
             .expect("Failed to create metadata storage");
-        
+
         let tracker_storage = TrackerStorage::open(temp_dir.path().join("tracker"))
             .expect("Failed to create tracker storage");
 
@@ -75,10 +76,13 @@ mod tests {
         };
 
         let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
-        
+
         // Verify the server state was created
         assert_eq!(server_state.config.node_url, "http://localhost:9053");
-        assert_eq!(server_state.config.tracker_nft_id, Some("test_nft_id".to_string()));
+        assert_eq!(
+            server_state.config.tracker_nft_id,
+            Some("test_nft_id".to_string())
+        );
     }
 
     #[test]
@@ -101,7 +105,10 @@ mod tests {
         assert_eq!(tracker_box.box_id, deserialized.box_id);
         assert_eq!(tracker_box.tracker_pubkey, deserialized.tracker_pubkey);
         assert_eq!(tracker_box.state_commitment, deserialized.state_commitment);
-        assert_eq!(tracker_box.last_verified_height, deserialized.last_verified_height);
+        assert_eq!(
+            tracker_box.last_verified_height,
+            deserialized.last_verified_height
+        );
         assert_eq!(tracker_box.value, deserialized.value);
         assert_eq!(tracker_box.creation_height, deserialized.creation_height);
         assert_eq!(tracker_box.tracker_nft_id, deserialized.tracker_nft_id);
@@ -110,16 +117,18 @@ mod tests {
     #[test]
     fn test_parse_tracker_box() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let metadata_storage = ScannerMetadataStorage::open(temp_dir.path().join("metadata"))
             .expect("Failed to create metadata storage");
-        
+
         let tracker_storage = TrackerStorage::open(temp_dir.path().join("tracker"))
             .expect("Failed to create tracker storage");
 
         let config = TrackerNodeConfig {
             start_height: Some(0),
-            tracker_nft_id: Some("dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string()),
+            tracker_nft_id: Some(
+                "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string(),
+            ),
             node_url: "http://localhost:9053".to_string(),
             scan_name: Some("test_tracker_scan".to_string()),
             api_key: None,
@@ -129,9 +138,15 @@ mod tests {
 
         // Create a mock ScanBox
         let mut registers = HashMap::new();
-        registers.insert("R4".to_string(), "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string());
+        registers.insert(
+            "R4".to_string(),
+            "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string(),
+        );
         // R5 should be a valid SAvlTree format (starts with 0x64, at least 66 hex chars)
-        registers.insert("R5".to_string(), "640123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01".to_string());
+        registers.insert(
+            "R5".to_string(),
+            "640123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01".to_string(),
+        );
         // R6 is the last verified height (u64 as string)
         registers.insert("R6".to_string(), "1000".to_string());
 
@@ -141,12 +156,11 @@ mod tests {
             ergo_tree: "mock_ergo_tree".to_string(),
             creation_height: 950,
             transaction_id: "mock_tx_id".to_string(),
-            assets: vec![
-                BoxAsset {
-                    token_id: "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string(),
-                    amount: 1,
-                }
-            ],
+            assets: vec![BoxAsset {
+                token_id: "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8"
+                    .to_string(),
+                amount: 1,
+            }],
             additional_registers: registers,
         };
 
@@ -156,27 +170,38 @@ mod tests {
 
         let tracker_box = result.unwrap();
         assert_eq!(tracker_box.box_id, "test_box_id_1234567890abcdef");
-        assert_eq!(tracker_box.tracker_pubkey, "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7");
-        assert_eq!(tracker_box.state_commitment, "640123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01");
+        assert_eq!(
+            tracker_box.tracker_pubkey,
+            "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
+        );
+        assert_eq!(
+            tracker_box.state_commitment,
+            "640123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"
+        );
         assert_eq!(tracker_box.last_verified_height, 1000);
         assert_eq!(tracker_box.value, 1000000);
         assert_eq!(tracker_box.creation_height, 950);
-        assert_eq!(tracker_box.tracker_nft_id, "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8");
+        assert_eq!(
+            tracker_box.tracker_nft_id,
+            "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8"
+        );
     }
 
     #[test]
     fn test_parse_tracker_box_missing_nft() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let metadata_storage = ScannerMetadataStorage::open(temp_dir.path().join("metadata"))
             .expect("Failed to create metadata storage");
-        
+
         let tracker_storage = TrackerStorage::open(temp_dir.path().join("tracker"))
             .expect("Failed to create tracker storage");
 
         let config = TrackerNodeConfig {
             start_height: Some(0),
-            tracker_nft_id: Some("dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string()),
+            tracker_nft_id: Some(
+                "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string(),
+            ),
             node_url: "http://localhost:9053".to_string(),
             scan_name: Some("test_tracker_scan".to_string()),
             api_key: None,
@@ -186,8 +211,14 @@ mod tests {
 
         // Create a mock ScanBox without the tracker NFT
         let mut registers = HashMap::new();
-        registers.insert("R4".to_string(), "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string());
-        registers.insert("R5".to_string(), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+        registers.insert(
+            "R4".to_string(),
+            "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string(),
+        );
+        registers.insert(
+            "R5".to_string(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        );
         registers.insert("R6".to_string(), "1000".to_string());
 
         let scan_box = ScanBox {
@@ -196,19 +227,20 @@ mod tests {
             ergo_tree: "mock_ergo_tree".to_string(),
             creation_height: 950,
             transaction_id: "mock_tx_id".to_string(),
-            assets: vec![
-                BoxAsset {
-                    token_id: "different_nft_id_1234567890abcdef1234567890abcdef".to_string(),
-                    amount: 1,
-                }
-            ],
+            assets: vec![BoxAsset {
+                token_id: "different_nft_id_1234567890abcdef1234567890abcdef".to_string(),
+                amount: 1,
+            }],
             additional_registers: registers,
         };
 
         // Parse should fail due to missing tracker NFT
         let result = server_state.parse_tracker_box(&scan_box);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::tracker_scanner::TrackerScannerError::MissingTrackerNft));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::tracker_scanner::TrackerScannerError::MissingTrackerNft
+        ));
     }
 
     #[test]
@@ -223,7 +255,9 @@ mod tests {
 
         let config = TrackerNodeConfig {
             start_height: Some(0),
-            tracker_nft_id: Some("dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string()),
+            tracker_nft_id: Some(
+                "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string(),
+            ),
             node_url: "http://localhost:9053".to_string(),
             scan_name: Some("test_tracker_scan".to_string()),
             api_key: None,
@@ -233,7 +267,10 @@ mod tests {
 
         // Create a mock ScanBox missing R5 register (required)
         let mut registers = HashMap::new();
-        registers.insert("R4".to_string(), "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string());
+        registers.insert(
+            "R4".to_string(),
+            "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string(),
+        );
         // Missing R5 (required - state commitment)
         registers.insert("R6".to_string(), "1000".to_string());
 
@@ -243,18 +280,20 @@ mod tests {
             ergo_tree: "mock_ergo_tree".to_string(),
             creation_height: 950,
             transaction_id: "mock_tx_id".to_string(),
-            assets: vec![
-                BoxAsset {
-                    token_id: "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string(),
-                    amount: 1,
-                }
-            ],
+            assets: vec![BoxAsset {
+                token_id: "dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8"
+                    .to_string(),
+                amount: 1,
+            }],
             additional_registers: registers,
         };
 
         // Parse should fail due to missing R5 register
         let result = server_state.parse_tracker_box(&scan_box);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::tracker_scanner::TrackerScannerError::MissingRegister(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::tracker_scanner::TrackerScannerError::MissingRegister(_)
+        ));
     }
 }

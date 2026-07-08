@@ -84,7 +84,12 @@ pub async fn handle_note_command(
     client: &TrackerClient,
 ) -> Result<()> {
     match cmd {
-        NoteCommands::Create { recipient, amount, demo, output } => {
+        NoteCommands::Create {
+            recipient,
+            amount,
+            demo,
+            output,
+        } => {
             if demo {
                 // Demo mode: Alice → Bob with tracker signature
                 create_demo_note(amount, output).await?
@@ -92,7 +97,7 @@ pub async fn handle_note_command(
                 // Normal mode: use CLI accounts
                 let recipient = recipient
                     .ok_or_else(|| anyhow::anyhow!("--recipient required in non-demo mode"))?;
-                
+
                 create_normal_note(account_manager, client, &recipient, amount).await?
             }
         }
@@ -169,13 +174,24 @@ pub async fn handle_note_command(
             let recipient_pubkey = current_account.get_pubkey_hex();
 
             // First, get the note to retrieve its original timestamp
-            let note = client.get_note(&issuer, &recipient_pubkey).await?
-                .ok_or_else(|| anyhow::anyhow!("Note not found for issuer {} and recipient {}", issuer, recipient_pubkey))?;
+            let note = client
+                .get_note(&issuer, &recipient_pubkey)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Note not found for issuer {} and recipient {}",
+                        issuer,
+                        recipient_pubkey
+                    )
+                })?;
 
             // Verify that the note has sufficient outstanding debt
             if note.outstanding_debt() < amount {
-                return Err(anyhow::anyhow!("Insufficient outstanding debt: {} nanoERG available, {} nanoERG requested",
-                    note.outstanding_debt(), amount));
+                return Err(anyhow::anyhow!(
+                    "Insufficient outstanding debt: {} nanoERG available, {} nanoERG requested",
+                    note.outstanding_debt(),
+                    amount
+                ));
             }
 
             // Use the note's original timestamp for redemption
@@ -217,7 +233,7 @@ pub async fn handle_note_command(
                 reserve_box_id: String::new(), // Will be looked up by server
                 tracker_box_id: String::new(), // Will be fetched by server
                 tracker_nft_id: String::new(), // Will be fetched by server
-                current_height: 0, // Will be fetched by server
+                current_height: 0,             // Will be fetched by server
                 recipient_address: String::new(), // Will be derived from recipient_pubkey by server
                 change_address: String::new(), // Will be derived from tracker pubkey by server
                 issuer_signature: hex::encode(&issuer_signature),
@@ -250,56 +266,56 @@ pub async fn handle_note_command(
 async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<()> {
     let alice = demo_keys::alice();
     let bob = demo_keys::bob();
-    
+
     eprintln!("=== Basis Demo Note Creator ===");
     eprintln!("Creating IOU note from Alice to Bob");
     eprintln!();
-    
+
     // Create signing message: blake2b256(alice_pk || bob_pk) || totalDebt || timestamp
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64;
-    
+
     let alice_pk_bytes = alice.public_key().serialize();
     let bob_pk_bytes = bob.public_key().serialize();
-    
+
     // Compute key = blake2b256(ownerKey || receiverKey)
     let mut key_hash_input = Vec::new();
     key_hash_input.extend_from_slice(&alice_pk_bytes);
     key_hash_input.extend_from_slice(&bob_pk_bytes);
     let key_hash = blake2b256_hash(&key_hash_input);
-    
+
     // Build message: key || totalDebt || timestamp (48 bytes)
     let mut message = Vec::new();
     message.extend_from_slice(&key_hash);
     message.extend_from_slice(&amount.to_be_bytes());
     message.extend_from_slice(&timestamp.to_be_bytes());
-    
+
     eprintln!("Message: {}", hex::encode(&message));
     eprintln!("  Key hash: {}", hex::encode(&key_hash));
     eprintln!("  Total debt: {} nanoERG", amount);
     eprintln!("  Timestamp: {}", timestamp);
     eprintln!();
-    
+
     // Alice signs the message
     let alice_sig = alice.keypair.sign_message(&message)?;
     let alice_sig_a = hex::encode(&alice_sig[0..33]);
     let alice_sig_z = hex::encode(&alice_sig[33..65]);
-    
+
     eprintln!("✓ Alice's signature generated");
-    
+
     // Request tracker signature from server
     eprintln!("Requesting tracker signature from server...");
-    
+
     // For now, we'll sign with tracker demo key (in production, server would do this)
     let tracker = demo_keys::tracker();
     let tracker_sig = tracker.keypair.sign_message(&message)?;
     let tracker_sig_a = hex::encode(&tracker_sig[0..33]);
     let tracker_sig_z = hex::encode(&tracker_sig[33..65]);
-    
+
     eprintln!("✓ Tracker's signature generated");
     eprintln!();
-    
+
     // Build note JSON matching Scala demo format
     let note = DemoNote {
         payerKey: alice.public_key_hex(),
@@ -324,9 +340,9 @@ async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<()> {
             hex::encode(blake2b256_hash(&key_input))
         },
     };
-    
+
     let note_json = serde_json::to_string_pretty(&note)?;
-    
+
     // Output JSON
     if let Some(path) = output {
         fs::write(&path, &note_json)?;
@@ -334,12 +350,15 @@ async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<()> {
     } else {
         println!("{}", note_json);
     }
-    
+
     eprintln!();
     eprintln!("=== Note Summary ===");
     eprintln!("  Payer:           {}...", alice.public_key_hex());
     eprintln!("  Payee:           {}...", bob.public_key_hex());
-    eprintln!("  Amount:          {} nanoERG ({:.6} ERG)", amount, note.totalDebtERG);
+    eprintln!(
+        "  Amount:          {} nanoERG ({:.6} ERG)",
+        amount, note.totalDebtERG
+    );
     eprintln!("  Timestamp:       {}", timestamp);
     eprintln!("  Payer Sig Valid: ✓");
     eprintln!("  Tracker Sig Valid: ✓");
@@ -347,7 +366,7 @@ async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<()> {
     eprintln!("=== Usage ===");
     eprintln!("  Redeem:  basis-cli transaction generate-redemption --issuer {} --recipient {} --amount {}", 
               alice.public_key_hex(), bob.public_key_hex(), amount);
-    
+
     Ok(())
 }
 
@@ -417,7 +436,7 @@ async fn create_normal_note(
         amount as f64 / 1_000_000_000.0
     );
     println!("  Timestamp: {}", timestamp);
-    
+
     Ok(())
 }
 
@@ -454,7 +473,7 @@ fn print_reserve_status(status: &KeyStatusResponse) {
 fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
     use blake2::{Blake2b, Digest};
     use generic_array::typenum::U32;
-    
+
     let mut hasher = Blake2b::<U32>::new();
     hasher.update(data);
     let result = hasher.finalize();

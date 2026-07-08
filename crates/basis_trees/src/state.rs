@@ -73,7 +73,7 @@ mod tests {
     fn test_tracker_state_creation() {
         let root = [1u8; 33];
         let state = TrackerState::new(root, 1000, 1234567890);
-        
+
         assert_eq!(state.avl_root_digest, root);
         assert_eq!(state.last_commit_height, 1000);
         assert_eq!(state.last_update_timestamp, 1234567890);
@@ -93,7 +93,7 @@ mod tests {
         let state = TrackerState::new([42u8; 33], 999, 987654321);
         let bytes = state.to_bytes();
         let restored = TrackerState::from_bytes(&bytes).unwrap();
-        
+
         assert_eq!(state, restored);
     }
 

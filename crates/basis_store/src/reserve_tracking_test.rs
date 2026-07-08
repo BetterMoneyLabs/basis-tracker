@@ -48,8 +48,16 @@ mod tests {
                 additional_registers: {
                     let mut registers = std::collections::HashMap::new();
                     // Use a valid hex-encoded compressed public key (33 bytes = 66 hex chars)
-                    registers.insert("R4".to_string(), "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb".to_string());
-                    registers.insert("R6".to_string(), "0e201af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string()); // 32-byte tracker NFT ID with Ergo prefix
+                    registers.insert(
+                        "R4".to_string(),
+                        "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb"
+                            .to_string(),
+                    );
+                    registers.insert(
+                        "R6".to_string(),
+                        "0e201af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304"
+                            .to_string(),
+                    ); // 32-byte tracker NFT ID with Ergo prefix
                     registers
                 },
             },
@@ -63,8 +71,16 @@ mod tests {
                 additional_registers: {
                     let mut registers = std::collections::HashMap::new();
                     // Use a valid hex-encoded compressed public key (33 bytes = 66 hex chars)
-                    registers.insert("R4".to_string(), "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc".to_string());
-                    registers.insert("R6".to_string(), "0e202bf34e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f30415".to_string()); // 32-byte tracker NFT ID with Ergo prefix
+                    registers.insert(
+                        "R4".to_string(),
+                        "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc"
+                            .to_string(),
+                    );
+                    registers.insert(
+                        "R6".to_string(),
+                        "0e202bf34e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f30415"
+                            .to_string(),
+                    ); // 32-byte tracker NFT ID with Ergo prefix
                     registers
                 },
             },
@@ -82,7 +98,10 @@ mod tests {
                         "  - Collateral: {}",
                         reserve_info.base_info.collateral_amount
                     );
-                    println!("  - Tracker NFT: {:?}", reserve_info.base_info.tracker_nft_id);
+                    println!(
+                        "  - Tracker NFT: {:?}",
+                        reserve_info.base_info.tracker_nft_id
+                    );
 
                     // Verify the parsed data matches expected values
                     assert_eq!(reserve_info.base_info.collateral_amount, scan_box.value);
@@ -95,7 +114,7 @@ mod tests {
                         .expect("R4 register should be present");
                     assert_eq!(
                         reserve_info.owner_pubkey,
-                        *expected_owner_pubkey  // Already hex-encoded
+                        *expected_owner_pubkey // Already hex-encoded
                     );
 
                     // Check tracker NFT extraction (if present) - now comes from R6 register according to spec
@@ -106,10 +125,7 @@ mod tests {
                         } else {
                             expected_tracker_nft.as_str()
                         };
-                        assert_eq!(
-                            reserve_info.base_info.tracker_nft_id,
-                            expected_stripped
-                        );
+                        assert_eq!(reserve_info.base_info.tracker_nft_id, expected_stripped);
                     } else {
                         // If no R6 register, the tracker_nft_id should be empty (handled by the parsing logic)
                     }
@@ -164,11 +180,9 @@ mod tests {
             "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb"
         );
         // Expected tracker NFT ID is now the 32-byte hex string we put in the R6 register
-        let expected_tracker_nft_hex = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304"; // 32-byte tracker NFT ID
-        assert_eq!(
-            reserve1.base_info.tracker_nft_id,
-            expected_tracker_nft_hex
-        );
+        let expected_tracker_nft_hex =
+            "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304"; // 32-byte tracker NFT ID
+        assert_eq!(reserve1.base_info.tracker_nft_id, expected_tracker_nft_hex);
 
         let reserve2 = state
             .reserve_tracker
@@ -290,9 +304,15 @@ mod tests {
                     let mut registers = std::collections::HashMap::new();
                     // Use valid hex-encoded compressed public keys for each owner
                     let owner_key = match owner {
-                        "owner_a" => "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb",
-                        "owner_b" => "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc",
-                        "owner_c" => "028d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cd",
+                        "owner_a" => {
+                            "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb"
+                        }
+                        "owner_b" => {
+                            "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc"
+                        }
+                        "owner_c" => {
+                            "028d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cd"
+                        }
                         _ => "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb", // default
                     };
                     registers.insert("R4".to_string(), owner_key.to_string());
@@ -302,10 +322,14 @@ mod tests {
                             // Generate a 32-byte hex string based on the nft value
                             let nft_bytes = hex::encode(nft_val.as_bytes());
                             // Pad or truncate to ensure exactly 64 hex chars (32 bytes)
-                            let padded = format!("{:0<64}", nft_bytes.get(..64).unwrap_or(&nft_bytes));
+                            let padded =
+                                format!("{:0<64}", nft_bytes.get(..64).unwrap_or(&nft_bytes));
                             format!("0e20{}", padded)
-                        },
-                        None => "0e200000000000000000000000000000000000000000000000000000000000000000".to_string(), // 32 zero bytes with prefix
+                        }
+                        None => {
+                            "0e200000000000000000000000000000000000000000000000000000000000000000"
+                                .to_string()
+                        } // 32 zero bytes with prefix
                     };
                     registers.insert("R6".to_string(), tracker_nft_id);
                     registers

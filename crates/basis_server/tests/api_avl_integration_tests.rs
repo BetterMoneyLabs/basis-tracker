@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod api_avl_integration_tests {
-    use basis_store::{TrackerStateManager, IouNote, PubKey, Signature};
-    use std::sync::Arc;
+    use basis_store::{IouNote, PubKey, Signature, TrackerStateManager};
     use secp256k1;
+    use std::sync::Arc;
 
     /// Helper to generate a test public key
     fn generate_test_pubkey(seed: u8) -> PubKey {
@@ -21,7 +21,13 @@ mod api_avl_integration_tests {
         timestamp: u64,
         secret_key_bytes: &[u8; 32],
     ) -> IouNote {
-        IouNote::create_and_sign(recipient_pubkey, amount_collected, timestamp, secret_key_bytes).unwrap()
+        IouNote::create_and_sign(
+            recipient_pubkey,
+            amount_collected,
+            timestamp,
+            secret_key_bytes,
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -45,7 +51,7 @@ mod api_avl_integration_tests {
         // Create a properly signed test note
         let note = create_signed_note(
             recipient_pubkey,
-            1000, // amount collected
+            1000,    // amount collected
             1000000, // timestamp
             &issuer_secret_key,
         );
@@ -58,10 +64,16 @@ mod api_avl_integration_tests {
         let updated_root = updated_state.avl_root_digest.clone();
 
         // Verify that the AVL tree root has changed
-        assert_ne!(initial_root, updated_root, "AVL tree root should change after adding note");
+        assert_ne!(
+            initial_root, updated_root,
+            "AVL tree root should change after adding note"
+        );
 
         // Verify that the root is not the empty root
-        assert_ne!(updated_root, [0u8; 33], "Root should not be empty after adding note");
+        assert_ne!(
+            updated_root, [0u8; 33],
+            "Root should not be empty after adding note"
+        );
     }
 
     #[tokio::test]
@@ -96,7 +108,11 @@ mod api_avl_integration_tests {
             let current_root = current_state.avl_root_digest.clone();
 
             // Verify root changes with each note
-            assert_ne!(current_root, [0u8; 33], "Root should not be empty after note {}", i);
+            assert_ne!(
+                current_root, [0u8; 33],
+                "Root should not be empty after note {}",
+                i
+            );
 
             // Each new note should result in a different root
             if i > 1 {
@@ -108,7 +124,10 @@ mod api_avl_integration_tests {
         // Final state should be different from initial
         let final_state = tracker.get_state();
         let final_root = final_state.avl_root_digest.clone();
-        assert_ne!(initial_root, final_root, "Final root should differ from initial after adding notes");
+        assert_ne!(
+            initial_root, final_root,
+            "Final root should differ from initial after adding notes"
+        );
     }
 
     #[tokio::test]
@@ -125,12 +144,7 @@ mod api_avl_integration_tests {
         let recipient_pubkey = generate_test_pubkey(2);
 
         // Create and store note
-        let original_note = create_signed_note(
-            recipient_pubkey,
-            1500,
-            1000000,
-            &issuer_secret_key,
-        );
+        let original_note = create_signed_note(recipient_pubkey, 1500, 1000000, &issuer_secret_key);
 
         // Store the note and update AVL tree
         let result = tracker.add_note(&issuer_pubkey, &original_note);
@@ -138,21 +152,36 @@ mod api_avl_integration_tests {
 
         // Retrieve the note back
         let retrieved_note_result = tracker.lookup_note(&issuer_pubkey, &recipient_pubkey);
-        assert!(retrieved_note_result.is_ok(), "Should be able to retrieve note");
+        assert!(
+            retrieved_note_result.is_ok(),
+            "Should be able to retrieve note"
+        );
 
         let retrieved_note = retrieved_note_result.unwrap();
 
         // Verify retrieved note matches original
-        assert_eq!(retrieved_note.amount_collected, original_note.amount_collected);
-        assert_eq!(retrieved_note.amount_redeemed, original_note.amount_redeemed);
+        assert_eq!(
+            retrieved_note.amount_collected,
+            original_note.amount_collected
+        );
+        assert_eq!(
+            retrieved_note.amount_redeemed,
+            original_note.amount_redeemed
+        );
         assert_eq!(retrieved_note.timestamp, original_note.timestamp);
         assert_eq!(retrieved_note.signature, original_note.signature);
-        assert_eq!(retrieved_note.recipient_pubkey, original_note.recipient_pubkey);
+        assert_eq!(
+            retrieved_note.recipient_pubkey,
+            original_note.recipient_pubkey
+        );
 
         // Verify AVL tree state is non-empty
         let state = tracker.get_state();
         let root = state.avl_root_digest.clone();
-        assert_ne!(root, [0u8; 33], "Root should not be empty after note storage");
+        assert_ne!(
+            root, [0u8; 33],
+            "Root should not be empty after note storage"
+        );
     }
 
     #[tokio::test]
@@ -173,12 +202,7 @@ mod api_avl_integration_tests {
         let recipient_pubkey = generate_test_pubkey(2);
 
         // Add a note
-        let note1 = create_signed_note(
-            recipient_pubkey,
-            1000,
-            1000000,
-            &issuer_secret_key,
-        );
+        let note1 = create_signed_note(recipient_pubkey, 1000, 1000000, &issuer_secret_key);
 
         tracker.add_note(&issuer_pubkey, &note1).unwrap();
         let state_after_add = tracker.get_state();
@@ -187,7 +211,7 @@ mod api_avl_integration_tests {
         // Update the same note
         let note2 = create_signed_note(
             recipient_pubkey,
-            2000, // increased amount
+            2000,    // increased amount
             1000001, // updated timestamp
             &issuer_secret_key,
         );
@@ -197,9 +221,18 @@ mod api_avl_integration_tests {
         let root_after_update = state_after_update.avl_root_digest.clone();
 
         // Verify all states are different
-        assert_ne!(empty_root, root_after_add, "Root should change after first note");
-        assert_ne!(root_after_add, root_after_update, "Root should change after update");
-        assert_ne!(empty_root, root_after_update, "Final root should differ from initial");
+        assert_ne!(
+            empty_root, root_after_add,
+            "Root should change after first note"
+        );
+        assert_ne!(
+            root_after_add, root_after_update,
+            "Root should change after update"
+        );
+        assert_ne!(
+            empty_root, root_after_update,
+            "Final root should differ from initial"
+        );
 
         // Verify AVL tree root is properly formatted (33 bytes)
         assert_eq!(root_after_update.len(), 33, "AVL root should be 33 bytes");
@@ -219,19 +252,17 @@ mod api_avl_integration_tests {
         let recipient_pubkey = generate_test_pubkey(2);
 
         // Create and store a note
-        let note = create_signed_note(
-            recipient_pubkey,
-            1000,
-            1000000,
-            &issuer_secret_key,
-        );
+        let note = create_signed_note(recipient_pubkey, 1000, 1000000, &issuer_secret_key);
 
         let add_result = tracker.add_note(&issuer_pubkey, &note);
         assert!(add_result.is_ok(), "Should be able to add note");
 
         // Generate a proof for this note
         let proof_result = tracker.generate_proof(&issuer_pubkey, &recipient_pubkey);
-        assert!(proof_result.is_ok(), "Should be able to generate proof for stored note");
+        assert!(
+            proof_result.is_ok(),
+            "Should be able to generate proof for stored note"
+        );
 
         let proof = proof_result.unwrap();
 
@@ -244,7 +275,10 @@ mod api_avl_integration_tests {
 
         // Verify AVL tree state commitment exists
         let state = tracker.get_state();
-        assert_ne!(state.avl_root_digest, [0u8; 33], "Tracker state should have valid AVL root");
+        assert_ne!(
+            state.avl_root_digest, [0u8; 33],
+            "Tracker state should have valid AVL root"
+        );
     }
 
     #[tokio::test]

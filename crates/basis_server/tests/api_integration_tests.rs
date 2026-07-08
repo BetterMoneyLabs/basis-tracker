@@ -33,6 +33,8 @@ mod api_tests {
             emergency: false,
             tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
             reserve_box_value: 500 + 1000000 + 1000000, // Reserve must cover debt + fee + buffer
+            fee_input_box_ids: vec![],
+            fee_input_total_value: 0,
         };
 
         assert!(!request.issuer_pubkey.is_empty());

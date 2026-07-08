@@ -4,8 +4,8 @@ use axum::{
 };
 use basis_server::{
     api::*, reserve_api::*, store::EventStore, AppConfig, AppState, ErgoConfig, EventType,
-    ServerConfig, TrackerCommand, TrackerEvent, TransactionConfig,
-    TrackerBoxUpdateConfig, TrackerBoxUpdater, SharedTrackerState,
+    ServerConfig, SharedTrackerState, TrackerBoxUpdateConfig, TrackerBoxUpdater, TrackerCommand,
+    TrackerEvent, TransactionConfig,
 };
 use basis_store::{
     ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
@@ -42,7 +42,7 @@ async fn main() {
                             scan_name: Some("Basis Reserve Scanner".to_string()),
                             api_key: Some("hello".to_string()),
                         },
-                        basis_reserve_contract_p2s: "RtQxdWJ9axeb5Ltahqosnhj45BE26xuDK4YWddVj5p59t9RjKPEkkHCYEiyxwRFMJcEHwVd9syFod8ReQo1Zaz9eNTZ5JwDEN5hkLd67sVr2sNQ6R46TSfausAc9D3q7et1apYaXnqV9PkpHPMCA1zMCEsmmADj62XRGq4Cw2VwpuKKCAdreTgmLzdFWHGVGQMsPDFFBkRibsPFMzXkytdy2mPs2zCtm15uyDpd3jDLBy95BtUFXU2DdaYa1xMZE9UXju4R4MhWH8vqWda5BgpRTa1RpQxpS5b96FG46r1v3ZWCLYcVo51J1ekY8cqqVFNNykpQScRRYqFjCLMjG26dYEwZyn21wGeLJ7RzcTwCpvGDBa2w1P3ycAEJAv9XDPEtJrSQpkvBaD1HaZ6X2JuXmFjPF5MChmVLk4CTXtRQVRis7vP95ByTTmbHbtVdao32kbN3xhCWgJZZdaKkNyKH4vFQn5jyoEmiV7FjQDegWnnaFXu5FW6stx9cbhsxWz5FfGpW1BCMRNNJTCRF6FtYoehrMT74LDRNxHQ38EmMn6mBEpSrhkzDj2jysdFJvDUf8UQjLZQLmUQtgNotfxeAPxiavsT5mLUja3hdWvZPv71FcHxvP53WJHAcn9JPek3vepbH9gxRdmBMW".to_string(),
+                        basis_reserve_contract_p2s: "4ZhBzJfNoUL9Bp993NzJcdUr6CNfuwvwNMgHC2JPHs8ane1jjE3K7gzUQVBNQfJccoLbB2P8xMsa9qZNFgRwgrWs6WGEa38gwF1BDkGwMLh6RJUez5Ge6toZzu7tZo5qYtqUinmckb5q9hcVo6Cpn3w2gcuwCd2sKmRohedxxbpP7vnrQmCNQveB22RN5ZVv8VGJaDUEC3ADCSRjzr5ZzJNBmVbAw2k5sTmoXGm7qJ1YT9gzmAPi97ptJJQXqNJoi1W6coMFwg34Dc21K9TMkKQexnXxon21XrbyWL6fzLGbYBRBiVpiRTeMah9Tc33yN93NVTjHWKvBcxSYiJU7eJy6aiwAHhqxYPtZNhwE196qUEYHX5gnN1xB4CpZA2W2HDuEZREpDPV4xy6g2qucW2fyhgDpscHMxrbaGfRq1zkrvML54z2Da9jpkM6nmZx2KB29HTh1do6L3rrLxnvg5cgANzfYuaWPFEoo6j2ZqjPzLDeSSVhPbkMnw6HhQp2qtzayqWVgCKGRzMFuh8BkpmkFCPKjhUwX6Dgv6DpkuHbJRM7k9YSvPCHRQTSeDJa4B5wuyXMsfFMkAnjR4oaLbSBU2QCgKBLFbGvrRKgAJG9eTSc31x6EtqKFoLN2urEWGsEh1F6cxDh2Ma3izwFLyHAgCcUurRXndm5gy3U4GpKdaJiWtwfhcZspwtJ72gWUBEzuPdcqjEyBc95jVtubHeN95QcZLJkJM88c6m1DPXaTBSfDpL8s3sBySa7".to_string(),
                         tracker_nft_id: None,
                         tracker_public_key: None,
                         tracker_secret_key: None,
@@ -67,8 +67,9 @@ async fn main() {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "basis_server=debug,basis_store=debug,tower_http=debug,axum=debug".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "basis_server=debug,basis_store=debug,tower_http=debug,axum=debug".into()
+            }),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -91,7 +92,8 @@ async fn main() {
                 node_url: "http://127.0.0.1:9053".to_string(), // Dummy URL that won't be used
                 ..Default::default()
             };
-            ServerState::new(minimal_config).unwrap_or_else(|_| panic!("Failed to create minimal scanner"))
+            ServerState::new(minimal_config)
+                .unwrap_or_else(|_| panic!("Failed to create minimal scanner"))
         }
     };
 
@@ -104,7 +106,8 @@ async fn main() {
     }
 
     // Get tracker public key from config early, needed for shared state
-    let tracker_pubkey = if let Some(tracker_pubkey_bytes) = match config.tracker_public_key_bytes() {
+    let tracker_pubkey = if let Some(tracker_pubkey_bytes) = match config.tracker_public_key_bytes()
+    {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::error!("Invalid tracker public key format: {}. Please set 'ergo.tracker_public_key' as either a hex-encoded public key or a P2PK address in your configuration file.", e);
@@ -123,9 +126,17 @@ async fn main() {
     let shared_tracker_state_for_updater = SharedTrackerState::new_with_tracker_key(tracker_pubkey);
 
     // Initialize tracker scanner for monitoring tracker state commitment boxes
-    tracing::debug!("Tracker NFT ID from config: {:?}", config.ergo.tracker_nft_id);
-    let _tracker_scanner_initialized = 
-    if config.ergo.tracker_nft_id.is_some() && config.ergo.tracker_nft_id.as_ref().map_or(false, |id| !id.is_empty()) {
+    tracing::debug!(
+        "Tracker NFT ID from config: {:?}",
+        config.ergo.tracker_nft_id
+    );
+    let _tracker_scanner_initialized = if config.ergo.tracker_nft_id.is_some()
+        && config
+            .ergo
+            .tracker_nft_id
+            .as_ref()
+            .map_or(false, |id| !id.is_empty())
+    {
         tracing::info!("Initializing tracker scanner with tracker NFT ID...");
         let tracker_scanner_config = TrackerNodeConfig {
             start_height: config.ergo.node.start_height,
@@ -140,11 +151,17 @@ async fn main() {
         let tracker_storage_path = std::path::Path::new("data").join("tracker_boxes");
 
         // Ensure data directory exists
-        std::fs::create_dir_all(&metadata_storage_path.parent().unwrap_or(std::path::Path::new("data"))).unwrap_or_else(|e| {
+        std::fs::create_dir_all(
+            &metadata_storage_path
+                .parent()
+                .unwrap_or(std::path::Path::new("data")),
+        )
+        .unwrap_or_else(|e| {
             tracing::warn!("Failed to create data directory: {}", e);
         });
 
-        match basis_store::persistence::ScannerMetadataStorage::open(metadata_storage_path.clone()) {
+        match basis_store::persistence::ScannerMetadataStorage::open(metadata_storage_path.clone())
+        {
             Ok(metadata_storage) => {
                 match basis_store::persistence::TrackerStorage::open(tracker_storage_path.clone()) {
                     Ok(tracker_storage) => {
@@ -154,56 +171,64 @@ async fn main() {
                             tracker_storage,
                         );
 
-                        // Ensure the tracker scan is registered on startup
-                        match tracker_scanner.ensure_scan_registered().await {
-                            Ok(scan_id) => {
-                                tracing::info!("Tracker scan registered with ID: {}", scan_id);
-
-                                // Process tracker boxes once to populate storage
-                                match tracker_scanner.process_tracker_boxes().await {
-                                    Ok(tracker_boxes) => {
-                                        tracing::info!("Processed {} tracker boxes", tracker_boxes.len());
-                                        if let Err(e) = tracker_scanner.update_tracker_state(&tracker_boxes).await {
-                                            tracing::error!("Failed to update tracker state: {}", e);
-                                        }
-                                        
-                                        // Set the latest tracker box ID in shared state for the updater
-                                        if let Some(latest_box) = tracker_boxes.iter().max_by_key(|b| b.last_verified_height) {
-                                            tracing::info!("Setting latest tracker box ID in shared state: {}", latest_box.box_id);
-                                            shared_tracker_state_for_updater.set_tracker_box_id(latest_box.box_id.clone());
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to process tracker boxes: {}", e);
-                                    }
+                        // Process tracker boxes directly, no scan registration required
+                        match tracker_scanner.process_tracker_boxes().await {
+                            Ok(tracker_boxes) => {
+                                tracing::info!("Processed {} tracker boxes", tracker_boxes.len());
+                                if let Err(e) =
+                                    tracker_scanner.update_tracker_state(&tracker_boxes).await
+                                {
+                                    tracing::error!("Failed to update tracker state: {}", e);
                                 }
 
-                                tracing::info!("Tracker scanner initialization completed successfully");
+                                // Set the latest tracker box ID in shared state for the updater
+                                if let Some(latest_box) =
+                                    tracker_boxes.iter().max_by_key(|b| b.last_verified_height)
+                                {
+                                    tracing::info!(
+                                        "Setting latest tracker box ID in shared state: {}",
+                                        latest_box.box_id
+                                    );
+                                    shared_tracker_state_for_updater
+                                        .set_tracker_box_id(latest_box.box_id.clone());
+                                }
+
+                                tracing::info!(
+                                    "Tracker scanner initialization completed successfully"
+                                );
                                 true
-                            },
+                            }
                             Err(e) => {
-                                tracing::warn!("Failed to register tracker scan: {:?}", e);
-                                tracing::info!("Continuing without tracker scanner registration...");
+                                tracing::warn!("Failed to process tracker boxes: {:?}", e);
+                                tracing::info!("Continuing without tracker scanner...");
                                 false
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to create tracker storage for tracker scanner: {:?}", e);
+                        tracing::warn!(
+                            "Failed to create tracker storage for tracker scanner: {:?}",
+                            e
+                        );
                         tracing::info!("Continuing without tracker scanner...");
                         false
                     }
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to create metadata storage for tracker scanner: {:?}", e);
+                tracing::warn!(
+                    "Failed to create metadata storage for tracker scanner: {:?}",
+                    e
+                );
                 tracing::info!("Continuing without tracker scanner...");
                 false
             }
         }
     } else {
         tracing::info!("Tracker NFT ID not configured, skipping tracker scanner initialization");
-        tracing::info!("To enable tracker scanner, configure 'ergo.tracker_nft_id' in your configuration");
+        tracing::info!(
+            "To enable tracker scanner, configure 'ergo.tracker_nft_id' in your configuration"
+        );
         false
     };
 
@@ -217,7 +242,8 @@ async fn main() {
 
     // Initialize tracker manager outside of the blocking task so it can be shared
     use basis_store::TrackerStateManager;
-    let shared_tracker_state = std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new()));
+    let shared_tracker_state =
+        std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new()));
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
     let _shared_tracker_state_clone = shared_tracker_state.clone();
@@ -227,12 +253,15 @@ async fn main() {
 
         tracing::debug!("Tracker thread started");
         let tracker = TrackerStateManager::new();
-        
+
         // Update shared state with the rebuilt AVL root digest after initialization
         let initial_root = tracker.get_state().avl_root_digest;
         shared_state_for_tracker.set_avl_root_digest(initial_root);
-        tracing::info!("Tracker thread initialized with AVL root digest: {}", hex::encode(&initial_root));
-        
+        tracing::info!(
+            "Tracker thread initialized with AVL root digest: {}",
+            hex::encode(&initial_root)
+        );
+
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         while let Some(cmd) = rx.blocking_recv() {
@@ -269,14 +298,18 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.get_recipient_notes(&recipient_pubkey);
+                    let result = redemption_manager
+                        .tracker
+                        .get_recipient_notes(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNotesByRecipientWithIssuer {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.get_recipient_notes_with_issuer(&recipient_pubkey);
+                    let result = redemption_manager
+                        .tracker
+                        .get_recipient_notes_with_issuer(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -284,7 +317,8 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker
+                    let result = redemption_manager
+                        .tracker
                         .lookup_note(&issuer_pubkey, &recipient_pubkey)
                         .map(Some);
                     let _ = response_tx.send(result);
@@ -326,7 +360,9 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.generate_proof(&issuer_pubkey, &recipient_pubkey);
+                    let result = redemption_manager
+                        .tracker
+                        .generate_proof(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetTrackerLookupProof {
@@ -334,7 +370,9 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                    let result = redemption_manager
+                        .tracker
+                        .generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveLookupProof {
@@ -342,7 +380,9 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                    let result = redemption_manager
+                        .tracker
+                        .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveInsertProof {
@@ -352,8 +392,13 @@ async fn main() {
                     new_already_redeemed,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.generate_reserve_insert_proof(&issuer_pubkey, &recipient_pubkey, timestamp, new_already_redeemed);
-                    let _ = response_tx.send(result.map(|(proof, _digest)| proof));
+                    let result = redemption_manager.tracker.generate_reserve_insert_proof(
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        timestamp,
+                        new_already_redeemed,
+                    );
+                    let _ = response_tx.send(result);
                 }
             }
         }
@@ -373,7 +418,9 @@ async fn main() {
         shared_tracker_state_for_updater.set_tracker_nft_id(tracker_nft_id.clone());
         tracing::info!("Tracker NFT ID initialized: {}", tracker_nft_id);
     } else {
-        tracing::warn!("No tracker NFT ID configured. Tracker box updater will be disabled until configured.");
+        tracing::warn!(
+            "No tracker NFT ID configured. Tracker box updater will be disabled until configured."
+        );
     }
 
     // Use mainnet network prefix for address encoding
@@ -394,11 +441,9 @@ async fn main() {
     let shared_state_clone = shared_tracker_state_for_updater.clone();
     let updater_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        if let Err(e) = TrackerBoxUpdater::start(
-            updater_config,
-            shared_state_clone,
-            updater_shutdown_rx,
-        ).await {
+        if let Err(e) =
+            TrackerBoxUpdater::start(updater_config, shared_state_clone, updater_shutdown_rx).await
+        {
             tracing::error!("Tracker box updater failed: {}", e);
         }
     });
@@ -527,7 +572,8 @@ async fn main() {
 
     // Initialize tracker storage for the new API endpoint
     let tracker_storage_path = std::path::Path::new("data").join("tracker_boxes");
-    let tracker_storage = match basis_store::persistence::TrackerStorage::open(tracker_storage_path) {
+    let tracker_storage = match basis_store::persistence::TrackerStorage::open(tracker_storage_path)
+    {
         Ok(storage) => storage,
         Err(e) => {
             tracing::error!("Failed to initialize tracker storage: {:?}", e);
@@ -536,33 +582,35 @@ async fn main() {
     };
 
     // Build acceptance predicate from configuration
-    let acceptance_predicate = match basis_server::acceptance::builder::build_predicate_tree(config.acceptance.clone()) {
-        Ok(Some(pred)) => {
-            tracing::info!("Acceptance predicate loaded: '{}'", pred.name());
-            Some(std::sync::Arc::from(pred))
-        }
-        Ok(None) => {
-            tracing::info!("No acceptance predicates configured");
-            None
-        }
-        Err(e) => {
-            tracing::warn!("Failed to build acceptance predicate: {}", e);
-            None
-        }
-    };
+    let acceptance_predicate =
+        match basis_server::acceptance::builder::build_predicate_tree(config.acceptance.clone()) {
+            Ok(Some(pred)) => {
+                tracing::info!("Acceptance predicate loaded: '{}'", pred.name());
+                Some(std::sync::Arc::from(pred))
+            }
+            Ok(None) => {
+                tracing::info!("No acceptance predicates configured");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to build acceptance predicate: {}", e);
+                None
+            }
+        };
 
     // Initialize policy storage for per-recipient acceptance policies
     let policy_storage_path = std::path::Path::new("data").join("acceptance_policies");
-    let policy_storage = match basis_store::persistence::AcceptancePolicyStorage::open(policy_storage_path) {
-        Ok(storage) => {
-            tracing::info!("Acceptance policy storage initialized successfully");
-            storage
-        }
-        Err(e) => {
-            tracing::error!("Failed to initialize acceptance policy storage: {:?}", e);
-            std::process::exit(1);
-        }
-    };
+    let policy_storage =
+        match basis_store::persistence::AcceptancePolicyStorage::open(policy_storage_path) {
+            Ok(storage) => {
+                tracing::info!("Acceptance policy storage initialized successfully");
+                storage
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize acceptance policy storage: {:?}", e);
+                std::process::exit(1);
+            }
+        };
 
     let app_state = AppState {
         tx,
@@ -570,7 +618,9 @@ async fn main() {
         ergo_scanner: std::sync::Arc::new(Mutex::new(ergo_scanner)),
         reserve_tracker: std::sync::Arc::new(Mutex::new(scanner_reserve_tracker)),
         config: std::sync::Arc::new(config.clone()),
-        shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(shared_tracker_state_for_updater)),
+        shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(
+            shared_tracker_state_for_updater,
+        )),
         tracker_storage,
         acceptance_predicate,
         policy_storage,
@@ -584,18 +634,39 @@ async fn main() {
         .route("/events", get(get_events))
         .route("/events/paginated", get(get_events_paginated))
         .route("/notes", post(create_note).options(handle_options))
-        .route("/acceptance/check", post(check_acceptance).options(handle_options))
-        .route("/acceptance/policy", post(upload_policy).options(handle_options))
-        .route("/acceptance/policy/{pubkey}", get(get_policy_by_recipient).options(handle_options))
+        .route(
+            "/acceptance/check",
+            post(check_acceptance).options(handle_options),
+        )
+        .route(
+            "/acceptance/policy",
+            post(upload_policy).options(handle_options),
+        )
+        .route(
+            "/acceptance/policy/{pubkey}",
+            get(get_policy_by_recipient).options(handle_options),
+        )
         .route("/redeem", post(initiate_redemption).options(handle_options))
-        .route("/redeem/complete", post(complete_redemption).options(handle_options))
+        .route(
+            "/redeem/complete",
+            post(complete_redemption).options(handle_options),
+        )
         .route("/proof/redemption", get(get_redemption_proof))
         .route("/tracker/proof", get(get_tracker_proof))
         .route("/reserve/proof", get(get_reserve_proof))
-        .route("/tracker/signature", post(request_tracker_signature).options(handle_options))
-        .route("/redemption/prepare", post(prepare_redemption).options(handle_options))
+        .route(
+            "/tracker/signature",
+            post(request_tracker_signature).options(handle_options),
+        )
+        .route(
+            "/redemption/prepare",
+            post(prepare_redemption).options(handle_options),
+        )
         .route("/reserves", get(get_all_reserves))
-        .route("/reserves/create", post(create_reserve_payload).options(handle_options))
+        .route(
+            "/reserves/create",
+            post(create_reserve_payload).options(handle_options),
+        )
         // Most specific parameterized routes first
         .route(
             "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",
@@ -609,7 +680,10 @@ async fn main() {
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
-        .route("/config/reserve-contract-p2s", get(get_basis_reserve_contract_p2s))
+        .route(
+            "/config/reserve-contract-p2s",
+            get(get_basis_reserve_contract_p2s),
+        )
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(
@@ -705,21 +779,25 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                     }
                 };
 
-                for ergo_box in &boxes {
+                for scan_box in &boxes {
                     // Extract owner pubkey from box registers (R4 register)
-                    let owner_pubkey = match ergo_box.get_register("R4") {
+                    let owner_pubkey = match scan_box.additional_registers.get("R4") {
                         Some(pubkey_hex) => {
                             // Parse hex-encoded public key from register
                             match hex::decode(pubkey_hex) {
                                 Ok(bytes) => bytes,
                                 Err(e) => {
-                                    tracing::warn!("Invalid R4 register hex for box {}: {}", ergo_box.box_id, e);
+                                    tracing::warn!(
+                                        "Invalid R4 register hex for box {}: {}",
+                                        scan_box.box_id,
+                                        e
+                                    );
                                     continue; // Skip this box
                                 }
                             }
                         }
                         None => {
-                            tracing::warn!("Box {} missing R4 register, skipping", ergo_box.box_id);
+                            tracing::warn!("Box {} missing R4 register, skipping", scan_box.box_id);
                             continue; // Skip boxes without owner pubkey
                         }
                     };
@@ -733,20 +811,21 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                     };
 
                     let mut reserve_info = basis_store::ExtendedReserveInfo::new(
-                        ergo_box.box_id.as_bytes(),
+                        scan_box.box_id.as_bytes(),
                         &owner_pubkey,
-                        ergo_box.value,
+                        scan_box.value,
                         tracker_nft_bytes_option.as_deref(),
                         scanner.last_scanned_height().await,
                     );
 
                     // Set contract address from configuration
-                    reserve_info.set_contract_address(config.basis_reserve_contract_p2s().to_string());
+                    reserve_info
+                        .set_contract_address(config.basis_reserve_contract_p2s().to_string());
 
                     if let Err(e) = tracker.update_reserve(reserve_info) {
                         tracing::warn!(
                             "Failed to update reserve info for {}: {}",
-                            ergo_box.box_id,
+                            scan_box.box_id,
                             e
                         );
                     }

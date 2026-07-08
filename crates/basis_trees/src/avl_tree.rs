@@ -1,7 +1,7 @@
 //! AVL+ tree implementation for Basis tracker state commitments
 
-use crate::state::TrackerState;
 use crate::errors::TreeError;
+use crate::state::TrackerState;
 
 use ergo_avltree_rust::{
     authenticated_tree_ops::AuthenticatedTreeOps,
@@ -73,10 +73,6 @@ impl BasisAvlTree {
         // Update cache
         self.cache.insert(key.clone(), value.clone());
 
-        // Generate a proof to commit the changes and update old_top_node
-        // This ensures subsequent lookup proofs are anchored to the correct root
-        let _ = self.prover.generate_proof();
-
         // Update state
         self.update_state();
 
@@ -95,11 +91,9 @@ impl BasisAvlTree {
             Ok(_) => {
                 // Update cache
                 self.cache.insert(key.clone(), value.clone());
-                // Generate a proof to commit the changes and update old_top_node
-                let _ = self.prover.generate_proof();
                 self.update_state();
                 Ok(())
-            },
+            }
             Err(_) => {
                 // Update failed, try insert instead
                 let insert_op = Operation::Insert(KeyValue {
@@ -107,21 +101,17 @@ impl BasisAvlTree {
                     value: value.clone().into(),
                 });
 
-                self.prover
-                    .perform_one_operation(&insert_op)
-                    .map_err(|e| TreeError::StorageError(format!("AVL tree operation failed: {:?}", e)))?;
+                self.prover.perform_one_operation(&insert_op).map_err(|e| {
+                    TreeError::StorageError(format!("AVL tree operation failed: {:?}", e))
+                })?;
 
                 // Update cache
                 self.cache.insert(key.clone(), value.clone());
-                // Generate a proof to commit the changes and update old_top_node
-                let _ = self.prover.generate_proof();
                 self.update_state();
                 Ok(())
             }
         }
     }
-
-
 
     /// Generate a proof for a lookup operation on the given key.
     ///
@@ -129,6 +119,11 @@ impl BasisAvlTree {
     /// can be used to verify the key's existence (or non-existence) in the tree.
     pub fn generate_lookup_proof(&mut self, key: Vec<u8>) -> (Vec<u8>, Option<Vec<u8>>) {
         use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
+
+        // Commit any pending modifications so the lookup proof only covers the
+        // lookup operation, not previous insert/update operations.
+        let _ = self.prover.generate_proof();
+
         let operation = Operation::Lookup(key.into());
         let result = self.prover.perform_one_operation(&operation).ok().flatten();
         let proof = self.prover.generate_proof().to_vec();
@@ -146,8 +141,8 @@ impl BasisAvlTree {
         key: &[u8],
         expected_value: &[u8],
     ) -> bool {
-        use ergo_avltree_rust::batch_avl_verifier::BatchAVLVerifier;
         use bytes::Bytes;
+        use ergo_avltree_rust::batch_avl_verifier::BatchAVLVerifier;
 
         let tree = AVLTree::new(tree_resolver, 32, None);
         let mut verifier = match BatchAVLVerifier::new(
@@ -172,6 +167,49 @@ impl BasisAvlTree {
     /// Generate a proof for the current tree state (all pending operations).
     pub fn generate_proof(&mut self) -> Vec<u8> {
         self.prover.generate_proof().to_vec()
+    }
+
+    /// Generate an insert/update proof without mutating the persistent tree state.
+    ///
+    /// This is useful for producing redemption transaction proofs where the on-chain
+    /// reserve tree has not been updated yet. A temporary prover is created from a
+    /// clone of the current tree, the operation is performed on the clone, and the
+    /// resulting proof (and new digest) is returned while the original tree remains
+    /// unchanged.
+    pub fn generate_insert_proof(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<(Vec<u8>, [u8; 33]), TreeError> {
+        // Clone the current tree so the persistent prover is not modified.
+        let cloned_tree = self.prover.base.tree.clone();
+        let mut temp_prover = BatchAVLProver::new(cloned_tree, true);
+
+        let key_exists = self.get(&key).is_some();
+        let operation = if key_exists {
+            Operation::Update(KeyValue {
+                key: key.into(),
+                value: value.into(),
+            })
+        } else {
+            Operation::Insert(KeyValue {
+                key: key.into(),
+                value: value.into(),
+            })
+        };
+
+        temp_prover
+            .perform_one_operation(&operation)
+            .map_err(|e| TreeError::StorageError(format!("AVL tree operation failed: {:?}", e)))?;
+
+        let proof = temp_prover.generate_proof().to_vec();
+
+        let mut digest = [0u8; 33];
+        if let Some(d) = temp_prover.digest() {
+            digest.copy_from_slice(&d);
+        }
+
+        Ok((proof, digest))
     }
 
     /// Get the root digest of the AVL tree
@@ -206,7 +244,84 @@ impl BasisAvlTree {
             .unwrap()
             .as_millis() as u64;
     }
-
-
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_insert_proof_does_not_mutate_state() {
+        let mut tree = BasisAvlTree::new().unwrap();
+        let key = vec![1u8; 32];
+        let value = vec![2u8; 16];
+
+        let digest_before = tree.root_digest();
+        let (proof, digest_after) = tree
+            .generate_insert_proof(key.clone(), value.clone())
+            .unwrap();
+
+        // The persistent tree digest must remain unchanged.
+        assert_eq!(tree.root_digest(), digest_before);
+        // But the proof must reflect the updated digest.
+        assert_ne!(digest_after, digest_before);
+        assert!(!proof.is_empty());
+
+        // Calling it a second time with the same key must still be an insert
+        // (not an update) because the persistent state was not mutated.
+        let (proof2, digest_after2) = tree
+            .generate_insert_proof(key.clone(), value.clone())
+            .unwrap();
+        assert_eq!(tree.root_digest(), digest_before);
+        assert_eq!(digest_after2, digest_after);
+        assert_eq!(proof2, proof);
+    }
+
+    #[test]
+    fn generate_insert_proof_matches_actual_insert() {
+        let mut tree = BasisAvlTree::new().unwrap();
+        let key = vec![3u8; 32];
+        let value = vec![4u8; 16];
+
+        let (proof, expected_digest) = tree
+            .generate_insert_proof(key.clone(), value.clone())
+            .unwrap();
+
+        // Now actually insert into the persistent tree.
+        tree.insert(key.clone(), value.clone()).unwrap();
+        let actual_digest = tree.root_digest();
+
+        assert_eq!(actual_digest, expected_digest);
+
+        // Verify the insert proof against the original (empty) digest using a
+        // BatchAVLVerifier and the same Insert operation.
+        use bytes::Bytes;
+        use ergo_avltree_rust::{
+            batch_avl_verifier::BatchAVLVerifier,
+            batch_node::AVLTree,
+            operation::{KeyValue, Operation},
+        };
+
+        let empty_digest = BasisAvlTree::new().unwrap().root_digest();
+        let avl_tree = AVLTree::new(tree_resolver, 32, None);
+        let mut verifier = BatchAVLVerifier::new(
+            &Bytes::copy_from_slice(&empty_digest),
+            &Bytes::copy_from_slice(&proof),
+            avl_tree,
+            Some(1),
+            Some(0),
+        )
+        .unwrap();
+
+        let operation = Operation::Insert(KeyValue {
+            key: key.into(),
+            value: value.into(),
+        });
+        verifier.perform_one_operation(&operation).unwrap();
+
+        let verified_digest = verifier.digest().unwrap();
+        let mut verified_digest_arr = [0u8; 33];
+        verified_digest_arr.copy_from_slice(&verified_digest);
+        assert_eq!(verified_digest_arr, expected_digest);
+    }
+}

@@ -26,8 +26,11 @@ rand = "0.8"
 bytes = "1.0"
 # Using reqwest with rustls to avoid OpenSSL dependencies
 reqwest = { version = "0.12.23", features = ["json", "rustls-tls"], default-features = false, optional = true }
+ureq = { version = "2.9", features = ["json"] }
 # Ergo blockchain dependencies for scanner - using compatible version
 ergo-lib = { workspace = true }
+ergotree-interpreter = "0.13.0"
+ergotree-ir = "0.13.0"
 # Basis trees for persistent AVL tree storage
 basis_trees = { path = "../basis_trees" }
 # Offchain functionality

@@ -47,7 +47,7 @@ impl SchnorrVerificationVector {
         let mut hasher = Blake2b::<U32>::new();
         hasher.update(&key_hash_input);
         let key_hash = hasher.finalize().to_vec();
-        
+
         let mut signing_message = Vec::new();
         signing_message.extend_from_slice(&key_hash);
         signing_message.extend_from_slice(&amount.to_be_bytes());
@@ -415,7 +415,8 @@ mod comprehensive_tests {
         // Test signing and verification with different issuers
         for (recipient_pubkey, amount, timestamp) in test_cases {
             // Alice signs a note to recipient
-            let message = schnorr::signing_message(&alice_pubkey, &recipient_pubkey, amount, timestamp);
+            let message =
+                schnorr::signing_message(&alice_pubkey, &recipient_pubkey, amount, timestamp);
             let signature = schnorr::schnorr_sign(&message, &alice_secret, &alice_pubkey)
                 .expect("Failed to create signature");
 
@@ -426,7 +427,8 @@ mod comprehensive_tests {
             assert!(schnorr::schnorr_verify(&signature, &message, &bob_pubkey).is_err());
 
             // Should fail with wrong message
-            let wrong_message = schnorr::signing_message(&alice_pubkey, &recipient_pubkey, amount + 1, timestamp);
+            let wrong_message =
+                schnorr::signing_message(&alice_pubkey, &recipient_pubkey, amount + 1, timestamp);
             assert!(schnorr::schnorr_verify(&signature, &wrong_message, &alice_pubkey).is_err());
         }
 

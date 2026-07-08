@@ -299,10 +299,7 @@ mod tests {
                 assert_eq!(name, "cow1");
                 assert_eq!(
                     predicates,
-                    &vec![
-                        "whitelist".to_string(),
-                        "collateralization".to_string()
-                    ]
+                    &vec!["whitelist".to_string(), "collateralization".to_string()]
                 );
             }
             _ => panic!("Expected AnyOf config"),

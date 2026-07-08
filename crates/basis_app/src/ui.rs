@@ -1,8 +1,8 @@
-use crate::app::{App, NoteInfo, Screen};
 use crate::acceptance_policy::{
-    get_policy_summary, get_whitelist_entries, get_blacklist_entries,
-    remove_from_whitelist, remove_from_blacklist, create_policy,
+    create_policy, get_blacklist_entries, get_policy_summary, get_whitelist_entries,
+    remove_from_blacklist, remove_from_whitelist,
 };
+use crate::app::{App, NoteInfo, Screen};
 use anyhow::Result;
 use std::io::{self, Write};
 
@@ -55,44 +55,17 @@ fn clear_screen() {
 
 fn print_banner() {
     println!();
-    println!(
-        "{}██████╗  █████╗ ███████╗██╗███████╗{}",
-        CYAN, RESET
-    );
-    println!(
-        "{}██╔══██╗██╔══██╗██╔════╝██║██╔════╝{}",
-        CYAN, RESET
-    );
-    println!(
-        "{}██████╔╝███████║███████╗██║███████╗{}",
-        CYAN, RESET
-    );
-    println!(
-        "{}██╔══██╗██╔══██║╚════██║██║╚════██║{}",
-        CYAN, RESET
-    );
-    println!(
-        "{}██████╔╝██║  ██║███████║██║███████║{}",
-        CYAN, RESET
-    );
-    println!(
-        "{}╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝╚══════╝{}",
-        CYAN, RESET
-    );
+    println!("{}██████╗  █████╗ ███████╗██╗███████╗{}", CYAN, RESET);
+    println!("{}██╔══██╗██╔══██╗██╔════╝██║██╔════╝{}", CYAN, RESET);
+    println!("{}██████╔╝███████║███████╗██║███████╗{}", CYAN, RESET);
+    println!("{}██╔══██╗██╔══██║╚════██║██║╚════██║{}", CYAN, RESET);
+    println!("{}██████╔╝██║  ██║███████║██║███████║{}", CYAN, RESET);
+    println!("{}╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝╚══════╝{}", CYAN, RESET);
     println!();
-    println!(
-        "{}        Wallet v0.1.0{}",
-        GRAY, RESET
-    );
+    println!("{}        Wallet v0.1.0{}", GRAY, RESET);
     println!();
-    println!(
-        "{}  Free Banking For Everyone{}",
-        RED, RESET
-    );
-    println!(
-        "{}  Interactive Terminal Basis Wallet{}",
-        GRAY, RESET
-    );
+    println!("{}  Free Banking For Everyone{}", RED, RESET);
+    println!("{}  Interactive Terminal Basis Wallet{}", GRAY, RESET);
     println!();
 }
 
@@ -127,19 +100,13 @@ fn draw_notification(app: &App) {
     if let Some((ref msg, is_error)) = app.notification {
         let color = if is_error { RED } else { GREEN };
         let icon = if is_error { "✗" } else { "✓" };
-        println!(
-            "{} {} {}{}{}\n",
-            color, icon, BOLD, msg, RESET
-        );
+        println!("{} {} {}{}{}\n", color, icon, BOLD, msg, RESET);
     }
 }
 
 async fn draw_main_menu(app: &mut App) -> Result<()> {
     println!("{}  MAIN MENU{}", BOLD, RESET);
-    println!(
-        "{}  ─────────{}\n",
-        CYAN, RESET
-    );
+    println!("{}  ─────────{}\n", CYAN, RESET);
 
     println!("  {}[1]{} Accounts Management", CYAN, RESET);
     println!("  {}[2]{} Notes (IOU Debt)", CYAN, RESET);
@@ -179,12 +146,14 @@ async fn draw_main_menu(app: &mut App) -> Result<()> {
 
 async fn draw_accounts(app: &mut App) -> Result<()> {
     println!("{}  ACCOUNTS{}", BOLD, RESET);
-    println!(
-        "{}  ─────────{}\n",
-        CYAN, RESET
-    );
+    println!("{}  ─────────{}\n", CYAN, RESET);
 
-    let accounts: Vec<_> = app.account_manager.list_accounts().into_iter().map(|a| a.clone()).collect();
+    let accounts: Vec<_> = app
+        .account_manager
+        .list_accounts()
+        .into_iter()
+        .map(|a| a.clone())
+        .collect();
 
     if accounts.is_empty() {
         println!("{}  No accounts found.{}\n", GRAY, RESET);
@@ -200,7 +169,11 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
             if is_current {
                 println!(
                     "  {}➤ [{}] {} {}(current){}",
-                    GREEN, i + 1, account.name, CYAN, RESET
+                    GREEN,
+                    i + 1,
+                    account.name,
+                    CYAN,
+                    RESET
                 );
             } else {
                 println!("    [{}] {}", i + 1, account.name);
@@ -208,7 +181,10 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
 
             println!(
                 "      {}Pubkey: {}...{}{}",
-                GRAY, &account.get_pubkey_hex()[..16], &account.get_pubkey_hex()[56..66], RESET
+                GRAY,
+                &account.get_pubkey_hex()[..16],
+                &account.get_pubkey_hex()[56..66],
+                RESET
             );
             println!();
         }
@@ -231,10 +207,7 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
                         let pubkey = account.get_pubkey_hex();
                         // Sync to address book
                         app.address_book.insert(name.clone(), pubkey.clone());
-                        app.set_notification(
-                            format!("Created account '{}'", account.name),
-                            false,
-                        );
+                        app.set_notification(format!("Created account '{}'", account.name), false);
                         app.current_account = Some(crate::app::AccountInfo {
                             name: account.name.clone(),
                             pubkey,
@@ -280,8 +253,7 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
             let name = read_input("Enter account name: ");
             let key = read_input("Enter private key (hex): ");
             if !name.is_empty() && !key.is_empty() {
-                match basis_cli_lib::account::Account::from_private_key_hex(&name, &key,
-                ) {
+                match basis_cli_lib::account::Account::from_private_key_hex(&name, &key) {
                     Ok(account) => {
                         let pubkey = account.get_pubkey_hex();
                         app.account_manager
@@ -289,10 +261,7 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
                             .add_account(&name, &pubkey, &key)?;
                         // Sync to address book
                         app.address_book.insert(name.clone(), pubkey);
-                        app.set_notification(
-                            format!("Imported account '{}'", name),
-                            false,
-                        );
+                        app.set_notification(format!("Imported account '{}'", name), false);
                     }
                     Err(e) => {
                         app.set_notification(format!("Error: {}", e), true);
@@ -339,13 +308,15 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
 
 async fn draw_address_book(app: &mut App) -> Result<()> {
     println!("{}  ADDRESS BOOK{}", BOLD, RESET);
-    println!(
-        "{}  ─────────────{}\n",
-        CYAN, RESET
-    );
+    println!("{}  ─────────────{}\n", CYAN, RESET);
 
     // Show accounts (read-only, synced from account manager)
-    let accounts: Vec<_> = app.account_manager.list_accounts().into_iter().map(|a| a.clone()).collect();
+    let accounts: Vec<_> = app
+        .account_manager
+        .list_accounts()
+        .into_iter()
+        .map(|a| a.clone())
+        .collect();
     if !accounts.is_empty() {
         println!("  {}Accounts (auto-synced):{}", BOLD, RESET);
         for (i, account) in accounts.iter().enumerate() {
@@ -363,10 +334,12 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
     }
 
     // Show manual contacts
-    let manual_contacts: Vec<_> = app.address_book.iter()
+    let manual_contacts: Vec<_> = app
+        .address_book
+        .iter()
         .filter(|(name, _)| !accounts.iter().any(|a| &a.name == *name))
         .collect();
-    
+
     if !manual_contacts.is_empty() {
         println!("  {}Additional Contacts:{}", BOLD, RESET);
         for (i, (name, pubkey)) in manual_contacts.iter().enumerate() {
@@ -396,17 +369,19 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
                 if let Some(account) = app.account_manager.get_account(&name) {
                     let account_pubkey = account.get_pubkey_hex();
                     app.set_notification(
-                        format!("'{}' is an account with pubkey {}...{}", name, &account_pubkey[..16], &account_pubkey[56..66]),
+                        format!(
+                            "'{}' is an account with pubkey {}...{}",
+                            name,
+                            &account_pubkey[..16],
+                            &account_pubkey[56..66]
+                        ),
                         true,
                     );
                 } else {
                     let pubkey = read_input("Public key (66 hex chars): ");
                     if pubkey.len() == 66 {
                         app.address_book.insert(name.clone(), pubkey);
-                        app.set_notification(
-                            format!("Added contact '{}'", name),
-                            false,
-                        );
+                        app.set_notification(format!("Added contact '{}'", name), false);
                     } else {
                         app.set_notification(
                             "Invalid pubkey length (must be 66 hex chars)".to_string(),
@@ -422,19 +397,16 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
                 // Prevent deleting account entries from address book
                 if app.account_manager.get_account(&name).is_some() {
                     app.set_notification(
-                        format!("Cannot delete '{}' - it's an account. Delete from Accounts instead.", name),
+                        format!(
+                            "Cannot delete '{}' - it's an account. Delete from Accounts instead.",
+                            name
+                        ),
                         true,
                     );
                 } else if app.address_book.remove(&name).is_some() {
-                    app.set_notification(
-                        format!("Deleted contact '{}'", name),
-                        false,
-                    );
+                    app.set_notification(format!("Deleted contact '{}'", name), false);
                 } else {
-                    app.set_notification(
-                        format!("Contact '{}' not found", name),
-                        true,
-                    );
+                    app.set_notification(format!("Contact '{}' not found", name), true);
                 }
             }
         }
@@ -449,15 +421,19 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
 
 async fn draw_notes(app: &mut App) -> Result<()> {
     println!("{}  NOTES (IOU Debt){}", BOLD, RESET);
-    println!(
-        "{}  ─────────────────{}\n",
-        CYAN, RESET
-    );
+    println!("{}  ─────────────────{}\n", CYAN, RESET);
 
-    println!("  {}[1]{} Notes Issued ({})", CYAN, RESET, app.issued_notes.len());
+    println!(
+        "  {}[1]{} Notes Issued ({})",
+        CYAN,
+        RESET,
+        app.issued_notes.len()
+    );
     println!(
         "  {}[2]{} Notes Received ({})\n",
-        CYAN, RESET, app.received_notes.len()
+        CYAN,
+        RESET,
+        app.received_notes.len()
     );
 
     println!("  {}[c]{} Create Note", CYAN, RESET);
@@ -517,25 +493,32 @@ async fn draw_notes(app: &mut App) -> Result<()> {
 
 async fn draw_reserves(app: &mut App) -> Result<()> {
     println!("{}  RESERVES & COLLATERAL{}", BOLD, RESET);
-    println!(
-        "{}  ───────────────────────{}\n",
-        CYAN, RESET
-    );
+    println!("{}  ───────────────────────{}\n", CYAN, RESET);
 
     if let Some(ref reserve) = app.reserve_status {
         let ratio_color = ratio_color(reserve.ratio);
         let status = ratio_status(reserve.ratio);
 
         println!("  {}Issuer:{}", BOLD, RESET);
-        println!("  {}...{}\n", &reserve.issuer[..20], &reserve.issuer[46..56]);
+        println!(
+            "  {}...{}\n",
+            &reserve.issuer[..20],
+            &reserve.issuer[46..56]
+        );
 
         println!(
             "  {}Total Debt:{}     {} nanoERG ({:.6} ERG)",
-            BOLD, RESET, reserve.total_debt, reserve.total_debt as f64 / 1_000_000_000.0
+            BOLD,
+            RESET,
+            reserve.total_debt,
+            reserve.total_debt as f64 / 1_000_000_000.0
         );
         println!(
             "  {}Collateral:{}     {} nanoERG ({:.6} ERG)",
-            BOLD, RESET, reserve.collateral, reserve.collateral as f64 / 1_000_000_000.0
+            BOLD,
+            RESET,
+            reserve.collateral,
+            reserve.collateral as f64 / 1_000_000_000.0
         );
         println!(
             "  {}Ratio:{}          {}{}{}",
@@ -559,10 +542,7 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
             .collect();
         println!("  [{}{}{}]\n", ratio_color, bar, RESET);
     } else {
-        println!(
-            "  {}No reserve data available.{}\n",
-            GRAY, RESET
-        );
+        println!("  {}No reserve data available.{}\n", GRAY, RESET);
     }
 
     println!("  {}[c]{} Create Reserve", CYAN, RESET);
@@ -587,10 +567,7 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
 
 async fn draw_transactions(app: &mut App) -> Result<()> {
     println!("{}  TRANSACTIONS & REDEMPTIONS{}", BOLD, RESET);
-    println!(
-        "{}  ───────────────────────────{}\n",
-        CYAN, RESET
-    );
+    println!("{}  ───────────────────────────{}\n", CYAN, RESET);
 
     println!("  {}[1]{} Generate Redemption Transaction", CYAN, RESET);
     println!();
@@ -609,10 +586,7 @@ async fn draw_transactions(app: &mut App) -> Result<()> {
 
 async fn draw_settings(app: &mut App) -> Result<()> {
     println!("{}  SETTINGS{}", BOLD, RESET);
-    println!(
-        "{}  ─────────{}\n",
-        CYAN, RESET
-    );
+    println!("{}  ─────────{}\n", CYAN, RESET);
 
     println!("  {}Tracker URL:{} {}", BOLD, RESET, app.server_url);
     println!();
@@ -632,10 +606,7 @@ async fn draw_settings(app: &mut App) -> Result<()> {
                     .get_config_mut()
                     .server_url = new_url.clone();
                 app.account_manager.config_manager.save()?;
-                app.set_notification(
-                    format!("Tracker URL updated to: {}", new_url),
-                    false,
-                );
+                app.set_notification(format!("Tracker URL updated to: {}", new_url), false);
             }
         }
         "b" | "B" => app.navigate_to(Screen::MainMenu),
@@ -649,11 +620,11 @@ async fn draw_settings(app: &mut App) -> Result<()> {
 
 async fn draw_create_note(app: &mut App) -> Result<()> {
     println!("{}  CREATE NOTE{}", BOLD, RESET);
+    println!("{}  ───────────{}\n", CYAN, RESET);
     println!(
-        "{}  ───────────{}\n",
-        CYAN, RESET
+        "  {}[Press Enter with empty input to cancel]{}\n",
+        GRAY, RESET
     );
-    println!("  {}[Press Enter with empty input to cancel]{}\n", GRAY, RESET);
 
     if app.current_account.is_none() {
         app.set_notification("No account selected".to_string(), true);
@@ -733,10 +704,7 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
                             }
                         }
                         Err(e) => {
-                            app.set_notification(
-                                format!("Signing error: {}", e),
-                                true,
-                            );
+                            app.set_notification(format!("Signing error: {}", e), true);
                         }
                     }
                 }
@@ -745,7 +713,10 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
             app.set_notification("Invalid amount".to_string(), true);
         }
     } else {
-        app.set_notification("Invalid pubkey length (must be 66 hex chars)".to_string(), true);
+        app.set_notification(
+            "Invalid pubkey length (must be 66 hex chars)".to_string(),
+            true,
+        );
     }
 
     app.navigate_to(Screen::Notes);
@@ -754,10 +725,7 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
 
 async fn draw_redeem_note(app: &mut App) -> Result<()> {
     println!("{}  REDEEM NOTE{}", BOLD, RESET);
-    println!(
-        "{}  ───────────{}\n",
-        CYAN, RESET
-    );
+    println!("{}  ───────────{}\n", CYAN, RESET);
 
     if app.current_account.is_none() {
         app.set_notification("No account selected".to_string(), true);
@@ -788,7 +756,10 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
 
     if app.received_notes.is_empty() {
         println!("{}  No notes received.{}", GRAY, RESET);
-        println!("  {}Tip:{} Create a note from another account first.\n", YELLOW, RESET);
+        println!(
+            "  {}Tip:{} Create a note from another account first.\n",
+            YELLOW, RESET
+        );
         println!("  Press Enter to go back...\n");
         read_input("");
         app.navigate_to(Screen::Notes);
@@ -917,11 +888,12 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
 
                             match app.client.initiate_redemption(request).await {
                                 Ok(_response) => {
-                                    let complete_request = basis_cli_lib::api::CompleteRedemptionRequest {
-                                        issuer_pubkey: issuer,
-                                        recipient_pubkey: recipient,
-                                        redeemed_amount: amount,
-                                    };
+                                    let complete_request =
+                                        basis_cli_lib::api::CompleteRedemptionRequest {
+                                            issuer_pubkey: issuer,
+                                            recipient_pubkey: recipient,
+                                            redeemed_amount: amount,
+                                        };
 
                                     match app.client.complete_redemption(complete_request).await {
                                         Ok(_) => {
@@ -968,11 +940,11 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
 
 async fn draw_create_reserve(app: &mut App) -> Result<()> {
     println!("{}  CREATE RESERVE{}", BOLD, RESET);
+    println!("{}  ──────────────{}\n", CYAN, RESET);
     println!(
-        "{}  ──────────────{}\n",
-        CYAN, RESET
+        "  {}[Press Enter with empty input to cancel]{}\n",
+        GRAY, RESET
     );
-    println!("  {}[Press Enter with empty input to cancel]{}\n", GRAY, RESET);
 
     if app.current_account.is_none() {
         app.set_notification("No account selected".to_string(), true);
@@ -1008,7 +980,10 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                 Ok(response) => {
                     println!("\n{}Reserve creation payload:{}", GREEN, RESET);
                     println!("{}Fee: {} nanoERG{}", BOLD, response.fee, RESET);
-                    println!("{}Change address: {}{}", BOLD, response.change_address, RESET);
+                    println!(
+                        "{}Change address: {}{}",
+                        BOLD, response.change_address, RESET
+                    );
                     println!("\n{}Requests:{}", BOLD, RESET);
                     for (i, req) in response.requests.iter().enumerate() {
                         println!("  Request {}:", i + 1);
@@ -1020,17 +995,17 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                     app.set_notification("Reserve payload generated".to_string(), false);
                 }
                 Err(e) => {
-                    app.set_notification(
-                        format!("Failed to create reserve: {}", e),
-                        true,
-                    );
+                    app.set_notification(format!("Failed to create reserve: {}", e), true);
                 }
             }
         } else {
             app.set_notification("Invalid amount".to_string(), true);
         }
     } else {
-        app.set_notification("Invalid NFT ID length (must be 64 hex chars)".to_string(), true);
+        app.set_notification(
+            "Invalid NFT ID length (must be 64 hex chars)".to_string(),
+            true,
+        );
     }
 
     app.navigate_to(Screen::Reserves);
@@ -1039,11 +1014,11 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
 
 async fn draw_generate_transaction(app: &mut App) -> Result<()> {
     println!("{}  GENERATE REDEMPTION TRANSACTION{}", BOLD, RESET);
+    println!("{}  ───────────────────────────────{}\n", CYAN, RESET);
     println!(
-        "{}  ───────────────────────────────{}\n",
-        CYAN, RESET
+        "  {}[Press Enter with empty input to cancel]{}\n",
+        GRAY, RESET
     );
-    println!("  {}[Press Enter with empty input to cancel]{}\n", GRAY, RESET);
 
     if app.current_account.is_none() {
         app.set_notification("No account selected".to_string(), true);
@@ -1085,10 +1060,7 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
             match app.client.get_note(&issuer, &recipient).await {
                 Ok(Some(note)) => {
                     if note.outstanding_debt() < amount {
-                        app.set_notification(
-                            "Insufficient outstanding debt".to_string(),
-                            true,
-                        );
+                        app.set_notification("Insufficient outstanding debt".to_string(), true);
                         app.navigate_to(Screen::Transactions);
                         return Ok(());
                     }
@@ -1098,8 +1070,7 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
                         Ok(reserves) => {
                             if let Some(reserve) = reserves.first() {
                                 let reserve_box_id = reserve.box_id.clone();
-                                let _tracker_nft_id =
-                                    reserve.base_info.tracker_nft_id.clone();
+                                let _tracker_nft_id = reserve.base_info.tracker_nft_id.clone();
 
                                 // Get tracker box
                                 match app.client.get_latest_tracker_box_id().await {
@@ -1107,8 +1078,10 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
                                         let tracker_box_id = tracker_box.tracker_box_id;
 
                                         // Get proofs
-                                        match app.client.get_tracker_proof(&issuer, &recipient,
-                                        ).await
+                                        match app
+                                            .client
+                                            .get_tracker_proof(&issuer, &recipient)
+                                            .await
                                         {
                                             Ok(tracker_proof) => {
                                                 let total_debt = tracker_proof.total_debt;
@@ -1117,18 +1090,12 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
                                                     tracker_proof.tracker_state_digest;
 
                                                 // Get issuer signature
-                                                let issuer_bytes = hex::decode(&issuer,
-                                                )?;
-                                                let recipient_bytes = hex::decode(&recipient,
-                                                )?;
+                                                let issuer_bytes = hex::decode(&issuer)?;
+                                                let recipient_bytes = hex::decode(&recipient)?;
 
                                                 let mut key_hash_input = Vec::new();
-                                                key_hash_input.extend_from_slice(
-                                                    &issuer_bytes,
-                                                );
-                                                key_hash_input.extend_from_slice(
-                                                    &recipient_bytes,
-                                                );
+                                                key_hash_input.extend_from_slice(&issuer_bytes);
+                                                key_hash_input.extend_from_slice(&recipient_bytes);
 
                                                 use blake2::{Blake2b, Digest};
                                                 use generic_array::typenum::U32;
@@ -1138,49 +1105,87 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
                                                     .to_vec();
 
                                                 let mut message = Vec::with_capacity(48);
-                                                message.extend_from_slice(
-                                                    &key_hash,
-                                                );
-                                                message.extend_from_slice(
-                                                    &total_debt.to_be_bytes(),
-                                                );
+                                                message.extend_from_slice(&key_hash);
+                                                message
+                                                    .extend_from_slice(&total_debt.to_be_bytes());
                                                 message.extend_from_slice(
                                                     &note.timestamp.to_be_bytes(),
                                                 );
 
                                                 if let Some(ref acc) = app.current_account {
-                                                    if let Some(account) = app.account_manager.get_account(
-                                                        &acc.name,
-                                                    ) {
-                                                        match account.sign_message(
-                                                            &message,
-                                                        ) {
+                                                    if let Some(account) =
+                                                        app.account_manager.get_account(&acc.name)
+                                                    {
+                                                        match account.sign_message(&message) {
                                                             Ok(issuer_signature) => {
                                                                 // Get tracker signature
-                                                                match app.client.request_tracker_signature(
-                                                                    &issuer,
-                                                                    &recipient,
-                                                                    total_debt,
-                                                                    note.timestamp,
-                                                                    emergency,
-                                                                ).await
+                                                                match app
+                                                                    .client
+                                                                    .request_tracker_signature(
+                                                                        &issuer,
+                                                                        &recipient,
+                                                                        total_debt,
+                                                                        note.timestamp,
+                                                                        emergency,
+                                                                    )
+                                                                    .await
                                                                 {
                                                                     Ok(tracker_sig_response) => {
                                                                         println!("\n{}Transaction generated successfully!{}", GREEN, RESET);
-                                                                        println!("\n{}Details:{}", BOLD, RESET);
-                                                                        println!("  Issuer: {}", issuer);
-                                                                        println!("  Recipient: {}", recipient);
-                                                                        println!("  Amount: {} nanoERG", amount);
+                                                                        println!(
+                                                                            "\n{}Details:{}",
+                                                                            BOLD, RESET
+                                                                        );
+                                                                        println!(
+                                                                            "  Issuer: {}",
+                                                                            issuer
+                                                                        );
+                                                                        println!(
+                                                                            "  Recipient: {}",
+                                                                            recipient
+                                                                        );
+                                                                        println!(
+                                                                            "  Amount: {} nanoERG",
+                                                                            amount
+                                                                        );
                                                                         println!("  Total Debt: {} nanoERG", total_debt);
-                                                                        println!("  Reserve Box: {}", reserve_box_id);
-                                                                        println!("  Tracker Box: {}", tracker_box_id);
-                                                                        println!("  Emergency: {}", emergency);
-                                                                        println!("\n{}Signature:{}", BOLD, RESET);
-                                                                        println!("  Issuer: {}...", hex::encode(&issuer_signature)[..32].to_string());
-                                                                        println!("  Tracker: {}...", tracker_sig_response.tracker_signature[..32].to_string());
+                                                                        println!(
+                                                                            "  Reserve Box: {}",
+                                                                            reserve_box_id
+                                                                        );
+                                                                        println!(
+                                                                            "  Tracker Box: {}",
+                                                                            tracker_box_id
+                                                                        );
+                                                                        println!(
+                                                                            "  Emergency: {}",
+                                                                            emergency
+                                                                        );
+                                                                        println!(
+                                                                            "\n{}Signature:{}",
+                                                                            BOLD, RESET
+                                                                        );
+                                                                        println!(
+                                                                            "  Issuer: {}...",
+                                                                            hex::encode(
+                                                                                &issuer_signature
+                                                                            )[..32]
+                                                                                .to_string()
+                                                                        );
+                                                                        println!(
+                                                                            "  Tracker: {}...",
+                                                                            tracker_sig_response
+                                                                                .tracker_signature
+                                                                                [..32]
+                                                                                .to_string()
+                                                                        );
                                                                         println!();
                                                                         wait_for_enter("Press Enter to continue...");
-                                                                        app.set_notification("Transaction generated".to_string(), false);
+                                                                        app.set_notification(
+                                                                            "Transaction generated"
+                                                                                .to_string(),
+                                                                            false,
+                                                                        );
                                                                     }
                                                                     Err(e) => {
                                                                         app.set_notification(format!("Tracker signature error: {}", e), true);
@@ -1188,19 +1193,28 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
                                                                 }
                                                             }
                                                             Err(e) => {
-                                                                app.set_notification(format!("Signing error: {}", e), true);
+                                                                app.set_notification(
+                                                                    format!("Signing error: {}", e),
+                                                                    true,
+                                                                );
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
                                             Err(e) => {
-                                                app.set_notification(format!("Tracker proof error: {}", e), true);
+                                                app.set_notification(
+                                                    format!("Tracker proof error: {}", e),
+                                                    true,
+                                                );
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        app.set_notification(format!("Tracker box error: {}", e), true);
+                                        app.set_notification(
+                                            format!("Tracker box error: {}", e),
+                                            true,
+                                        );
                                     }
                                 }
                             } else {
@@ -1223,7 +1237,10 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
             app.set_notification("Invalid amount".to_string(), true);
         }
     } else {
-        app.set_notification("Invalid pubkey length (must be 66 hex chars)".to_string(), true);
+        app.set_notification(
+            "Invalid pubkey length (must be 66 hex chars)".to_string(),
+            true,
+        );
     }
 
     app.navigate_to(Screen::Transactions);
@@ -1234,7 +1251,7 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
 fn select_pubkey_from_address_book(app: &App, prompt_prefix: &str) -> Option<String> {
     // Collect address book contacts
     let mut all_contacts: Vec<(String, String)> = Vec::new();
-    
+
     // Add accounts from account manager
     for account in app.account_manager.list_accounts() {
         let pubkey = account.get_pubkey_hex();
@@ -1242,20 +1259,26 @@ fn select_pubkey_from_address_book(app: &App, prompt_prefix: &str) -> Option<Str
             all_contacts.push((account.name.clone(), pubkey));
         }
     }
-    
+
     // Add address book contacts (deduplicate by pubkey)
-    let mut seen_pubkeys: std::collections::HashSet<String> = all_contacts.iter().map(|(_, pk)| pk.clone()).collect();
+    let mut seen_pubkeys: std::collections::HashSet<String> =
+        all_contacts.iter().map(|(_, pk)| pk.clone()).collect();
     for (name, pubkey) in app.address_book.iter() {
         if pubkey.len() == 66 && !seen_pubkeys.contains(pubkey) {
             all_contacts.push((name.clone(), pubkey.clone()));
             seen_pubkeys.insert(pubkey.clone());
         }
     }
-    
+
     all_contacts.sort_by(|a, b| a.0.cmp(&b.0));
-    
+
     if !all_contacts.is_empty() {
-        println!("\n  {}Available Contacts ({}):{}", BOLD, all_contacts.len(), RESET);
+        println!(
+            "\n  {}Available Contacts ({}):{}",
+            BOLD,
+            all_contacts.len(),
+            RESET
+        );
         for (i, (name, pubkey)) in all_contacts.iter().enumerate() {
             println!(
                 "    [{}] {}: {}...{}",
@@ -1278,7 +1301,14 @@ fn select_pubkey_from_address_book(app: &App, prompt_prefix: &str) -> Option<Str
     if let Ok(idx) = input.parse::<usize>() {
         if idx > 0 && idx <= all_contacts.len() {
             let (name, pubkey) = &all_contacts[idx - 1];
-            println!("  {}Using contact '{}' pubkey: {}...{}{}", GREEN, name, &pubkey[..16], &pubkey[56..66], RESET);
+            println!(
+                "  {}Using contact '{}' pubkey: {}...{}{}",
+                GREEN,
+                name,
+                &pubkey[..16],
+                &pubkey[56..66],
+                RESET
+            );
             return Some(pubkey.clone());
         }
     }
@@ -1286,17 +1316,31 @@ fn select_pubkey_from_address_book(app: &App, prompt_prefix: &str) -> Option<Str
     // Check if it's a contact name
     if let Some(pubkey) = app.address_book.get(&input) {
         if pubkey.len() == 66 {
-            println!("  {}Using contact '{}' pubkey: {}...{}{}", GREEN, input, &pubkey[..16], &pubkey[56..66], RESET);
+            println!(
+                "  {}Using contact '{}' pubkey: {}...{}{}",
+                GREEN,
+                input,
+                &pubkey[..16],
+                &pubkey[56..66],
+                RESET
+            );
             return Some(pubkey.clone());
         }
     }
-    
+
     // Check if it's an account name
     for account in app.account_manager.list_accounts() {
         if account.name == input {
             let pubkey = account.get_pubkey_hex();
             if pubkey.len() == 66 {
-                println!("  {}Using account '{}' pubkey: {}...{}{}", GREEN, input, &pubkey[..16], &pubkey[56..66], RESET);
+                println!(
+                    "  {}Using account '{}' pubkey: {}...{}{}",
+                    GREEN,
+                    input,
+                    &pubkey[..16],
+                    &pubkey[56..66],
+                    RESET
+                );
                 return Some(pubkey);
             }
         }
@@ -1358,8 +1402,12 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
     println!("{}  ─────────────────{}\n", CYAN, RESET);
 
     // Display current policy summary
-    let (collateral_pct, whitelist_count, blacklist_count) = get_policy_summary(&app.acceptance_config);
-    println!("  Current Mode: {}[{}% Collateral Required]{}", BOLD, collateral_pct, RESET);
+    let (collateral_pct, whitelist_count, blacklist_count) =
+        get_policy_summary(&app.acceptance_config);
+    println!(
+        "  Current Mode: {}[{}% Collateral Required]{}",
+        BOLD, collateral_pct, RESET
+    );
     println!("  Whitelist: {} entries", whitelist_count);
     println!("  Blacklist: {} entries", blacklist_count);
     println!();
@@ -1378,9 +1426,13 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
     match read_choice("Select option: ").as_str() {
         "1" => {
             let input = read_input("Enter collateral percentage (0-1000, default=100): ");
-            let pct = if input.is_empty() { 100 } else { input.parse::<u16>().unwrap_or(100) };
+            let pct = if input.is_empty() {
+                100
+            } else {
+                input.parse::<u16>().unwrap_or(100)
+            };
             let ratio = (pct as f64) / 100.0;
-            
+
             // Update collateral predicate
             let mut config = AcceptanceConfig::default_collateral();
             config.predicates[0] = PredicateConfig::Collateralization {
@@ -1388,50 +1440,73 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                 min_ratio: ratio,
             };
             app.acceptance_config = config;
-            
+
             // Save to disk and upload to server
             if let Err(e) = save_and_upload_policy(app).await {
-                app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                app.set_notification(
+                    format!("⚠️ Policy saved locally but upload failed: {}", e),
+                    true,
+                );
             } else {
-                app.set_notification(format!("✅ Policy updated: {}% collateral required", pct), false);
+                app.set_notification(
+                    format!("✅ Policy updated: {}% collateral required", pct),
+                    false,
+                );
             }
         }
         "2" => {
             println!("\n  Add issuer to whitelist:");
             println!("  {}[1]{} Select from Address Book", CYAN, RESET);
             println!("  {}[2]{} Enter pubkey manually\n", CYAN, RESET);
-            
+
             let choice = read_choice("Select: ");
             let pubkey = if choice == "1" {
                 select_pubkey_from_address_book(app, "Select contact")
             } else {
                 let pk = read_input("Enter pubkey (66 hex chars): ");
-                if pk.len() == 66 { Some(pk) } else { None }
+                if pk.len() == 66 {
+                    Some(pk)
+                } else {
+                    None
+                }
             };
-            
+
             if let Some(pubkey) = pubkey {
                 if pubkey.len() != 66 {
-                    app.set_notification(format!("Invalid pubkey length: {} (must be 66 hex chars)", pubkey.len()), true);
+                    app.set_notification(
+                        format!(
+                            "Invalid pubkey length: {} (must be 66 hex chars)",
+                            pubkey.len()
+                        ),
+                        true,
+                    );
                 } else {
-                    let debt_limit = read_input("Add debt limit? (nanoERG, Press Enter for none): ");
-                    let _max_debt = if debt_limit.is_empty() { None } else { debt_limit.parse::<u64>().ok() };
-                    
+                    let debt_limit =
+                        read_input("Add debt limit? (nanoERG, Press Enter for none): ");
+                    let _max_debt = if debt_limit.is_empty() {
+                        None
+                    } else {
+                        debt_limit.parse::<u64>().ok()
+                    };
+
                     // Add to whitelist
                     let mut holders = HashSet::new();
                     holders.insert(pubkey.clone());
-                    
-                    app.acceptance_config = create_policy(
-                        &app.acceptance_config,
-                        Some(holders),
-                        None,
-                        None,
-                    );
-                    
+
+                    app.acceptance_config =
+                        create_policy(&app.acceptance_config, Some(holders), None, None);
+
                     // Save to disk and upload to server
                     if let Err(e) = save_and_upload_policy(app).await {
-                        app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                        app.set_notification(
+                            format!("⚠️ Policy saved locally but upload failed: {}", e),
+                            true,
+                        );
                     } else {
-                        app.set_notification("✅ Added to whitelist and uploaded".to_string(), false);
+                        app.set_notification(
+                            "✅ Added to whitelist and uploaded".to_string(),
+                            false,
+                        );
                     }
                 }
             }
@@ -1445,7 +1520,13 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                 println!("\n  Select issuer to remove:");
                 for (i, (name, pubkey)) in whitelist.iter().enumerate() {
                     if pubkey.len() >= 66 {
-                        println!("  [{}] {}: {}...{}", i + 1, name, &pubkey[..16], &pubkey[56..66]);
+                        println!(
+                            "  [{}] {}: {}...{}",
+                            i + 1,
+                            name,
+                            &pubkey[..16],
+                            &pubkey[56..66]
+                        );
                     } else {
                         println!("  [{}] {}: {} (invalid length)", i + 1, name, pubkey);
                     }
@@ -1455,13 +1536,20 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                     if n > 0 && n <= whitelist.len() {
                         let pubkey = whitelist[n - 1].1.clone();
                         // Remove from whitelist
-                        app.acceptance_config = remove_from_whitelist(&app.acceptance_config, &pubkey);
-                        
+                        app.acceptance_config =
+                            remove_from_whitelist(&app.acceptance_config, &pubkey);
+
                         // Save to disk and upload to server
                         if let Err(e) = save_and_upload_policy(app).await {
-                            app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                            app.set_notification(
+                                format!("⚠️ Policy saved locally but upload failed: {}", e),
+                                true,
+                            );
                         } else {
-                            app.set_notification("✅ Removed from whitelist and uploaded".to_string(), false);
+                            app.set_notification(
+                                "✅ Removed from whitelist and uploaded".to_string(),
+                                false,
+                            );
                         }
                     }
                 }
@@ -1471,34 +1559,46 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
             println!("\n  Add issuer to blacklist:");
             println!("  {}[1]{} Select from Address Book", CYAN, RESET);
             println!("  {}[2]{} Enter pubkey manually\n", CYAN, RESET);
-            
+
             let choice = read_choice("Select: ");
             let pubkey = if choice == "1" {
                 select_pubkey_from_address_book(app, "Select contact")
             } else {
                 let pk = read_input("Enter pubkey (66 hex chars): ");
-                if pk.len() == 66 { Some(pk) } else { None }
+                if pk.len() == 66 {
+                    Some(pk)
+                } else {
+                    None
+                }
             };
-            
+
             if let Some(pubkey) = pubkey {
                 if pubkey.len() != 66 {
-                    app.set_notification(format!("Invalid pubkey length: {} (must be 66 hex chars)", pubkey.len()), true);
+                    app.set_notification(
+                        format!(
+                            "Invalid pubkey length: {} (must be 66 hex chars)",
+                            pubkey.len()
+                        ),
+                        true,
+                    );
                 } else {
                     let mut holders = HashSet::new();
                     holders.insert(pubkey);
-                    
-                    app.acceptance_config = create_policy(
-                        &app.acceptance_config,
-                        None,
-                        Some(holders),
-                        None,
-                    );
-                    
+
+                    app.acceptance_config =
+                        create_policy(&app.acceptance_config, None, Some(holders), None);
+
                     // Save to disk and upload to server
                     if let Err(e) = save_and_upload_policy(app).await {
-                        app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                        app.set_notification(
+                            format!("⚠️ Policy saved locally but upload failed: {}", e),
+                            true,
+                        );
                     } else {
-                        app.set_notification("✅ Added to blacklist and uploaded".to_string(), false);
+                        app.set_notification(
+                            "✅ Added to blacklist and uploaded".to_string(),
+                            false,
+                        );
                     }
                 }
             }
@@ -1521,13 +1621,20 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                 if let Ok(n) = idx.parse::<usize>() {
                     if n > 0 && n <= blacklist.len() {
                         let pubkey = blacklist[n - 1].clone();
-                        app.acceptance_config = remove_from_blacklist(&app.acceptance_config, &pubkey);
-                        
+                        app.acceptance_config =
+                            remove_from_blacklist(&app.acceptance_config, &pubkey);
+
                         // Save to disk and upload to server
                         if let Err(e) = save_and_upload_policy(app).await {
-                            app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                            app.set_notification(
+                                format!("⚠️ Policy saved locally but upload failed: {}", e),
+                                true,
+                            );
                         } else {
-                            app.set_notification("✅ Removed from blacklist and uploaded".to_string(), false);
+                            app.set_notification(
+                                "✅ Removed from blacklist and uploaded".to_string(),
+                                false,
+                            );
                         }
                     }
                 }
@@ -1535,12 +1642,18 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
         }
         "6" => {
             app.acceptance_config = AcceptanceConfig::default_collateral();
-            
+
             // Save to disk and upload to server
             if let Err(e) = save_and_upload_policy(app).await {
-                app.set_notification(format!("⚠️ Policy saved locally but upload failed: {}", e), true);
+                app.set_notification(
+                    format!("⚠️ Policy saved locally but upload failed: {}", e),
+                    true,
+                );
             } else {
-                app.set_notification("✅ Reset to 100% Collateral Required and uploaded".to_string(), false);
+                app.set_notification(
+                    "✅ Reset to 100% Collateral Required and uploaded".to_string(),
+                    false,
+                );
             }
         }
         "7" => {
@@ -1548,19 +1661,25 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
             println!("\n  {}Current Policy:{}", BOLD, RESET);
             println!("  Default: Reject");
             println!("  Collateral: {}%", collateral_pct);
-            
+
             let whitelist = get_whitelist_entries(&app.acceptance_config);
             if !whitelist.is_empty() {
                 println!("\n  Whitelist ({}):", whitelist.len());
                 for (i, (name, pubkey)) in whitelist.iter().enumerate() {
                     if pubkey.len() >= 66 {
-                        println!("  [{}] {}: {}...{}", i + 1, name, &pubkey[..16], &pubkey[56..66]);
+                        println!(
+                            "  [{}] {}: {}...{}",
+                            i + 1,
+                            name,
+                            &pubkey[..16],
+                            &pubkey[56..66]
+                        );
                     } else {
                         println!("  [{}] {}: {} (invalid length)", i + 1, name, pubkey);
                     }
                 }
             }
-            
+
             let blacklist = get_blacklist_entries(&app.acceptance_config);
             if !blacklist.is_empty() {
                 println!("\n  Blacklist ({}):", blacklist.len());
@@ -1572,7 +1691,7 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                     }
                 }
             }
-            
+
             println!("\n  Policy Logic: NOT blacklisted AND (whitelisted OR collateralized)");
             wait_for_enter("\nPress Enter to continue...");
         }
@@ -1584,15 +1703,15 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
             } else {
                 input
             };
-            
+
             if pubkey.len() == 66 {
                 // Simple test - just check whitelist/blacklist for now
                 let whitelist = get_whitelist_entries(&app.acceptance_config);
                 let blacklist = get_blacklist_entries(&app.acceptance_config);
-                
+
                 let is_blacklisted = blacklist.contains(&pubkey);
                 let is_whitelisted = whitelist.iter().any(|(_, pk)| pk == &pubkey);
-                
+
                 if is_blacklisted {
                     println!("\n  {}❌ REJECTED{}", RED, RESET);
                     println!("  Reason: Blacklisted (blacklist takes precedence)");
@@ -1605,7 +1724,10 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                 }
                 wait_for_enter("\nPress Enter to continue...");
             } else {
-                app.set_notification("Invalid pubkey length (must be 66 hex chars)".to_string(), true);
+                app.set_notification(
+                    "Invalid pubkey length (must be 66 hex chars)".to_string(),
+                    true,
+                );
             }
         }
         "b" | "B" => app.navigate_to(Screen::MainMenu),
@@ -1620,8 +1742,9 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
 /// Save policy to disk and upload to server
 async fn save_and_upload_policy(app: &mut App) -> Result<()> {
     // 1. Save to local config file
-    app.tui_config_manager.update_acceptance(app.acceptance_config.clone())?;
-    
+    app.tui_config_manager
+        .update_acceptance(app.acceptance_config.clone())?;
+
     // 2. Upload to server if connected and account exists
     if app.server_connected {
         if let Some(ref account) = app.current_account {
@@ -1629,18 +1752,18 @@ async fn save_and_upload_policy(app: &mut App) -> Result<()> {
             if let Some(account_obj) = app.account_manager.get_account(&account.name) {
                 // Serialize policy to JSON
                 let policy_json = serde_json::to_string(&app.acceptance_config)?;
-                
+
                 // Sign the policy JSON with the account's private key
                 let signature = account_obj.sign_message(policy_json.as_bytes())?;
                 let signature_hex = hex::encode(&signature);
-                
+
                 // Create upload request
                 let request = basis_cli_lib::api::UploadPolicyRequest {
                     recipient_pubkey: account.pubkey.clone(),
                     policy_json,
                     signature: signature_hex,
                 };
-                
+
                 // Upload to server
                 match app.client.upload_policy(request).await {
                     Ok(_) => {

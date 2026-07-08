@@ -279,6 +279,8 @@ pub struct ReserveProofData {
     /// Hex-encoded AVL insert proof for context var #5 (insert operation)
     /// This proof is used to INSERT the new already_redeemed amount into the reserve tree
     pub insert_proof: String,
+    /// Hex-encoded updated reserve state digest after the insert operation (R5 register value)
+    pub new_reserve_state_digest: String,
 }
 
 // Redemption preparation response - updated with new fields

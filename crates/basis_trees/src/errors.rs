@@ -7,25 +7,25 @@ use thiserror::Error;
 pub enum TreeError {
     #[error("Key not found in tree")]
     KeyNotFound,
-    
+
     #[error("Duplicate key found")]
     DuplicateKey,
-    
+
     #[error("Invalid proof format")]
     InvalidProof,
-    
+
     #[error("Storage error: {0}")]
     StorageError(String),
-    
+
     #[error("Tree corruption detected")]
     TreeCorruption,
-    
+
     #[error("Cryptographic error")]
     CryptographicError,
-    
+
     #[error("Invalid tree state")]
     InvalidState,
-    
+
     #[error("Operation not supported")]
     UnsupportedOperation,
 }

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use basis_store;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateNoteRequest {
@@ -332,7 +332,9 @@ impl TrackerClient {
         let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
             Ok(resp) => resp,
             Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp.into_string().unwrap_or_else(|_| format!("HTTP {}", code));
+                let error_text = resp
+                    .into_string()
+                    .unwrap_or_else(|_| format!("HTTP {}", code));
                 return Err(anyhow::anyhow!(
                     "Failed to initiate redemption: {}",
                     error_text
@@ -364,7 +366,9 @@ impl TrackerClient {
         let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
             Ok(resp) => resp,
             Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp.into_string().unwrap_or_else(|_| format!("HTTP {}", code));
+                let error_text = resp
+                    .into_string()
+                    .unwrap_or_else(|_| format!("HTTP {}", code));
                 return Err(anyhow::anyhow!(
                     "Failed to complete redemption: {}",
                     error_text
@@ -436,12 +440,12 @@ pub struct RedemptionPreparationRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedemptionPreparationResponse {
     pub redemption_id: String,
-    pub avl_proof: String,  // Hex-encoded AVL proof
-    pub tracker_signature: String,  // Hex-encoded 65-byte Schnorr signature
-    pub tracker_pubkey: String,  // Hex-encoded tracker public key
-    pub tracker_state_digest: String,  // Hex-encoded 33-byte AVL tree root digest
+    pub avl_proof: String,            // Hex-encoded AVL proof
+    pub tracker_signature: String,    // Hex-encoded 65-byte Schnorr signature
+    pub tracker_pubkey: String,       // Hex-encoded tracker public key
+    pub tracker_state_digest: String, // Hex-encoded 33-byte AVL tree root digest
     pub block_height: u64,
-    pub tracker_box_id: String,  // ID of the tracker box used for the proof
+    pub tracker_box_id: String, // ID of the tracker box used for the proof
 }
 
 // Tracker proof response for context var #8
@@ -471,11 +475,17 @@ pub struct ReserveProofResponse {
     /// Hex-encoded AVL insert proof for context var #5 (insert operation)
     /// This proof is used to INSERT the new already_redeemed amount into the reserve tree
     pub insert_proof: String,
+    /// Hex-encoded updated reserve state digest after the insert operation (R5 register value)
+    pub new_reserve_state_digest: String,
 }
 
 impl TrackerClient {
     /// Get tracker lookup proof for context var #8
-    pub async fn get_tracker_proof(&self, issuer_pubkey: &str, recipient_pubkey: &str) -> Result<TrackerProofResponse> {
+    pub async fn get_tracker_proof(
+        &self,
+        issuer_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<TrackerProofResponse> {
         let url = format!(
             "{}/tracker/proof?issuer_pubkey={}&recipient_pubkey={}",
             self.base_url, issuer_pubkey, recipient_pubkey
@@ -491,15 +501,24 @@ impl TrackerClient {
             }
         } else {
             let error_text = response.into_string()?;
-            Err(anyhow::anyhow!("Failed to get tracker proof: {}", error_text))
+            Err(anyhow::anyhow!(
+                "Failed to get tracker proof: {}",
+                error_text
+            ))
         }
     }
 
     /// Get reserve proof for context var #5 (insert) and #7 (lookup)
-    pub async fn get_reserve_proof(&self, issuer_pubkey: &str, recipient_pubkey: &str) -> Result<ReserveProofResponse> {
+    pub async fn get_reserve_proof(
+        &self,
+        issuer_pubkey: &str,
+        recipient_pubkey: &str,
+        amount: u64,
+        timestamp: u64,
+    ) -> Result<ReserveProofResponse> {
         let url = format!(
-            "{}/reserve/proof?issuer_pubkey={}&recipient_pubkey={}",
-            self.base_url, issuer_pubkey, recipient_pubkey
+            "{}/reserve/proof?issuer_pubkey={}&recipient_pubkey={}&amount={}&timestamp={}",
+            self.base_url, issuer_pubkey, recipient_pubkey, amount, timestamp
         );
         let response = ureq::get(&url).call()?;
 
@@ -509,15 +528,26 @@ impl TrackerClient {
                 Ok(api_response.data.unwrap())
             } else {
                 // If reserve not found, this might be first redemption
-                Err(anyhow::anyhow!("Reserve record not found: {:?}", api_response.error))
+                Err(anyhow::anyhow!(
+                    "Reserve record not found: {:?}",
+                    api_response.error
+                ))
             }
         } else {
             let error_text = response.into_string()?;
-            Err(anyhow::anyhow!("Failed to get reserve proof: {}", error_text))
+            Err(anyhow::anyhow!(
+                "Failed to get reserve proof: {}",
+                error_text
+            ))
         }
     }
 
-    pub async fn prepare_redemption(&self, issuer_pubkey: &str, recipient_pubkey: &str, amount: u64) -> Result<RedemptionPreparationResponse> {
+    pub async fn prepare_redemption(
+        &self,
+        issuer_pubkey: &str,
+        recipient_pubkey: &str,
+        amount: u64,
+    ) -> Result<RedemptionPreparationResponse> {
         let request = RedemptionPreparationRequest {
             issuer_pubkey: issuer_pubkey.to_string(),
             recipient_pubkey: recipient_pubkey.to_string(),
@@ -536,7 +566,10 @@ impl TrackerClient {
             if api_response.success {
                 Ok(api_response.data.unwrap())
             } else {
-                Err(anyhow::anyhow!("API error during redemption preparation: {:?}", api_response.error))
+                Err(anyhow::anyhow!(
+                    "API error during redemption preparation: {:?}",
+                    api_response.error
+                ))
             }
         } else {
             let error_text = response.into_string()?;
@@ -590,7 +623,10 @@ impl TrackerClient {
     }
 
     // Reserve operations
-    pub async fn create_reserve(&self, request: CreateReserveRequest) -> Result<ReserveCreationResponse> {
+    pub async fn create_reserve(
+        &self,
+        request: CreateReserveRequest,
+    ) -> Result<ReserveCreationResponse> {
         let url = format!("{}/reserves/create", self.base_url);
         let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
 
@@ -609,7 +645,10 @@ impl TrackerClient {
 
     /// Upload acceptance policy to server
     #[allow(dead_code)]
-    pub async fn upload_policy(&self, request: UploadPolicyRequest) -> Result<UploadPolicyResponse> {
+    pub async fn upload_policy(
+        &self,
+        request: UploadPolicyRequest,
+    ) -> Result<UploadPolicyResponse> {
         let url = format!("{}/acceptance/policy", self.base_url);
         let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
 
@@ -692,6 +731,7 @@ pub struct TrackerBoxIdResponse {
 // Define helper structs for API response handling
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FlattenedReserveInfo {
+    #[serde(alias = "boxId")]
     pub box_id: String,
     pub owner_pubkey: String,
     pub collateral_amount: u64,
@@ -702,9 +742,20 @@ struct FlattenedReserveInfo {
     pub collateralization_ratio: Option<f64>,
 }
 
+fn decode_box_id(raw: &str) -> String {
+    if raw.len() == 128 {
+        if let Ok(bytes) = hex::decode(raw) {
+            if bytes.iter().all(|b| b.is_ascii_hexdigit()) {
+                return String::from_utf8(bytes).unwrap_or_else(|_| raw.to_string());
+            }
+        }
+    }
+    raw.to_string()
+}
+
 impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
     fn from(flattened: FlattenedReserveInfo) -> Self {
-        use basis_store::{ReserveInfo, ExtendedReserveInfo};
+        use basis_store::{ExtendedReserveInfo, ReserveInfo};
 
         let base_info = ReserveInfo {
             collateral_amount: flattened.collateral_amount,
@@ -716,7 +767,7 @@ impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
         ExtendedReserveInfo {
             base_info,
             total_debt: flattened.total_debt,
-            box_id: flattened.box_id,
+            box_id: decode_box_id(&flattened.box_id),
             owner_pubkey: flattened.owner_pubkey,
             last_updated_timestamp: flattened.last_updated_timestamp,
         }
@@ -727,7 +778,10 @@ impl TrackerClient {
     // New methods for the redemption transaction generation
 
     /// Get reserves for a specific issuer
-    pub async fn get_reserves_by_issuer(&self, pubkey: &str) -> Result<Vec<basis_store::ExtendedReserveInfo>> {
+    pub async fn get_reserves_by_issuer(
+        &self,
+        pubkey: &str,
+    ) -> Result<Vec<basis_store::ExtendedReserveInfo>> {
         let url = format!("{}/reserves/issuer/{}", self.base_url, pubkey);
         let response = ureq::get(&url).call()?;
 
@@ -735,7 +789,7 @@ impl TrackerClient {
             let api_response: ApiResponse<Vec<FlattenedReserveInfo>> = response.into_json()?;
             if api_response.success {
                 let flattened_reserves = api_response.data.unwrap_or_default();
-                
+
                 // Fetch reserve contract P2S address from server config
                 let contract_address = match self.get_basis_reserve_contract_p2s().await {
                     Ok(addr) => addr,
@@ -744,12 +798,13 @@ impl TrackerClient {
                         String::new()
                     }
                 };
-                
+
                 let extended_reserves: Vec<basis_store::ExtendedReserveInfo> = flattened_reserves
                     .into_iter()
                     .map(|flattened| {
                         let mut reserve = basis_store::ExtendedReserveInfo::from(flattened);
                         reserve.base_info.contract_address = contract_address.clone();
+                        reserve.box_id = decode_box_id(&reserve.box_id);
                         reserve
                     })
                     .collect();
@@ -761,7 +816,8 @@ impl TrackerClient {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!(
                 "Failed to get reserves for issuer {}: {}",
-                pubkey, error_text
+                pubkey,
+                error_text
             ))
         }
     }
@@ -810,8 +866,50 @@ impl TrackerClient {
         }
     }
 
+    /// Get unspent boxes from the node's wallet.
+    /// This follows `/wallet/boxes/unspent` which returns boxes the wallet can sign.
+    /// Each item has a nested `box` object containing the actual ErgoBoxDetails.
+    pub async fn get_wallet_boxes(
+        &self,
+        node_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<Vec<ErgoBoxDetails>> {
+        let url = format!(
+            "{}/wallet/boxes/unspent?minConfirmations=0&maxConfirmations=-1",
+            node_url.trim_end_matches('/')
+        );
+
+        let mut request = ureq::get(&url);
+        if let Some(key) = api_key {
+            request = request.set("api_key", key);
+        }
+
+        let response = request.call()?;
+
+        if response.status() == 200 {
+            #[derive(Debug, Clone, Serialize, Deserialize)]
+            struct WalletBoxEntry {
+                #[serde(rename = "box")]
+                pub box_details: ErgoBoxDetails,
+            }
+            let entries: Vec<WalletBoxEntry> = response.into_json()?;
+            Ok(entries.into_iter().map(|e| e.box_details).collect())
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get wallet boxes: {}",
+                error_text
+            ))
+        }
+    }
+
     /// Get box details from the Ergo node directly
-    pub async fn get_box_from_node(&self, box_id: &str, node_url: &str, api_key: Option<&str>) -> Result<ErgoBoxDetails> {
+    pub async fn get_box_from_node(
+        &self,
+        box_id: &str,
+        node_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<ErgoBoxDetails> {
         let url = format!("{}/utxo/byId/{}", node_url.trim_end_matches('/'), box_id);
         let mut request_builder = ureq::get(&url);
 
@@ -829,33 +927,116 @@ impl TrackerClient {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!(
                 "Failed to get box from node {}: {}",
-                box_id, error_text
+                box_id,
+                error_text
             ))
         }
     }
 
-    /// Get the serialized bytes of a box from the Ergo node
-    /// Makes direct request to Ergo node's /utxo/byId/{box_id} endpoint
-    #[allow(dead_code)]
-    pub async fn get_box_bytes(&self, box_id: &str, node_url: &str, api_key: Option<&str>) -> Result<String> {
-        let url = format!("{}/utxo/byId/{}", node_url, box_id);
-        
+    /// Get the hex-encoded serialized bytes of a box from the Ergo node
+    /// using the /utxo/byIdBinary/{box_id} endpoint.
+    pub async fn get_box_binary(
+        &self,
+        box_id: &str,
+        node_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<String> {
+        let url = format!(
+            "{}/utxo/byIdBinary/{}",
+            node_url.trim_end_matches('/'),
+            box_id
+        );
+
         let mut request = ureq::get(&url);
-        
+
         // Add API key if provided
         if let Some(key) = api_key {
             request = request.set("api_key", key);
         }
-        
+
         let response = request.call()?;
-        
+
         if response.status() == 200 {
-            // Return the box JSON as string (the Ergo node /wallet/transaction/sign 
-            // accepts box IDs in inputsRaw/dataInputsRaw, not full serialized bytes)
-            let box_json = response.into_string()?;
-            Ok(box_json)
+            let body: serde_json::Value = response.into_json()?;
+            body["bytes"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Missing 'bytes' field in /utxo/byIdBinary response for box {}",
+                        box_id
+                    )
+                })
         } else {
-            Err(anyhow::anyhow!("Failed to get box {} from Ergo node: status {}", box_id, response.status()))
+            Err(anyhow::anyhow!(
+                "Failed to get binary box {} from Ergo node: status {}",
+                box_id,
+                response.status()
+            ))
+        }
+    }
+
+    /// Get current blockchain height from the Ergo node /info endpoint.
+    pub async fn get_node_height(&self, node_url: &str, api_key: Option<&str>) -> Result<u32> {
+        let url = format!("{}/info", node_url.trim_end_matches('/'));
+
+        let mut request = ureq::get(&url);
+
+        if let Some(key) = api_key {
+            request = request.set("api_key", key);
+        }
+
+        let response = request.call()?;
+
+        if response.status() == 200 {
+            let body: serde_json::Value = response.into_json()?;
+            body["fullHeight"]
+                .as_u64()
+                .map(|h| h as u32)
+                .ok_or_else(|| anyhow::anyhow!("Missing 'fullHeight' in node /info response"))
+        } else {
+            Err(anyhow::anyhow!(
+                "Failed to get node height: status {}",
+                response.status()
+            ))
+        }
+    }
+
+    /// Get the private key for a wallet address from the Ergo node.
+    /// This is used to satisfy `proveDlog(receiver)` conditions in the Basis reserve contract.
+    pub async fn get_private_key(
+        &self,
+        node_url: &str,
+        api_key: Option<&str>,
+        address: &str,
+    ) -> Result<String> {
+        let url = format!("{}/wallet/getPrivateKey", node_url.trim_end_matches('/'));
+        let mut request = ureq::post(&url);
+
+        if let Some(key) = api_key {
+            request = request.set("api_key", key);
+        }
+
+        let request_body = serde_json::json!({ "address": address });
+        let response = request.send_json(request_body)?;
+
+        if response.status() == 200 {
+            let secret: String = response.into_json()?;
+            Ok(secret)
+        } else if response.status() == 404 {
+            let error_text = response.into_string().unwrap_or_default();
+            Err(anyhow::anyhow!(
+                "Address {} not found in node wallet: {}",
+                address,
+                error_text
+            ))
+        } else {
+            let error_text = response.into_string().unwrap_or_default();
+            Err(anyhow::anyhow!(
+                "Failed to get private key for {}: {}",
+                address,
+                error_text
+            ))
         }
     }
 
@@ -864,7 +1045,8 @@ impl TrackerClient {
         let response = ureq::get(&url).call()?;
 
         if response.status() == 200 {
-            let api_response: ApiResponse<Vec<SerializableIouNoteWithAge>> = response.into_json()?;
+            let api_response: ApiResponse<Vec<SerializableIouNoteWithAge>> =
+                response.into_json()?;
             if api_response.success {
                 Ok(api_response.data.unwrap_or_default())
             } else {
@@ -872,10 +1054,7 @@ impl TrackerClient {
             }
         } else {
             let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to get all notes: {}",
-                error_text
-            ))
+            Err(anyhow::anyhow!("Failed to get all notes: {}", error_text))
         }
     }
 }
@@ -883,18 +1062,24 @@ impl TrackerClient {
 // Define the ErgoBoxDetails struct for parsing box data from the Ergo node
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErgoBoxDetails {
+    #[serde(alias = "boxId")]
     pub box_id: String,
     pub value: u64,
+    #[serde(alias = "ergoTree")]
     pub ergo_tree: String,
     pub assets: Vec<Token>,
+    #[serde(alias = "additionalRegisters")]
     pub additional_registers: std::collections::HashMap<String, String>,
+    #[serde(alias = "creationHeight")]
     pub creation_height: u32,
+    #[serde(alias = "transactionId")]
     pub transaction_id: String,
     pub index: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Token {
+    #[serde(alias = "tokenId")]
     pub token_id: String,
     pub amount: u64,
 }
@@ -902,8 +1087,8 @@ pub struct Token {
 // Define the SerializableIouNoteWithAge struct outside of the impl block
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializableIouNoteWithAge {
-    pub issuer_pubkey: String,  // Changed from issuer_pubkey to match server response
-    pub recipient_pubkey: String,  // Changed from recipient_pubkey to match server response
+    pub issuer_pubkey: String, // Changed from issuer_pubkey to match server response
+    pub recipient_pubkey: String, // Changed from recipient_pubkey to match server response
     pub amount_collected: u64,
     pub amount_redeemed: u64,
     pub timestamp: u64,

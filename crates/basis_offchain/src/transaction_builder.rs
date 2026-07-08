@@ -17,7 +17,6 @@
 
 use thiserror::Error;
 
-
 /// Public key type (Secp256k1)
 pub type PubKey = [u8; 33];
 
@@ -98,9 +97,7 @@ pub struct RedemptionTransactionData {
 /// - Estimates transaction size for fee calculation
 pub struct RedemptionTransactionBuilder;
 
-impl RedemptionTransactionBuilder {
-
-}
+impl RedemptionTransactionBuilder {}
 
 #[cfg(test)]
 mod tests {

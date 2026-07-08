@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document specifies the CLI command for generating unsigned Ergo redemption transactions according to the Basis protocol contract requirements. The command generates transactions that spend reserve boxes to pay out to note holders, with proper AVL tree updates and context extension variables.
+This document specifies the CLI command for generating unsigned Ergo redemption transactions according to the Basis protocol contract (`basis.es`). The generated transaction is ready for signing via the Ergo node's `/wallet/transaction/sign` endpoint and spends a reserve box to pay a creditor while preserving the remaining collateral in a new reserve box.
 
 ## CLI Command Definition
 
@@ -15,393 +15,225 @@ basis-cli transaction generate-redemption \
   --issuer-pubkey <HEX_ENCODED_PUBKEY> \
   --recipient-pubkey <HEX_ENCODED_PUBKEY> \
   --amount <AMOUNT_IN_NANOERG> \
-  --output-file <OUTPUT_JSON_FILE>
+  [--output-file <OUTPUT_JSON_FILE>] \
+  [--emergency] \
+  [--tracker-box-id <TRACKER_BOX_ID>] \
+  [--change-address <CHANGE_ADDRESS>]
 ```
 
 ### Command Options
 - `--issuer-pubkey`: Hex-encoded issuer public key (33 bytes compressed secp256k1)
 - `--recipient-pubkey`: Hex-encoded recipient public key (33 bytes compressed secp256k1)
 - `--amount`: Redemption amount in nanoERG (must be <= totalDebt - alreadyRedeemed)
-- `--output-file`: Path to output the generated transaction JSON file (optional, defaults to stdout)
-- `--emergency`: Flag to indicate emergency redemption (after 3 days tracker unavailability)
+- `--output-file`: Path to output the generated transaction JSON file (optional; defaults to stdout)
+- `--emergency`: Emergency redemption flag (after 3 days / 2160 blocks tracker unavailability)
+- `--tracker-box-id`: Tracker box ID to use as data input (optional; fetched from server if omitted)
+- `--change-address`: Wallet change address for the fee-input change output (optional; defaults to recipient address)
+
+### Required External State
+- The CLI must have a current account selected whose public key matches `--issuer-pubkey` (the reserve owner signs the redemption message).
+- The recipient address derived from `--recipient-pubkey` must be present in the Ergo node wallet, because the node must satisfy `proveDlog(receiver)` when signing the transaction.
+- The local Ergo node is expected at `http://127.0.0.1:9053` with API key `hello`.
 
 ## Transaction Structure
 
 ### Input Validation
-Before generating the transaction, the command must validate:
-1. All public keys are properly hex-encoded 33-byte compressed secp256k1 points
-2. Amount is a positive integer
-3. The specified note exists in the tracker's AVL tree
+Before generating the transaction, the command validates:
+1. Both public keys are 33-byte compressed secp256k1 points (66 hex characters)
+2. Amount is positive
+3. The note exists in the tracker's state
 4. Redemption amount <= (totalDebt - alreadyRedeemed)
-5. Tracker server URL is available in the configuration
-6. The issuer has a valid reserve box
-7. For emergency redemption: verify 3 days have passed since tracker creation
+5. A reserve box with sufficient collateral exists for the issuer
+6. A tracker box exists and is available on-chain
+7. The wallet has a fee input with no tokens covering the required fee
 
 ### Public Key to Address Conversion
-The command derives addresses from public keys using the Ergo node's `/utils/rawToAddress/{pubkeyHex}` API endpoint:
-- Input: Hex-encoded compressed public key (33 bytes)
-- Output: P2PK address in Base58 format (starting with '9' for mainnet or '3' for testnet)
+Addresses are derived from public keys using `ergo-lib` (compressed point -> `ProveDlog` -> P2PK address). The recipient address is used for both the redemption output and, by default, the fee-input change output.
 
 ### Transaction Components
 
 #### 1. Inputs
-The transaction has one input:
-- **Reserve Box**: The reserve box identified by retrieving the issuer's reserve via the `/reserves/issuer/{pubkey}` API endpoint
+- **Reserve Box**: The issuer's reserve box being spent, fetched from the server and verified on the Ergo node.
+- **Fee Input(s)**: One or more wallet-owned P2PK boxes with no tokens, selected to cover the 1,000,000 nanoERG transaction fee. The reserve box itself is explicitly excluded from fee selection.
 
 #### 2. Data Inputs
-The transaction has one data input:
-- **Tracker Box**: The tracker box retrieved from the Basis Tracker server via the `/tracker/latest-box` API endpoint
-  - This box contains the AVL tree commitment to `hash(A||B) -> totalDebt`
+- **Tracker Box**: The tracker commitment box containing:
   - R4: Tracker's public key (GroupElement)
-  - R5: AVL tree root digest
+  - R5: AVL tree root digest tracking `hash(ownerKey||receiverKey) -> totalDebt`
 
 #### 3. Outputs
-The transaction has two outputs:
 
-**Output 1 - Redemption Payment**:
-- `address`: The recipient address derived from the recipient public key
-- `value`: The redemption amount specified via `--amount`
-- `assets`: Empty array (no tokens transferred to recipient in basic redemption)
-- `registers`: Empty object (no special registers needed for recipient)
+**Output 0 - Updated Reserve** (must be at index 0):
+- `value`: Original reserve value minus the redeemed amount
+- `ergoTree`: The Basis reserve contract P2S address (from server configuration)
+- `assets`: The reserve NFT token preserved from the input
+- `additionalRegisters`:
+  - `R4`: Issuer's public key (GroupElement)
+  - `R5`: Updated reserve AVL tree root digest after inserting the new redeemed entry
+  - `R6`: Tracker server NFT ID
 
-**Output 2 - Updated Reserve**:
-- `address`: The reserve contract P2S address (from configuration: `ergo.basis_reserve_contract_p2s`)
-- `value`: Remaining collateral after redemption = original reserve value - redeemed amount - transaction fee
-- `assets`: Contains the tracker NFT token to maintain reserve identity
-- `registers`:
-  - `R4`: The issuer's public key (GroupElement) - same as input
-  - `R5`: The **updated** AVL tree root digest after inserting new redeemed amount
-    - Key: `blake2b256(ownerKeyBytes || receiverBytes)`
-    - Value: `longToByteArray(timestamp) ++ longToByteArray(newRedeemedAmount)` (16 bytes total)
-      - `timestamp`: 8 bytes big-endian, the payment timestamp
-      - `newRedeemedAmount`: 8 bytes big-endian, cumulative redeemed amount
-  - `R6`: The NFT ID of the tracker server (bytes) - same as input
+**Output 1 - Recipient Redemption**:
+- `value`: The redemption amount
+- `ergoTree`: P2PK contract for the recipient
+- `assets`: Empty
+- `additionalRegisters`: Empty
+
+**Output 2 - Fee**:
+- `value`: 1,000,000 nanoERG
+- `ergoTree`: Standard fee recipient contract
+- `assets`: Empty
+
+**Output 3 - Change** (only if change amount > 0):
+- `value`: Fee input total value minus transaction fee
+- `ergoTree`: P2PK contract for the change address (recipient address by default, or `--change-address` if provided)
+- `assets`: Empty
 
 #### 4. Context Extension Variables
 
 | ID | Name | Type | Description | Required |
 |----|------|------|-------------|----------|
-| #0 | action | Byte | Action byte: `action*10 + index` (0x00 for redemption at output index 0) | Yes |
-| #1 | receiver | GroupElement | Receiver's public key (33 bytes compressed) | Yes |
-| #2 | reserveSig | Coll[Byte] | Reserve owner's Schnorr signature (65 bytes: 33-byte a + 32-byte z) | Yes |
+| #0 | action | Byte | `action*10 + index` (0x00 for redemption at output index 0) | Yes |
+| #1 | receiver | GroupElement | Recipient's public key (33 bytes compressed) | Yes |
+| #2 | reserveSig | Coll[Byte] | Reserve owner's 65-byte Schnorr signature (33-byte a + 32-byte z) | Yes |
 | #3 | totalDebt | Long | Total cumulative debt amount (nanoERG) | Yes |
 | #4 | timestamp | Long | Payment timestamp (milliseconds since Unix epoch) | Yes |
-| #5 | insertProof | Coll[Byte] | AVL proof for inserting into reserve tree | Yes |
-| #6 | trackerSig | Coll[Byte] | Tracker's Schnorr signature (65 bytes: 33-byte a + 32-byte z) | Yes (normal redemption) |
-| #7 | lookupProofReserve | Coll[Byte] | AVL proof for looking up in reserve tree for `(timestamp, redeemedDebt)` | No (omit for first redemption) |
-| #8 | lookupProofTracker | Coll[Byte] | AVL proof for looking up in tracker tree for `totalDebt` | Yes |
+| #5 | insertProof | Coll[Byte] | AVL proof for inserting into the reserve tree | Yes |
+| #6 | trackerSig | Coll[Byte] | Tracker's 65-byte Schnorr signature | Yes (normal redemption) |
+| #7 | lookupProofReserve | Coll[Byte] | AVL proof for looking up `(timestamp, redeemedDebt)` in reserve tree | No (omit for first redemption) |
+| #8 | lookupProofTracker | Coll[Byte] | AVL proof for looking up `totalDebt` in tracker tree | Yes |
 
-#### 5. Transaction Metadata
-- `fee`: Transaction fee (typically 1000000 nanoERG = 0.001 ERG)
-- `inputsRaw`: Serialized bytes of the reserve box being spent
+### Transaction Metadata
+- `fee`: 1,000,000 nanoERG (0.001 ERG), paid by wallet-owned inputs
+- `inputsRaw`: Serialized bytes of the reserve box and all fee input boxes
 - `dataInputsRaw`: Serialized bytes of the tracker commitment box
+- `secrets.dlog`: Recipient's private key (fetched from the node wallet via `/wallet/getPrivateKey`) so the node can satisfy `proveDlog(receiver)` during signing
 
 ## Transaction Generation Process
 
-### Step 1: Load Configuration
-1. Read the CLI configuration file to get the tracker server URL
-   - Look for `tracker_server.url` in the configuration
-   - Use default value `http://localhost:3048` if not specified
+### Step 1: Retrieve Note Information
+Query the Basis Tracker server:
+- `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}`
+- Verify the note exists and the redemption amount is valid.
 
-### Step 2: Retrieve Note Information from Tracker
-1. Query the Basis Tracker server to get the note details:
-   - Call `GET /proof/redemption?issuer_pubkey={issuer}&recipient_pubkey={recipient}`
-   - Extract `total_debt` and `already_redeemed` from response
-   - Verify the redemption amount <= (total_debt - already_redeemed)
-   - Return error if amount exceeds available debt
+### Step 2: Retrieve Issuer's Reserve Box
+Query the server:
+- `GET /reserves/issuer/{issuer_pubkey}`
+- Select a reserve box with collateral >= redemption amount.
 
-### Step 3: Retrieve Issuer's Reserve Box
-1. Query the Basis Tracker server to get the issuer's reserve box:
-   - Call `GET /reserves/issuer/{issuer_pubkey}`
-   - Select the appropriate reserve box with sufficient collateral
-   - Extract the `box_id` from the response
-   - Handle errors if no reserve box is found
+### Step 3: Retrieve Tracker Box
+- Use the provided `--tracker-box-id`, or
+- Query `GET /tracker/latest-box-id` from the server.
+- Verify the tracker box exists on the Ergo node.
 
-### Step 4: Retrieve Tracker Box
-1. Query the Basis Tracker server to get the latest tracker box:
-   - Call `GET /tracker/latest-box` (returns full box, not just ID)
-   - Extract the `box_id`, `box_bytes`, and AVL tree state
-   - Handle errors if no tracker box is found
+### Step 4: Retrieve AVL Proofs
+- `GET /proof/redemption?issuer_pubkey={issuer}&recipient_pubkey={recipient}` returns the tracker lookup proof and total debt.
+- `POST /redemption/prepare` (or equivalent server endpoint) returns the reserve insert proof and, for subsequent redemptions, the reserve lookup proof.
 
-### Step 5: Public Key to Address Conversion
-1. Convert public keys to addresses using Ergo node API:
-   - Call `GET /utils/rawToAddress/{recipient_pubkey}` for recipient address
-   - Call `GET /utils/rawToAddress/{issuer_pubkey}` for issuer address
+### Step 5: Fetch Wallet Inputs and Recipient Secret
+- Query the Ergo node wallet for boxes covering the fee (`/wallet/boxes/unspentByErgoTree` or similar).
+- Select P2PK boxes with no tokens, excluding the reserve box.
+- Fetch the recipient's private key from the node wallet via `/wallet/getPrivateKey`.
 
-### Step 6: Reserve Box Retrieval from Ergo Node
-1. Query the Ergo node to retrieve the current reserve box details:
-   - Use `GET /utxo/byId/{reserve_box_id}` on Ergo node API
-   - Include API key in header if required: `api_key: <ergo_api_key>`
-   - Extract current value, assets, and register values
-   - Verify sufficient collateral for redemption
-   - The serialized bytes will be used in `inputsRaw`
+### Step 6: Build Signing Message
+Build the 48-byte message signed by both reserve owner and tracker:
+```
+key = blake2b256(issuer_pubkey || recipient_pubkey)          // 32 bytes
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)  // 48 bytes total
+```
+- `totalDebt`: 8-byte big-endian cumulative debt
+- `timestamp`: 8-byte big-endian payment timestamp in milliseconds
 
-### Step 7: Tracker Box Retrieval from Ergo Node
-1. Query the Ergo node to retrieve the tracker box details:
-   - Use `GET /utxo/byId/{tracker_box_id}` on Ergo node API
-   - Extract AVL tree root digest from R5 register
-   - Extract tracker public key from R4 register
-   - The serialized bytes will be used in `dataInputsRaw`
+### Step 7: Sign with Issuer Key
+Sign the message using the current CLI account's private key. The implementation retries nonces until both the challenge `e` and response `z` have their most-significant byte < 0x80 (ErgoScript signed-integer compatibility). See `specs/SCHNORR_SIGNATURE_SPEC.md`.
 
-### Step 8: Request AVL Proofs from Tracker
-1. Request AVL proofs from the tracker server:
-   - Call `POST /redemption/prepare` with:
-     ```json
-     {
-       "issuer_pubkey": "<issuer_pubkey>",
-       "recipient_pubkey": "<recipient_pubkey>",
-       "total_debt": <total_debt>
-     }
-     ```
-   - Extract from response:
-     - `tracker_lookup_proof` (context var #8)
-     - `reserve_lookup_proof` (context var #7, may be null for first redemption)
-     - `reserve_insert_proof` (context var #5)
+### Step 8: Request Tracker Signature
+Query the server:
+- `POST /tracker/signature` with `{issuer_pubkey, recipient_pubkey, total_debt, timestamp, emergency}`
+- Extract the tracker's 65-byte Schnorr signature.
 
-### Step 9: Request Signatures
-1. Build signing message (48 bytes):
-   - `key = blake2b256(issuer_pubkey_bytes || recipient_pubkey_bytes)` (32 bytes)
-   - `message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
-     - `totalDebt`: 8-byte big-endian representation of the total cumulative debt amount
-     - `timestamp`: 8-byte big-endian representation of the payment timestamp (milliseconds since Unix epoch)
-
-2. Request reserve owner's signature:
-   - CLI prompts user or uses configured key
-   - Sign message with issuer's private key
-   - Format: 65-byte Schnorr signature (33-byte a + 32-byte z)
-
-3. Request tracker's signature:
-   - Call `POST /tracker/signature` with:
-     ```json
-     {
-       "issuer_pubkey": "<issuer_pubkey>",
-       "recipient_pubkey": "<recipient_pubkey>",
-       "total_debt": <total_debt>,
-       "timestamp": <timestamp>,
-       "emergency": <true/false>
-     }
-     ```
-   - Extract `tracker_signature` from response
-
-### Step 10: Generate Updated AVL Tree
-1. Calculate new redeemed amount:
-   - `newRedeemed = alreadyRedeemed + redemptionAmount`
-
-2. Generate updated AVL tree:
-   - `key = blake2b256(ownerKeyBytes || receiverBytes)`
-   - `treeValue = longToByteArray(timestamp) ++ longToByteArray(newRedeemed)` (16 bytes total)
-   - `updatedTree = reserveTree.insert((key, treeValue), insertProof)`
-   - Extract new root digest for R5 register
-
-### Step 11: Transaction Assembly
-Assemble the transaction following the Ergo node's `/wallet/transaction/send` format:
-
+### Step 9: Assemble Transaction
+Construct the unsigned transaction in the format expected by the Ergo node `/wallet/transaction/sign`:
 ```json
 {
-  "requests": [
-    {
-      "address": "<recipient_address>",
-      "value": <redemption_amount>,
-      "assets": [],
-      "registers": {}
-    },
-    {
-      "address": "<issuer_address>",
-      "value": <remaining_collateral>,
-      "assets": [
-        {
-          "tokenId": "<tracker_nft_id>",
-          "amount": 1
+  "tx": {
+    "inputs": [
+      {
+        "boxId": "<reserve_box_id>",
+        "extension": {
+          "0": "0200",
+          "1": "07<recipient_pubkey_hex>",
+          "2": "0e41<reserve_signature_hex>",
+          "3": "05<long_to_vlq(totalDebt)>",
+          "4": "05<long_to_vlq(timestamp)>",
+          "5": "0e<insert_proof_hex>",
+          "6": "0e41<tracker_signature_hex>",
+          "8": "0e<tracker_lookup_proof_hex>"
         }
-      ],
-      "registers": {
-        "R4": "<issuer_pubkey_hex>",
-        "R5": "<updated_avl_tree_root_hex>",
-        "R6": "<tracker_nft_id_hex>"
+      },
+      {
+        "boxId": "<fee_input_box_id>",
+        "extension": {}
       }
-    }
-  ],
-  "fee": 1000000,
-  "inputsRaw": [
-    "<hex_encoded_serialized_reserve_box>"
-  ],
-  "dataInputsRaw": [
-    "<hex_encoded_serialized_tracker_box>"
-  ],
-  "contextExtension": {
-    "0": 0,
-    "1": "<receiver_pubkey_hex>",
-    "2": "<reserve_owner_signature_hex>",
-    "3": <total_debt>,
-    "4": <timestamp>,
-    "5": "<avl_insert_proof_hex>",
-    "6": "<tracker_signature_hex>",
-    "7": "<reserve_lookup_proof_hex>",
-    "8": "<tracker_lookup_proof_hex>"
+    ],
+    "dataInputs": [{ "boxId": "<tracker_box_id>" }],
+    "outputs": [
+      { /* updated reserve box */ },
+      { /* recipient output */ },
+      { /* fee output */ },
+      { /* change output */ }
+    ]
+  },
+  "inputsRaw": ["<reserve_box_bytes>", "<fee_input_bytes>"],
+  "dataInputsRaw": ["<tracker_box_bytes>"],
+  "secrets": {
+    "dlog": ["<recipient_private_key_hex>"]
   }
 }
 ```
 
-Note: Context var #7 should be omitted from the JSON if this is the first redemption (reserve_lookup_proof is null).
+### Step 10: Output Generation
+Write the assembled JSON to the file specified by `--output-file` or print it to stdout.
 
-### Step 12: Output Generation
-1. Write the transaction JSON to the specified output file or stdout
-2. Include metadata about the transaction:
-   - Original note details (totalDebt, alreadyRedeemed)
-   - Redemption amount
-   - Expected transaction fee
-   - Estimated confirmation time
+## Signing and Broadcasting
 
-## Example Transaction
+1. Sign the generated transaction with the Ergo node:
+   ```bash
+   curl -X POST http://127.0.0.1:9053/wallet/transaction/sign \
+     -H "api_key: hello" \
+     -H "Content-Type: application/json" \
+     -d @transaction.json > signed_transaction.json
+   ```
 
-### First Redemption (no context var #7)
-```json
-{
-  "requests": [
-    {
-      "address": "9iJrR3pjgfAp7uVzmY54MSqFh6BEZG8XswWR8qMYj4Mx5e7yv",
-      "value": 500000000,
-      "assets": [],
-      "registers": {}
-    },
-    {
-      "address": "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
-      "value": 99900000000,
-      "assets": [
-        {
-          "tokenId": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b",
-          "amount": 1
-        }
-      ],
-      "registers": {
-        "R4": "02d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b",
-        "R5": "b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-        "R6": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b"
-      }
-    }
-  ],
-  "fee": 1000000,
-  "inputsRaw": ["hex_encoded_reserve_box"],
-  "dataInputsRaw": ["hex_encoded_tracker_box"],
-  "contextExtension": {
-    "0": 0,
-    "1": "02receiver_pubkey_hex...",
-    "2": "reserve_owner_signature_hex...",
-    "3": 5000000000,
-    "4": 1743379200000,
-    "5": "avl_insert_proof_hex...",
-    "6": "tracker_signature_hex...",
-    "8": "tracker_lookup_proof_hex..."
-  }
-}
-```
-
-### Subsequent Redemption (with context var #7)
-```json
-{
-  "requests": [
-    {
-      "address": "9iJrR3pjgfAp7uVzmY54MSqFh6BEZG8XswWR8qMYj4Mx5e7yv",
-      "value": 300000000,
-      "assets": [],
-      "registers": {}
-    },
-    {
-      "address": "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
-      "value": 99600000000,
-      "assets": [
-        {
-          "tokenId": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b",
-          "amount": 1
-        }
-      ],
-      "registers": {
-        "R4": "02d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b",
-        "R5": "c3d4e5f678901234567890123456789012345678901234567890123456789012",
-        "R6": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b"
-      }
-    }
-  ],
-  "fee": 1000000,
-  "inputsRaw": ["hex_encoded_reserve_box"],
-  "dataInputsRaw": ["hex_encoded_tracker_box"],
-  "contextExtension": {
-    "0": 0,
-    "1": "02receiver_pubkey_hex...",
-    "2": "reserve_owner_signature_hex...",
-    "3": 5000000000,
-    "4": 1743379200000,
-    "5": "avl_insert_proof_hex...",
-    "6": "tracker_signature_hex...",
-    "7": "reserve_lookup_proof_hex...",
-    "8": "tracker_lookup_proof_hex..."
-  }
-}
-```
+2. Broadcast the signed transaction:
+   ```bash
+   curl -X POST http://127.0.0.1:9053/transactions \
+     -H "api_key: hello" \
+     -H "Content-Type: application/json" \
+     -d @signed_transaction.json
+   ```
 
 ## Error Handling
 
-### Validation Errors
-- `InvalidPublicKey`: If public keys are not properly formatted
-- `InsufficientDebt`: If redemption amount exceeds (totalDebt - alreadyRedeemed)
-- `NoteNotFound`: If the note doesn't exist in tracker's AVL tree
-- `InvalidAmount`: If the redemption amount is not positive
-- `EmergencyRedemptionTooEarly`: If emergency redemption requested before 3 days
-- `ConfigurationError`: If the tracker server URL is not available
-- `IssuerHasNoReserve`: If the issuer doesn't have a reserve box
-
-### Network Errors
-- `TrackerServerUnavailable`: If the Basis Tracker server is unreachable
-- `ErgoNodeUnavailable`: If the Ergo node is unreachable
-- `BoxNotFound`: If the specified reserve or tracker box doesn't exist
-- `AddressDerivationError`: If public key to address conversion fails
-- `SignatureGenerationError`: If signature generation fails
-
-### Transaction Assembly Errors
-- `InvalidTransactionStructure`: If transaction doesn't conform to required format
-- `SerializationError`: If there's an error serializing the transaction
-- `AvlProofError`: If AVL proof generation fails
+- `InvalidPublicKey`: Public keys are not 33-byte compressed secp256k1
+- `NoteNotFound`: No note exists for the issuer/recipient pair
+- `InsufficientDebt`: Redemption amount exceeds available debt
+- `NoReserveBox`: No reserve box with sufficient collateral found
+- `NoTrackerBox`: No tracker box available
+- `NoFeeInputs`: Wallet has no suitable P2PK/no-token boxes covering the fee
+- `RecipientNotInWallet`: Node wallet does not contain the recipient's private key
+- `SignatureError`: Schnorr signature generation failed (including compatibility retries)
+- `AvlProofError`: AVL proof generation failed
 
 ## Security Considerations
 
-1. **Private Key Protection**: The command generates unsigned transactions only - private keys are never handled by the CLI (except optionally for reserve owner signature)
-2. **Input Validation**: All inputs are thoroughly validated before transaction generation
-3. **AVL Tree Consistency**: The AVL tree state is updated to reflect the redemption
-4. **Time Lock Verification**: Emergency redemption time locks are enforced (3 days from tracker creation)
-5. **Address Derivation**: Addresses are derived from public keys using the official Ergo node API
-6. **Tracker Verification**: totalDebt is verified against tracker's AVL tree commitment
-7. **Double Redemption Prevention**: AVL tree design prevents redeeming same debt twice
+1. **Private Key Handling**: The reserve owner private key is used only by the CLI account; the node never sees it. The recipient private key is fetched from the node wallet solely to satisfy the `proveDlog(receiver)` constraint during node signing.
+2. **Input Validation**: All public keys, amounts, and proofs are validated before assembly.
+3. **AVL Tree Consistency**: The reserve output R5 reflects the updated tree after the redemption insert.
+4. **Double Redemption Prevention**: The reserve tree tracks cumulative redeemed amounts per `(owner, receiver)` pair.
+5. **Emergency Redemption**: Only allowed after the tracker has been unavailable for 2160 blocks; the tracker signature field must still be present but verification is bypassed by the contract.
 
-## Integration Points
+## References
 
-### API Dependencies
-- Basis Tracker Server: `/proof/redemption`, `/redemption/prepare`, `/tracker/signature`
-- Basis Tracker Server: `/reserves/issuer/{pubkey}`, `/tracker/latest-box`
-- Ergo Node API: `/utils/rawToAddress/{pubkeyHex}`, `/utxo/byId/{box_id}`
-- Ergo Node API: `/utils/schnorrSign` (for tracker signatures via tracker server)
-
-### Configuration Integration
-- The command reads the tracker server URL from the CLI configuration file
-- Uses the `tracker_server.url` configuration key
-- Falls back to default value if not specified
-
-### Output Format
-The generated transaction follows the Ergo node's `/wallet/transaction/send` API format, making it compatible with standard Ergo wallet tools for signing and submission.
-
-## Post-Transaction Steps
-
-After generating the unsigned transaction:
-
-1. **Sign the Transaction**:
-   - Use Ergo node's `/wallet/transaction/sign` endpoint
-   - Or use external signing tools
-
-2. **Submit the Transaction**:
-   - Use Ergo node's `/wallet/transaction/send` endpoint
-   - Or broadcast via other means
-
-3. **Monitor Confirmation**:
-   - Track transaction status on the blockchain
-   - Verify reserve box update
-
-This specification provides a complete framework for implementing the CLI command that generates unsigned redemption transactions according to the Basis protocol contract requirements.
+- Contract: `chaincash/contracts/offchain/basis.es`
+- Schnorr signature spec: `specs/SCHNORR_SIGNATURE_SPEC.md`
+- Implementation: `crates/basis_cli/src/commands/transaction.rs`

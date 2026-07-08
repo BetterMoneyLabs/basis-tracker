@@ -19,8 +19,7 @@ mod tests {
                 .expect("Invalid issuer pubkey hex")
                 .try_into()
                 .expect("Issuer pubkey must be 33 bytes");
-            let message = hex::decode(vector.message_hex)
-                .expect("Invalid message hex");
+            let message = hex::decode(vector.message_hex).expect("Invalid message hex");
             let signature: [u8; 65] = hex::decode(vector.signature_hex)
                 .expect("Invalid signature hex")
                 .try_into()
@@ -29,9 +28,12 @@ mod tests {
             // Verify with basis_core::impls::SchnorrVerifier
             let verifier = basis_core::impls::SchnorrVerifier;
             let result = basis_core::traits::SignatureVerifier::verify_signature(
-                &verifier, &signature, &message, &issuer_pubkey
+                &verifier,
+                &signature,
+                &message,
+                &issuer_pubkey,
             );
-            
+
             assert!(
                 result.is_ok(),
                 "Test vector {}: basis_core verifier should accept basis_store test vector signature",
@@ -45,17 +47,16 @@ mod tests {
     #[test]
     fn test_test_vectors_bitlength_constraint() {
         for vector in SCHNORR_TEST_VECTORS.iter().filter(|v| v.should_verify) {
-            let signature = hex::decode(vector.signature_hex)
-                .expect("Invalid signature hex");
-            
+            let signature = hex::decode(vector.signature_hex).expect("Invalid signature hex");
+
             // Extract z from signature (last 32 bytes)
             let z_bytes: [u8; 32] = signature[33..65]
                 .try_into()
                 .expect("Signature must be at least 65 bytes");
-            
+
             let z_big = num_bigint::BigUint::from_bytes_be(&z_bytes);
             let bit_length = z_big.bits();
-            
+
             assert!(
                 bit_length <= 255,
                 "Test vector {}: z.bitLength = {} > 255. Signatures with bitLength > 255 are rejected by Scala/contract.",
@@ -73,8 +74,7 @@ mod tests {
                 .expect("Invalid issuer pubkey hex")
                 .try_into()
                 .expect("Issuer pubkey must be 33 bytes");
-            let message = hex::decode(vector.message_hex)
-                .expect("Invalid message hex");
+            let message = hex::decode(vector.message_hex).expect("Invalid message hex");
             let signature: [u8; 65] = hex::decode(vector.signature_hex)
                 .expect("Invalid signature hex")
                 .try_into()
@@ -82,7 +82,7 @@ mod tests {
 
             // Verify with basis_store
             let result = schnorr::schnorr_verify(&signature, &message, &issuer_pubkey);
-            
+
             assert!(
                 result.is_err(),
                 "Test vector {}: Invalid signature should fail verification",

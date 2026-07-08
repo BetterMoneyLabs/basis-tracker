@@ -39,7 +39,11 @@ pub async fn handle_reserve_command(
     client: &TrackerClient,
 ) -> Result<()> {
     match cmd {
-        ReserveCommands::Create { nft_id, owner, amount } => {
+        ReserveCommands::Create {
+            nft_id,
+            owner,
+            amount,
+        } => {
             // Get the owner public key from either the command line argument or current account
             let owner_pubkey = if let Some(owner_key) = owner {
                 owner_key
@@ -51,7 +55,10 @@ pub async fn handle_reserve_command(
 
             // Validate that the public key is 66 hex characters (33 bytes)
             if owner_pubkey.len() != 66 {
-                return Err(anyhow::anyhow!("Owner public key must be 33 bytes (66 hex characters), got {} characters", owner_pubkey.len()));
+                return Err(anyhow::anyhow!(
+                    "Owner public key must be 33 bytes (66 hex characters), got {} characters",
+                    owner_pubkey.len()
+                ));
             }
 
             println!("Creating reserve with:");
@@ -81,7 +88,10 @@ pub async fn handle_reserve_command(
                 println!("    value: {}", req.value);
                 println!("    assets: [");
                 for asset in &req.assets {
-                    println!("      {{ token_id: \"{}\", amount: {} }},", asset.token_id, asset.amount);
+                    println!(
+                        "      {{ token_id: \"{}\", amount: {} }},",
+                        asset.token_id, asset.amount
+                    );
                 }
                 println!("    ]");
                 println!("    registers: {{");

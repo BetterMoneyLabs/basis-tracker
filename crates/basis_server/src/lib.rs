@@ -23,12 +23,7 @@ pub use store::*;
 pub use tracker_box_updater::*;
 
 // Re-export specific types needed by tests
-pub use models::{
-    CreateReserveRequest,
-    ReserveCreationResponse,
-    ReservePaymentRequest,
-    Asset,
-};
+pub use models::{Asset, CreateReserveRequest, ReserveCreationResponse, ReservePaymentRequest};
 
 // Application state that holds a channel to communicate with the tracker thread
 #[derive(Clone)]
@@ -38,7 +33,8 @@ pub struct AppState {
     pub ergo_scanner: std::sync::Arc<Mutex<basis_store::ergo_scanner::ServerState>>,
     pub reserve_tracker: std::sync::Arc<Mutex<basis_store::ReserveTracker>>,
     pub config: std::sync::Arc<AppConfig>,
-    pub shared_tracker_state: std::sync::Arc<tokio::sync::Mutex<tracker_box_updater::SharedTrackerState>>,
+    pub shared_tracker_state:
+        std::sync::Arc<tokio::sync::Mutex<tracker_box_updater::SharedTrackerState>>,
     pub tracker_storage: basis_store::persistence::TrackerStorage,
     pub acceptance_predicate: Option<std::sync::Arc<dyn acceptance::NotePredicate>>,
     pub policy_storage: basis_store::persistence::AcceptancePolicyStorage,
@@ -66,8 +62,9 @@ pub enum TrackerCommand {
     },
     GetNotesByRecipientWithIssuer {
         recipient_pubkey: basis_store::PubKey,
-        response_tx:
-            tokio::sync::oneshot::Sender<Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>,
+        >,
     },
     GetNoteByIssuerAndRecipient {
         issuer_pubkey: basis_store::PubKey,
@@ -77,8 +74,9 @@ pub enum TrackerCommand {
         >,
     },
     GetNotes {
-        response_tx:
-            tokio::sync::oneshot::Sender<Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>,
+        >,
     },
     InitiateRedemption {
         request: basis_store::RedemptionRequest,
@@ -95,23 +93,29 @@ pub enum TrackerCommand {
     GenerateProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
-        response_tx: tokio::sync::oneshot::Sender<Result<basis_store::NoteProof, basis_store::NoteError>>,
+        response_tx:
+            tokio::sync::oneshot::Sender<Result<basis_store::NoteProof, basis_store::NoteError>>,
     },
     GetTrackerLookupProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
-        response_tx: tokio::sync::oneshot::Sender<Result<basis_store::TrackerLookupProof, basis_store::NoteError>>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<basis_store::TrackerLookupProof, basis_store::NoteError>,
+        >,
     },
     GetReserveLookupProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
-        response_tx: tokio::sync::oneshot::Sender<Result<basis_store::ReserveLookupProof, basis_store::NoteError>>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<basis_store::ReserveLookupProof, basis_store::NoteError>,
+        >,
     },
     GetReserveInsertProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
         timestamp: u64,
         new_already_redeemed: u64,
-        response_tx: tokio::sync::oneshot::Sender<Result<Vec<u8>, basis_store::NoteError>>,
+        response_tx:
+            tokio::sync::oneshot::Sender<Result<(Vec<u8>, Vec<u8>), basis_store::NoteError>>,
     },
 }

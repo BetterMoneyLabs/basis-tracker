@@ -3,10 +3,10 @@
 //! This module implements a background service that periodically updates the R4 and R5 register values
 //! of the tracker box every 10 minutes by submitting transactions to the Ergo blockchain via the wallet payment API.
 
+use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use std::sync::{Arc, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
-use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
 /// Create a default tracker public key that looks realistic (compressed format with proper prefix)
 fn create_default_tracker_pubkey() -> [u8; 33] {
@@ -15,10 +15,9 @@ fn create_default_tracker_pubkey() -> [u8; 33] {
     // Followed by 32 bytes representing x-coordinate of a point on the curve
     // Using a pattern similar to one found in the codebase
     [
-        0x02, 0xda, 0xda, 0x81, 0x1a, 0x88, 0x8c, 0xd0, 0xdc, 0x7a,
-        0x0a, 0x41, 0x73, 0x9a, 0x3a, 0xd9, 0xb0, 0xf4, 0x27, 0x74,
-        0x1f, 0xe6, 0xca, 0x19, 0x70, 0x0c, 0xf1, 0xa5, 0x12, 0x00,
-        0xc9, 0x6b, 0xf7
+        0x02, 0xda, 0xda, 0x81, 0x1a, 0x88, 0x8c, 0xd0, 0xdc, 0x7a, 0x0a, 0x41, 0x73, 0x9a, 0x3a,
+        0xd9, 0xb0, 0xf4, 0x27, 0x74, 0x1f, 0xe6, 0xca, 0x19, 0x70, 0x0c, 0xf1, 0xa5, 0x12, 0x00,
+        0xc9, 0x6b, 0xf7,
     ]
 }
 
@@ -198,7 +197,7 @@ impl TrackerBoxUpdater {
         mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<(), TrackerBoxUpdaterError> {
         let mut ticker = interval(Duration::from_secs(config.update_interval_seconds));
-        
+
         // Track the last submitted digest to avoid redundant transactions
         let mut last_submitted_digest: Option<[u8; 33]> = None;
         // Track pending transaction that needs confirmation
@@ -224,10 +223,7 @@ impl TrackerBoxUpdater {
             if let Some((ref tx_id, expected_digest)) = pending_tx {
                 match Self::check_transaction_confirmation(&config, tx_id).await {
                     Ok(true) => {
-                        info!(
-                            "Transaction {} confirmed on chain. Update complete.",
-                            tx_id
-                        );
+                        info!("Transaction {} confirmed on chain. Update complete.", tx_id);
                         last_submitted_digest = Some(expected_digest);
                         pending_tx = None;
                         // Continue to next cycle - will check if further updates needed
@@ -305,7 +301,14 @@ impl TrackerBoxUpdater {
             }
 
             // Build and submit the update transaction
-            match Self::submit_tracker_update(&config, &tracker_box, &tracker_pubkey, &current_digest).await {
+            match Self::submit_tracker_update(
+                &config,
+                &tracker_box,
+                &tracker_pubkey,
+                &current_digest,
+            )
+            .await
+            {
                 Ok(tx_id) => {
                     info!(
                         "Tracker box update submitted. Transaction ID: {}, Box ID: {}. Waiting for confirmation...",
@@ -322,7 +325,7 @@ impl TrackerBoxUpdater {
     }
 
     /// Find the tracker box on chain using the tracker NFT ID
-    /// 
+    ///
     /// Note: There should be at most one tracker box at any time since the tracker NFT
     /// is unique (non-fungible token with amount=1). If multiple boxes are found, this
     /// indicates an inconsistent state (e.g., during a reorg or race condition).
@@ -403,8 +406,8 @@ impl TrackerBoxUpdater {
         let mut r5_bytes = vec![0x64u8];
         r5_bytes.extend_from_slice(avl_root_digest);
         r5_bytes.push(0x01u8); // flags: insert-only allowed
-        r5_bytes.push(32u8);   // key length: 32 bytes (VLQ, single byte)
-        r5_bytes.push(0u8);    // value length: 0 (variable / None)
+        r5_bytes.push(32u8); // key length: 32 bytes (VLQ, single byte)
+        r5_bytes.push(0u8); // value length: 0 (variable / None)
         let r5_value = hex::encode(&r5_bytes);
 
         // Build registers map
@@ -412,15 +415,15 @@ impl TrackerBoxUpdater {
         registers.insert("R4".to_string(), r4_value);
         registers.insert("R5".to_string(), r5_value);
 
-            // Build assets list - preserve the tracker NFT token
-            let assets: Vec<PaymentAsset> = tracker_box
-                .assets
-                .iter()
-                .map(|asset| PaymentAsset {
-                    token_id: asset.token_id.clone(),
-                    amount: asset.amount as i64,
-                })
-                .collect();
+        // Build assets list - preserve the tracker NFT token
+        let assets: Vec<PaymentAsset> = tracker_box
+            .assets
+            .iter()
+            .map(|asset| PaymentAsset {
+                token_id: asset.token_id.clone(),
+                amount: asset.amount as i64,
+            })
+            .collect();
 
         // Build the payment request
         // Convert ergoTree to P2S address for the wallet payment API
@@ -439,29 +442,34 @@ impl TrackerBoxUpdater {
             }
             Err(_) => {
                 // Case 2: Hex-encoded ergoTree - need to decode and convert to P2S
-                let tree_bytes = hex::decode(&tracker_box.ergo_tree)
-                    .map_err(|e| TrackerBoxUpdaterError::SerializationError(
-                        format!("Failed to decode ergoTree hex: {}", e)
-                    ))?;
+                let tree_bytes = hex::decode(&tracker_box.ergo_tree).map_err(|e| {
+                    TrackerBoxUpdaterError::SerializationError(format!(
+                        "Failed to decode ergoTree hex: {}",
+                        e
+                    ))
+                })?;
 
-                let ergo_tree = ergo_lib::ergotree_ir::ergo_tree::ErgoTree::sigma_parse_bytes(&tree_bytes)
-                    .map_err(|e| TrackerBoxUpdaterError::SerializationError(
-                        format!("Failed to parse ergoTree bytes: {}", e)
-                    ))?;
+                let ergo_tree =
+                    ergo_lib::ergotree_ir::ergo_tree::ErgoTree::sigma_parse_bytes(&tree_bytes)
+                        .map_err(|e| {
+                            TrackerBoxUpdaterError::SerializationError(format!(
+                                "Failed to parse ergoTree bytes: {}",
+                                e
+                            ))
+                        })?;
 
                 let encoder = ergo_lib::ergotree_ir::address::AddressEncoder::new(
                     ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet,
                 );
 
                 // Create P2S address from the ErgoTree
-                let address = ergo_lib::ergotree_ir::address::Address::P2S(
-                    ergo_tree.sigma_serialize_bytes()
-                );
+                let address =
+                    ergo_lib::ergotree_ir::address::Address::P2S(ergo_tree.sigma_serialize_bytes());
 
                 let p2s_address = encoder.address_to_str(&address);
                 if p2s_address.is_empty() {
                     return Err(TrackerBoxUpdaterError::SerializationError(
-                        "Failed to encode P2S address: empty result".to_string()
+                        "Failed to encode P2S address: empty result".to_string(),
                     ));
                 }
                 p2s_address
@@ -471,7 +479,11 @@ impl TrackerBoxUpdater {
         let payment = PaymentRequest {
             address: p2s_address,
             value: tracker_box.value as i64,
-            assets: if assets.is_empty() { None } else { Some(assets) },
+            assets: if assets.is_empty() {
+                None
+            } else {
+                Some(assets)
+            },
             registers: Some(registers),
         };
 
@@ -495,7 +507,7 @@ impl TrackerBoxUpdater {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-                return Err(TrackerBoxUpdaterError::TransactionFailedOnChain(format!(
+            return Err(TrackerBoxUpdaterError::TransactionFailedOnChain(format!(
                 "HTTP {}: {}",
                 status, body
             )));

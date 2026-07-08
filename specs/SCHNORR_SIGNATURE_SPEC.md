@@ -77,10 +77,12 @@ Where:
 5. **Challenge Computation**:
    - Compute `e = H(R || message || public_key)` using Blake2b256
    - Reduce `e` modulo the secp256k1 order `n` to get scalar
+   - **ErgoScript Compatibility Constraint**: The 32-byte big-endian representation of `e` MUST have its most-significant byte < 0x80 (i.e. the highest bit must be 0). ErgoScript's `byteArrayToBigInt` treats 32-byte values as signed two's-complement integers, so if the top byte is >= 0x80, `e` would be interpreted as a negative number and signature verification would fail on-chain. If this constraint is not met, the signer MUST generate a new nonce and retry.
 
 6. **Response Calculation**:
    - Compute `z = k + e * s (mod n)` where `s` is the private key
    - This becomes the 'z' component of the signature
+   - **ErgoScript Compatibility Constraint**: The 32-byte big-endian representation of `z` MUST have its most-significant byte < 0x80 (equivalently `z.bitLength <= 255`). If this constraint is not met, the signer MUST generate a new nonce and retry.
 
 7. **Signature Assembly**:
    - Combine prefix (from compressed R), 'a' component (R), and 'z' component
@@ -100,9 +102,19 @@ function schnorr_sign(message_bytes, private_key_scalar, public_key_bytes):
     challenge_input = R_compressed || message_bytes || public_key_bytes
     e_full = blake2b256(challenge_input)
     e = reduce_mod_n(e_full)  // Reduce to field range
-    
+
+    // ErgoScript compatibility: e must be a positive signed 256-bit integer.
+    // Reject nonces where the top byte of e is >= 0x80 and retry.
+    if e_bytes[0] >= 0x80:
+        continue  // retry with new nonce
+
     // Calculate response z = k + e*s (mod n)
     z = (k + e * private_key_scalar) % curve_order_n
+
+    // ErgoScript compatibility: z must also be a positive signed 256-bit integer
+    // (bitLength <= 255). Reject and retry if the top byte of z is >= 0x80.
+    if z_bytes[0] >= 0x80:
+        continue  // retry with new nonce
     
     // Assemble signature: [prefix_byte || R_compressed_without_prefix || z_bytes]
     signature = [R_compressed[0]] || R_compressed[1:] || int_to_bytes(z, 32)

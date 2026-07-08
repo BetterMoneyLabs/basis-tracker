@@ -1,7 +1,7 @@
 //! Test helpers for Basis trees module
 
-use crate::storage::TreeNode;
 use crate::errors::TreeError;
+use crate::storage::TreeNode;
 use ergo_avltree_rust::batch_node::Node;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -63,7 +63,7 @@ pub fn in_memory_resolver(_storage: &InMemoryNodeStorage) -> impl Fn(&[u8; 32]) 
         // 1. Fetch node from storage by digest
         // 2. Convert TreeNode to ergo_avltree_rust::Node
         // 3. Return the proper node structure
-        
+
         // For now, we'll use the same approach as the current resolver
         panic!("In-memory resolver not fully implemented - needs proper node conversion");
     }
@@ -87,7 +87,12 @@ impl Default for TestTreeConfig {
 }
 
 /// Helper to create test note data
-pub fn create_test_note_data(issuer_pubkey: &[u8], recipient_pubkey: &[u8], amount: u64, timestamp: u64) -> Vec<u8> {
+pub fn create_test_note_data(
+    issuer_pubkey: &[u8],
+    recipient_pubkey: &[u8],
+    amount: u64,
+    timestamp: u64,
+) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(issuer_pubkey);
     data.extend_from_slice(recipient_pubkey);

@@ -1,13 +1,9 @@
 use anyhow::Result;
-use basis_cli_lib::{
-    account::AccountManager,
-    api::TrackerClient,
-    config::ConfigManager,
-};
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use basis_cli_lib::{account::AccountManager, api::TrackerClient, config::ConfigManager};
 use basis_core::acceptance::AcceptanceConfig;
 use basis_store::ExtendedReserveInfo;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// TUI-specific configuration including acceptance policy
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -37,8 +33,8 @@ pub struct TuiConfigManager {
 
 impl TuiConfigManager {
     pub fn new() -> Result<Self> {
-        let mut config_path = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        let mut config_path =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
         config_path.push(".basis");
         std::fs::create_dir_all(&config_path)?;
         config_path.push("ui.toml");
@@ -174,7 +170,7 @@ impl App {
         });
 
         let mut address_book = HashMap::new();
-        
+
         // Auto-populate address book with existing accounts (accounts are source of truth)
         for account in account_manager.list_accounts() {
             address_book.insert(account.name.clone(), account.get_pubkey_hex());

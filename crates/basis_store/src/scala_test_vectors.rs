@@ -199,7 +199,11 @@ mod tests {
     fn test_message_construction_matches_scala() {
         for vector in SCHNORR_TEST_VECTORS {
             // Skip vectors where Scala intentionally used different components
-            if vector.id == "TV003" || vector.id == "TV006" || vector.id == "TV007" || vector.id == "TV008" {
+            if vector.id == "TV003"
+                || vector.id == "TV006"
+                || vector.id == "TV007"
+                || vector.id == "TV008"
+            {
                 continue;
             }
             let issuer_pubkey = decode_pubkey(vector.issuer_pubkey_hex);
@@ -224,7 +228,8 @@ mod tests {
 
             // Also verify the constructed message is exactly 48 bytes
             assert_eq!(
-                rust_message.len(), 48,
+                rust_message.len(),
+                48,
                 "Vector {}: Constructed message must be exactly 48 bytes",
                 vector.id
             );
@@ -313,7 +318,11 @@ mod tests {
     fn test_message_reconstruction() {
         for vector in SCHNORR_TEST_VECTORS {
             // Skip vectors with intentionally different message components
-            if vector.id == "TV003" || vector.id == "TV006" || vector.id == "TV007" || vector.id == "TV008" {
+            if vector.id == "TV003"
+                || vector.id == "TV006"
+                || vector.id == "TV007"
+                || vector.id == "TV008"
+            {
                 continue;
             }
             let issuer_pubkey = decode_pubkey(vector.issuer_pubkey_hex);
@@ -344,9 +353,11 @@ mod tests {
         for vector in SCHNORR_TEST_VECTORS {
             let sig_bytes = hex::decode(vector.signature_hex).expect("Invalid signature hex");
             assert_eq!(
-                sig_bytes.len(), 65,
+                sig_bytes.len(),
+                65,
                 "Vector {}: Signature must be 65 bytes, got {}",
-                vector.id, sig_bytes.len()
+                vector.id,
+                sig_bytes.len()
             );
 
             // Skip prefix check for all-zero signature (TV002)
@@ -358,7 +369,8 @@ mod tests {
             assert!(
                 prefix == 0x02 || prefix == 0x03,
                 "Vector {}: Signature prefix must be 0x02 or 0x03, got 0x{:02x}",
-                vector.id, prefix
+                vector.id,
+                prefix
             );
         }
     }
@@ -373,15 +385,25 @@ mod tests {
         // Byte constant: prefix 0x02
         let action_bytes = hex::decode(ACTION_BYTE_SERIALIZED).expect("Invalid action hex");
         assert_eq!(action_bytes[0], 0x02, "Byte constant prefix must be 0x02");
-        assert_eq!(action_bytes.len(), 2, "Byte constant should be 2 bytes (prefix + value)");
-        assert_eq!(action_bytes[1], 0x00, "Byte value should be 0x00 (REDEEM_ACTION)");
+        assert_eq!(
+            action_bytes.len(),
+            2,
+            "Byte constant should be 2 bytes (prefix + value)"
+        );
+        assert_eq!(
+            action_bytes[1], 0x00,
+            "Byte value should be 0x00 (REDEEM_ACTION)"
+        );
 
         // Long constant: prefix 0x05 + VLQ-encoded value
         let debt_bytes = hex::decode(TOTAL_DEBT_SERIALIZED).expect("Invalid debt hex");
         assert_eq!(debt_bytes[0], 0x05, "Long constant prefix must be 0x05");
         // Ergo Long uses VLQ, so length is not fixed at 10 bytes
         // Just verify we can parse the value from the remaining bytes
-        assert!(debt_bytes.len() >= 2, "Long constant should have at least prefix + 1 byte");
+        assert!(
+            debt_bytes.len() >= 2,
+            "Long constant should have at least prefix + 1 byte"
+        );
 
         // GroupElement constant: prefix 0x07 + 33 bytes
         let alice_bytes = hex::decode(ALICE_PUBKEY_SERIALIZED).expect("Invalid alice hex");
@@ -390,13 +412,18 @@ mod tests {
             "GroupElement constant prefix must be 0x07"
         );
         assert_eq!(
-            alice_bytes.len(), 34,
+            alice_bytes.len(),
+            34,
             "GroupElement constant should be 34 bytes (prefix + 33 bytes)"
         );
 
         // Bob pubkey should be 34 bytes (1 prefix + 33 pubkey)
         let bob_bytes = hex::decode(BOB_PUBKEY_SERIALIZED).expect("Invalid bob hex");
-        assert_eq!(bob_bytes.len(), 34, "GroupElement constant should be 34 bytes");
+        assert_eq!(
+            bob_bytes.len(),
+            34,
+            "GroupElement constant should be 34 bytes"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -459,7 +486,9 @@ mod tests {
                 assert!(
                     verified,
                     "Vector {} ({}) should verify but failed: {:?}",
-                    vector.id, vector.description, result.err()
+                    vector.id,
+                    vector.description,
+                    result.err()
                 );
                 valid_count += 1;
             } else {
@@ -508,7 +537,8 @@ mod tests {
         let emergency_vector = &SCHNORR_TEST_VECTORS[10]; // TV011
         assert_eq!(emergency_vector.id, "TV011");
         assert_eq!(
-            emergency_vector.description, "Emergency redemption valid reserve signature"
+            emergency_vector.description,
+            "Emergency redemption valid reserve signature"
         );
 
         let issuer_pubkey = decode_pubkey(emergency_vector.issuer_pubkey_hex);
@@ -535,8 +565,7 @@ mod tests {
             let value = hex::decode(vector.value_hex).expect("Invalid value hex");
 
             // Create a new Rust AVL tree (same as Scala empty PlasmaMap)
-            let mut tree = basis_trees::BasisAvlTree::new()
-                .expect("Failed to create AVL tree");
+            let mut tree = basis_trees::BasisAvlTree::new().expect("Failed to create AVL tree");
 
             // Insert the key-value pair (same as Scala plasmaMap.insert)
             tree.insert(key.clone(), value.clone())
@@ -547,7 +576,8 @@ mod tests {
 
             // Verify the lookup returned the correct value
             assert_eq!(
-                lookup_value, Some(value.clone()),
+                lookup_value,
+                Some(value.clone()),
                 "Vector {}: Lookup should return the inserted value",
                 vector.id
             );
@@ -557,12 +587,8 @@ mod tests {
 
             // Verify the proof using the Rust verifier
             // This simulates what the ErgoScript contract does on-chain
-            let proof_valid = basis_trees::BasisAvlTree::verify_proof(
-                &root_digest,
-                &proof,
-                &key,
-                &value,
-            );
+            let proof_valid =
+                basis_trees::BasisAvlTree::verify_proof(&root_digest, &proof, &key, &value);
 
             assert!(
                 proof_valid,
@@ -589,8 +615,7 @@ mod tests {
             let value = hex::decode(vector.value_hex).expect("Invalid value hex");
 
             // Create a new Rust AVL tree
-            let mut tree = basis_trees::BasisAvlTree::new()
-                .expect("Failed to create AVL tree");
+            let mut tree = basis_trees::BasisAvlTree::new().expect("Failed to create AVL tree");
 
             // Insert the key-value pair (16-byte value for reserve tree)
             tree.insert(key.clone(), value.clone())
@@ -601,7 +626,8 @@ mod tests {
 
             // Verify the lookup returned the correct value
             assert_eq!(
-                lookup_value, Some(value.clone()),
+                lookup_value,
+                Some(value.clone()),
                 "Vector {}: Lookup should return the inserted value",
                 vector.id
             );
@@ -610,12 +636,8 @@ mod tests {
             let root_digest = tree.root_digest();
 
             // Verify the proof
-            let proof_valid = basis_trees::BasisAvlTree::verify_proof(
-                &root_digest,
-                &proof,
-                &key,
-                &value,
-            );
+            let proof_valid =
+                basis_trees::BasisAvlTree::verify_proof(&root_digest, &proof, &key, &value);
 
             assert!(
                 proof_valid,
@@ -625,7 +647,8 @@ mod tests {
 
             // Verify the value format: timestamp (8 bytes) || redeemedAmount (8 bytes)
             assert_eq!(
-                value.len(), 16,
+                value.len(),
+                16,
                 "Vector {}: Reserve tree value should be 16 bytes (timestamp || redeemedAmount)",
                 vector.id
             );
@@ -645,14 +668,22 @@ mod tests {
     // -------------------------------------------------------------------------
     #[test]
     fn test_avl_multiple_insertions_and_proofs() {
-        let mut tree = basis_trees::BasisAvlTree::new()
-            .expect("Failed to create AVL tree");
+        let mut tree = basis_trees::BasisAvlTree::new().expect("Failed to create AVL tree");
 
         // Insert multiple entries (simulating multiple debt relationships)
         let entries = vec![
-            ("6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4", "0000000002faf080"), // 50M nanoERG
-            ("07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b", "000000003b9aca00"), // 1B nanoERG
-            ("55df4d11e0afb42e8137dab457fd76f46a00b6abb753c85cdef64493263c9900", "00000000017d7840"), // 25M nanoERG
+            (
+                "6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4",
+                "0000000002faf080",
+            ), // 50M nanoERG
+            (
+                "07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b",
+                "000000003b9aca00",
+            ), // 1B nanoERG
+            (
+                "55df4d11e0afb42e8137dab457fd76f46a00b6abb753c85cdef64493263c9900",
+                "00000000017d7840",
+            ), // 25M nanoERG
         ];
 
         for (key_hex, value_hex) in &entries {
@@ -669,7 +700,8 @@ mod tests {
 
             let (proof, lookup_value) = tree.generate_lookup_proof(key.clone());
             assert_eq!(
-                lookup_value, Some(expected_value.clone()),
+                lookup_value,
+                Some(expected_value.clone()),
                 "Lookup for {} should return correct value",
                 key_hex
             );
@@ -697,15 +729,12 @@ mod tests {
     // -------------------------------------------------------------------------
     #[test]
     fn test_avl_proof_with_wrong_value_fails() {
-        let mut tree = basis_trees::BasisAvlTree::new()
-            .expect("Failed to create AVL tree");
+        let mut tree = basis_trees::BasisAvlTree::new().expect("Failed to create AVL tree");
 
         let key = hex::decode("6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4")
             .expect("Invalid key hex");
-        let correct_value = hex::decode("0000000002faf080")
-            .expect("Invalid value hex");
-        let wrong_value = hex::decode("0000000000000000")
-            .expect("Invalid wrong value hex");
+        let correct_value = hex::decode("0000000002faf080").expect("Invalid value hex");
+        let wrong_value = hex::decode("0000000000000000").expect("Invalid wrong value hex");
 
         tree.insert(key.clone(), correct_value.clone())
             .expect("Failed to insert into AVL tree");
@@ -714,15 +743,13 @@ mod tests {
         let root_digest = tree.root_digest();
 
         // Verify with correct value should succeed
-        let valid = basis_trees::BasisAvlTree::verify_proof(
-            &root_digest, &proof, &key, &correct_value,
-        );
+        let valid =
+            basis_trees::BasisAvlTree::verify_proof(&root_digest, &proof, &key, &correct_value);
         assert!(valid, "Proof with correct value should verify");
 
         // Verify with wrong value should fail
-        let invalid = basis_trees::BasisAvlTree::verify_proof(
-            &root_digest, &proof, &key, &wrong_value,
-        );
+        let invalid =
+            basis_trees::BasisAvlTree::verify_proof(&root_digest, &proof, &key, &wrong_value);
         assert!(!invalid, "Proof with wrong value should NOT verify");
     }
 
@@ -732,8 +759,7 @@ mod tests {
     // -------------------------------------------------------------------------
     #[test]
     fn test_avl_update_and_proof_verification() {
-        let mut tree = basis_trees::BasisAvlTree::new()
-            .expect("Failed to create AVL tree");
+        let mut tree = basis_trees::BasisAvlTree::new().expect("Failed to create AVL tree");
 
         let key = hex::decode("6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4")
             .expect("Invalid key hex");
@@ -751,7 +777,10 @@ mod tests {
 
         // Verify initial proof
         let initial_valid = basis_trees::BasisAvlTree::verify_proof(
-            &initial_digest, &initial_proof, &key, &initial_value,
+            &initial_digest,
+            &initial_proof,
+            &key,
+            &initial_value,
         );
         assert!(initial_valid, "Initial proof should verify");
 
@@ -764,20 +793,30 @@ mod tests {
 
         // Verify updated value is returned
         assert_eq!(
-            lookup_value, Some(updated_value.clone()),
+            lookup_value,
+            Some(updated_value.clone()),
             "Lookup should return updated value"
         );
 
         // Verify updated proof
         let updated_valid = basis_trees::BasisAvlTree::verify_proof(
-            &updated_digest, &updated_proof, &key, &updated_value,
+            &updated_digest,
+            &updated_proof,
+            &key,
+            &updated_value,
         );
         assert!(updated_valid, "Updated proof should verify");
 
         // Old proof should NOT verify against new digest
         let old_proof_invalid = basis_trees::BasisAvlTree::verify_proof(
-            &updated_digest, &initial_proof, &key, &initial_value,
+            &updated_digest,
+            &initial_proof,
+            &key,
+            &initial_value,
         );
-        assert!(!old_proof_invalid, "Old proof should NOT verify against new digest");
+        assert!(
+            !old_proof_invalid,
+            "Old proof should NOT verify against new digest"
+        );
     }
 }

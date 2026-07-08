@@ -111,6 +111,8 @@ pub fn create_test_redemption_request(
         emergency: false,
         tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
         reserve_box_value: amount + 1000000 + 1000000, // Reserve must cover debt + fee + buffer
+        fee_input_box_ids: Vec::new(),
+        fee_input_total_value: 0,
     }
 }
 
@@ -135,7 +137,8 @@ pub fn generate_test_signature(message: &[u8]) -> [u8; 65] {
     let (secret, pubkey) = generate_test_keypair();
 
     let secret_key = secp256k1::SecretKey::from_slice(&secret).unwrap();
-    schnorr::schnorr_sign(message, &secret_key.secret_bytes(), &pubkey).expect("Failed to generate test signature")
+    schnorr::schnorr_sign(message, &secret_key.secret_bytes(), &pubkey)
+        .expect("Failed to generate test signature")
 }
 
 /// Verify test signature
@@ -242,7 +245,8 @@ mod tests {
         let (secret, pubkey) = generate_test_keypair();
 
         let secret_key = secp256k1::SecretKey::from_slice(&secret).unwrap();
-        let signature = schnorr::schnorr_sign(message, &secret_key.secret_bytes(), &pubkey).unwrap();
+        let signature =
+            schnorr::schnorr_sign(message, &secret_key.secret_bytes(), &pubkey).unwrap();
 
         let is_valid = schnorr::schnorr_verify(&signature, message, &pubkey).is_ok();
 

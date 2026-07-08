@@ -1,7 +1,7 @@
 use crate::{
     schnorr::{self, generate_keypair},
     transaction_builder::{RedemptionTransactionBuilder, TxContext},
-    IouNote, RedemptionRequest, RedemptionManager, TrackerStateManager,
+    IouNote, RedemptionManager, RedemptionRequest, TrackerStateManager,
 };
 
 #[cfg(test)]
@@ -250,6 +250,8 @@ mod property_tests {
                 emergency: false,
                 tracker_signature: Some("02".repeat(65)),
                 reserve_box_value: amount + 1000000 + 1000000, // Reserve must cover debt + fee + buffer
+                fee_input_box_ids: Vec::new(),
+                fee_input_total_value: 0,
             };
 
             // Basic validation: amount should be positive
@@ -390,6 +392,8 @@ mod property_tests {
                 emergency: false,
                 tracker_signature: Some("02".repeat(65)),
                 reserve_box_value: initial_amount + 1000000 + 1000000, // Reserve must cover max debt + fee + buffer
+                fee_input_box_ids: Vec::new(),
+                fee_input_total_value: 0,
             };
 
                 let result = redemption_manager.initiate_redemption(&request);

@@ -62,7 +62,10 @@ fn test_signing_message() -> Result<(), String> {
     }
 
     if message.len() != 48 {
-        return Err(format!("signing message should be 48 bytes, got {}", message.len()));
+        return Err(format!(
+            "signing message should be 48 bytes, got {}",
+            message.len()
+        ));
     }
 
     println!("✓ test_signing_message passed");
@@ -285,7 +288,7 @@ fn test_multiple_signatures() -> Result<(), String> {
 }
 
 fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
-    use crate::{TrackerStateManager, IouNote, PubKey};
+    use crate::{IouNote, PubKey, TrackerStateManager};
 
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer_pubkey: PubKey = [1u8; 33];
@@ -309,7 +312,7 @@ fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
 }
 
 fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
-    use crate::{TrackerStateManager, IouNote, PubKey};
+    use crate::{IouNote, PubKey, TrackerStateManager};
     use secp256k1::{Secp256k1, SecretKey};
 
     let secp = Secp256k1::new();
@@ -320,8 +323,9 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
     let recipient_pubkey: PubKey = [2u8; 33];
 
     // Create first signed note
-    let note1 = IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key.secret_bytes())
-        .map_err(|e| format!("Failed to create first note: {:?}", e))?;
+    let note1 =
+        IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key.secret_bytes())
+            .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
     let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1);
     if result1.is_err() {
@@ -329,19 +333,23 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
     }
 
     // Create second signed note with higher timestamp
-    let note2 = IouNote::create_and_sign(recipient_pubkey, 2000, 1000001, &secret_key.secret_bytes())
-        .map_err(|e| format!("Failed to create second note: {:?}", e))?;
+    let note2 =
+        IouNote::create_and_sign(recipient_pubkey, 2000, 1000001, &secret_key.secret_bytes())
+            .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
     let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2);
     if result2.is_err() {
-        return Err(format!("Second note with higher timestamp should succeed: {:?}", result2.err()));
+        return Err(format!(
+            "Second note with higher timestamp should succeed: {:?}",
+            result2.err()
+        ));
     }
 
     Ok(())
 }
 
 fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
-    use crate::{TrackerStateManager, IouNote, PubKey};
+    use crate::{IouNote, PubKey, TrackerStateManager};
     use secp256k1::{Secp256k1, SecretKey};
 
     let secp = Secp256k1::new();
@@ -352,8 +360,9 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
     let recipient_pubkey: PubKey = [2u8; 33];
 
     // Add first signed note
-    let note1 = IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key.secret_bytes())
-        .map_err(|e| format!("Failed to create first note: {:?}", e))?;
+    let note1 =
+        IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key.secret_bytes())
+            .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
     let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1);
     if result1.is_err() {
@@ -361,28 +370,38 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
     }
 
     // Try to add note with same timestamp - should fail
-    let note2 = IouNote::create_and_sign(recipient_pubkey, 2000, 1000000, &secret_key.secret_bytes())
-        .map_err(|e| format!("Failed to create second note: {:?}", e))?;
+    let note2 =
+        IouNote::create_and_sign(recipient_pubkey, 2000, 1000000, &secret_key.secret_bytes())
+            .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
     let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2);
     match result2 {
-        Err(crate::NoteError::PastTimestamp) => {}, // Expected
-        _ => return Err(format!("Expected PastTimestamp error for same timestamp, got: {:?}", result2.err())),
+        Err(crate::NoteError::PastTimestamp) => {} // Expected
+        _ => {
+            return Err(format!(
+                "Expected PastTimestamp error for same timestamp, got: {:?}",
+                result2.err()
+            ))
+        }
     }
 
     // Try to add note with lower timestamp - should fail
-    let note3 = IouNote::create_and_sign(recipient_pubkey, 2000, 999999, &secret_key.secret_bytes())
-        .map_err(|e| format!("Failed to create third note: {:?}", e))?;
+    let note3 =
+        IouNote::create_and_sign(recipient_pubkey, 2000, 999999, &secret_key.secret_bytes())
+            .map_err(|e| format!("Failed to create third note: {:?}", e))?;
 
     let result3 = tracker.add_note(&issuer_pubkey_bytes, &note3);
     match result3 {
         Err(crate::NoteError::PastTimestamp) => Ok(()), // Expected
-        _ => Err(format!("Expected PastTimestamp error for lower timestamp, got: {:?}", result3.err())),
+        _ => Err(format!(
+            "Expected PastTimestamp error for lower timestamp, got: {:?}",
+            result3.err()
+        )),
     }
 }
 
 fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), String> {
-    use crate::{TrackerStateManager, IouNote, PubKey};
+    use crate::{IouNote, PubKey, TrackerStateManager};
     use secp256k1::{Secp256k1, SecretKey};
 
     let secp = Secp256k1::new();
@@ -395,8 +414,9 @@ fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), S
     let recipient_pubkey: PubKey = [3u8; 33];
 
     // Add note for first issuer
-    let note1 = IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key1.secret_bytes())
-        .map_err(|e| format!("Failed to create first note: {:?}", e))?;
+    let note1 =
+        IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key1.secret_bytes())
+            .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
     let result1 = tracker.add_note(&issuer1_pubkey, &note1);
     if result1.is_err() {
@@ -404,8 +424,9 @@ fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), S
     }
 
     // Add note for different issuer with same timestamp - should succeed
-    let note2 = IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key2.secret_bytes())
-        .map_err(|e| format!("Failed to create second note: {:?}", e))?;
+    let note2 =
+        IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key2.secret_bytes())
+            .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
     let result2 = tracker.add_note(&issuer2_pubkey, &note2);
     if result2.is_err() {

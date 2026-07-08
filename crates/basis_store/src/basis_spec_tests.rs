@@ -16,10 +16,10 @@
 #[cfg(test)]
 mod tests {
     use crate::schnorr::{
-        self, generate_keypair, schnorr_sign, schnorr_verify,
-        pubkey_to_hex, pubkey_from_hex, signature_to_hex, signature_from_hex,
+        self, generate_keypair, pubkey_from_hex, pubkey_to_hex, schnorr_sign, schnorr_verify,
+        signature_from_hex, signature_to_hex,
     };
-    use crate::{IouNote, NoteKey, TrackerStateManager, PubKey};
+    use crate::{IouNote, NoteKey, PubKey, TrackerStateManager};
     use basis_core::types::signing_message as core_signing_message;
     use blake2::{Blake2b, Digest};
     use generic_array::typenum::U32;
@@ -30,8 +30,8 @@ mod tests {
     const BASIS_TOKEN_ID: &str = "4b2d8b7beb3eaac8234d9e61792d270898a43934d6a27275e4f3a044609c9f2a";
     const TRACKER_NFT: &str = "3c45f29a5165b030fdb5eaf5d81f8108f9d8f507b31487dd51f4ae08fe07cf4a";
 
-    const MIN_VALUE: u64 = 1_000_000_000;    // 1 ERG
-    const FEE_VALUE: u64 = 1_000_000;        // 0.001 ERG
+    const MIN_VALUE: u64 = 1_000_000_000; // 1 ERG
+    const FEE_VALUE: u64 = 1_000_000; // 0.001 ERG
 
     // Standard test timestamp (in seconds, Sept 2001 - clearly in the past)
     // Note: The add_note check compares timestamp (ms) against current_time (secs),
@@ -82,8 +82,8 @@ mod tests {
         assert_eq!(message.len(), 48, "Message must be exactly 48 bytes");
 
         // Both owner and tracker sign the EXACT same message
-        let owner_sig = schnorr_sign(&message, &owner_secret, &owner_pk)
-            .expect("Owner signing should succeed");
+        let owner_sig =
+            schnorr_sign(&message, &owner_secret, &owner_pk).expect("Owner signing should succeed");
         let tracker_sig = schnorr_sign(&message, &tracker_secret, &tracker_pk)
             .expect("Tracker signing should succeed");
 
@@ -92,16 +92,22 @@ mod tests {
         assert_eq!(tracker_sig.len(), 65, "Tracker signature must be 65 bytes");
 
         // Verify owner signature
-        assert!(schnorr_verify(&owner_sig, &message, &owner_pk).is_ok(),
-            "Owner signature must verify");
+        assert!(
+            schnorr_verify(&owner_sig, &message, &owner_pk).is_ok(),
+            "Owner signature must verify"
+        );
 
         // Verify tracker signature
-        assert!(schnorr_verify(&tracker_sig, &message, &tracker_pk).is_ok(),
-            "Tracker signature must verify");
+        assert!(
+            schnorr_verify(&tracker_sig, &message, &tracker_pk).is_ok(),
+            "Tracker signature must verify"
+        );
 
         // Verify signatures are different (different signers)
-        assert_ne!(owner_sig, tracker_sig,
-            "Owner and tracker signatures must differ");
+        assert_ne!(
+            owner_sig, tracker_sig,
+            "Owner and tracker signatures must differ"
+        );
 
         // Create IOU note using the crate's API
         let note = IouNote::create_and_sign(receiver_pk, total_debt, timestamp, &owner_secret)
@@ -113,8 +119,10 @@ mod tests {
         assert_eq!(note_message, message, "Note's signing message must match");
 
         // Verify the note's signature
-        assert!(note.verify_signature(&owner_pk).is_ok(),
-            "Note signature must verify");
+        assert!(
+            note.verify_signature(&owner_pk).is_ok(),
+            "Note signature must verify"
+        );
     }
 
     /// BasisSpec: "OR-branch A: valid tracker sig -> succeeds"
@@ -183,7 +191,7 @@ mod tests {
         let carol_pk = secp256k1::PublicKey::from_secret_key(&secp, &_carol_secret).serialize();
 
         let initial_debt_to_bob: u64 = 10_000_000_000; // 10 ERG
-        let transfer_amount: u64 = 5_000_000_000;       // 5 ERG
+        let transfer_amount: u64 = 5_000_000_000; // 5 ERG
         let remaining_debt_to_bob: u64 = 5_000_000_000; // 5 ERG
 
         let timestamp: u64 = TEST_TIMESTAMP;
@@ -198,30 +206,49 @@ mod tests {
         assert_eq!(msg_to_carol.len(), 48);
 
         // Alice signs both notes
-        let alice_sig_bob = schnorr_sign(&msg_to_bob, &alice_secret.secret_bytes(), &alice_pk).unwrap();
-        let alice_sig_carol = schnorr_sign(&msg_to_carol, &alice_secret.secret_bytes(), &alice_pk).unwrap();
+        let alice_sig_bob =
+            schnorr_sign(&msg_to_bob, &alice_secret.secret_bytes(), &alice_pk).unwrap();
+        let alice_sig_carol =
+            schnorr_sign(&msg_to_carol, &alice_secret.secret_bytes(), &alice_pk).unwrap();
 
         // Both signatures must verify against Alice's public key
-        assert!(schnorr_verify(&alice_sig_bob, &msg_to_bob, &alice_pk).is_ok(),
-            "Alice's signature on Bob's note must verify");
-        assert!(schnorr_verify(&alice_sig_carol, &msg_to_carol, &alice_pk).is_ok(),
-            "Alice's signature on Carol's note must verify");
+        assert!(
+            schnorr_verify(&alice_sig_bob, &msg_to_bob, &alice_pk).is_ok(),
+            "Alice's signature on Bob's note must verify"
+        );
+        assert!(
+            schnorr_verify(&alice_sig_carol, &msg_to_carol, &alice_pk).is_ok(),
+            "Alice's signature on Carol's note must verify"
+        );
 
         // Debt amounts must add up
-        assert_eq!(remaining_debt_to_bob + transfer_amount, initial_debt_to_bob,
-            "Remaining + transferred debt must equal initial debt");
+        assert_eq!(
+            remaining_debt_to_bob + transfer_amount,
+            initial_debt_to_bob,
+            "Remaining + transferred debt must equal initial debt"
+        );
 
         // Messages must be different (different recipients/amounts)
-        assert_ne!(msg_to_bob, msg_to_carol,
-            "Notes to different recipients must have different messages");
+        assert_ne!(
+            msg_to_bob, msg_to_carol,
+            "Notes to different recipients must have different messages"
+        );
 
         // Create actual IOU notes
         let note_to_bob = IouNote::create_and_sign(
-            bob_pk, remaining_debt_to_bob, timestamp, &alice_secret.secret_bytes()
-        ).unwrap();
+            bob_pk,
+            remaining_debt_to_bob,
+            timestamp,
+            &alice_secret.secret_bytes(),
+        )
+        .unwrap();
         let note_to_carol = IouNote::create_and_sign(
-            carol_pk, transfer_amount, timestamp2, &alice_secret.secret_bytes()
-        ).unwrap();
+            carol_pk,
+            transfer_amount,
+            timestamp2,
+            &alice_secret.secret_bytes(),
+        )
+        .unwrap();
 
         // Verify both notes
         assert!(note_to_bob.verify_signature(&alice_pk).is_ok());
@@ -242,26 +269,43 @@ mod tests {
         let alice_pk = secp256k1::PublicKey::from_secret_key(&secp, &alice_secret).serialize();
 
         // Three creditors
-        let bob_pk = secp256k1::PublicKey::from_secret_key(&secp,
-            &SecretKey::new(&mut secp256k1::rand::thread_rng())).serialize();
-        let carol_pk = secp256k1::PublicKey::from_secret_key(&secp,
-            &SecretKey::new(&mut secp256k1::rand::thread_rng())).serialize();
-        let dave_pk = secp256k1::PublicKey::from_secret_key(&secp,
-            &SecretKey::new(&mut secp256k1::rand::thread_rng())).serialize();
+        let bob_pk = secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &SecretKey::new(&mut secp256k1::rand::thread_rng()),
+        )
+        .serialize();
+        let carol_pk = secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &SecretKey::new(&mut secp256k1::rand::thread_rng()),
+        )
+        .serialize();
+        let dave_pk = secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &SecretKey::new(&mut secp256k1::rand::thread_rng()),
+        )
+        .serialize();
 
         let amount: u64 = 5_000_000_000; // 5 ERG each
         let base_timestamp: u64 = TEST_TIMESTAMP;
 
         // Create notes with different timestamps
-        let note_bob = IouNote::create_and_sign(
-            bob_pk, amount, base_timestamp, &alice_secret.secret_bytes()
-        ).unwrap();
+        let note_bob =
+            IouNote::create_and_sign(bob_pk, amount, base_timestamp, &alice_secret.secret_bytes())
+                .unwrap();
         let note_carol = IouNote::create_and_sign(
-            carol_pk, amount, base_timestamp + 1000, &alice_secret.secret_bytes()
-        ).unwrap();
+            carol_pk,
+            amount,
+            base_timestamp + 1000,
+            &alice_secret.secret_bytes(),
+        )
+        .unwrap();
         let note_dave = IouNote::create_and_sign(
-            dave_pk, amount, base_timestamp + 2000, &alice_secret.secret_bytes()
-        ).unwrap();
+            dave_pk,
+            amount,
+            base_timestamp + 2000,
+            &alice_secret.secret_bytes(),
+        )
+        .unwrap();
 
         // All must verify
         assert!(note_bob.verify_signature(&alice_pk).is_ok());
@@ -301,8 +345,10 @@ mod tests {
         assert!(schnorr_verify(&reserve_sig, &message, &owner_pk).is_ok());
 
         // Invalid tracker sig must NOT verify against tracker's public key
-        assert!(schnorr_verify(&invalid_tracker_sig, &message, &tracker_pk).is_err(),
-            "Invalid tracker signature must fail verification");
+        assert!(
+            schnorr_verify(&invalid_tracker_sig, &message, &tracker_pk).is_err(),
+            "Invalid tracker signature must fail verification"
+        );
     }
 
     /// BasisSpec: "basis redemption should fail with invalid tracker signature (even with old tracker)"
@@ -345,8 +391,10 @@ mod tests {
         let tracker_sig = schnorr_sign(&message, &tracker_secret, &tracker_pk).unwrap();
 
         // Invalid reserve sig must NOT verify against owner's public key
-        assert!(schnorr_verify(&invalid_reserve_sig, &message, &owner_pk).is_err(),
-            "Invalid reserve owner signature must fail verification");
+        assert!(
+            schnorr_verify(&invalid_reserve_sig, &message, &owner_pk).is_err(),
+            "Invalid reserve owner signature must fail verification"
+        );
 
         // Tracker sig must verify
         assert!(schnorr_verify(&tracker_sig, &message, &tracker_pk).is_ok());
@@ -368,8 +416,10 @@ mod tests {
         // Corrupt signature by flipping bit at position 0
         tracker_sig[0] ^= 0x01;
 
-        assert!(schnorr_verify(&tracker_sig, &message, &tracker_pk).is_err(),
-            "Corrupted signature must fail verification");
+        assert!(
+            schnorr_verify(&tracker_sig, &message, &tracker_pk).is_err(),
+            "Corrupted signature must fail verification"
+        );
     }
 
     /// BasisSpec: "basis redemption should fail with invalid AVL tree proof"
@@ -397,8 +447,10 @@ mod tests {
         assert!(schnorr_verify(&tracker_sig, &correct_message, &tracker_pk).is_ok());
 
         // But NOT with wrong message (reversed keys)
-        assert!(schnorr_verify(&sig, &wrong_message, &owner_pk).is_err(),
-            "Signature must fail verification with wrong key order");
+        assert!(
+            schnorr_verify(&sig, &wrong_message, &owner_pk).is_err(),
+            "Signature must fail verification with wrong key order"
+        );
         assert!(schnorr_verify(&tracker_sig, &wrong_message, &tracker_pk).is_err());
 
         // Messages must be different
@@ -427,14 +479,18 @@ mod tests {
         let timestamp: u64 = TEST_TIMESTAMP;
 
         // Message for note to Carol
-        let message_to_carol = core_signing_message(&alice_pk, &carol_pk, transfer_amount, timestamp);
+        let message_to_carol =
+            core_signing_message(&alice_pk, &carol_pk, transfer_amount, timestamp);
 
         // Bob tries to forge Alice's signature
-        let forged_alice_sig = schnorr_sign(&message_to_carol, &bob_secret.secret_bytes(), &bob_pk).unwrap();
+        let forged_alice_sig =
+            schnorr_sign(&message_to_carol, &bob_secret.secret_bytes(), &bob_pk).unwrap();
 
         // Forgery must fail verification against Alice's public key
-        assert!(schnorr_verify(&forged_alice_sig, &message_to_carol, &alice_pk).is_err(),
-            "Forged signature must fail verification");
+        assert!(
+            schnorr_verify(&forged_alice_sig, &message_to_carol, &alice_pk).is_err(),
+            "Forged signature must fail verification"
+        );
     }
 
     /// BasisSpec: "debt transfer: should fail with replay attack (reuse old note)"
@@ -449,32 +505,32 @@ mod tests {
         let timestamp2: u64 = timestamp1 + 1000;
 
         // Create note with timestamp1
-        let note1 = IouNote::create_and_sign(
-            receiver_pk, total_debt, timestamp1, &owner_secret
-        ).unwrap();
+        let note1 =
+            IouNote::create_and_sign(receiver_pk, total_debt, timestamp1, &owner_secret).unwrap();
 
         // Attempt to "replay" with same timestamp
         // In a real system, the contract checks timestamp > storedTimestamp
         // Here we verify that a second note with the same timestamp has the
         // same message (and thus same signature, enabling replay detection)
-        let note1_replay = IouNote::create_and_sign(
-            receiver_pk, total_debt, timestamp1, &owner_secret
-        ).unwrap();
+        let note1_replay =
+            IouNote::create_and_sign(receiver_pk, total_debt, timestamp1, &owner_secret).unwrap();
 
         // Same timestamp + same amount = same message = same signature
         assert_eq!(note1.timestamp, note1_replay.timestamp);
         assert_eq!(note1.amount_collected, note1_replay.amount_collected);
 
         // A new note with a different timestamp would have a different message
-        let note2 = IouNote::create_and_sign(
-            receiver_pk, total_debt, timestamp2, &owner_secret
-        ).unwrap();
+        let note2 =
+            IouNote::create_and_sign(receiver_pk, total_debt, timestamp2, &owner_secret).unwrap();
 
         assert_ne!(note1.timestamp, note2.timestamp);
         // Different timestamps mean different messages
         let msg1 = note1.signing_message(&owner_pk);
         let msg2 = note2.signing_message(&owner_pk);
-        assert_ne!(msg1, msg2, "Different timestamps must produce different messages");
+        assert_ne!(
+            msg1, msg2,
+            "Different timestamps must produce different messages"
+        );
     }
 
     /// BasisSpec: "debt transfer: should fail with insufficient collateral"
@@ -488,13 +544,14 @@ mod tests {
         let timestamp: u64 = TEST_TIMESTAMP;
         let reserve_value: u64 = 3_000_000_000; // Only 3 ERG collateral
 
-        let note = IouNote::create_and_sign(
-            receiver_pk, total_debt, timestamp, &owner_secret
-        ).unwrap();
+        let note =
+            IouNote::create_and_sign(receiver_pk, total_debt, timestamp, &owner_secret).unwrap();
 
         // Outstanding debt is 5 ERG, reserve only has 3 ERG
-        assert!(note.outstanding_debt() > reserve_value,
-            "Outstanding debt must exceed reserve value for insufficient collateral");
+        assert!(
+            note.outstanding_debt() > reserve_value,
+            "Outstanding debt must exceed reserve value for insufficient collateral"
+        );
     }
 
     // ========== MESSAGE FORMAT COMPATIBILITY TESTS ==========
@@ -519,13 +576,25 @@ mod tests {
             input[33..].copy_from_slice(&receiver_pk);
             blake2b256(&input)
         };
-        assert_eq!(&message[0..32], &expected_key[..], "First 32 bytes must be blake2b256(owner||receiver)");
+        assert_eq!(
+            &message[0..32],
+            &expected_key[..],
+            "First 32 bytes must be blake2b256(owner||receiver)"
+        );
 
         // Verify totalDebt portion (bytes 32-40, big-endian)
-        assert_eq!(&message[32..40], &total_debt.to_be_bytes(), "Bytes 32-40 must be totalDebt (BE)");
+        assert_eq!(
+            &message[32..40],
+            &total_debt.to_be_bytes(),
+            "Bytes 32-40 must be totalDebt (BE)"
+        );
 
         // Verify timestamp portion (bytes 40-48, big-endian)
-        assert_eq!(&message[40..48], &timestamp.to_be_bytes(), "Bytes 40-48 must be timestamp (BE)");
+        assert_eq!(
+            &message[40..48],
+            &timestamp.to_be_bytes(),
+            "Bytes 40-48 must be timestamp (BE)"
+        );
     }
 
     /// BasisSpec: "basis redemption should fail with invalid action code"
@@ -636,7 +705,10 @@ mod tests {
         let msg1 = core_signing_message(&owner_pk, &receiver_pk, 1_000_000_000, timestamp);
         let msg2 = core_signing_message(&owner_pk, &receiver_pk, 2_000_000_000, timestamp);
 
-        assert_ne!(msg1, msg2, "Different amounts must produce different messages");
+        assert_ne!(
+            msg1, msg2,
+            "Different amounts must produce different messages"
+        );
     }
 
     /// Test that different timestamps produce different messages
@@ -649,7 +721,10 @@ mod tests {
         let msg1 = core_signing_message(&owner_pk, &receiver_pk, total_debt, TEST_TIMESTAMP);
         let msg2 = core_signing_message(&owner_pk, &receiver_pk, total_debt, TEST_TIMESTAMP + 1);
 
-        assert_ne!(msg1, msg2, "Different timestamps must produce different messages");
+        assert_ne!(
+            msg1, msg2,
+            "Different timestamps must produce different messages"
+        );
     }
 
     // ========== NOTE KEY TESTS ==========
@@ -686,18 +761,21 @@ mod tests {
     ///   The first 32 bytes (6995ccf3...) are the key hash.
     #[test]
     fn note_key_matches_scala_demo() {
-        let alice_pk = hex::decode("0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83")
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let bob_pk = hex::decode("03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea")
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let alice_pk =
+            hex::decode("0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let bob_pk =
+            hex::decode("03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea")
+                .unwrap()
+                .try_into()
+                .unwrap();
 
         let note_key = NoteKey::from_keys(&alice_pk, &bob_pk);
-        let expected = hex::decode("6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4")
-            .unwrap();
+        let expected =
+            hex::decode("6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4")
+                .unwrap();
 
         assert_eq!(
             note_key.key_hash.to_vec(),
@@ -708,9 +786,9 @@ mod tests {
 
     // ========== TRACKER STATE MANAGER TESTS ==========
 
-    /// Test reserve tree value format: 16 bytes (timestamp || already_redeemed)
+    /// Test reserve tree value format: 8 bytes (already_redeemed)
     #[test]
-    fn reserve_tree_value_format_16_bytes() {
+    fn reserve_tree_value_format_8_bytes() {
         let mut tracker = TrackerStateManager::new_with_temp_storage();
 
         let (issuer_secret, issuer_pk) = random_keypair();
@@ -719,21 +797,30 @@ mod tests {
         let total_debt: u64 = 1_000_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let note = IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
+        let note =
+            IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
 
         // Insert note into tracker
         tracker.add_note(&issuer_pk, &note).unwrap();
 
         // Generate reserve lookup proof
-        let lookup_proof = tracker.generate_reserve_lookup_proof(&issuer_pk, &recipient_pk).unwrap();
+        let lookup_proof = tracker
+            .generate_reserve_lookup_proof(&issuer_pk, &recipient_pk)
+            .unwrap();
 
-        // For first redemption, value should be 16 bytes of zeros
-        assert_eq!(lookup_proof.value.len(), 16,
-            "Reserve tree value must be 16 bytes (timestamp || redeemedAmount)");
+        // For first redemption, value should be 16 bytes: 0 timestamp || 0 redeemedAmount
+        assert_eq!(
+            lookup_proof.value.len(),
+            16,
+            "Reserve tree value must be 16 bytes (timestamp || redeemedAmount)"
+        );
 
         // For first redemption, value should be all zeros
-        assert_eq!(lookup_proof.value, vec![0u8; 16],
-            "First redemption value should be 16 zero bytes");
+        assert_eq!(
+            lookup_proof.value,
+            vec![0u8; 16],
+            "First redemption value should be 16 zero bytes"
+        );
     }
 
     /// Test that get_already_redeemed returns 0 for first redemption
@@ -747,14 +834,17 @@ mod tests {
         let total_debt: u64 = 1_000_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let note = IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
+        let note =
+            IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
         tracker.add_note(&issuer_pk, &note).unwrap();
 
-        let already_redeemed = tracker.get_already_redeemed(&issuer_pk, &recipient_pk).unwrap();
-        assert_eq!(already_redeemed, 0, "First redemption should have 0 already redeemed");
-
-        let stored_timestamp = tracker.get_already_redeemed_timestamp(&issuer_pk, &recipient_pk).unwrap();
-        assert_eq!(stored_timestamp, 0, "First redemption should have 0 stored timestamp");
+        let already_redeemed = tracker
+            .get_already_redeemed(&issuer_pk, &recipient_pk)
+            .unwrap();
+        assert_eq!(
+            already_redeemed, 0,
+            "First redemption should have 0 already redeemed"
+        );
     }
 
     /// Test tracker tree lookup proof generation
@@ -768,19 +858,27 @@ mod tests {
         let total_debt: u64 = 1_000_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let note = IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
+        let note =
+            IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
         tracker.add_note(&issuer_pk, &note).unwrap();
 
-        let lookup_proof = tracker.generate_tracker_lookup_proof(&issuer_pk, &recipient_pk).unwrap();
+        let lookup_proof = tracker
+            .generate_tracker_lookup_proof(&issuer_pk, &recipient_pk)
+            .unwrap();
 
         // Tracker tree value should be 8 bytes (totalDebt as big-endian u64)
-        assert_eq!(lookup_proof.value.len(), 8,
-            "Tracker tree value must be 8 bytes (totalDebt)");
+        assert_eq!(
+            lookup_proof.value.len(),
+            8,
+            "Tracker tree value must be 8 bytes (totalDebt)"
+        );
 
         // Value should match the note's totalDebt
         let decoded_debt = u64::from_be_bytes(lookup_proof.value.try_into().unwrap());
-        assert_eq!(decoded_debt, total_debt,
-            "Tracker tree value must match note's totalDebt");
+        assert_eq!(
+            decoded_debt, total_debt,
+            "Tracker tree value must match note's totalDebt"
+        );
     }
 
     // ========== PROPERTY-BASED STYLE TESTS ==========
@@ -789,7 +887,14 @@ mod tests {
     #[test]
     fn signature_always_65_bytes() {
         let amounts = vec![0, 1, 1_000, 1_000_000, 1_000_000_000, u64::MAX - 1000];
-        let timestamps = vec![0, 1, 1_000_000, 1_000_000_000, TEST_TIMESTAMP, u64::MAX - 1000];
+        let timestamps = vec![
+            0,
+            1,
+            1_000_000,
+            1_000_000_000,
+            TEST_TIMESTAMP,
+            u64::MAX - 1000,
+        ];
 
         let (secret, pubkey) = random_keypair();
         let (_, receiver_pk) = random_keypair();
@@ -798,10 +903,19 @@ mod tests {
             for ts in &timestamps {
                 let msg = core_signing_message(&pubkey, &receiver_pk, amount, *ts);
                 let sig = schnorr_sign(&msg, &secret, &pubkey).unwrap();
-                assert_eq!(sig.len(), 65,
-                    "Signature must be 65 bytes for amount={} timestamp={}", amount, ts);
-                assert!(schnorr_verify(&sig, &msg, &pubkey).is_ok(),
-                    "Signature must verify for amount={} timestamp={}", amount, ts);
+                assert_eq!(
+                    sig.len(),
+                    65,
+                    "Signature must be 65 bytes for amount={} timestamp={}",
+                    amount,
+                    ts
+                );
+                assert!(
+                    schnorr_verify(&sig, &msg, &pubkey).is_ok(),
+                    "Signature must verify for amount={} timestamp={}",
+                    amount,
+                    ts
+                );
             }
         }
     }
@@ -822,7 +936,8 @@ mod tests {
         let wrong_amount_msg = core_signing_message(&pubkey, &receiver_pk, amount + 1, timestamp);
         let wrong_ts_msg = core_signing_message(&pubkey, &receiver_pk, amount, timestamp + 1);
         let (_, diff_receiver_pk) = random_keypair();
-        let wrong_receiver_msg = core_signing_message(&pubkey, &diff_receiver_pk, amount, timestamp);
+        let wrong_receiver_msg =
+            core_signing_message(&pubkey, &diff_receiver_pk, amount, timestamp);
 
         assert!(schnorr_verify(&sig, &wrong_amount_msg, &pubkey).is_err());
         assert!(schnorr_verify(&sig, &wrong_ts_msg, &pubkey).is_err());
@@ -845,8 +960,11 @@ mod tests {
         for i in 0..65 {
             let mut corrupted = sig;
             corrupted[i] ^= 0x01;
-            assert!(schnorr_verify(&corrupted, &msg, &pubkey).is_err(),
-                "Corrupted byte at position {} must cause verification failure", i);
+            assert!(
+                schnorr_verify(&corrupted, &msg, &pubkey).is_err(),
+                "Corrupted byte at position {} must cause verification failure",
+                i
+            );
         }
     }
 
@@ -857,17 +975,30 @@ mod tests {
         let (_, receiver_pk) = random_keypair();
 
         // Note with collected > redeemed
-        let note = IouNote::create_and_sign(receiver_pk, 5_000_000_000, TEST_TIMESTAMP, &secret).unwrap();
+        let note =
+            IouNote::create_and_sign(receiver_pk, 5_000_000_000, TEST_TIMESTAMP, &secret).unwrap();
         assert_eq!(note.outstanding_debt(), 5_000_000_000);
 
         // Note with equal collected and redeemed
-        let mut note2 = IouNote::new(receiver_pk, 5_000_000_000, 5_000_000_000, TEST_TIMESTAMP, [0u8; 65]);
+        let mut note2 = IouNote::new(
+            receiver_pk,
+            5_000_000_000,
+            5_000_000_000,
+            TEST_TIMESTAMP,
+            [0u8; 65],
+        );
         note2.amount_collected = 5_000_000_000;
         note2.amount_redeemed = 5_000_000_000;
         assert_eq!(note2.outstanding_debt(), 0);
 
         // Note with more collected than redeemed
-        let mut note3 = IouNote::new(receiver_pk, 10_000_000_000, 3_000_000_000, TEST_TIMESTAMP, [0u8; 65]);
+        let mut note3 = IouNote::new(
+            receiver_pk,
+            10_000_000_000,
+            3_000_000_000,
+            TEST_TIMESTAMP,
+            [0u8; 65],
+        );
         note3.amount_collected = 10_000_000_000;
         note3.amount_redeemed = 3_000_000_000;
         assert_eq!(note3.outstanding_debt(), 7_000_000_000);

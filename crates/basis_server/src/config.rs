@@ -139,14 +139,23 @@ impl AppConfig {
 
                 // Try hex decoding first
                 if let Ok(bytes) = hex::decode(pubkey_input) {
-                    tracing::info!("Successfully decoded hex public key, length: {}", bytes.len());
+                    tracing::info!(
+                        "Successfully decoded hex public key, length: {}",
+                        bytes.len()
+                    );
                     if bytes.len() == 33 {
                         let mut pubkey_bytes = [0u8; 33];
                         pubkey_bytes.copy_from_slice(&bytes);
-                        tracing::info!("Returning 33-byte compressed public key from hex: {}", hex::encode(&pubkey_bytes));
+                        tracing::info!(
+                            "Returning 33-byte compressed public key from hex: {}",
+                            hex::encode(&pubkey_bytes)
+                        );
                         return Ok(Some(pubkey_bytes));
                     } else {
-                        tracing::info!("Hex decoded public key has wrong length: {}, expected 33", bytes.len());
+                        tracing::info!(
+                            "Hex decoded public key has wrong length: {}, expected 33",
+                            bytes.len()
+                        );
                     }
                 } else {
                     tracing::info!("Failed to decode tracker public key as hex, attempting P2PK address parsing");
@@ -156,7 +165,9 @@ impl AppConfig {
                 let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
                 match encoder.parse_address_from_str(pubkey_input) {
                     Ok(ergo_lib::ergotree_ir::address::Address::P2Pk(pubkey)) => {
-                        tracing::info!("Successfully parsed as P2PK address, extracting public key");
+                        tracing::info!(
+                            "Successfully parsed as P2PK address, extracting public key"
+                        );
                         // Use sigma serialization to get the compressed public key bytes
                         use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
                         let pk_bytes = pubkey.h.sigma_serialize_bytes();
@@ -164,17 +175,23 @@ impl AppConfig {
                         if pk_bytes.len() == 33 {
                             let mut result = [0u8; 33];
                             result.copy_from_slice(&pk_bytes);
-                            tracing::info!("Returning 33-byte compressed public key from P2PK: {}", hex::encode(&result));
+                            tracing::info!(
+                                "Returning 33-byte compressed public key from P2PK: {}",
+                                hex::encode(&result)
+                            );
                             Ok(Some(result))
                         } else {
-                            tracing::info!("Public key extracted from P2PK has wrong length: {}, expected 33", pk_bytes.len());
+                            tracing::info!(
+                                "Public key extracted from P2PK has wrong length: {}, expected 33",
+                                pk_bytes.len()
+                            );
                             Err("Invalid public key length in P2PK address".into())
                         }
                     }
                     Ok(_) => {
                         tracing::info!("Address is not P2PK format");
                         Err("Address is not P2PK format".into())
-                    },
+                    }
                     Err(_) => {
                         tracing::info!("Failed to parse as either hex public key or P2PK address");
                         Err("Invalid hex public key or P2PK address format".into())
@@ -199,7 +216,9 @@ impl AppConfig {
 
                 // If input is P2PK address, extract and return the public key as hex
                 let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-                if let Ok(ergo_lib::ergotree_ir::address::Address::P2Pk(pubkey)) = encoder.parse_address_from_str(pubkey_input) {
+                if let Ok(ergo_lib::ergotree_ir::address::Address::P2Pk(pubkey)) =
+                    encoder.parse_address_from_str(pubkey_input)
+                {
                     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
                     let pubkey_bytes = pubkey.h.sigma_serialize_bytes();
                     if pubkey_bytes.len() == 33 {
@@ -234,7 +253,9 @@ impl AppConfig {
     /// Get the tracker private key bytes (if configured)
     /// Reads the tracker_secret_key from the configuration file.
     /// TODO: Implement secure storage (e.g., HSM, key vault, encrypted keystore) for production use.
-    pub fn tracker_private_key_bytes(&self) -> Result<Option<[u8; 32]>, Box<dyn std::error::Error>> {
+    pub fn tracker_private_key_bytes(
+        &self,
+    ) -> Result<Option<[u8; 32]>, Box<dyn std::error::Error>> {
         // Read from the config file's tracker_secret_key field
         // This is a temporary solution - in production, private keys should be retrieved from secure storage
         match self.tracker_secret_key_bytes() {
@@ -262,15 +283,15 @@ impl AppConfig {
                 } else {
                     // It's a hex public key, derive address
                     let pubkey_bytes = hex::decode(pubkey_input)?;
-                    
+
                     if pubkey_bytes.len() != 33 {
                         return Err("Invalid tracker public key length".into());
                     }
 
                     use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+                    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
                     use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
                     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
-                    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
                     let ec_point = EcPoint::sigma_parse_bytes(&pubkey_bytes)?;
                     let prove_dlog = ProveDlog::new(ec_point);
@@ -310,12 +331,15 @@ mod tests {
                 },
                 basis_reserve_contract_p2s: "test".to_string(),
                 tracker_nft_id: None,
-                tracker_public_key: Some("02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string()),
+                tracker_public_key: Some(
+                    "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
+                        .to_string(),
+                ),
                 tracker_secret_key: None,
             },
             transaction: TransactionConfig {
                 fee: 1000000,
-                        change_address: None,
+                change_address: None,
             },
             acceptance: AcceptanceConfig::empty(),
         };
@@ -327,7 +351,10 @@ mod tests {
 
         let hex_result = config.tracker_public_key_hex();
         assert!(hex_result.is_some());
-        assert_eq!(hex_result.unwrap(), "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7");
+        assert_eq!(
+            hex_result.unwrap(),
+            "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
+        );
     }
 
     #[test]

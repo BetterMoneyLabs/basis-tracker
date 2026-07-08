@@ -112,7 +112,8 @@ impl MockContractValidator {
             }
         } else {
             // No signature provided - only allowed after emergency period
-            let enough_time_spent = (blockchain.current_height - blockchain.tracker_creation_height) > 3 * 720;
+            let enough_time_spent =
+                (blockchain.current_height - blockchain.tracker_creation_height) > 3 * 720;
             if !enough_time_spent {
                 return ContractValidationResult::TrackerSignatureRequired;
             }
@@ -253,7 +254,10 @@ mod tests {
         let tracker_sig = generate_redemption_signature(&tracker_secret, &tracker_pubkey, &message);
 
         println!("Issuer signature (65 bytes): {}", hex::encode(&issuer_sig));
-        println!("Tracker signature (65 bytes): {}", hex::encode(&tracker_sig));
+        println!(
+            "Tracker signature (65 bytes): {}",
+            hex::encode(&tracker_sig)
+        );
 
         // Verify signatures independently
         assert!(
@@ -302,6 +306,8 @@ mod tests {
             emergency: false,
             tracker_signature: Some(hex::encode(&tracker_sig)),
             reserve_box_value: total_debt + 1000000, // Reserve must cover debt + fee
+            fee_input_box_ids: Vec::new(),
+            fee_input_total_value: 0,
         };
 
         // Initiate redemption through manager
@@ -314,8 +320,14 @@ mod tests {
 
         let redemption_data = redemption_data.unwrap();
         println!("Redemption ID: {}", redemption_data.redemption_id);
-        println!("Transaction bytes length: {}", redemption_data.transaction_bytes.len());
-        println!("Required signatures: {}", redemption_data.required_signatures.len());
+        println!(
+            "Transaction bytes length: {}",
+            redemption_data.transaction_bytes.len()
+        );
+        println!(
+            "Required signatures: {}",
+            redemption_data.required_signatures.len()
+        );
 
         // Complete redemption
         redemption_manager
@@ -353,7 +365,8 @@ mod tests {
         let tracker_sig = generate_redemption_signature(&tracker_secret, &tracker_pubkey, &message);
 
         // Create INVALID issuer signature (signed with tracker key instead of alice key)
-        let invalid_issuer_sig = generate_redemption_signature(&tracker_secret, &alice_pubkey, &message);
+        let invalid_issuer_sig =
+            generate_redemption_signature(&tracker_secret, &alice_pubkey, &message);
 
         // Validate against mock contract
         let blockchain = MockBlockchain::new(1000, 1000);
@@ -397,7 +410,8 @@ mod tests {
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
 
         // Create INVALID tracker signature (signed with alice key instead of tracker key)
-        let invalid_tracker_sig = generate_redemption_signature(&alice_secret, &tracker_pubkey, &message);
+        let invalid_tracker_sig =
+            generate_redemption_signature(&alice_secret, &tracker_pubkey, &message);
 
         // Validate against mock contract
         let blockchain = MockBlockchain::new(1000, 1000);
@@ -661,6 +675,8 @@ mod tests {
             emergency: false,
             tracker_signature: Some(hex::encode(&tracker_sig)),
             reserve_box_value: total_debt + 1000000, // Reserve must cover debt + fee
+            fee_input_box_ids: Vec::new(),
+            fee_input_total_value: 0,
         };
 
         // Initiate redemption
@@ -673,8 +689,7 @@ mod tests {
         let tx_bytes = hex::decode(&redemption_data.transaction_bytes)
             .expect("Transaction bytes should be valid hex");
         let tx_json: serde_json::Value =
-            serde_json::from_slice(&tx_bytes)
-                .expect("Transaction should be valid JSON");
+            serde_json::from_slice(&tx_bytes).expect("Transaction should be valid JSON");
 
         // Verify transaction structure
         assert!(
@@ -688,11 +703,18 @@ mod tests {
             tx.get("dataInputs").is_some(),
             "Transaction should have dataInputs"
         );
-        assert!(tx.get("outputs").is_some(), "Transaction should have outputs");
+        assert!(
+            tx.get("outputs").is_some(),
+            "Transaction should have outputs"
+        );
 
         // Verify inputs
         let inputs = tx["inputs"].as_array().expect("Inputs should be array");
-        assert_eq!(inputs.len(), 1, "Should have 1 input (reserve box)");
+        assert_eq!(
+            inputs.len(),
+            2,
+            "Should have 2 inputs (reserve box + fee input placeholder)"
+        );
         assert_eq!(
             inputs[0]["boxId"], "test_reserve_box_1",
             "Input should be reserve box"
@@ -738,12 +760,6 @@ mod tests {
             "Context extension should have #3 (totalDebt)"
         );
 
-        // Context var #4: timestamp (Long)
-        assert!(
-            extension.contains_key("4"),
-            "Context extension should have #4 (timestamp)"
-        );
-
         // Context var #5: insert proof (Coll[Byte])
         assert!(
             extension.contains_key("5"),
@@ -772,7 +788,11 @@ mod tests {
         let data_inputs = tx["dataInputs"]
             .as_array()
             .expect("Data inputs should be array");
-        assert_eq!(data_inputs.len(), 1, "Should have 1 data input (tracker box)");
+        assert_eq!(
+            data_inputs.len(),
+            1,
+            "Should have 1 data input (tracker box)"
+        );
         assert_eq!(
             data_inputs[0]["boxId"], "test_tracker_box_1",
             "Data input should be tracker box"
@@ -780,7 +800,11 @@ mod tests {
 
         // Verify outputs
         let outputs = tx["outputs"].as_array().expect("Outputs should be array");
-        assert_eq!(outputs.len(), 2, "Should have 2 outputs (reserve + recipient)");
+        assert_eq!(
+            outputs.len(),
+            3,
+            "Should have 3 outputs (reserve + recipient + fee)"
+        );
 
         println!("✅ First redemption transaction structure validated\n");
     }

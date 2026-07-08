@@ -1,46 +1,24 @@
 //! Ergo blockchain scanner for monitoring Basis reserve contracts
-//! This module provides modern blockchain integration using /scan and /blockchain APIs
-//! Adopted from chaincash-rs scanner implementation, modified for reserves-only scanning
+//! This module provides blockchain integration using /blockchain endpoints (no node scans).
 
-use std::{sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::Mutex;
 
-use ergo_lib::ergotree_ir::address::AddressEncoder;
-use ergo_lib::ergotree_ir::address::NetworkPrefix;
-use ergo_lib::ergotree_ir::ergo_tree::ErgoTree;
-use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use reqwest::Client;
 
-/// Wrapper struct for the actual API response from /scan/unspentBoxes endpoint
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ApiScanBox {
-    #[serde(rename = "box")]
-    inner_box: ApiInnerBox,
-    #[serde(rename = "confirmationsNum")]
-    confirmations_num: u32,
-    address: String,
-    #[serde(rename = "creationTransaction")]
-    creation_transaction: String,
-    scans: Vec<i32>,
-    onchain: bool,
-    #[serde(rename = "creationOutIndex")]
-    creation_out_index: u32,
-    #[serde(rename = "spendingTransaction")]
-    spending_transaction: Option<String>,
-    #[serde(rename = "spendingHeight")]
-    spending_height: Option<u64>,
-    #[serde(rename = "inclusionHeight")]
-    inclusion_height: u64,
-    spent: bool,
-}
+/// Response from `POST /blockchain/box/unspent/byAddress` is a JSON array of IndexedErgoBox.
+pub(crate) type ByAddressResponse = Vec<IndexedErgoBox>;
 
-/// The inner box structure from the API response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ApiInnerBox {
+/// Box representation returned by Ergo `/blockchain/*` endpoints (IndexedErgoBox).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct IndexedErgoBox {
     #[serde(rename = "boxId")]
     box_id: String,
     value: u64,
@@ -52,19 +30,40 @@ struct ApiInnerBox {
     transaction_id: String,
     #[serde(rename = "additionalRegisters")]
     additional_registers: std::collections::HashMap<String, String>,
-    assets: Vec<ApiBoxAsset>,
-    index: u32,
+    #[serde(default)]
+    assets: Vec<IndexedBoxAsset>,
+    #[serde(flatten)]
+    _extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
-/// Asset structure from the API response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ApiBoxAsset {
+/// Asset representation in an IndexedErgoBox.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct IndexedBoxAsset {
     #[serde(rename = "tokenId")]
     token_id: String,
     amount: u64,
 }
 
-
+impl From<IndexedErgoBox> for ScanBox {
+    fn from(box_: IndexedErgoBox) -> Self {
+        Self {
+            box_id: box_.box_id,
+            value: box_.value,
+            ergo_tree: box_.ergo_tree,
+            creation_height: box_.creation_height,
+            transaction_id: box_.transaction_id,
+            additional_registers: box_.additional_registers,
+            assets: box_
+                .assets
+                .into_iter()
+                .map(|a| BoxAsset {
+                    token_id: a.token_id,
+                    amount: a.amount,
+                })
+                .collect(),
+        }
+    }
+}
 
 use crate::{
     persistence::{ReserveStorage, ScannerMetadataStorage},
@@ -127,8 +126,6 @@ pub struct ServerStateInner {
     pub current_height: u64,
     pub last_scanned_height: u64,
     pub scan_active: bool,
-    pub scan_id: Option<i32>,
-    pub last_scan_verification: Option<std::time::SystemTime>,
 }
 
 /// Server state for scanner
@@ -233,8 +230,6 @@ impl ServerState {
             current_height: 0,
             last_scanned_height: start_height,
             scan_active: false,
-            scan_id: None,
-            last_scan_verification: None,
         }));
 
         Ok(Self {
@@ -313,11 +308,46 @@ impl ServerState {
         Ok(height)
     }
 
-    /// Get unspent reserve boxes
-    pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ErgoBox>, ScannerError> {
-        // This would use the scan API to get actual reserve boxes
-        // For now, return empty vector as placeholder
-        Ok(vec![])
+    /// Get unspent reserve boxes via `POST /blockchain/box/unspent/byAddress`.
+    pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ScanBox>, ScannerError> {
+        let reserve_contract_p2s = self.config.reserve_contract_p2s.as_ref().ok_or_else(|| {
+            ScannerError::Generic("Reserve contract P2S not configured".to_string())
+        })?;
+
+        let url = format!("{}/blockchain/box/unspent/byAddress", self.config.node_url);
+        info!("Fetching unspent reserve boxes from: {}", url);
+
+        let response = self
+            .request_builder(reqwest::Method::POST, &url)
+            .json(reserve_contract_p2s)
+            .send()
+            .await
+            .map_err(|e| {
+                ScannerError::HttpError(format!("Failed to fetch reserve boxes: {}", e))
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let response_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read response".to_string());
+            error!(
+                "Failed to get reserve boxes with status {}: {}",
+                status, response_text
+            );
+            return Err(ScannerError::NodeError(format!(
+                "Failed to get reserve boxes with status: {}",
+                status
+            )));
+        }
+
+        let parsed: ByAddressResponse = response.json().await.map_err(|e| {
+            ScannerError::JsonError(format!("Failed to parse reserve boxes response: {}", e))
+        })?;
+
+        info!("Found {} reserve boxes", parsed.len());
+        Ok(parsed.into_iter().map(Into::into).collect())
     }
 
     /// Check if scanner is active
@@ -331,18 +361,14 @@ impl ServerState {
     pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
         info!("Starting Ergo blockchain scanner for reserves");
 
+        if self.config.reserve_contract_p2s.is_none() {
+            warn!("No reserve contract P2S specified, scanner will have no boxes to fetch");
+        }
+
         // Update inner state
         {
             let mut inner = self.inner.lock().await;
             inner.scan_active = true;
-        }
-
-        if let Some(reserve_contract_p2s) = &self.config.reserve_contract_p2s {
-            info!("Using reserve contract P2S: {}", reserve_contract_p2s);
-            // Register the scan for reserves
-            self.register_reserve_scan().await?;
-        } else {
-            warn!("No reserve contract P2S specified, using polling mode");
         }
 
         Ok(())
@@ -364,434 +390,9 @@ impl ServerState {
         &self.reserve_storage
     }
 
-
-
-    /// Register reserve scan with Ergo node
-    pub async fn register_reserve_scan(&mut self) -> Result<(), ScannerError> {
-        let reserve_contract_p2s =
-            self.config.reserve_contract_p2s.as_ref().ok_or_else(|| {
-                ScannerError::Generic("Reserve contract P2S not configured".to_string())
-            })?;
-
-        let scan_name = self
-            .config
-            .scan_name
-            .as_deref()
-            .unwrap_or("Basis Reserve Scanner");
-
-        // Check if scan ID already exists in database
-        debug!(
-            "Checking for existing scan ID in database for scan name: '{}'",
-            scan_name
-        );
-        match self.metadata_storage.get_scan_id(scan_name) {
-            Ok(Some(stored_scan_id)) => {
-                info!("Found existing scan ID in database: {}", stored_scan_id);
-
-                // Verify the scan still exists on the node (only every 4 hours)
-                let should_verify = self.should_verify_scan().await;
-                if should_verify {
-                    debug!("Verifying scan ID {} exists on Ergo node", stored_scan_id);
-                    match self.verify_scan_exists(stored_scan_id).await {
-                        Ok(true) => {
-                            info!("Using existing scan ID: {}", stored_scan_id);
-                            // Update verification timestamp
-                            self.update_scan_verification_time().await;
-                            // Update inner state with the validated scan ID
-                            {
-                                let mut inner = self.inner.lock().await;
-                                inner.scan_id = Some(stored_scan_id);
-                            }
-                            return Ok(());
-                        }
-                        Ok(false) => {
-                            warn!(
-                                "Stored scan ID {} no longer exists on node, re-registering",
-                                stored_scan_id
-                            );
-                            self.metadata_storage
-                                .remove_scan_id(scan_name)
-                                .map_err(|e| {
-                                    ScannerError::StoreError(format!(
-                                        "Failed to remove invalid scan ID: {:?}",
-                                        e
-                                    ))
-                                })?;
-                            info!(
-                                "Removed invalid scan ID {} from database, proceeding to registration",
-                                stored_scan_id
-                            );
-                        }
-                        Err(e) => {
-                            // If verification fails due to scan list endpoint being unavailable (400/404),
-                            // or JSON parsing errors, assume the scan still exists and continue using it
-                            if e.to_string().contains("400") || e.to_string().contains("404") || e.to_string().contains("Failed to parse scan list") {
-                                warn!("Scan list endpoint unavailable or JSON parsing failed ({}), assuming scan ID {} still exists", e, stored_scan_id);
-                                // Update verification timestamp
-                                self.update_scan_verification_time().await;
-                                // Update inner state with the existing scan ID
-                                {
-                                    let mut inner = self.inner.lock().await;
-                                    inner.scan_id = Some(stored_scan_id);
-                                    inner.scan_active = true;
-                                }
-                                return Ok(());
-                            } else {
-                                error!(
-                                    "Failed to verify existing scan ID {}: {}",
-                                    stored_scan_id, e
-                                );
-                                warn!("Unable to verify scan ID, forcing re-registration");
-                                self.metadata_storage
-                                    .remove_scan_id(scan_name)
-                                    .map_err(|e| {
-                                        ScannerError::StoreError(format!(
-                                            "Failed to remove scan ID: {:?}",
-                                            e
-                                        ))
-                                    })?;
-                                info!("Forcing scan registration due to verification failure");
-                            }
-                        }
-                    }
-                } else {
-                    debug!("Skipping scan ID verification (last verified less than 4 hours ago)");
-                    // Update inner state with the existing scan ID without verification
-                    {
-                        let mut inner = self.inner.lock().await;
-                        inner.scan_id = Some(stored_scan_id);
-                        inner.scan_active = true;
-                    }
-                    return Ok(());
-                }
-            }
-            Ok(None) => {
-                info!("No existing scan ID found in database for scan name: '{}', proceeding with new registration", scan_name);
-            }
-            Err(e) => {
-                error!("Failed to get scan ID from database: {:?}", e);
-                info!("Database error, proceeding with new registration");
-            }
-        }
-
-        // Create the ErgoTree and serialize it with ByteArrayConstant wrapper
-        // This matches the Scala pattern: ByteArrayConstant(ErgoTreeSerializer.DefaultSerializer.serializeErgoTree(script))
-        let serialized_contract_bytes = {
-            let tree: ErgoTree = AddressEncoder::new(NetworkPrefix::Mainnet)
-                .parse_address_from_str(reserve_contract_p2s)
-                .unwrap()
-                .script()
-                .unwrap();
-            
-            // Get raw ErgoTree bytes
-            let ergo_tree_bytes = tree.sigma_serialize_bytes();
-            
-            // Create ByteArrayConstant wrapper and serialize it
-            // This matches what the Ergo node expects for scan registration
-            let byte_array_constant = ergo_lib::ergotree_ir::mir::constant::Constant::from(ergo_tree_bytes);
-            byte_array_constant.sigma_serialize_bytes()
-        };
-
-        let contract_bytes_hex = hex::encode(&serialized_contract_bytes);
-
-        // Register new scan
-        let scan_payload = serde_json::json!({
-            "scanName": scan_name,
-            "walletInteraction": "shared",
-            "trackingRule": {
-                "predicate": "contains",
-                "register": "R1",
-                "value": contract_bytes_hex
-            },
-            "removeOffchain": false
-        });
-
-        // Log scan registration (INFO level) and JSON payload (DEBUG level)
-        info!("Registering new reserve scan with name: {}", scan_name);
-        debug!("Reserve scan registration JSON payload: {}", scan_payload);
-
-        let url = format!("{}/scan/register", self.config.node_url);
-
-        // Create request builder and log request details
-        let request_builder = self
-            .request_builder(reqwest::Method::POST, &url)
-            .json(&scan_payload);
-
-        // Log exact HTTP request details
-        info!("Sending HTTP POST request to Ergo node: {}", url);
-        info!("Request headers: API key present: {}", self.config.api_key.is_some());
-        info!("Request body (JSON): {}", scan_payload);
-        debug!("Sending scan registration request to: {}", url);
-        debug!(
-            "Request headers include: {}",
-            if self.config.api_key.is_some() {
-                "API key"
-            } else {
-                "NO API key"
-            }
-        );
-
-        let response = request_builder.send().await.map_err(|e| {
-            error!("HTTP request failed: {}", e);
-            error!(
-                "Request details - URL: {}, Method: POST, Headers: API key present: {}",
-                url,
-                self.config.api_key.is_some()
-            );
-            ScannerError::HttpError(format!("Failed to register scan: {}", e))
-        })?;
-
-        // Log response details
-        let status = response.status();
-        debug!("Response status: {}", status);
-        debug!("Response headers: {:?}", response.headers());
-
-        if !status.is_success() {
-            // Try to read response body for more details
-            let response_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unable to read response body".to_string());
-            error!(
-                "Scan registration failed with status: {}. Response body: {}",
-                status, response_text
-            );
-            error!("Full request details:");
-            error!("  URL: {}", url);
-            error!("  Method: POST");
-            error!("  API key present: {}", self.config.api_key.is_some());
-            error!("  Payload: {}", scan_payload);
-            error!("  Response status: {}", status);
-            error!("  Response body: {}", response_text);
-            return Err(ScannerError::NodeError(format!(
-                "Scan registration failed with status: {}. Response: {}",
-                status, response_text
-            )));
-        }
-
-        let result: serde_json::Value = response.json().await.map_err(|e| {
-            error!("Failed to parse scan registration response JSON: {}", e);
-            ScannerError::JsonError(format!("Failed to parse scan registration response: {}", e))
-        })?;
-
-        debug!(
-            "Scan registration successful response: {}",
-            serde_json::to_string_pretty(&result)
-                .unwrap_or_else(|_| "Unable to format JSON".to_string())
-        );
-
-        let scan_id = result["scanId"]
-            .as_i64()
-            .and_then(|v| i32::try_from(v).ok());
-
-        // Store scan ID in database and update inner state
-        if let Some(scan_id) = scan_id {
-            self.metadata_storage
-                .store_scan_id(scan_name, scan_id)
-                .map_err(|e| {
-                    ScannerError::StoreError(format!("Failed to store scan ID: {:?}", e))
-                })?;
-
-            // Update inner state with the new scan ID
-            {
-                let mut inner = self.inner.lock().await;
-                inner.scan_id = Some(scan_id);
-                inner.scan_active = true;
-            }
-
-            info!("Registered and stored reserve scan with ID: {}", scan_id);
-        } else {
-            error!(
-                "Failed to get scan ID from registration response. Response was: {}",
-                result
-            );
-            return Err(ScannerError::Generic(
-                "Failed to get scan ID from registration response".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Check if scan verification is needed (every 4 hours)
-    async fn should_verify_scan(&self) -> bool {
-        let inner = self.inner.lock().await;
-        match inner.last_scan_verification {
-            Some(last_verification) => {
-                let now = std::time::SystemTime::now();
-                let duration_since_last = now.duration_since(last_verification).unwrap_or_default();
-                duration_since_last >= std::time::Duration::from_secs(4 * 60 * 60) // 4 hours
-            }
-            None => true, // Never verified before
-        }
-    }
-
-    /// Update the last scan verification timestamp
-    async fn update_scan_verification_time(&self) {
-        let mut inner = self.inner.lock().await;
-        inner.last_scan_verification = Some(std::time::SystemTime::now());
-    }
-
-    /// Verify that a scan ID still exists on the Ergo node
-    pub async fn verify_scan_exists(&self, scan_id: i32) -> Result<bool, ScannerError> {
-        let url = format!("{}/scan/listAll", self.config.node_url);
-        debug!("Verifying scan exists - URL: {}", url);
-        debug!("Looking for scan ID: {}", scan_id);
-        info!("Sending HTTP GET request to Ergo node: {}", url);
-        info!("Looking for scan ID: {}", scan_id);
-
-        let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
-            .await;
-
-        let response = match response {
-            Ok(resp) => resp,
-            Err(e) => {
-                error!("Failed to send scan list request: {}", e);
-                // If we can't even connect, assume the scan exists to avoid re-registration
-                warn!(
-                    "Network error connecting to scan list endpoint, assuming scan ID {} exists",
-                    scan_id
-                );
-                return Ok(true);
-            }
-        };
-
-        let status = response.status();
-        debug!("Scan list response status: {}", status);
-
-        // If scan list endpoint is not available (400/404), assume scan exists
-        // This handles nodes that don't support scan listing
-        if status == 400 || status == 404 {
-            info!(
-                "Scan list endpoint not available (status: {}), assuming scan ID {} exists",
-                status, scan_id
-            );
-            return Ok(true);
-        }
-
-        if !status.is_success() {
-            // Try to read response body for more details
-            let response_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unable to read response body".to_string());
-            // Log as warning instead of error since we're handling this gracefully
-            warn!(
-                "Scan list request failed with status: {}. Response body: {}",
-                status, response_text
-            );
-            // For any other non-success status, assume scan exists to prevent re-registration
-            warn!("Scan list request failed (status: {}), assuming scan ID {} exists to prevent re-registration", status, scan_id);
-            return Ok(true);
-        }
-
-        let scans: serde_json::Value = response.json().await.map_err(|e| {
-            error!("Failed to parse scan list JSON: {}", e);
-            ScannerError::JsonError(format!("Failed to parse scan list: {}", e))
-        })?;
-
-        debug!(
-            "Scan list response: {}",
-            serde_json::to_string_pretty(&scans)
-                .unwrap_or_else(|_| "Unable to format JSON".to_string())
-        );
-
-        // Check if our scan ID exists in the list
-        if let Some(scans_array) = scans.as_array() {
-            debug!("Found {} scans in list", scans_array.len());
-            for scan in scans_array {
-                if let Some(id) = scan["scanId"].as_i64() {
-                    debug!("Checking scan ID: {} against target: {}", id, scan_id);
-                    if id == scan_id as i64 {
-                        debug!("Scan ID {} found in scan list", scan_id);
-                        return Ok(true);
-                    }
-                } else {
-                    debug!("Scan entry missing scanId: {:?}", scan);
-                }
-            }
-        } else {
-            debug!("Scan list is not an array or is empty");
-        }
-
-        debug!("Scan ID {} not found in scan list", scan_id);
-        Ok(false)
-    }
-
-    /// Get unspent boxes from registered scan
+    /// Get unspent boxes from the blockchain via the reserve contract address.
     pub async fn get_scan_boxes(&self) -> Result<Vec<ScanBox>, ScannerError> {
-        let scan_id = {
-            let inner = self.inner.lock().await;
-            inner.scan_id
-        };
-
-        let scan_id =
-            scan_id.ok_or_else(|| ScannerError::Generic("Scan not registered".to_string()))?;
-
-        let url = format!("{}/scan/unspentBoxes/{}", self.config.node_url, scan_id);
-
-        info!("Sending HTTP GET request to Ergo node: {}", url);
-        info!("Requesting unspent boxes for scan ID: {}", scan_id);
-
-        let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
-            .await
-            .map_err(|e| ScannerError::HttpError(format!("Failed to fetch scan boxes: {}", e)))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let response_text = response.text().await.unwrap_or_else(|_| "Unable to read response".to_string());
-            error!("Failed to get scan boxes with status: {}", status);
-            error!("Response body: {}", response_text);
-            return Err(ScannerError::NodeError(format!(
-                "Failed to get scan boxes with status: {}",
-                status
-            )));
-        }
-
-        let response_text = response.text().await.map_err(|e| {
-            error!("Failed to read response text: {}", e);
-            ScannerError::HttpError(format!("Failed to read response text: {}", e))
-        })?;
-
-        // Parse the JSON response as the API format first
-        let api_boxes: Vec<ApiScanBox> = serde_json::from_str(&response_text)
-            .map_err(|e| {
-                error!("Failed to parse API scan boxes JSON: {}", e);
-                error!("Raw response was: {}", response_text);
-                ScannerError::JsonError(format!("Failed to parse API scan boxes: {}", e))
-            })?;
-
-        // Convert API boxes to our internal ScanBox format
-        let mut scan_boxes = Vec::new();
-        for api_box in api_boxes {
-            let converted_box = ScanBox {
-                box_id: api_box.inner_box.box_id,
-                value: api_box.inner_box.value,
-                ergo_tree: api_box.inner_box.ergo_tree,
-                creation_height: api_box.inner_box.creation_height,
-                transaction_id: api_box.inner_box.transaction_id,
-                additional_registers: api_box.inner_box.additional_registers,
-                assets: api_box.inner_box.assets.into_iter().map(|a| BoxAsset {
-                    token_id: a.token_id,
-                    amount: a.amount,
-                }).collect(),
-            };
-            scan_boxes.push(converted_box);
-        }
-
-        info!("Found {} boxes from scan (converted from API format)", scan_boxes.len());
-        for (i, box_data) in scan_boxes.iter().enumerate() {
-            info!("Box {}: ID={}, value={}, creation_height={}",
-                  i + 1, box_data.box_id, box_data.value, box_data.creation_height);
-            info!("  Registers: {:?}", box_data.additional_registers);
-            info!("  Assets: {:?}", box_data.assets);
-        }
-
-        Ok(scan_boxes)
+        self.get_unspent_reserve_boxes().await
     }
 
     /// Parse reserve box into ExtendedReserveInfo
@@ -832,8 +433,12 @@ impl ServerState {
 
         // Create extended reserve info
         // Decode the hex-encoded public key to actual bytes
-        let owner_pubkey_bytes = hex::decode(&owner_pubkey)
-            .map_err(|_| ScannerError::InvalidReserveBox(format!("Invalid hex in owner pubkey for box {}", box_id)))?;
+        let owner_pubkey_bytes = hex::decode(&owner_pubkey).map_err(|_| {
+            ScannerError::InvalidReserveBox(format!(
+                "Invalid hex in owner pubkey for box {}",
+                box_id
+            ))
+        })?;
 
         // Decode the hex-encoded tracker NFT ID to actual bytes
         // R6 contains a Coll[Byte] value with Ergo serialization prefix: 0e20 (type + length)
@@ -843,8 +448,12 @@ impl ServerState {
         } else {
             tracker_nft_id_raw.as_str()
         };
-        let tracker_nft_id_bytes = hex::decode(tracker_nft_hex)
-            .map_err(|_| ScannerError::InvalidReserveBox(format!("Invalid hex in tracker NFT ID for box {}", box_id)))?;
+        let tracker_nft_id_bytes = hex::decode(tracker_nft_hex).map_err(|_| {
+            ScannerError::InvalidReserveBox(format!(
+                "Invalid hex in tracker NFT ID for box {}",
+                box_id
+            ))
+        })?;
 
         // Validate that the tracker NFT ID is exactly 32 bytes (the actual tracker NFT ID)
         if tracker_nft_id_bytes.len() != 32 {
@@ -875,13 +484,19 @@ impl ServerState {
         let mut current_box_ids = Vec::new();
 
         for scan_box in &scan_boxes {
-            debug!("Processing scan box: ID={}, value={}, registers={:?}",
-                  scan_box.box_id, scan_box.value, scan_box.additional_registers);
+            debug!(
+                "Processing scan box: ID={}, value={}, registers={:?}",
+                scan_box.box_id, scan_box.value, scan_box.additional_registers
+            );
 
             match self.parse_reserve_box(scan_box) {
                 Ok(reserve_info) => {
-                    debug!("Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
-                          reserve_info.box_id, reserve_info.owner_pubkey, reserve_info.base_info.collateral_amount);
+                    debug!(
+                        "Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
+                        reserve_info.box_id,
+                        reserve_info.owner_pubkey,
+                        reserve_info.base_info.collateral_amount
+                    );
                     current_box_ids.push(reserve_info.box_id.clone());
 
                     // Update in-memory tracker
@@ -900,7 +515,10 @@ impl ServerState {
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to parse reserve box {}: {} - registers: {:?}", scan_box.box_id, e, scan_box.additional_registers);
+                    warn!(
+                        "Failed to parse reserve box {}: {} - registers: {:?}",
+                        scan_box.box_id, e, scan_box.additional_registers
+                    );
                 }
             }
         }
@@ -909,15 +527,21 @@ impl ServerState {
         // NOTE: Disabled for testing to prevent manually-inserted reserves from being deleted
         // when they don't exist on the local test node.
         let all_reserves = self.reserve_tracker.get_all_reserves();
-        info!("Current tracker has {} reserves, {} are still active in scan",
-              all_reserves.len(), current_box_ids.len());
+        info!(
+            "Current tracker has {} reserves, {} are still active in scan",
+            all_reserves.len(),
+            current_box_ids.len()
+        );
 
         // Only remove reserves if we actually found VALID boxes in the scan.
         // If no valid reserves were parsed (e.g., all failed validation), don't remove manually-inserted reserves.
         if !current_box_ids.is_empty() {
             for reserve in all_reserves {
                 if !current_box_ids.contains(&reserve.box_id) {
-                    info!("Removing spent reserve: {} (not found in current scan)", reserve.box_id);
+                    info!(
+                        "Removing spent reserve: {} (not found in current scan)",
+                        reserve.box_id
+                    );
                     // Remove from in-memory tracker
                     if let Err(e) = self.reserve_tracker.remove_reserve(&reserve.box_id) {
                         warn!("Failed to remove reserve {}: {}", reserve.box_id, e);
@@ -938,17 +562,13 @@ impl ServerState {
             info!("Scan returned 0 boxes, skipping reserve removal to preserve manually-inserted reserves");
         }
 
-        debug!("Finished processing scan boxes: {} processed, {} in tracker after processing",
-              scan_boxes.len(), self.reserve_tracker.get_all_reserves().len());
+        debug!(
+            "Finished processing scan boxes: {} processed, {} in tracker after processing",
+            scan_boxes.len(),
+            self.reserve_tracker.get_all_reserves().len()
+        );
 
         Ok(())
-    }
-
-    /// Get the reserve contract P2S for scan registration
-    async fn _get_reserve_contract_p2s(&self) -> Result<String, ScannerError> {
-        self.config.reserve_contract_p2s.clone().ok_or_else(|| {
-            ScannerError::Generic("No reserve contract P2S configured in node config".to_string())
-        })
     }
 }
 
@@ -1066,7 +686,7 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
                     let inner = state.inner.lock().await;
                     inner.current_height
                 };
-                
+
                 if height != previous_height {
                     info!("Current Ergo blockchain height: {}", height);
                     // Update current height in state
@@ -1075,24 +695,22 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
                         inner.current_height = height;
                     }
                 }
-                
-                // Check if we have a valid scan ID before processing
-                let has_valid_scan = {
-                    let inner = state.inner.lock().await;
-                    inner.scan_id.is_some() && inner.scan_active
-                };
 
-                if !has_valid_scan {
-                    warn!("Scanner has no valid scan ID, attempting to register scan...");
-                    let mut state_mut = state.as_ref().clone();
-                    match state_mut.register_reserve_scan().await {
+                // Process scan boxes whenever the height has advanced
+                if height > state.last_scanned_height().await {
+                    match state.process_scan_boxes().await {
                         Ok(()) => {
-                            info!("Scan registration successful, resuming normal operation");
                             consecutive_failures = 0;
+                            // Update last scanned height on success
+                            {
+                                let mut inner = state.inner.lock().await;
+                                inner.last_scanned_height = height;
+                            }
                         }
                         Err(e) => {
-                            error!("Failed to register scan: {}", e);
+                            error!("Failed to process scan boxes: {}", e);
                             consecutive_failures += 1;
+
                             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                                 error!(
                                     "Too many consecutive failures ({}), waiting before retry",
@@ -1100,43 +718,6 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
                                 );
                                 tokio::time::sleep(Duration::from_secs(60)).await;
                                 // Wait longer after many failures
-                            }
-                        }
-                    }
-                } else {
-                    // Process scan boxes if we have a valid scan
-                    if height > state.last_scanned_height().await {
-                        match state.process_scan_boxes().await {
-                            Ok(()) => {
-                                consecutive_failures = 0;
-                                // Update last scanned height on success
-                                {
-                                    let mut inner = state.inner.lock().await;
-                                    inner.last_scanned_height = height;
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to process scan boxes: {}", e);
-                                consecutive_failures += 1;
-
-                                // If we get "scan not registered" error, reset scan state
-                                if e.to_string().contains("Scan not registered") {
-                                    warn!("Scan registration lost, resetting scan state");
-                                    {
-                                        let mut inner = state.inner.lock().await;
-                                        inner.scan_id = None;
-                                        inner.scan_active = false;
-                                    }
-                                }
-
-                                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                                    error!(
-                                        "Too many consecutive failures ({}), waiting before retry",
-                                        consecutive_failures
-                                    );
-                                    tokio::time::sleep(Duration::from_secs(60)).await;
-                                    // Wait longer after many failures
-                                }
                             }
                         }
                     }
@@ -1208,9 +789,15 @@ mod tests {
                 assert_eq!(reserve_info.owner_pubkey, expected_pubkey);
                 // The tracker_nft_id should match the one from R6 register
                 assert_eq!(reserve_info.base_info.tracker_nft_id, tracker_nft_id);
-                println!("SUCCESS: Prefix was correctly stripped. Original: {}, Stripped: {}", prefixed_pubkey, reserve_info.owner_pubkey);
-                println!("SUCCESS: Tracker NFT ID correctly extracted from R6 register: {}", reserve_info.base_info.tracker_nft_id);
-            },
+                println!(
+                    "SUCCESS: Prefix was correctly stripped. Original: {}, Stripped: {}",
+                    prefixed_pubkey, reserve_info.owner_pubkey
+                );
+                println!(
+                    "SUCCESS: Tracker NFT ID correctly extracted from R6 register: {}",
+                    reserve_info.base_info.tracker_nft_id
+                );
+            }
             Err(e) => {
                 panic!("Failed to parse reserve box: {:?}", e);
             }
@@ -1246,11 +833,14 @@ mod tests {
         match result {
             Ok(_) => {
                 panic!("Expected error when R6 register is missing, but parsing succeeded");
-            },
+            }
             Err(e) => {
                 // Check that the error message mentions the missing R6 register
                 assert!(e.to_string().contains("Missing R6 register"));
-                println!("SUCCESS: Correctly returned error for missing R6 register: {:?}", e);
+                println!(
+                    "SUCCESS: Correctly returned error for missing R6 register: {:?}",
+                    e
+                );
             }
         }
     }
@@ -1286,11 +876,14 @@ mod tests {
         match result {
             Ok(_) => {
                 panic!("Expected error when R6 register has invalid length, but parsing succeeded");
-            },
+            }
             Err(e) => {
                 // Check that the error message mentions the invalid length
                 assert!(e.to_string().contains("Invalid tracker NFT ID length"));
-                println!("SUCCESS: Correctly returned error for invalid R6 register length: {:?}", e);
+                println!(
+                    "SUCCESS: Correctly returned error for invalid R6 register length: {:?}",
+                    e
+                );
             }
         }
     }

@@ -7,10 +7,10 @@ use crate::errors::TreeError;
 #[test]
 fn test_tree_creation() -> Result<(), TreeError> {
     let tree = BasisAvlTree::new()?;
-    
+
     let digest = tree.root_digest();
     assert_eq!(digest.len(), 33);
-    
+
     Ok(())
 }
 
@@ -55,8 +55,6 @@ fn test_tree_update() -> Result<(), TreeError> {
     Ok(())
 }
 
-
-
 /// Test proof generation
 #[test]
 fn test_proof_generation() -> Result<(), TreeError> {
@@ -85,7 +83,8 @@ fn test_multiple_insertions() -> Result<(), TreeError> {
     let initial_digest = tree.root_digest();
 
     // Insert multiple keys with proper non-zero values
-    for i in 1..11 {  // Start from 1 to avoid zero keys
+    for i in 1..11 {
+        // Start from 1 to avoid zero keys
         let mut key = vec![0u8; 32];
         key[0] = i;
         let value = vec![i * 2; 32];
@@ -93,11 +92,17 @@ fn test_multiple_insertions() -> Result<(), TreeError> {
     }
 
     let final_digest = tree.root_digest();
-    assert_ne!(initial_digest, final_digest, "Digest should change after multiple insertions");
+    assert_ne!(
+        initial_digest, final_digest,
+        "Digest should change after multiple insertions"
+    );
 
     // Verify state is consistent
     let state = tree.get_state();
-    assert!(!state.is_empty(), "State should not be empty after insertions");
+    assert!(
+        !state.is_empty(),
+        "State should not be empty after insertions"
+    );
 
     Ok(())
 }
@@ -109,7 +114,7 @@ fn test_sequential_updates() -> Result<(), TreeError> {
 
     let mut key = vec![0u8; 32];
     key[0] = 1;
-    
+
     // Insert initial value
     tree.insert(key.clone(), vec![10u8; 32])?;
     let digest1 = tree.root_digest();
@@ -120,7 +125,10 @@ fn test_sequential_updates() -> Result<(), TreeError> {
     }
 
     let final_digest = tree.root_digest();
-    assert_ne!(digest1, final_digest, "Digest should change after sequential updates");
+    assert_ne!(
+        digest1, final_digest,
+        "Digest should change after sequential updates"
+    );
 
     Ok(())
 }
@@ -133,11 +141,12 @@ fn test_mixed_operations() -> Result<(), TreeError> {
     let initial_digest = tree.root_digest();
 
     // Perform mixed operations with proper non-zero keys
-    for i in 1..6 {  // Start from 1 to avoid zero keys
+    for i in 1..6 {
+        // Start from 1 to avoid zero keys
         let mut key = vec![0u8; 32];
         key[0] = i;
         let value = vec![i * 3; 32];
-        
+
         if i % 2 == 0 {
             tree.insert(key, value)?;
         } else {
@@ -148,7 +157,10 @@ fn test_mixed_operations() -> Result<(), TreeError> {
     }
 
     let final_digest = tree.root_digest();
-    assert_ne!(initial_digest, final_digest, "Digest should change after mixed operations");
+    assert_ne!(
+        initial_digest, final_digest,
+        "Digest should change after mixed operations"
+    );
 
     Ok(())
 }
@@ -170,7 +182,10 @@ fn test_large_number_of_operations() -> Result<(), TreeError> {
     }
 
     let final_digest = tree.root_digest();
-    assert_ne!(initial_digest, final_digest, "Digest should change after many insertions");
+    assert_ne!(
+        initial_digest, final_digest,
+        "Digest should change after many insertions"
+    );
 
     Ok(())
 }
@@ -193,8 +208,14 @@ fn test_state_consistency_after_operations() -> Result<(), TreeError> {
     let digest2 = tree.root_digest();
     let state2 = tree.get_state().clone();
 
-    assert_eq!(digest1, digest2, "Digest should not change after proof generation");
-    assert_eq!(state1.avl_root_digest, state2.avl_root_digest, "State should be consistent");
+    assert_eq!(
+        digest1, digest2,
+        "Digest should not change after proof generation"
+    );
+    assert_eq!(
+        state1.avl_root_digest, state2.avl_root_digest,
+        "State should be consistent"
+    );
 
     Ok(())
 }
@@ -213,7 +234,11 @@ fn test_lookup_proof_generation_and_verification() -> Result<(), TreeError> {
     // Generate lookup proof
     let (proof, returned_value) = tree.generate_lookup_proof(key.clone());
     assert!(returned_value.is_some(), "Lookup should return the value");
-    assert_eq!(returned_value.unwrap(), value, "Returned value should match");
+    assert_eq!(
+        returned_value.unwrap(),
+        value,
+        "Returned value should match"
+    );
 
     // Verify the proof
     let valid = BasisAvlTree::verify_proof(&digest, &proof, &key, &value);

@@ -2,17 +2,17 @@
 
 #[cfg(test)]
 mod cors_tests {
-use axum::{
-    body::Body,
-    http::{Method, Request, StatusCode},
-    routing::{get, post},
-    Router,
-};
-use basis_server::{api::*, reserve_api::*, store::EventStore, AppState, TrackerCommand};
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tower::ServiceExt;
-use tower_http::cors::{Any, CorsLayer};
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode},
+        routing::{get, post},
+        Router,
+    };
+    use basis_server::{api::*, reserve_api::*, store::EventStore, AppState, TrackerCommand};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+    use tower::ServiceExt;
+    use tower_http::cors::{Any, CorsLayer};
 
     // Test helper to create a mock app state with CORS enabled
     async fn create_mock_app_with_cors() -> Router {
@@ -27,7 +27,7 @@ use tower_http::cors::{Any, CorsLayer};
 
         // Create server state with temporary storage
         let ergo_scanner = Arc::new(tokio::sync::Mutex::new(
-            basis_store::ergo_scanner::ServerState::new(config).unwrap()
+            basis_store::ergo_scanner::ServerState::new(config).unwrap(),
         ));
         let reserve_tracker = Arc::new(tokio::sync::Mutex::new(basis_store::ReserveTracker::new()));
 
@@ -150,7 +150,7 @@ use tower_http::cors::{Any, CorsLayer};
                         response_tx,
                     } => {
                         // Mock reserve insert proof
-                        let _ = response_tx.send(Ok(vec![1, 2, 3, 4]));
+                        let _ = response_tx.send(Ok((vec![1, 2, 3, 4], vec![5, 6, 7, 8])));
                     }
                     TrackerCommand::GetNotesByRecipientWithIssuer {
                         recipient_pubkey: _,
@@ -176,25 +176,32 @@ use tower_http::cors::{Any, CorsLayer};
                     ..Default::default()
                 },
                 basis_reserve_contract_p2s: "test".to_string(),
-                tracker_nft_id: Some("69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string()),
-                tracker_public_key: Some("9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string()),
+                tracker_nft_id: Some(
+                    "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+                ),
+                tracker_public_key: Some(
+                    "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+                ),
                 tracker_secret_key: None,
             },
             transaction: basis_server::config::TransactionConfig {
                 fee: 1000000,
                 change_address: None,
             },
-            acceptance: basis_server::acceptance::config::AcceptanceConfig::empty()
+            acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
         });
 
         // Use a unique temporary directory for each test invocation using a counter
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique_id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let temp_dir = std::env::temp_dir().join(format!("basis_test_tracker_storage_cors_{}_{}", std::process::id(), unique_id));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "basis_test_tracker_storage_cors_{}_{}",
+            std::process::id(),
+            unique_id
+        ));
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-        let tracker_storage = basis_store::persistence::TrackerStorage::open(
-            &temp_dir
-        ).expect("Failed to create tracker storage");
+        let tracker_storage = basis_store::persistence::TrackerStorage::open(&temp_dir)
+            .expect("Failed to create tracker storage");
 
         let app_state = AppState {
             tx,
@@ -203,13 +210,14 @@ use tower_http::cors::{Any, CorsLayer};
             reserve_tracker,
             config: test_config,
             shared_tracker_state: std::sync::Arc::new(tokio::sync::Mutex::new(
-                basis_server::tracker_box_updater::SharedTrackerState::new()
+                basis_server::tracker_box_updater::SharedTrackerState::new(),
             )),
             tracker_storage,
             acceptance_predicate: None,
             policy_storage: basis_store::persistence::AcceptancePolicyStorage::open(
-                temp_dir.join("policies")
-            ).expect("Failed to create policy storage"),
+                temp_dir.join("policies"),
+            )
+            .expect("Failed to create policy storage"),
         };
 
         // Build the app with CORS enabled (same as main server)

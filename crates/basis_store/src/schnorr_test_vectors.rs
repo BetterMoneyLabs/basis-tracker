@@ -160,15 +160,13 @@ mod tests {
                 .expect("Invalid issuer pubkey hex")
                 .try_into()
                 .expect("Issuer pubkey must be 33 bytes");
-            let message = hex::decode(vector.message_hex)
-                .expect("Invalid message hex");
+            let message = hex::decode(vector.message_hex).expect("Invalid message hex");
             let signature = hex::decode(vector.signature_hex)
                 .expect("Invalid signature hex")
                 .try_into()
                 .expect("Signature must be 65 bytes");
 
-            let result = schnorr::schnorr_verify(&signature, &message, &issuer_pubkey
-            );
+            let result = schnorr::schnorr_verify(&signature, &message, &issuer_pubkey);
             let verified = result.is_ok();
 
             assert_eq!(

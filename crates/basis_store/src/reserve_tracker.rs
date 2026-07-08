@@ -224,7 +224,9 @@ impl ExtendedReserveInfo {
                 collateral_amount,
                 last_updated_height,
                 contract_address: String::new(), // Must be set separately via set_contract_address()
-                tracker_nft_id: tracker_nft_id.map(|id| hex::encode(id)).unwrap_or_else(|| "".to_string()),
+                tracker_nft_id: tracker_nft_id
+                    .map(|id| hex::encode(id))
+                    .unwrap_or_else(|| "".to_string()),
             },
             total_debt: 0,
             box_id: hex::encode(box_id),
@@ -266,7 +268,10 @@ mod tests {
         let retrieved = tracker.get_reserve(&reserve_info.box_id).unwrap();
         assert_eq!(retrieved.base_info.collateral_amount, 1000000000);
         assert_eq!(retrieved.total_debt, 0);
-        assert_eq!(retrieved.base_info.tracker_nft_id, hex::encode(b"test_tracker_nft_1234567890"));
+        assert_eq!(
+            retrieved.base_info.tracker_nft_id,
+            hex::encode(b"test_tracker_nft_1234567890")
+        );
 
         // Add debt
         tracker.add_debt(&reserve_info.box_id, 500000000).unwrap(); // 0.5 ERG debt

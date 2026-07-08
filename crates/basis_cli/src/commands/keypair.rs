@@ -1,6 +1,6 @@
+use crate::crypto::KeyPair;
 use anyhow::Result;
 use clap::Args;
-use crate::crypto::KeyPair;
 
 #[derive(Args)]
 #[command(name = "generate-keypair", about = "Generate a new secp256k1 keypair")]

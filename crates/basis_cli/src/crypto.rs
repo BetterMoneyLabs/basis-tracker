@@ -1,6 +1,6 @@
 use anyhow::Result;
-use secp256k1::{KeyPair as SecpKeyPair, Secp256k1, SecretKey};
 use basis_core::traits::SignatureVerifier;
+use secp256k1::{KeyPair as SecpKeyPair, Secp256k1, SecretKey};
 
 pub type PubKey = [u8; 33];
 pub type Signature = [u8; 65];
@@ -26,18 +26,18 @@ impl KeyPair {
     }
 
     pub fn sign_message(&self, message: &[u8]) -> Result<Signature> {
-        use secp256k1::{Secp256k1, SecretKey};
         use blake2::{Blake2b, Digest};
         use generic_array::typenum::U32;
+        use secp256k1::{Secp256k1, SecretKey};
 
         let secp = Secp256k1::new();
         let issuer_pubkey_bytes = self.get_public_key_bytes();
 
         // Curve order for secp256k1
         let n = num_bigint::BigUint::from_bytes_be(&[
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
-            0x41, 0x41,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C,
+            0xD0, 0x36, 0x41, 0x41,
         ]);
 
         // Retry loop: regenerate nonce until z.bitLength <= 255 (Scala/ErgoScript constraint)
@@ -63,6 +63,13 @@ impl KeyPair {
             // Convert to Scalar using the same approach as in basis_store
             let e_scalar = secp256k1::Scalar::from_be_bytes(e_bytes_32)
                 .map_err(|_| anyhow::anyhow!("Failed to create scalar from challenge"))?;
+
+            // Ensure e is interpreted as a positive integer in Scala/ErgoScript, which
+            // treats 32-byte values as signed big-endian integers. If the first byte is
+            // >= 0x80, the challenge would be negative in Scala, breaking verification.
+            if e_scalar.to_be_bytes()[0] >= 0x80 {
+                continue;
+            }
 
             // Get the secret key scalar
             let _secret_key_scalar = secp256k1::Scalar::from_be_bytes(self.keypair.secret_bytes())
@@ -140,9 +147,9 @@ impl KeyPair {
     }
 }
 
-    // This function is available for future use but currently unused
-    #[allow(dead_code)]
-    fn blake2b_hash(data: &[u8]) -> [u8; 32] {
+// This function is available for future use but currently unused
+#[allow(dead_code)]
+fn blake2b_hash(data: &[u8]) -> [u8; 32] {
     use blake2::{Blake2b, Digest};
 
     let mut hasher = Blake2b::<blake2::digest::consts::U32>::new();

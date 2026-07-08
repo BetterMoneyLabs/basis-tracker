@@ -338,6 +338,8 @@ dependencies = [
  "criterion",
  "ergo-lib",
  "ergo_avltree_rust",
+ "ergotree-interpreter",
+ "ergotree-ir",
  "fjall",
  "generic-array",
  "hex",
@@ -352,6 +354,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "ureq",
 ]
 
 [[package]]

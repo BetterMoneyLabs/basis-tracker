@@ -1,6 +1,6 @@
 //! Core implementations for Basis Tracker system
 
-use crate::traits::{SignatureVerifier, CryptoError};
+use crate::traits::{CryptoError, SignatureVerifier};
 use crate::types::{PubKey, Signature};
 use blake2::{Blake2b, Digest};
 use generic_array::typenum::U32;
@@ -11,7 +11,12 @@ use std::convert::TryInto;
 pub struct SchnorrVerifier;
 
 impl SignatureVerifier for SchnorrVerifier {
-    fn verify_signature(&self, signature: &Signature, message: &[u8], public_key: &PubKey) -> Result<(), CryptoError> {
+    fn verify_signature(
+        &self,
+        signature: &Signature,
+        message: &[u8],
+        public_key: &PubKey,
+    ) -> Result<(), CryptoError> {
         use secp256k1::Secp256k1;
 
         let secp = Secp256k1::new();
@@ -60,7 +65,12 @@ impl SignatureVerifier for SchnorrVerifier {
         Ok(())
     }
 
-    fn sign_message(&self, message: &[u8], secret_key: &[u8; 32], public_key: &PubKey) -> Result<Signature, CryptoError> {
+    fn sign_message(
+        &self,
+        message: &[u8],
+        secret_key: &[u8; 32],
+        public_key: &PubKey,
+    ) -> Result<Signature, CryptoError> {
         // Delegate to the canonical schnorr_sign function to avoid code duplication
         schnorr_sign(message, secret_key, public_key)
     }
@@ -143,15 +153,18 @@ mod tests {
         let timestamp = 1743379200000u64; // Mar 29, 2025 in ms
 
         // Create the message to be signed: key || totalDebt || timestamp
-        let message = crate::types::signing_message(&issuer_pubkey, &recipient_pubkey, total_debt, timestamp);
+        let message =
+            crate::types::signing_message(&issuer_pubkey, &recipient_pubkey, total_debt, timestamp);
 
         // Sign the message
         let verifier = SchnorrVerifier;
-        let signature = verifier.sign_message(&message, &secret_key.secret_bytes(), &recipient_pubkey)
+        let signature = verifier
+            .sign_message(&message, &secret_key.secret_bytes(), &recipient_pubkey)
             .expect("Signing should succeed");
 
         // Verify the signature
-        verifier.verify_signature(&signature, &message, &recipient_pubkey)
+        verifier
+            .verify_signature(&signature, &message, &recipient_pubkey)
             .expect("Verification should succeed");
 
         assert_eq!(signature.len(), 65, "Signature should be 65 bytes");
@@ -172,11 +185,13 @@ mod tests {
         let timestamp = 1743379200000u64; // Mar 29, 2025 in ms
 
         // Create the message to be signed: key || totalDebt || timestamp
-        let message = crate::types::signing_message(&issuer_pubkey, &recipient_pubkey, total_debt, timestamp);
+        let message =
+            crate::types::signing_message(&issuer_pubkey, &recipient_pubkey, total_debt, timestamp);
 
         // Sign the message
         let verifier = SchnorrVerifier;
-        let signature = verifier.sign_message(&message, &secret_key.secret_bytes(), &recipient_pubkey)
+        let signature = verifier
+            .sign_message(&message, &secret_key.secret_bytes(), &recipient_pubkey)
             .expect("Signing should succeed");
 
         // Tamper with the message
@@ -186,7 +201,10 @@ mod tests {
         // Verify with tampered message (should fail)
         let result = verifier.verify_signature(&signature, &tampered_message, &recipient_pubkey);
 
-        assert!(result.is_err(), "Verification should fail with tampered message");
+        assert!(
+            result.is_err(),
+            "Verification should fail with tampered message"
+        );
     }
 }
 
@@ -208,7 +226,8 @@ pub fn pubkey_to_hex(pubkey: &PubKey) -> String {
 
 /// Convert a hexadecimal string to a public key
 pub fn pubkey_from_hex(hex_str: &str) -> Result<PubKey, CryptoError> {
-    let bytes = hex::decode(hex_str).map_err(|_| CryptoError::InternalError("Hex decode failed".to_string()))?;
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| CryptoError::InternalError("Hex decode failed".to_string()))?;
 
     if bytes.len() != 33 {
         return Err(CryptoError::InvalidPublicKey);
@@ -227,7 +246,8 @@ pub fn signature_to_hex(signature: &Signature) -> String {
 
 /// Convert a hexadecimal string to a signature
 pub fn signature_from_hex(hex_str: &str) -> Result<Signature, CryptoError> {
-    let bytes = hex::decode(hex_str).map_err(|_| CryptoError::InternalError("Hex decode failed".to_string()))?;
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| CryptoError::InternalError("Hex decode failed".to_string()))?;
 
     if bytes.len() != 65 {
         return Err(CryptoError::InvalidSignatureFormat);
@@ -250,8 +270,8 @@ pub fn schnorr_sign(
     let secp = Secp256k1::new();
 
     // Parse the secret key
-    let secret_key = SecretKey::from_slice(secret_key_bytes)
-        .map_err(|_| CryptoError::InvalidSignature)?;
+    let secret_key =
+        SecretKey::from_slice(secret_key_bytes).map_err(|_| CryptoError::InvalidSignature)?;
 
     // Curve order for secp256k1
     let n = num_bigint::BigUint::from_bytes_be(&[
@@ -268,6 +288,13 @@ pub fn schnorr_sign(
 
         // Compute challenge e = H(a || message || issuer_pubkey)
         let e_scalar = compute_challenge(&a_bytes, message, issuer_pubkey)?;
+
+        // Ensure e is interpreted as a positive integer in Scala/ErgoScript, which
+        // treats 32-byte values as signed big-endian integers. If the first byte is
+        // >= 0x80, the challenge would be negative in Scala, breaking verification.
+        if e_scalar.to_be_bytes()[0] >= 0x80 {
+            continue;
+        }
 
         // Convert scalars to their big integer representations for modular arithmetic
         let k_big = num_bigint::BigUint::from_bytes_be(&nonce_secret.secret_bytes());
@@ -319,6 +346,8 @@ pub fn schnorr_verify(
         Err(CryptoError::InvalidSignature) => Err(CryptoError::InvalidSignature),
         Err(CryptoError::InvalidPublicKey) => Err(CryptoError::InvalidPublicKey),
         Err(CryptoError::InvalidSignatureFormat) => Err(CryptoError::InvalidSignatureFormat),
-        Err(CryptoError::InternalError(_)) => Err(CryptoError::InternalError("Verification failed".to_string())),
+        Err(CryptoError::InternalError(_)) => Err(CryptoError::InternalError(
+            "Verification failed".to_string(),
+        )),
     }
 }

@@ -1,5 +1,5 @@
 //! Simple in-memory storage layer for AVL tree
-//! 
+//!
 //! Since Fjall persistence doesn't work well with AVL+ trees due to resolver limitations,
 //! this provides a simple in-memory storage implementation.
 
@@ -111,7 +111,8 @@ impl TreeStorage {
 
     /// Log a tree operation
     pub fn log_operation(&mut self, operation: TreeOperation) -> Result<(), TreeError> {
-        self.operations.insert(operation.sequence_number, operation.clone());
+        self.operations
+            .insert(operation.sequence_number, operation.clone());
         self.current_sequence = operation.sequence_number;
         Ok(())
     }
@@ -125,19 +126,20 @@ impl TreeStorage {
     /// Get operations in sequence range
     pub fn get_operations(&self, start: u64, end: u64) -> Result<Vec<TreeOperation>, TreeError> {
         let mut operations = Vec::new();
-        
+
         for seq in start..=end {
             if let Some(operation) = self.operations.get(&seq) {
                 operations.push(operation.clone());
             }
         }
-        
+
         Ok(operations)
     }
 
     /// Store a checkpoint
     pub fn store_checkpoint(&mut self, checkpoint: &TreeCheckpoint) -> Result<(), TreeError> {
-        self.checkpoints.insert(checkpoint.checkpoint_id, checkpoint.clone());
+        self.checkpoints
+            .insert(checkpoint.checkpoint_id, checkpoint.clone());
         Ok(())
     }
 
@@ -181,13 +183,13 @@ impl TreeStorage {
         end_digest: &[u8],
     ) -> Result<Vec<TreeNode>, TreeError> {
         let mut nodes = Vec::new();
-        
+
         for (digest, node) in &self.nodes {
             if digest.as_slice() >= start_digest && digest.as_slice() <= end_digest {
                 nodes.push(node.clone());
             }
         }
-        
+
         nodes.sort_by(|a, b| a.digest.cmp(&b.digest));
         Ok(nodes)
     }
@@ -206,7 +208,7 @@ mod tests {
     #[test]
     fn test_tree_storage_creation() {
         let storage = TreeStorage::new();
-        
+
         // Should be able to create storage without errors
         assert_eq!(storage.current_sequence, 0);
     }

@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod integration_tests {
-    use basis_server::{TrackerBoxUpdateConfig, TrackerBoxUpdater, SharedTrackerState};
+    use basis_server::{SharedTrackerState, TrackerBoxUpdateConfig, TrackerBoxUpdater};
 
     #[tokio::test]
     async fn test_tracker_box_updater_integration() {
         // Create shared state with some test values
         let shared_state = SharedTrackerState::new();
-        
+
         // Set some test values
         let test_root = [0x11u8; 33]; // Test AVL root digest (33 bytes)
         let test_pubkey = [0x02u8; 33]; // Test compressed public key (33 bytes)
@@ -16,7 +16,7 @@ mod integration_tests {
         // Verify the values were set correctly
         assert_eq!(shared_state.get_avl_root_digest(), test_root);
         assert_eq!(shared_state.get_tracker_pubkey(), test_pubkey);
-        
+
         // Test creating and starting the updater
         let config = TrackerBoxUpdateConfig::default();
 
@@ -33,10 +33,7 @@ mod integration_tests {
         let _ = shutdown_tx.send(());
 
         // Wait for the updater to finish with timeout
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            updater_handle
-        ).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), updater_handle).await;
 
         // Should complete without error
         assert!(result.is_ok(), "Updater should complete within timeout");
@@ -48,7 +45,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_tracker_box_updates_avl_digest() {
-        use basis_store::{TrackerStateManager, IouNote};
+        use basis_store::{IouNote, TrackerStateManager};
         use secp256k1::{Secp256k1, SecretKey};
 
         // Create shared state
@@ -69,14 +66,19 @@ mod integration_tests {
         // Create a properly signed test note
         let note = IouNote::create_and_sign(
             recipient_pubkey,
-            1000, // amount collected
+            1000,       // amount collected
             1234567890, // timestamp
             &secret_key.secret_bytes(),
-        ).expect("Should be able to create a valid signed note");
+        )
+        .expect("Should be able to create a valid signed note");
 
         // Add the note to the tracker
         let result = tracker.add_note(&issuer_pubkey, &note);
-        assert!(result.is_ok(), "Adding note to tracker should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Adding note to tracker should succeed: {:?}",
+            result.err()
+        );
 
         // Get the new AVL root digest after the update
         let new_root = tracker.get_state().avl_root_digest;
@@ -92,25 +94,31 @@ mod integration_tests {
     #[tokio::test]
     async fn test_shared_tracker_state_nft_id() {
         let shared_state = SharedTrackerState::new();
-        
+
         // Initially no NFT ID
         assert!(shared_state.get_tracker_nft_id().is_none());
-        
+
         // Set NFT ID
         shared_state.set_tracker_nft_id("test_nft_123".to_string());
-        assert_eq!(shared_state.get_tracker_nft_id(), Some("test_nft_123".to_string()));
+        assert_eq!(
+            shared_state.get_tracker_nft_id(),
+            Some("test_nft_123".to_string())
+        );
     }
 
     #[tokio::test]
     async fn test_shared_tracker_state_box_id() {
         let shared_state = SharedTrackerState::new();
-        
+
         // Initially no box ID
         assert!(shared_state.get_tracker_box_id().is_none());
-        
+
         // Set box ID
         shared_state.set_tracker_box_id("box_123".to_string());
-        assert_eq!(shared_state.get_tracker_box_id(), Some("box_123".to_string()));
+        assert_eq!(
+            shared_state.get_tracker_box_id(),
+            Some("box_123".to_string())
+        );
     }
 
     #[tokio::test]
@@ -125,9 +133,9 @@ mod integration_tests {
 
         // Check a non-existent transaction ID (64 hex chars)
         let fake_tx_id = "0000000000000000000000000000000000000000000000000000000000000000";
-        
+
         let result = TrackerBoxUpdater::check_transaction_confirmation(&config, fake_tx_id).await;
-        
+
         // Should return an error since the node is unreachable
         assert!(result.is_err(), "Should error when node is unreachable");
     }
