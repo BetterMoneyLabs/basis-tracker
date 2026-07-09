@@ -1,111 +1,140 @@
 # Redemption Transaction Format Specification
 
 ## Overview
-This document specifies the format for redemption transactions that spend reserve boxes to pay out to note holders. The transaction follows the Ergo node's `/wallet/transaction/send` API format and includes all necessary context extension variables for the Basis reserve contract validation.
+This document specifies the format for redemption transactions that spend reserve boxes to pay out to note holders. The transaction is built for the Ergo node's `/wallet/transaction/sign` endpoint, then broadcast via `/transactions`. It includes all necessary context extension variables for the Basis reserve contract validation.
 
 ## Transaction Request Format
 
-### Wallet Transaction Request Structure
-For the `/wallet/transaction/send` endpoint, the redemption transaction request follows this structure according to the Ergo node API:
+### `/wallet/transaction/sign` Request Structure
+
+The redemption transaction request follows this structure:
 
 ```json
 {
-  "requests": [
-    {
-      "address": "String",
-      "value": "Number",
-      "assets": [
-        {
-          "tokenId": "String",
-          "amount": "Number"
+  "tx": {
+    "inputs": [
+      {
+        "boxId": "String",
+        "extension": {
+          "0": "ErgoConstant (Byte)",
+          "1": "ErgoConstant (GroupElement)",
+          "2": "ErgoConstant (Coll[Byte])",
+          "3": "ErgoConstant (Long)",
+          "5": "ErgoConstant (Coll[Byte])",
+          "6": "ErgoConstant (Coll[Byte])",
+          "7": "ErgoConstant (Coll[Byte])",
+          "8": "ErgoConstant (Coll[Byte])"
         }
-      ],
-      "registers": {
-        "R4": "String",
-        "R5": "String",
-        "R6": "String"
+      },
+      {
+        "boxId": "String",
+        "extension": {}
       }
-    }
-  ],
-  "fee": "Number",
-  "inputsRaw": [
-    "HexString"
-  ],
-  "dataInputsRaw": [
-    "HexString"
-  ],
-  "contextExtension": {
-    "0": "ErgoConstant (Byte)",
-    "1": "ErgoConstant (GroupElement)",
-    "2": "ErgoConstant (Coll[Byte])",
-    "3": "ErgoConstant (Long)",
-    "5": "ErgoConstant (Coll[Byte])",
-    "6": "ErgoConstant (Coll[Byte])",
-    "7": "ErgoConstant (Coll[Byte])",
-    "8": "ErgoConstant (Coll[Byte])"
+    ],
+    "dataInputs": [
+      { "boxId": "String" }
+    ],
+    "outputs": [
+      { /* recipient output */ },
+      { /* updated reserve output */ },
+      { /* fee output */ },
+      { /* change output */ }
+    ]
+  },
+  "inputsRaw": ["HexString"],
+  "dataInputsRaw": ["HexString"],
+  "secrets": {
+    "dlog": ["recipient_private_key_hex"]
   }
 }
 ```
 
 ### Top-Level Fields
-- `requests`: Array of transaction requests (PaymentRequest objects)
-- `fee`: Transaction fee in nanoERG (typically 1000000 for 0.001 ERG)
-- `inputsRaw`: Array of hex-encoded serialized input box bytes (boxes to be spent)
-- `dataInputsRaw`: Array of hex-encoded serialized data input box bytes (boxes to be referenced without spending)
-- `contextExtension`: Map of context extension variables for contract validation
+- `tx`: The unsigned Ergo transaction
+  - `inputs`: Inputs to spend. The first input is the reserve box with its context extension; subsequent inputs are wallet-owned fee boxes with empty extensions.
+  - `dataInputs`: Data inputs referenced but not spent (the tracker commitment box).
+  - `outputs`: Transaction outputs: recipient redemption, updated reserve, fee, and optional change.
+- `inputsRaw`: Array of hex-encoded serialized input box bytes (reserve box + fee inputs)
+- `dataInputsRaw`: Array of hex-encoded serialized data input box bytes (tracker box)
+- `secrets.dlog`: Array of hex-encoded private keys used by the node to satisfy `proveDlog` constraints (e.g., the recipient's private key)
 
-### Payment Request Fields
-- `address`: Recipient's Ergo address (required)
-- `value`: Amount to send in nanoERG (required)
-- `assets`: Optional array of tokens to include
-- `registers`: Optional register values to include
+### Output Fields
+- `value`: Amount in nanoERG
+- `ergoTree`: Hex-encoded Ergo contract bytes
+- `creationHeight`: Current blockchain height
+- `assets`: Optional array of tokens (camelCase: `tokenId`, `amount`)
+- `additionalRegisters`: Optional register values (e.g., R4, R5, R6 for the reserve output)
 
 ## Redemption-Specific Transaction Format
 
 ### Redemption Transaction Structure
-A redemption transaction typically has the following structure:
+A redemption transaction has the following structure:
 
 ```json
 {
-  "requests": [
-    {
-      "address": "9RecipientAddressHere...",
-      "value": 500000000,
-      "assets": [],
-      "registers": {}
-    },
-    {
-      "address": "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33",
-      "value": 99900000000,
-      "assets": [
-        {
-          "tokenId": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b",
-          "amount": 1
+  "tx": {
+    "inputs": [
+      {
+        "boxId": "reserve_box_id",
+        "extension": {
+          "0": "0200",
+          "1": "0703receiver_pubkey_hex...",
+          "2": "0e4102reserve_owner_sig_hex...",
+          "3": "05long_to_vlq(totalDebt)",
+          "5": "0e...insert_proof_hex...",
+          "6": "0e4102tracker_sig_hex...",
+          "8": "0e...tracker_lookup_proof_hex..."
         }
-      ],
-      "registers": {
-        "R4": "02d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b",
-        "R5": "hex_encoded_updated_avl_tree_root_digest",
-        "R6": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b"
+      },
+      {
+        "boxId": "fee_input_box_id",
+        "extension": {}
       }
-    }
-  ],
-  "fee": 1000000,
-  "inputsRaw": [
-    "hex_encoded_serialized_reserve_box_bytes"
-  ],
-  "dataInputsRaw": [
-    "hex_encoded_serialized_tracker_box_bytes"
-  ],
-  "contextExtension": {
-    "0": "0200",
-    "1": "0702receiver_pubkey_hex...",
-    "2": "0e4102reserve_owner_sig_hex...",
-    "3": "0500000000004a817c80",
-    "5": "0e...avl_insert_proof_hex...",
-    "6": "0e4102tracker_sig_hex...",
-    "7": "0e...reserve_lookup_proof_hex...",
-    "8": "0e...tracker_lookup_proof_hex..."
+    ],
+    "dataInputs": [
+      { "boxId": "tracker_box_id" }
+    ],
+    "outputs": [
+      {
+        "value": 500000000,
+        "ergoTree": "recipient_p2pk_ergo_tree_hex",
+        "creationHeight": 1234567,
+        "assets": [],
+        "additionalRegisters": {}
+      },
+      {
+        "value": 99900000000,
+        "ergoTree": "basis_reserve_contract_ergo_tree_hex",
+        "creationHeight": 1234567,
+        "assets": [
+          { "tokenId": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b", "amount": 1 }
+        ],
+        "additionalRegisters": {
+          "R4": "0703issuer_pubkey_hex...",
+          "R5": "hex_encoded_updated_avl_tree_root_digest",
+          "R6": "0e20tracker_nft_id_hex"
+        }
+      },
+      {
+        "value": 1000000,
+        "ergoTree": "standard_fee_contract_ergo_tree_hex",
+        "creationHeight": 1234567,
+        "assets": [],
+        "additionalRegisters": {}
+      },
+      {
+        "value": 490000000,
+        "ergoTree": "change_p2pk_ergo_tree_hex",
+        "creationHeight": 1234567,
+        "assets": [],
+        "additionalRegisters": {}
+      }
+    ]
+  },
+  "inputsRaw": ["hex_encoded_serialized_reserve_box_bytes", "hex_encoded_serialized_fee_input_bytes"],
+  "dataInputsRaw": ["hex_encoded_serialized_tracker_box_bytes"],
+  "secrets": {
+    "dlog": ["recipient_private_key_hex"]
   }
 }
 ```

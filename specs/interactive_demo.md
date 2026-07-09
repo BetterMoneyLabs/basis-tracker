@@ -88,7 +88,8 @@ curl -X POST http://localhost:9053/wallet/transaction/sign \
   -d @redemption_tx.json > signed_tx.json
 
 # 7. Broadcast
-curl -X POST http://localhost:9053/wallet/transaction/send \
+# Broadcast the signed transaction to the network
+curl -X POST http://localhost:9053/transactions \
   -H "Content-Type: application/json" \
   -H "api_key: bob-api-key" \
   -d @signed_tx.json
@@ -315,6 +316,20 @@ curl "http://localhost:3048/proof/redemption?issuer_pubkey=0377709166937fcdc08bf
 
 ## Step 5: Generate Redemption Transaction (Bob)
 
+### 5.0 Ensure the Tracker Box Is Up to Date
+
+Before redemption can succeed, the tracker server must have committed the note to its on-chain tracker box. The server's background updater submits a tracker box update transaction every 10 minutes whenever new notes are added. Verify the tracker box has the current state:
+
+```bash
+# Check the latest tracker box ID
+curl http://localhost:3048/tracker/latest-box-id
+
+# Confirm the note is in the tracker's AVL tree
+curl "http://localhost:3048/notes?issuer=0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83&recipient=03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea"
+```
+
+If the tracker box has not been updated yet, wait up to 10 minutes or check the server logs for the updater confirmation. The contract verifies the note's total debt against the tracker box R5 AVL tree root, so redemption will fail if the tracker box is stale.
+
 ### 5.1 Generate Unsigned Transaction
 
 Bob generates an unsigned redemption transaction using the CLI:
@@ -339,7 +354,9 @@ Bob generates an unsigned redemption transaction using the CLI:
 3. Gets latest tracker box ID
 4. Fetches AVL proofs (tracker lookup proof, reserve insert proof)
 5. Requests tracker signature from server
-6. Builds unsigned transaction with proper context extension variables
+6. Fetches Bob's private key from the Ergo node wallet (`/wallet/getPrivateKey`) to include in `secrets.dlog`
+7. Selects wallet-owned fee inputs from the node
+8. Builds an unsigned transaction in the format expected by `/wallet/transaction/sign`, including `inputsRaw`, `dataInputsRaw`, and `secrets.dlog`
 
 **Example output:**
 ```
@@ -377,36 +394,67 @@ cat redemption_tx.json | jq .
 **Key fields:**
 ```json
 {
-  "requests": [
-    {
-      "address": "9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73",
-      "value": 25000000,
-      "assets": [],
-      "registers": {}
-    },
-    {
-      "address": "2iHkR7CWvD1R4j1yZg5bkeDRQavjAaVPeTDFGGLZduHyfWMuYpmhHocX8GJoaieTx78FntzJbCBVL6rf96ocJoZdmWBL2fci7NqWgAirppPQmZ7fN9V6z13Ay6brPriBKYqLp1bT2Fk4FkFLCfdPpe",
-      "value": 74000000,
-      "assets": [{"tokenId": "...", "amount": 1}],
-      "registers": {
-        "R4": "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83",
-        "R5": "...",
-        "R6": "..."
+  "tx": {
+    "inputs": [
+      {
+        "boxId": "reserve_box_id",
+        "extension": {
+          "0": "0200",
+          "1": "0703receiver_pubkey_hex...",
+          "2": "0e4102reserve_owner_sig_hex...",
+          "3": "05long_to_vlq(totalDebt)",
+          "5": "0e...insert_proof_hex...",
+          "6": "0e4102tracker_sig_hex...",
+          "8": "0e...tracker_lookup_proof_hex..."
+        }
+      },
+      {
+        "boxId": "fee_input_box_id",
+        "extension": {}
       }
-    }
-  ],
-  "fee": 1000000,
-  "inputsRaw": ["..."],
-  "dataInputsRaw": ["..."],
-  "contextExtension": {
-    "0": "0200",
-    "1": "07...",
-    "2": "0e...",
-    "3": "05...",
-    "4": "05...",
-    "5": "0e...",
-    "6": "0e...",
-    "8": "0e..."
+    ],
+    "dataInputs": [
+      { "boxId": "tracker_box_id" }
+    ],
+    "outputs": [
+      {
+        "value": 25000000,
+        "ergoTree": "recipient_p2pk_ergo_tree_hex",
+        "creationHeight": 1234567,
+        "assets": [],
+        "additionalRegisters": {}
+      },
+      {
+        "value": 74000000,
+        "ergoTree": "basis_reserve_contract_ergo_tree_hex",
+        "creationHeight": 1234567,
+        "assets": [{"tokenId": "...", "amount": 1}],
+        "additionalRegisters": {
+          "R4": "07issuer_pubkey_hex...",
+          "R5": "hex_encoded_updated_avl_tree_root_digest",
+          "R6": "0e20tracker_nft_id_hex"
+        }
+      },
+      {
+        "value": 1000000,
+        "ergoTree": "standard_fee_contract_ergo_tree_hex",
+        "creationHeight": 1234567,
+        "assets": [],
+        "additionalRegisters": {}
+      },
+      {
+        "value": 490000000,
+        "ergoTree": "change_p2pk_ergo_tree_hex",
+        "creationHeight": 1234567,
+        "assets": [],
+        "additionalRegisters": {}
+      }
+    ]
+  },
+  "inputsRaw": ["hex_encoded_serialized_reserve_box_bytes", "hex_encoded_serialized_fee_input_bytes"],
+  "dataInputsRaw": ["hex_encoded_serialized_tracker_box_bytes"],
+  "secrets": {
+    "dlog": ["recipient_private_key_hex"]
   }
 }
 ```
@@ -415,28 +463,28 @@ cat redemption_tx.json | jq .
 
 ## Step 6: Sign and Broadcast (Bob)
 
-### 6.1 Sign with Ergo Wallet
+### 6.1 Sign with Ergo Node Wallet
 
-Bob submits the unsigned transaction to his Ergo node wallet:
+Bob submits the unsigned redemption transaction to his Ergo node wallet:
 
 ```bash
-# Sign the transaction
+# Sign the transaction (the node uses secrets.dlog to satisfy proveDlog(receiver))
 curl -X POST http://localhost:9053/wallet/transaction/sign \
   -H "Content-Type: application/json" \
   -H "api_key: bob-api-key" \
-  -d @redemption_tx.json
+  -d @redemption_tx.json > signed_tx.json
 ```
 
-**Note:** Bob's wallet must:
-- Be unlocked
-- Hold the fee boxes referenced in the transaction (if any)
-- For this tutorial, the transaction uses inputsRaw/dataInputsRaw which reference boxes by ID
+**Note:**
+- Bob's wallet must be unlocked.
+- The transaction JSON already contains `secrets.dlog` with Bob's private key, which the CLI fetched from the node wallet (`/wallet/getPrivateKey`) so the node can satisfy the `proveDlog(receiver)` condition.
+- The transaction uses `inputsRaw`/`dataInputsRaw` to reference the reserve and tracker boxes by serialized bytes.
 
 ### 6.2 Broadcast Signed Transaction
 
 ```bash
 # Broadcast the signed transaction
-curl -X POST http://localhost:9053/wallet/transaction/send \
+curl -X POST http://localhost:9053/transactions \
   -H "Content-Type: application/json" \
   -H "api_key: bob-api-key" \
   -d @signed_tx.json
@@ -444,14 +492,7 @@ curl -X POST http://localhost:9053/wallet/transaction/send \
 
 ### 6.3 Alternative: Sign via CLI
 
-If Bob has configured his Ergo node in the CLI:
-
-```bash
-./target/debug/basis_cli transaction sign \
-  --input redemption_tx.json \
-  --node-url http://localhost:9053 \
-  --api-key bob-api-key
-```
+If Bob has configured his Ergo node in the CLI, the CLI command is still under development. Currently the CLI only generates the unsigned transaction.
 
 ---
 
@@ -588,13 +629,16 @@ curl http://localhost:3048/health
 
 ### "Script reduced to false"
 
-**Cause:** Contract validation failed - usually signature or proof issue.
+**Cause:** Contract validation failed - usually signature, proof, or tracker box issue.
 
 **Common fixes:**
-1. Ensure tracker signature is fresh (not expired)
-2. Check AVL proofs are valid for current tree state
-3. Verify reserve owner's signature uses correct message format
-4. Confirm redemption amount ≤ (totalDebt - alreadyRedeemed)
+1. Ensure the tracker box has been updated to include the note's debt; if not, wait for the tracker updater to commit the new AVL root
+2. Ensure `secrets.dlog` contains the recipient's private key and the recipient address is in the node wallet
+3. Ensure tracker signature is fresh (not expired)
+4. Check AVL proofs are valid for current tree state
+5. Verify reserve owner's signature uses correct message format
+6. Confirm redemption amount ≤ (totalDebt - alreadyRedeemed)
+7. Verify `inputsRaw` and `dataInputsRaw` match the reserve and tracker boxes referenced by ID
 
 ### "Tracker box not found"
 
@@ -610,14 +654,20 @@ curl http://localhost:3048/tracker/latest-box-id
 
 ### Context Extension Format Issues
 
-If you see errors about context extension variables:
+Context extensions are attached to the **reserve input** (the first input in `tx.inputs`), not at the top level. If you see errors about context extension variables:
+
 - **#0 (action)**: Must be `0200` (Byte constant, value 0)
 - **#1 (receiver)**: Must be `07` + 33-byte pubkey hex (GroupElement)
 - **#2 (reserveSig)**: Must be `0e` + 2-byte length + 65-byte signature (Coll[Byte])
 - **#3 (totalDebt)**: Must be `05` + 8-byte big-endian Long
-- **#5 (insertProof)**: AVL proof for reserve tree insert
-- **#6 (trackerSig)**: Tracker's 65-byte Schnorr signature
-- **#8 (lookupProof)**: AVL proof for tracker tree lookup
+- **#5 (insertProof)**: AVL proof for reserve tree insert (Coll[Byte])
+- **#6 (trackerSig)**: Tracker's 65-byte Schnorr signature (Coll[Byte])
+- **#8 (lookupProof)**: AVL proof for tracker tree lookup (Coll[Byte])
+
+If the node returns a signing error such as "Script reduced to false" or "Cannot proveDlog", verify:
+1. `secrets.dlog` contains the recipient's private key hex
+2. `inputsRaw` and `dataInputsRaw` contain the correct serialized box bytes
+3. The reserve output is at index 0 in `tx.outputs` (the contract action byte resolves to index 0)
 
 ---
 

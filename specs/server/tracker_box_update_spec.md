@@ -27,7 +27,7 @@ The tracker box uses the following registers:
   - Stores: `hash(issuer_pubkey || recipient_pubkey) -> totalDebt`
   - Updated whenever notes are added, modified, or transferred
   - See "R5 Register Serialization Format" below for exact byte layout
-- **R6**: Reserved for future use (currently not used)
+- **R6**: Tracker NFT ID (bytes) - identifies which tracker server this tracker box is linked to; must be preserved in the tracker box assets and output registers
 
 ## AVL Tree Commitment
 
@@ -61,6 +61,12 @@ pub struct TrackerBoxUpdateConfig {
     pub node_url: String,
     /// API key for Ergo node authentication (optional)
     pub api_key: Option<String>,
+    /// Transaction fee in nanoERG paid by wallet inputs for each tracker update
+    pub fee: u64,
+    /// Optional change address for the fee-input change output
+    pub change_address: Option<String>,
+    /// Optional tracker secret key (32 bytes) used as a dlog secret when signing
+    pub tracker_secret_key: Option<[u8; 32]>,
 }
 ```
 
@@ -170,21 +176,41 @@ The background task executes the following algorithm in a continuous loop:
 7. **Create Register Constants**:
    - R4: Tracker public key as EcPoint constant (33 bytes, compressed secp256k1 point) - identifies the tracker server
    - R5: Serialized `SAvlTree` constant containing the current AVL tree root digest (37 bytes total; see "R5 Register Serialization Format" below)
-8. **Submit Transaction**:
-   - Construct a wallet payment request with R4 and R5 register values, preserving the tracker NFT token
-   - Use camelCase field names (`tokenId`, not `token_id`) for the `assets` array
-   - Convert the tracker box's `ergoTree` (hex-encoded) to a P2S address for the wallet payment API
-   - Submit transaction via Ergo node API at `/wallet/payment/send` endpoint
-   - Log transaction ID on successful submission and mark it as pending confirmation
-9. **Error Handling**:
-   - If any step fails, log an appropriate ERROR message
-   - Continue with the scheduled interval regardless of failures
+   - R6: Serialized `Coll[Byte]` constant containing the tracker NFT ID (preserved from the input tracker box)
+8. **Build Unsigned Transaction**:
+   - **Inputs**: the current tracker box (spends it) plus one or more wallet-owned P2PK/no-token boxes to pay the configured fee
+   - **Outputs**: new tracker box with the same value and updated R4/R5/R6; fee output to the standard fee contract; optional change output to the change address
+   - **inputsRaw**: serialized bytes of the tracker box and all fee inputs
+   - **secrets.dlog**: the configured tracker secret key (hex) so the node can satisfy `proveDlog(trackerPubkey)`; may be omitted if the tracker key is already in the node wallet
+9. **Submit Transaction**:
+   - POST the unsigned transaction to `/wallet/transaction/sign` to obtain a signed transaction
+   - POST the signed transaction to `/transactions` to broadcast it
+   - Log the transaction ID on successful broadcast and mark it as pending confirmation
+10. **Error Handling**:
+    - If any step fails, log an appropriate ERROR message
+    - Continue with the scheduled interval regardless of failures
+
+### Asset Serialization in Payment Request
+
+The tracker NFT token is preserved in the new tracker box output using the `assets` array with **camelCase** field names as required by the Ergo node API:
+
+```json
+{
+  "tokenId": "000b0695159e5f5c32c606385bd5f276d80133149c84c8b1325366381bf6f17f",
+  "amount": 1
+}
+```
+
+Using `token_id` instead of `tokenId` will result in a node error such as:
+```
+Attempt to decode value on failed cursor: DownField(tokenId),DownArray,DownField(assets),DownArray
+```
 
 ### Transaction Confirmation Flow
 
 To prevent submitting redundant updates during blockchain propagation:
 
-1. After submitting a transaction, store its ID and the expected digest as `pending_tx`
+1. After broadcasting a transaction, store its ID and the expected digest as `pending_tx`
 2. On each subsequent cycle, check if the transaction is confirmed via `/blockchain/transaction/byId`
 3. Only update `last_submitted_digest` after the transaction is confirmed on-chain
 4. If the transaction is not yet found (404), continue waiting
@@ -230,22 +256,6 @@ Bytes 1-33 of this example are the digest:
 d5d44e152c7e42673dea178b918d9195c2ba689da94046384dc40c55a64c836a01
 ```
 
-## Asset Serialization in Payment Request
-
-The `assets` array passed to `/wallet/payment/send` must use **camelCase** field names as required by the Ergo node API:
-
-```json
-{
-  "tokenId": "000b0695159e5f5c32c606385bd5f276d80133149c84c8b1325366381bf6f17f",
-  "amount": 1
-}
-```
-
-Using `token_id` instead of `tokenId` will result in a node error such as:
-```
-Attempt to decode value on failed cursor: DownField(tokenId),DownArray,DownField(assets),DownArray
-```
-
 ## Implementation Details
 
 ### Background Service Structure
@@ -278,17 +288,18 @@ impl TrackerBoxUpdater {
         // Logs warning if multiple boxes found (indicates inconsistent state)
     }
 
-    /// Submit a tracker box update transaction via the wallet payment API
+    /// Submit a tracker box update transaction via /wallet/transaction/sign and broadcast via /transactions
     async fn submit_tracker_update(
         config: &TrackerBoxUpdateConfig,
         tracker_box: &ErgoBoxApi,
         tracker_pubkey: &[u8; 33],
         avl_root_digest: &[u8; 33],
     ) -> Result<String, TrackerBoxUpdaterError> {
-        // Build R4 (GroupElement) and R5 (SAvlTree) registers
-        // Convert ergoTree (hex-encoded) to P2S address for wallet API
-        // Preserve tracker NFT token in assets
-        // Submit via /wallet/payment/send
+        // Build R4 (GroupElement), R5 (SAvlTree), and R6 (Coll[Byte]) registers
+        // Select wallet fee inputs covering config.fee
+        // Fetch raw bytes for the tracker box and all fee inputs
+        // Assemble UnsignedErgoTransaction and sign with /wallet/transaction/sign
+        // Broadcast signed transaction with /transactions
         // Returns transaction ID
     }
 
@@ -505,9 +516,12 @@ The service handles the following error conditions:
 2. **Configuration Errors**: Invalid configuration parameters (missing node URL, invalid tracker NFT ID)
 3. **HTTP Errors**: Network failures, node unreachable, API errors (5xx, 4xx)
 4. **No Tracker Box Found**: Tracker NFT ID not found on chain
-5. **Transaction Failed**: Wallet API rejects the payment request (insufficient funds, invalid registers, etc.)
-6. **Transaction Not Found**: Submitted transaction ID not found on chain after extended waiting
-7. **Serialization Errors**: Failed to decode ergoTree hex, parse ergoTree bytes, or encode P2S address
+5. **No Fee Inputs**: Wallet has no suitable P2PK/no-token boxes to pay the update fee
+6. **Insufficient Fee Inputs**: Wallet boxes don't cover the configured fee
+7. **Signing Failed**: `/wallet/transaction/sign` rejected the unsigned transaction (bad inputs, missing secrets, etc.)
+8. **Broadcast Failed**: `/transactions` rejected the signed transaction
+9. **Transaction Not Found**: Submitted transaction ID not found on chain after extended waiting
+10. **Serialization Errors**: Failed to decode ergoTree hex, parse ergoTree bytes, or encode addresses
 
 ### Error Recovery
 
@@ -522,7 +536,7 @@ The service handles the following error conditions:
 2. **Resource Management**: Proper handling of async resources and channels
 3. **Log Security**: No sensitive cryptographic information exposed in logs
 4. **Rate Limiting**: Built-in 10-minute interval prevents excessive resource usage
-5. **Address Conversion**: Proper conversion of hex-encoded ergoTree to P2S address prevents malformed transactions
+5. **Secret Handling**: The configured `tracker_secret_key` is passed only to the node's `/wallet/transaction/sign` endpoint as a `dlog` secret; it is never logged or broadcast
 6. **Pending Transaction State**: Prevents duplicate submissions while waiting for confirmation
 
 ## Performance Characteristics

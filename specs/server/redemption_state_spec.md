@@ -139,16 +139,21 @@ The redemption process begins when a recipient initiates a redemption request:
 
 9. **Request Signatures**
     - Build signing message: `message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
-    - Emergency redemption uses the same message format; tracker signature becomes optional after 3 days
-   - Request reserve owner's signature on message
-   - Request tracker's signature on message via Ergo node API
-   - Return `RedemptionError::InvalidReserveSignature` or `InvalidTrackerSignature` if invalid
+    - Emergency redemption uses the same message format; tracker signature verification is bypassed after 3 days
+    - Request reserve owner's signature on message (generated locally by the redeemer's CLI using the issuer's secret key)
+    - Request tracker's signature on message from the tracker server via its `/tracker/signature` API
+    - The server signs locally if `tracker_secret_key` is configured, otherwise it delegates to the Ergo node's `/utils/schnorrSign` endpoint
+    - Return `RedemptionError::InvalidReserveSignature` or `InvalidTrackerSignature` if invalid
 
 10. **Build Transaction**
-    - Construct redemption transaction with all required components
-    - Include reserve box ID, tracker box ID, recipient address
-    - Set context extension variables (#0-#8)
-    - Return `RedemptionError::TransactionError` if building fails
+     - Construct a redemption transaction ready for the Ergo node's `/wallet/transaction/sign` endpoint
+     - Include the reserve box as the first input with all context extension variables (#0-#8)
+     - Include wallet-owned fee inputs with empty extensions
+     - Include the tracker box as a data input
+     - Provide `inputsRaw` (serialized bytes of all inputs) and `dataInputsRaw` (serialized tracker box)
+     - Provide `secrets.dlog` with the recipient's private key so the node can satisfy the `proveDlog(receiver)` spend condition
+     - Include the recipient output, updated reserve output, fee output, and optional change output
+     - Return `RedemptionError::TransactionError` if building fails
 
 11. **Return Redemption Data**
     - Generate unique redemption ID
@@ -156,16 +161,23 @@ The redemption process begins when a recipient initiates a redemption request:
     - Return success with `RedemptionData`
 
 ### 2. Complete Redemption
-After the redemption transaction is successfully submitted to the blockchain:
+After the unsigned redemption transaction is built:
 
-1. **Update Local State**
-    - Update reserve's cumulative redeemed amount in local storage
+1. **Sign Transaction**
+    - POST the unsigned transaction JSON to the Ergo node's `/wallet/transaction/sign` endpoint
+    - The node uses `secrets.dlog` (recipient private key) to satisfy the `proveDlog(receiver)` condition
+    - Obtain the signed transaction bytes from the response
+    - Return `RedemptionError::TransactionError` if signing fails
+
+2. **Broadcast Transaction**
+    - POST the signed transaction to `/transactions` to broadcast it to the network
+    - Return `RedemptionError::TransactionError` if broadcast fails
+
+3. **Confirm on Chain**
+    - Wait for the transaction to be included in a block
+    - Update reserve's cumulative redeemed amount in local storage from blockchain events
     - Update note state if tracking separately
     - Store transaction ID for reference
-
-2. **Monitor Blockchain**
-    - Wait for transaction confirmation
-    - Update reserve state from blockchain events
     - Handle any reorganization scenarios
 
 ## State Transitions
@@ -385,10 +397,12 @@ The redemption process integrates with the blockchain scanner to:
 
 The redemption process integrates with the Ergo node API to:
 
-1. **Real Schnorr Signatures**: Use the `/utils/schnorrSign` endpoint to generate tracker signatures securely
-2. **Transaction Submission**: Prepare transactions that can be submitted to the Ergo node for blockchain inclusion
-3. **State Verification**: Access current blockchain state for redemption validation
-4. **Tracker Box Lookup**: Query tracker box information including creation height and registers
+1. **Tracker Schnorr Signatures**: The tracker server either signs redemption messages locally using a configured `tracker_secret_key`, or delegates to the Ergo node's `/utils/schnorrSign` endpoint. Redeemers request the tracker signature through the tracker server's `/tracker/signature` API, not directly from the Ergo node.
+2. **Transaction Signing**: Redemption transactions are built in the format expected by `/wallet/transaction/sign`, with `inputsRaw`, `dataInputsRaw`, and `secrets.dlog`, so the node can satisfy the recipient's `proveDlog` spend condition.
+3. **Transaction Broadcast**: Signed redemption transactions are broadcast to the network via `/transactions`.
+4. **State Verification**: Access current blockchain state for redemption validation, including reserve boxes, tracker boxes, and current height.
+5. **Tracker Box Lookup**: Query tracker box information including creation height and registers.
+6. **Box Retrieval**: Fetch serialized box bytes (`/utxo/byId/binary`) for inclusion in `inputsRaw` and `dataInputsRaw`, and wallet boxes (`/wallet/boxes/unspent`) for fee inputs.
 
 ## Emergency Redemption
 
@@ -426,7 +440,7 @@ where key = blake2b256(ownerKeyBytes || receiverBytes)
 4. **AVL Tree Tracking**: Cumulative redeemed amounts tracked in on-chain AVL tree
 5. **Tracker Verification**: totalDebt must match value committed in tracker's AVL tree
 6. **Double Redemption Prevention**: AVL tree design prevents redeeming same debt twice
-7. **Remote Signature Generation**: Tracker signatures generated via Ergo node API to protect private keys
+7. **Tracker Signature Handling**: Tracker signatures are either generated locally by the server using a configured `tracker_secret_key`, or delegated to the Ergo node's `/utils/schnorrSign` endpoint. In both cases, redeemers obtain the signature through the tracker server's `/tracker/signature` API and never need the tracker private key.
 8. **Proof Verification**: All AVL proofs verified against on-chain tree commitments
 
 ## Context Extension Variables Summary
@@ -440,7 +454,7 @@ For redemption transactions:
 | #2 | Coll[Byte] | Reserve owner signature | Signature API |
 | #3 | Long | Total debt amount | Tracker AVL tree |
 | #5 | Coll[Byte] | Reserve insert proof | AVL proof generator |
-| #6 | Coll[Byte] | Tracker signature | Ergo node API |
+| #6 | Coll[Byte] | Tracker signature | Tracker server (`/tracker/signature`) |
 | #7 | Coll[Byte] | Reserve lookup proof | AVL proof generator (optional) |
 | #8 | Coll[Byte] | Tracker lookup proof | AVL proof generator |
 
