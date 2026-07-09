@@ -40,7 +40,7 @@ async fn main() {
                             reserve_contract_p2s: None,
                             node_url: "http://127.0.0.1:9053".to_string(),
                             scan_name: Some("Basis Reserve Scanner".to_string()),
-                            api_key: Some("hello".to_string()),
+                            api_key: None,
                         },
                         basis_reserve_contract_p2s: "4ZhBzJfNoUL9Bp993NzJcdUr6CNfuwvwNMgHC2JPHs8ane1jjE3K7gzUQVBNQfJccoLbB2P8xMsa9qZNFgRwgrWs6WGEa38gwF1BDkGwMLh6RJUez5Ge6toZzu7tZo5qYtqUinmckb5q9hcVo6Cpn3w2gcuwCd2sKmRohedxxbpP7vnrQmCNQveB22RN5ZVv8VGJaDUEC3ADCSRjzr5ZzJNBmVbAw2k5sTmoXGm7qJ1YT9gzmAPi97ptJJQXqNJoi1W6coMFwg34Dc21K9TMkKQexnXxon21XrbyWL6fzLGbYBRBiVpiRTeMah9Tc33yN93NVTjHWKvBcxSYiJU7eJy6aiwAHhqxYPtZNhwE196qUEYHX5gnN1xB4CpZA2W2HDuEZREpDPV4xy6g2qucW2fyhgDpscHMxrbaGfRq1zkrvML54z2Da9jpkM6nmZx2KB29HTh1do6L3rrLxnvg5cgANzfYuaWPFEoo6j2ZqjPzLDeSSVhPbkMnw6HhQp2qtzayqWVgCKGRzMFuh8BkpmkFCPKjhUwX6Dgv6DpkuHbJRM7k9YSvPCHRQTSeDJa4B5wuyXMsfFMkAnjR4oaLbSBU2QCgKBLFbGvrRKgAJG9eTSc31x6EtqKFoLN2urEWGsEh1F6cxDh2Ma3izwFLyHAgCcUurRXndm5gy3U4GpKdaJiWtwfhcZspwtJ72gWUBEzuPdcqjEyBc95jVtubHeN95QcZLJkJM88c6m1DPXaTBSfDpL8s3sBySa7".to_string(),
                         tracker_nft_id: None,
@@ -430,6 +430,9 @@ async fn main() {
         node_url: config.ergo.node.node_url.clone(),
         api_key: config.ergo.node.api_key.clone(),
         update_interval_seconds: 600, // 10 minutes
+        fee: config.transaction.fee,
+        change_address: config.get_change_address().ok(),
+        tracker_secret_key: config.tracker_secret_key_bytes(),
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 

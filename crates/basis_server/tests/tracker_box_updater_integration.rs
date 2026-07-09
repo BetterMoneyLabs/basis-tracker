@@ -127,8 +127,7 @@ mod integration_tests {
         // Using a local/mock URL that will definitely timeout/fail
         let config = TrackerBoxUpdateConfig {
             node_url: "http://localhost:99999".to_string(), // Invalid port - will fail fast
-            api_key: None,
-            update_interval_seconds: 600,
+            ..Default::default()
         };
 
         // Check a non-existent transaction ID (64 hex chars)

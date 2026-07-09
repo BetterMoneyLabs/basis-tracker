@@ -6,6 +6,9 @@ target
 .crush
 data
 
+# Local configuration files containing secrets
+config/basis.toml
+
 # process id file
 server.pid
 

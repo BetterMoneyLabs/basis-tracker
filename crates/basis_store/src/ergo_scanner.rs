@@ -665,7 +665,7 @@ impl Default for NodeConfig {
             reserve_contract_p2s: None,
             node_url: "http://159.89.116.15:11088".to_string(), // Your Ergo node
             scan_name: Some("Basis Reserve Scanner".to_string()),
-            api_key: Some("hello".to_string()),
+            api_key: None,
         }
     }
 }

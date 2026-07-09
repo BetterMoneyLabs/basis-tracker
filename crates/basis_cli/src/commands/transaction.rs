@@ -472,6 +472,8 @@ async fn generate_redemption_transaction(
         .await?;
 
     // Build fee input objects with empty extensions, then include their raw bytes.
+    // /wallet/transaction/sign expects UnsignedErgoTransaction inputs, which only
+    // contain boxId and a top-level extension map (no spendingProof).
     let mut fee_input_json = Vec::new();
     let mut fee_input_binaries = Vec::new();
     for fee_box_id in &fee_input_ids {
@@ -668,7 +670,9 @@ fn select_fee_inputs(
 fn build_savl_tree_from_digest(digest_hex: &str) -> Vec<u8> {
     let digest_bytes = hex::decode(digest_hex).unwrap_or_else(|_| vec![0u8; 33]);
 
-    // The server returns a 33-byte root digest. Use it as-is after the SAvlTree type byte.
+    // The server returns a 33-byte root digest: 32-byte AVL digest + 1-byte flags.
+    // Scala's SAvlTree serialization is: type byte 0x64 || 32-byte digest || flags
+    // || VLQ key_length || VLQ value_length.
     let root_digest: Vec<u8> = if digest_bytes.len() >= 33 {
         digest_bytes[..33].to_vec()
     } else {
@@ -678,10 +682,10 @@ fn build_savl_tree_from_digest(digest_hex: &str) -> Vec<u8> {
         padded
     };
 
-    let mut r5_bytes = Vec::with_capacity(37);
+    let mut r5_bytes = Vec::with_capacity(38);
     r5_bytes.push(0x64u8); // SAvlTree type byte
-    r5_bytes.extend_from_slice(&root_digest); // 33-byte root digest
-    r5_bytes.push(0x01u8); // flags: insert-only allowed
+    r5_bytes.extend_from_slice(&root_digest); // 33-byte digest from the AVL prover
+    r5_bytes.push(0x01u8); // flags: insertions allowed
     r5_bytes.extend_from_slice(&vlq_encode(32)); // key length
     r5_bytes.extend_from_slice(&vlq_encode(0)); // value length: variable (0)
 

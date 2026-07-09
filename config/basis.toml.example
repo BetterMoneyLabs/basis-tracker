@@ -7,20 +7,18 @@ database_url = "sqlite:data/basis.db"
 basis_reserve_contract_p2s = "4ZhBzJfNoUL9Bp993NzJcdUr6CNfuwvwNMgHC2JPHs8ane1jjE3K7gzUQVBNQfJccoLbB2P8xMsa9qZNFgRwgrWs6WGEa38gwF1BDkGwMLh6RJUez5Ge6toZzu7tZo5qYtqUinmckb5q9hcVo6Cpn3w2gcuwCd2sKmRohedxxbpP7vnrQmCNQveB22RN5ZVv8VGJaDUEC3ADCSRjzr5ZzJNBmVbAw2k5sTmoXGm7qJ1YT9gzmAPi97ptJJQXqNJoi1W6coMFwg34Dc21K9TMkKQexnXxon21XrbyWL6fzLGbYBRBiVpiRTeMah9Tc33yN93NVTjHWKvBcxSYiJU7eJy6aiwAHhqxYPtZNhwE196qUEYHX5gnN1xB4CpZA2W2HDuEZREpDPV4xy6g2qucW2fyhgDpscHMxrbaGfRq1zkrvML54z2Da9jpkM6nmZx2KB29HTh1do6L3rrLxnvg5cgANzfYuaWPFEoo6j2ZqjPzLDeSSVhPbkMnw6HhQp2qtzayqWVgCKGRzMFuh8BkpmkFCPKjhUwX6Dgv6DpkuHbJRM7k9YSvPCHRQTSeDJa4B5wuyXMsfFMkAnjR4oaLbSBU2QCgKBLFbGvrRKgAJG9eTSc31x6EtqKFoLN2urEWGsEh1F6cxDh2Ma3izwFLyHAgCcUurRXndm5gy3U4GpKdaJiWtwfhcZspwtJ72gWUBEzuPdcqjEyBc95jVtubHeN95QcZLJkJM88c6m1DPXaTBSfDpL8s3sBySa7"
 # Tracker NFT ID (hex-encoded) - required for reserve creation and redemption
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
-# Example: tracker_nft_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-tracker_nft_id = "000b0695159e5f5c32c606385bd5f276d80133149c84c8b1325366381bf6f17f"
+tracker_nft_id = "your_tracker_nft_token_id_here"
 # Tracker public key - can be hex-encoded public key or P2PK address
-# Example hex: "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
-# Example P2PK: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33"
-tracker_public_key = "9f7ZXamnfaDZL7EWLKLuBZgWMuHCusQYK6yow2d7p2eES9oRRRe"
+tracker_public_key = "your_tracker_public_key_or_p2pk_address_here"
 # Tracker secret key for local signing (hex-encoded, 32 bytes)
 # If provided, the server will sign redemption transactions locally instead of using the Ergo node API
-tracker_secret_key = "3a9b51135a5a37eb0b1af59dd570e0a99a7eb482f9cead153def9097f6beb929"
+# WARNING: never commit this value to version control
+tracker_secret_key = "your_tracker_secret_key_here"
 
 [ergo.node]
 start_height = 0
 node_url = "http://127.0.0.1:9053"
-api_key = "hello"
+api_key = "your_node_api_key_here"
 timeout_secs = 30
 
 [transaction]
