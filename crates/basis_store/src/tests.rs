@@ -505,3 +505,188 @@ mod test_module {
         super::test_different_issuer_recipient_pairs_allow_same_timestamps().unwrap();
     }
 }
+
+#[cfg(test)]
+mod confirmation_state_tests {
+    use crate::{IouNote, NoteConfirmationStatus, TrackerStateManager};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    fn make_manager() -> TrackerStateManager {
+        TrackerStateManager::new_with_temp_storage()
+    }
+
+    fn issuer_pubkey(secret_key: &[u8; 32]) -> [u8; 33] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(secret_key).expect("valid secret key");
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+    }
+
+    fn create_note(
+        issuer_secret: &[u8; 32],
+        recipient: &[u8; 33],
+        amount: u64,
+        timestamp: u64,
+    ) -> IouNote {
+        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret).unwrap()
+    }
+
+    #[test]
+    fn fresh_note_is_local_only() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note = create_note(&issuer_secret, &recipient, 1000, 1);
+
+        manager.add_note(&issuer, &note).unwrap();
+
+        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
+        assert_eq!(confirmation.confirmed_total_debt, None);
+        assert_eq!(confirmation.pending_total_debt, None);
+    }
+
+    #[test]
+    fn mark_notes_pending_transitions_to_pending() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note = create_note(&issuer_secret, &recipient, 1000, 1);
+
+        manager.add_note(&issuer, &note).unwrap();
+
+        let digest = manager.get_state().avl_root_digest;
+        let count = manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        assert_eq!(count, 1);
+
+        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmation.status, NoteConfirmationStatus::Pending);
+        assert_eq!(confirmation.pending_total_debt, Some(1000));
+        assert_eq!(confirmation.pending_tx_id, Some("tx123".to_string()));
+    }
+
+    #[test]
+    fn confirm_pending_notes_promotes_to_confirmed() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note = create_note(&issuer_secret, &recipient, 1000, 1);
+
+        manager.add_note(&issuer, &note).unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager.confirm_pending_notes("box123", 200).unwrap();
+
+        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmation.status, NoteConfirmationStatus::Confirmed);
+        assert_eq!(confirmation.confirmed_total_debt, Some(1000));
+        assert_eq!(confirmation.confirmed_box_id, Some("box123".to_string()));
+        assert_eq!(confirmation.confirmed_height, Some(200));
+        assert_eq!(confirmation.pending_total_debt, None);
+        assert_eq!(confirmation.pending_tx_id, None);
+    }
+
+    #[test]
+    fn revert_pending_notes_returns_to_local_only() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note = create_note(&issuer_secret, &recipient, 1000, 1);
+
+        manager.add_note(&issuer, &note).unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager.revert_pending_notes().unwrap();
+
+        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
+        assert_eq!(confirmation.confirmed_total_debt, None);
+        assert_eq!(confirmation.pending_total_debt, None);
+        assert_eq!(confirmation.pending_tx_id, None);
+    }
+
+    #[test]
+    fn reconcile_matching_digest_confirms_all_notes() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note = create_note(&issuer_secret, &recipient, 1000, 1);
+
+        manager.add_note(&issuer, &note).unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        let count = manager
+            .reconcile_with_confirmed_digest(&digest, "box456", 300)
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmation.status, NoteConfirmationStatus::Confirmed);
+        assert_eq!(confirmation.confirmed_total_debt, Some(1000));
+        assert_eq!(confirmation.confirmed_box_id, Some("box456".to_string()));
+        assert_eq!(confirmation.confirmed_height, Some(300));
+    }
+
+    #[test]
+    fn non_matching_digest_does_not_confirm() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note = create_note(&issuer_secret, &recipient, 1000, 1);
+
+        manager.add_note(&issuer, &note).unwrap();
+        let other_digest = [0u8; 33];
+        let count = manager
+            .reconcile_with_confirmed_digest(&other_digest, "box789", 300)
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
+    }
+
+    #[test]
+    fn rebuild_confirmations_clears_pending_state() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note = create_note(&issuer_secret, &recipient, 1000, 1);
+
+        manager.add_note(&issuer, &note).unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+
+        manager.rebuild_confirmations();
+
+        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
+        assert_eq!(confirmation.pending_total_debt, None);
+        assert_eq!(confirmation.pending_tx_id, None);
+    }
+
+    #[test]
+    fn note_confirmation_redeemable_amount() {
+        let confirmation = crate::NoteConfirmation {
+            status: NoteConfirmationStatus::Confirmed,
+            confirmed_total_debt: Some(1000),
+            pending_total_debt: None,
+            confirmed_box_id: None,
+            confirmed_height: None,
+            pending_tx_id: None,
+        };
+
+        assert!(confirmation.is_redeemable(0));
+        assert_eq!(confirmation.redeemable_amount(0), 1000);
+        assert!(confirmation.is_redeemable(500));
+        assert_eq!(confirmation.redeemable_amount(500), 500);
+        assert!(!confirmation.is_redeemable(1000));
+        assert_eq!(confirmation.redeemable_amount(1000), 0);
+        assert!(!confirmation.is_redeemable(1500));
+        assert_eq!(confirmation.redeemable_amount(1500), 0);
+    }
+}

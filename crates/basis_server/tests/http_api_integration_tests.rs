@@ -4,7 +4,10 @@
 mod http_api_tests {
     use axum::http::StatusCode;
     use basis_server::{
-        api::{get_notes_by_issuer, get_notes_by_recipient},
+        api::{
+            get_note_state, get_notes_by_issuer, get_notes_by_recipient, get_pending_tx,
+            get_tracker_state,
+        },
         config,
         store::EventStore,
         AppState, TrackerCommand,
@@ -155,6 +158,57 @@ mod http_api_tests {
                     } => {
                         // Mock response - return empty list for testing
                         let _ = response_tx.send(Ok(Vec::new()));
+                    }
+                    TrackerCommand::GetConfirmation {
+                        issuer_pubkey,
+                        recipient_pubkey,
+                        response_tx,
+                    } => {
+                        let result = Ok(redemption_manager
+                            .tracker
+                            .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::GetAllConfirmations { response_tx } => {
+                        let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
+                    }
+                    TrackerCommand::MarkNotesPending {
+                        digest,
+                        tx_id,
+                        submitted_height,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.mark_notes_pending(
+                            digest,
+                            &tx_id,
+                            submitted_height,
+                        );
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ConfirmPendingNotes {
+                        box_id,
+                        height,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager
+                            .tracker
+                            .confirm_pending_notes(&box_id, height);
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::RevertPendingNotes { response_tx } => {
+                        let result = redemption_manager.tracker.revert_pending_notes();
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ReconcileWithConfirmedDigest {
+                        digest,
+                        box_id,
+                        height,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager
+                            .tracker
+                            .reconcile_with_confirmed_digest(&digest, &box_id, height);
+                        let _ = response_tx.send(result);
                     }
                 }
             }
@@ -379,5 +433,110 @@ mod http_api_tests {
         assert!(response
             .headers()
             .contains_key("access-control-allow-origin"));
+    }
+
+    // Helper to create a valid signed note for tests.
+    fn create_test_note(
+        issuer_secret: [u8; 32],
+        recipient: [u8; 33],
+        amount: u64,
+        timestamp: u64,
+    ) -> (basis_store::PubKey, basis_store::IouNote) {
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&issuer_secret).unwrap();
+        let issuer = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize();
+        let note =
+            basis_store::IouNote::create_and_sign(recipient, amount, timestamp, &issuer_secret)
+                .unwrap();
+        (issuer, note)
+    }
+
+    #[tokio::test]
+    async fn test_get_tracker_state() {
+        let state = create_mock_app_state().await;
+        let digest = [1u8; 33];
+        {
+            let shared = state.shared_tracker_state.lock().await;
+            shared.set_avl_root_digest(digest);
+            shared.set_confirmed(digest, "box1".to_string(), 100);
+        }
+
+        let response = get_tracker_state(axum::extract::State(state)).await;
+        assert_eq!(response.0, StatusCode::OK);
+        assert!(response.1.success);
+        let data = response.1.data.clone().unwrap();
+        assert_eq!(data.local_digest, hex::encode(digest));
+        assert_eq!(data.confirmed_digest, Some(hex::encode(digest)));
+        assert_eq!(data.confirmed_box_id, Some("box1".to_string()));
+        assert_eq!(data.confirmed_height, Some(100));
+    }
+
+    #[tokio::test]
+    async fn test_get_pending_tx() {
+        let state = create_mock_app_state().await;
+        let digest = [2u8; 33];
+        {
+            let shared = state.shared_tracker_state.lock().await;
+            shared.set_pending(digest, "tx1".to_string(), 150);
+        }
+
+        let response = get_pending_tx(axum::extract::State(state)).await;
+        assert_eq!(response.0, StatusCode::OK);
+        assert!(response.1.success);
+        let data = response.1.data.clone().unwrap();
+        assert_eq!(data.pending_tx_id, Some("tx1".to_string()));
+        assert_eq!(data.pending_digest, Some(hex::encode(digest)));
+        assert_eq!(data.submitted_height, Some(150));
+    }
+
+    #[tokio::test]
+    async fn test_get_note_state_not_found() {
+        let state = create_mock_app_state().await;
+        let request = basis_server::models::NoteStateRequest {
+            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
+                .to_string(),
+            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
+                .to_string(),
+        };
+
+        let response =
+            get_note_state(axum::extract::State(state), axum::extract::Json(request)).await;
+        assert_eq!(response.0, StatusCode::NOT_FOUND);
+        assert!(!response.1.success);
+    }
+
+    #[tokio::test]
+    async fn test_get_note_state_local_only() {
+        let state = create_mock_app_state().await;
+        let issuer_secret = [1u8; 32];
+        let recipient = [2u8; 33];
+        let (issuer, note) = create_test_note(issuer_secret, recipient, 1000, 1);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::AddNote {
+                issuer_pubkey: issuer,
+                note,
+                response_tx: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+
+        let request = basis_server::models::NoteStateRequest {
+            issuer_pubkey: hex::encode(issuer),
+            recipient_pubkey: hex::encode(recipient),
+        };
+
+        let response =
+            get_note_state(axum::extract::State(state), axum::extract::Json(request)).await;
+        assert_eq!(response.0, StatusCode::OK);
+        assert!(response.1.success);
+        let data = response.1.data.clone().unwrap();
+        assert_eq!(data.local, 1000);
+        assert_eq!(data.status, "local_only");
+        assert_eq!(data.confirmed, None);
+        assert_eq!(data.redeemable, false);
     }
 }

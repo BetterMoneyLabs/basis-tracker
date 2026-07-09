@@ -159,6 +159,54 @@ mod cors_tests {
                         // Mock response - return empty list for testing
                         let _ = response_tx.send(Ok(Vec::new()));
                     }
+                    TrackerCommand::GetConfirmation {
+                        issuer_pubkey,
+                        recipient_pubkey,
+                        response_tx,
+                    } => {
+                        let result = Ok(redemption_manager
+                            .tracker
+                            .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::GetAllConfirmations { response_tx } => {
+                        let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
+                    }
+                    TrackerCommand::MarkNotesPending {
+                        digest,
+                        tx_id,
+                        submitted_height,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager
+                            .tracker
+                            .mark_notes_pending(digest, &tx_id, submitted_height);
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ConfirmPendingNotes {
+                        box_id,
+                        height,
+                        response_tx,
+                    } => {
+                        let result =
+                            redemption_manager.tracker.confirm_pending_notes(&box_id, height);
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::RevertPendingNotes { response_tx } => {
+                        let result = redemption_manager.tracker.revert_pending_notes();
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ReconcileWithConfirmedDigest {
+                        digest,
+                        box_id,
+                        height,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager
+                            .tracker
+                            .reconcile_with_confirmed_digest(&digest, &box_id, height);
+                        let _ = response_tx.send(result);
+                    }
                 }
             }
         });

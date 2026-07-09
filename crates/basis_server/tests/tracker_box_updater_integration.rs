@@ -25,7 +25,7 @@ mod integration_tests {
 
         // Start the updater in a background task
         let updater_handle = tokio::spawn(async move {
-            TrackerBoxUpdater::start(config, shared_state, shutdown_rx).await
+            TrackerBoxUpdater::start(config, shared_state, shutdown_rx, None).await
         });
 
         // Give it a moment to start, then send shutdown

@@ -1,6 +1,48 @@
 use basis_store::IouNote;
 use serde::{Deserialize, Serialize};
 
+/// Confirmation summary attached to note responses.
+/// Mirrors the store-side `NoteConfirmation` but includes the
+/// redeemable flag/amount computed for the client.
+#[derive(Debug, Serialize)]
+pub struct NoteConfirmationSummary {
+    pub status: String,
+    pub confirmed_total_debt: Option<u64>,
+    pub pending_total_debt: Option<u64>,
+    pub confirmed_box_id: Option<String>,
+    pub confirmed_height: Option<u64>,
+    pub pending_tx_id: Option<String>,
+    pub redeemable: bool,
+    pub redeemable_amount: u64,
+}
+
+impl NoteConfirmationSummary {
+    /// Build a summary from a store confirmation and the already-redeemed amount.
+    pub fn from_confirmation(
+        confirmation: &basis_store::NoteConfirmation,
+        already_redeemed: u64,
+    ) -> Self {
+        Self {
+            status: status_to_string(confirmation.status),
+            confirmed_total_debt: confirmation.confirmed_total_debt,
+            pending_total_debt: confirmation.pending_total_debt,
+            confirmed_box_id: confirmation.confirmed_box_id.clone(),
+            confirmed_height: confirmation.confirmed_height,
+            pending_tx_id: confirmation.pending_tx_id.clone(),
+            redeemable: confirmation.is_redeemable(already_redeemed),
+            redeemable_amount: confirmation.redeemable_amount(already_redeemed),
+        }
+    }
+}
+
+fn status_to_string(status: basis_store::NoteConfirmationStatus) -> String {
+    match status {
+        basis_store::NoteConfirmationStatus::LocalOnly => "local_only".to_string(),
+        basis_store::NoteConfirmationStatus::Pending => "pending".to_string(),
+        basis_store::NoteConfirmationStatus::Confirmed => "confirmed".to_string(),
+    }
+}
+
 // Request structure for creating a new IOU note
 // Using hex-encoded strings for public keys and signature
 #[derive(Debug, Deserialize)]
@@ -57,6 +99,8 @@ pub struct SerializableIouNote {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<NoteConfirmationSummary>,
 }
 
 // Serializable version of IouNote for API responses with age
@@ -69,6 +113,8 @@ pub struct SerializableIouNoteWithAge {
     pub timestamp: u64,
     pub signature: String,
     pub age_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<NoteConfirmationSummary>,
 }
 
 impl From<IouNote> for SerializableIouNote {
@@ -80,6 +126,7 @@ impl From<IouNote> for SerializableIouNote {
             amount_redeemed: note.amount_redeemed,
             timestamp: note.timestamp,
             signature: hex::encode(note.signature),
+            confirmation: None,
         }
     }
 }
@@ -344,6 +391,48 @@ pub struct TrackerBoxIdResponse {
     pub tracker_box_id: String,
     pub timestamp: u64,
     pub height: u64,
+}
+
+// Tracker state response - shows local, confirmed and pending digests.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackerStateResponse {
+    pub local_digest: String,
+    pub confirmed_digest: Option<String>,
+    pub confirmed_box_id: Option<String>,
+    pub confirmed_height: Option<u64>,
+    pub pending_digest: Option<String>,
+    pub pending_tx_id: Option<String>,
+    pub pending_submitted_height: Option<u64>,
+    pub tracker_box_id: Option<String>,
+}
+
+// Pending tracker update transaction response.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingTxResponse {
+    pub pending_tx_id: Option<String>,
+    pub pending_digest: Option<String>,
+    pub submitted_height: Option<u64>,
+}
+
+// Request for a single note's confirmation state.
+#[derive(Debug, Deserialize)]
+pub struct NoteStateRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+}
+
+// Response for a single note's confirmation state.
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteStateResponse {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub local: u64,
+    pub confirmed: Option<u64>,
+    pub pending: Option<u64>,
+    pub already_redeemed: u64,
+    pub redeemable: bool,
+    pub redeemable_amount: u64,
+    pub status: String,
 }
 
 // Request for checking note acceptance

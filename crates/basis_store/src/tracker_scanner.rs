@@ -195,17 +195,45 @@ impl TrackerServerState {
             .ok_or_else(|| TrackerScannerError::MissingRegister("R5".to_string()))?
             .clone();
 
-        let last_verified_height = match scan_box.additional_registers.get("R6") {
-            Some(last_verified_height_str) => {
-                last_verified_height_str.parse::<u64>().map_err(|e| {
-                    TrackerScannerError::InvalidRegisterData(format!("Invalid R6 register: {}", e))
-                })?
-            }
-            None => {
-                // Use creation_height as fallback if R6 is not present
-                scan_box.creation_height
-            }
+        // R6 contains the tracker NFT ID as a Coll[Byte] constant (serialized as
+        // 0e20 + 64 hex chars). Parse it out and validate against the configured
+        // tracker NFT ID.
+        let r6_tracker_nft_id = scan_box
+            .additional_registers
+            .get("R6")
+            .ok_or_else(|| TrackerScannerError::MissingRegister("R6".to_string()))?
+            .clone();
+
+        let tracker_nft_hex = if r6_tracker_nft_id.len() >= 4 {
+            &r6_tracker_nft_id[4..]
+        } else {
+            r6_tracker_nft_id.as_str()
         };
+        let tracker_nft_id_from_r6 = hex::decode(tracker_nft_hex).map_err(|_| {
+            TrackerScannerError::InvalidRegisterData(format!(
+                "Invalid R6 tracker NFT ID hex: {}",
+                r6_tracker_nft_id
+            ))
+        })?;
+        if tracker_nft_id_from_r6.len() != 32 {
+            return Err(TrackerScannerError::InvalidRegisterData(format!(
+                "Invalid R6 tracker NFT ID length: expected 32 bytes, got {}",
+                tracker_nft_id_from_r6.len()
+            )));
+        }
+        let tracker_nft_id_from_r6 = hex::encode(&tracker_nft_id_from_r6);
+
+        // Use the configured tracker NFT ID only if it matches R6; otherwise the
+        // on-chain value is authoritative.
+        if tracker_nft_id != &tracker_nft_id_from_r6 {
+            warn!(
+                "Tracker box R6 NFT ID ({}) does not match configured tracker NFT ID ({}). Using on-chain value.",
+                tracker_nft_id_from_r6, tracker_nft_id
+            );
+        }
+
+        // The box creation height is the best available height indicator.
+        let last_verified_height = scan_box.creation_height;
 
         // Validate register data (basic sanity checks)
         if tracker_pubkey.len() != 66 {
@@ -240,7 +268,7 @@ impl TrackerServerState {
             last_verified_height,
             value: scan_box.value,
             creation_height: scan_box.creation_height,
-            tracker_nft_id: tracker_nft_id.clone(),
+            tracker_nft_id: tracker_nft_id_from_r6,
         })
     }
 

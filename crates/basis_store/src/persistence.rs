@@ -4,7 +4,8 @@
 //! for fast lookups by issuer, recipient, and timestamp without full partition scans.
 
 use crate::{
-    reserve_tracker::ExtendedReserveInfo, IouNote, NoteError, NoteKey, PubKey, TrackerBoxInfo,
+    reserve_tracker::ExtendedReserveInfo, IouNote, NoteConfirmation, NoteError, NoteKey, PubKey,
+    TrackerBoxInfo,
 };
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
@@ -19,6 +20,7 @@ pub struct NoteStorage {
     notes_partition: fjall::Partition,
     issuer_index: fjall::Partition,
     recipient_index: fjall::Partition,
+    confirmations_partition: fjall::Partition,
 }
 
 /// Database storage for scanner metadata
@@ -174,10 +176,17 @@ impl NoteStorage {
                 NoteError::StorageError(format!("Failed to open recipient index partition: {}", e))
             })?;
 
+        let confirmations_partition = keyspace
+            .open_partition("confirmations", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open confirmations partition: {}", e))
+            })?;
+
         Ok(Self {
             notes_partition,
             issuer_index,
             recipient_index,
+            confirmations_partition,
         })
     }
 
@@ -358,6 +367,62 @@ impl NoteStorage {
                 e
             ))),
         }
+    }
+
+    /// Persist a confirmation record for a note key.
+    pub fn store_confirmation(
+        &self,
+        key_bytes: &[u8; 32],
+        confirmation: &NoteConfirmation,
+    ) -> Result<(), NoteError> {
+        let value = serde_json::to_vec(confirmation).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+        })?;
+        self.confirmations_partition
+            .insert(key_bytes, &value)
+            .map_err(|e| NoteError::StorageError(format!("Failed to store confirmation: {}", e)))?;
+        Ok(())
+    }
+
+    /// Retrieve a confirmation record for a note key.
+    pub fn get_confirmation(
+        &self,
+        key_bytes: &[u8; 32],
+    ) -> Result<Option<NoteConfirmation>, NoteError> {
+        match self.confirmations_partition.get(key_bytes) {
+            Ok(Some(value_bytes)) => {
+                let confirmation: NoteConfirmation =
+                    serde_json::from_slice(&value_bytes).map_err(|e| {
+                        NoteError::StorageError(format!("Failed to parse confirmation: {}", e))
+                    })?;
+                Ok(Some(confirmation))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get confirmation: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Retrieve all confirmation records.
+    pub fn get_all_confirmations(&self) -> Result<Vec<([u8; 32], NoteConfirmation)>, NoteError> {
+        let mut results = Vec::new();
+        for entry in self.confirmations_partition.iter() {
+            let (key, value) = entry.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate confirmations: {}", e))
+            })?;
+            if key.len() != 32 {
+                continue;
+            }
+            let mut key_bytes = [0u8; 32];
+            key_bytes.copy_from_slice(&key);
+            let confirmation: NoteConfirmation = serde_json::from_slice(&value).map_err(|e| {
+                NoteError::StorageError(format!("Failed to parse confirmation: {}", e))
+            })?;
+            results.push((key_bytes, confirmation));
+        }
+        Ok(results)
     }
 
     /// Retrieve notes by their keys using the main partition

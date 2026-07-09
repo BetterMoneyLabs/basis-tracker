@@ -147,8 +147,11 @@ mod tests {
             "R5".to_string(),
             "640123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01".to_string(),
         );
-        // R6 is the last verified height (u64 as string)
-        registers.insert("R6".to_string(), "1000".to_string());
+        // R6 is the tracker NFT ID as a Coll[Byte] constant (0e20 + 32-byte token id)
+        registers.insert(
+            "R6".to_string(),
+            "0e20dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string(),
+        );
 
         let scan_box = ScanBox {
             box_id: "test_box_id_1234567890abcdef".to_string(),
@@ -178,7 +181,7 @@ mod tests {
             tracker_box.state_commitment,
             "640123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"
         );
-        assert_eq!(tracker_box.last_verified_height, 1000);
+        assert_eq!(tracker_box.last_verified_height, 950);
         assert_eq!(tracker_box.value, 1000000);
         assert_eq!(tracker_box.creation_height, 950);
         assert_eq!(
@@ -219,7 +222,10 @@ mod tests {
             "R5".to_string(),
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
         );
-        registers.insert("R6".to_string(), "1000".to_string());
+        registers.insert(
+            "R6".to_string(),
+            "0e20dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string(),
+        );
 
         let scan_box = ScanBox {
             box_id: "test_box_id_1234567890abcdef".to_string(),
@@ -272,7 +278,10 @@ mod tests {
             "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7".to_string(),
         );
         // Missing R5 (required - state commitment)
-        registers.insert("R6".to_string(), "1000".to_string());
+        registers.insert(
+            "R6".to_string(),
+            "0e20dbfbbaf91a98c22204de3745e1986463620dcf3525ad566c6924cf9e976f86f8".to_string(),
+        );
 
         let scan_box = ScanBox {
             box_id: "test_box_id_1234567890abcdef".to_string(),

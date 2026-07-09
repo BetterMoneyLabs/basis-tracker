@@ -397,6 +397,126 @@ The reserve now records the 0.3 ERG redemption in its on-chain AVL tree under `b
 
 ---
 
+## Third Redemption Test (0.5 ERG reserve, 0.4 ERG debt, 0.2 ERG partial redemption)
+
+### Summary
+
+A third end-to-end redemption validated the new confirmation-aware API (`/tracker/state`, `/tracker/pending-tx`, `/notes/state`) together with the tracker-box R6 parsing fix and the plain-string broadcast parser fix:
+
+1. Deployed a 0.5 ERG reserve using an existing reserve NFT.
+2. Created a 0.4 ERG Alice→Bob IOU note and submitted it to the tracker.
+3. Waited for the tracker server to commit the note on-chain; verified confirmation via the new API.
+4. Generated, signed, and broadcast a partial (0.2 ERG) redemption transaction.
+5. Verified the new reserve (0.3 ERG) and Bob's redemption output (0.2 ERG) on-chain.
+
+**Reserve creation transaction:** `6e022f4abb5e5236a35f0b5ba31d3f2ae502f1dcba44c1c20a347d4d4fe7460d`
+**Tracker update transaction:** `c57ca332ed27f92ba49c9d944c6703edd1d3a93f02ffbcde7862ec9ec8059a27`
+**Redemption transaction:** `96c55b392eeb3118dd009e301e31282f2af4da67952b4d6c89c44ef3458a35ea`
+**Result:** Success — Bob received 0.2 ERG, reserve collateral reduced from 0.5 ERG to 0.3 ERG, with 0.2 ERG debt still outstanding.
+
+### Reserve Deployment
+
+An existing reserve NFT was reused instead of minting a new one (to avoid another slow token-issuance cycle):
+
+```bash
+./target/debug/basis_cli reserve create \
+  --owner 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
+  --amount 500000000 \
+  --nft-id 08c9d7a2c43676f3f6e25f3fe713314a89c4ce3430941887889ff8e4b285f594
+```
+
+| Field | Value |
+|-------|-------|
+| Reserve creation tx | `6e022f4abb5e5236a35f0b5ba31d3f2ae502f1dcba44c1c20a347d4d4fe7460d` (height 1825416) |
+| Reserve box ID | `f2e1594efdd1065e87d37e369212db075b5d61b597f4c693f59f7638eb718cb0` |
+| Collateral | 500,000,000 nanoERG (0.5 ERG) |
+| Reserve NFT | `08c9d7a2c43676f3f6e25f3fe713314a89c4ce3430941887889ff8e4b285f594` |
+
+### Note Creation and On-Chain Confirmation
+
+```bash
+./target/debug/basis_cli note create --demo --amount 400000000 --output /tmp/note_04_erg.json
+# then POST /notes with the CreateNoteRequest body (issuer, recipient, amount, timestamp, signature)
+```
+
+The background updater published the new AVL root once a token-free fee box was available:
+
+| Field | Value |
+|-------|-------|
+| Old tracker box ID | `8de094ec99c1c502fe3ef8db21aa0bf9edd3bb60a04aaef7e4a3c15273bd7dc9` |
+| Tracker update tx ID | `c57ca332ed27f92ba49c9d944c6703edd1d3a93f02ffbcde7862ec9ec8059a27` (height 1825604) |
+| New tracker box ID | `b9c4bdbd8de1cee5d41006baf32c1c0ba5621bd7749c8a3ee9bc603cb95a6f72` |
+| New tracker digest (R5) | `8f8e9d303b9fe3676432a671df8e2c1762013ca949c1c51632e9de8592c5d5fc01` |
+
+The new confirmation API reported the state transition accurately. `GET /tracker/state` returned `local_digest == confirmed_digest == 8f8e9d30…` with `confirmed_box_id = b9c4bdbd…` and no pending tx, and `POST /notes/state` returned:
+
+```json
+{
+  "local": 400000000,
+  "confirmed": 400000000,
+  "pending": null,
+  "already_redeemed": 0,
+  "redeemable": true,
+  "redeemable_amount": 400000000,
+  "status": "confirmed"
+}
+```
+
+### Partial Redemption Transaction (0.2 ERG of 0.4 ERG debt)
+
+```bash
+./target/debug/basis_cli transaction generate-redemption \
+  --issuer-pubkey 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
+  --recipient-pubkey 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea \
+  --amount 200000000 \
+  --tracker-box-id b9c4bdbd8de1cee5d41006baf32c1c0ba5621bd7749c8a3ee9bc603cb95a6f72 \
+  --change-address 9fPRvaMYzBPotu6NGvZn4A6N4J2jDmRGs4Zwc9UhFFeSXgRJ8pS \
+  --output-file /tmp/redemption_02_tx.json
+
+curl -X POST http://127.0.0.1:9053/wallet/transaction/sign \
+  -H "Content-Type: application/json" -H "api_key: hello" \
+  -d @/tmp/redemption_02_tx.json > /tmp/redemption_02_signed.json
+
+curl -X POST http://127.0.0.1:9053/transactions \
+  -H "Content-Type: application/json" -H "api_key: hello" \
+  -d @/tmp/redemption_02_signed.json
+```
+
+**Confirmed transaction details (height 1825612):**
+
+| Field | Value |
+|-------|-------|
+| Transaction ID | `96c55b392eeb3118dd009e301e31282f2af4da67952b4d6c89c44ef3458a35ea` |
+| Inputs spent | Reserve `f2e1594e…` (0.5 ERG), fee input `839ca95e…` |
+| Output 0 (new reserve) | `95cac2385ec569ee9967d04ed8d12b2d2d9f6efde13a4ece1dbdfa23da44be01` — 0.3 ERG |
+| Output 1 (Bob's redemption) | `bf02a443a980dc7c9033f46ae63910abe6309fe02c94f0074144d158448e1d1a` — 0.2 ERG |
+| Output 2 (fee) | `f923d95168fe3c65b0fe5ed4b1dbe3b81c32d5b22373e62c20ba6457bdde8263` — 0.001 ERG |
+| Output 3 (change) | `785d480f17878c9a43f03ba0b77cba655f1ac12da3145dc2026bb347c8997e70` — 0.498 ERG |
+
+**New reserve box R5 (updated reserve AVL tree):**
+
+```
+64c6db7c180c70664a4d71c8dd3c43ec47842e7d691d8e399753a793d32a4318b301012000
+```
+
+The reserve now records the 0.2 ERG redemption under `blake2b256(Alice_pubkey || Bob_pubkey)`; 0.2 ERG of the original 0.4 ERG debt remains outstanding and redeemable.
+
+### Lessons Learned from the Third Test
+
+1. **The confirmation API tracks on-chain truth correctly.** `/notes/state` flipped to `status = "confirmed"`, `redeemable = true`, `redeemable_amount = 400000000` exactly when the tracker update tx `c57ca332…` confirmed, and `/tracker/state` reconciled `confirmed_box_id` to `b9c4bdbd…` automatically. No stale-box workaround was required, though `--tracker-box-id` was still passed explicitly for safety.
+
+2. **The R6 parsing fix works end-to-end.** The tracker scanner now parses R6 as a `Coll[Byte]` NFT id and uses `creation_height` for `last_verified_height`; the server no longer logs `Invalid R6 register` and keeps the shared `tracker_box_id` current.
+
+3. **The plain-string broadcast parser fix works.** The updater logged `Tracker box update submitted. Transaction ID: c57ca332…` directly from the string response of `POST /transactions`, with no `Missing tx id` warning.
+
+4. **`already_redeemed` lags the on-chain reserve R5 right after broadcast.** Immediately after confirmation, `/notes/state` still reported `already_redeemed = 0` even though the new reserve box R5 already recorded the 0.2 ERG redemption. The local note's `amount_redeemed` catches up on the next scanner cycle that processes the spent/recreated reserve box. The on-chain reserve R5 is the authoritative redemption record.
+
+5. **The server listens on the configured port 3048, not 8080.** Health/state queries must target `http://127.0.0.1:3048`.
+
+6. **A token-free fee box must remain available between cycles.** Reserve creation spent the only plain ERG box, so the updater logged `No wallet boxes available to pay transaction fee` until a fresh plain box (`b801f95f…`) confirmed. Keeping at least one small plain ERG box in the wallet avoids update stalls.
+
+---
+
 - [Tracker Box Update Specification](server/tracker_box_update_spec.md)
 - [Redemption Transaction Format Specification](server/redemption_transaction_format_spec.md)
 - [Redemption State Specification](server/redemption_state_spec.md)

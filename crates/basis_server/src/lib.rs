@@ -118,4 +118,42 @@ pub enum TrackerCommand {
         response_tx:
             tokio::sync::oneshot::Sender<Result<(Vec<u8>, Vec<u8>), basis_store::NoteError>>,
     },
+    /// Get the confirmation record for a single note.
+    GetConfirmation {
+        issuer_pubkey: basis_store::PubKey,
+        recipient_pubkey: basis_store::PubKey,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<Option<basis_store::NoteConfirmation>, basis_store::NoteError>,
+        >,
+    },
+    /// Get a snapshot of all confirmation records keyed by note key.
+    GetAllConfirmations {
+        response_tx: tokio::sync::oneshot::Sender<
+            std::collections::HashMap<[u8; 32], basis_store::NoteConfirmation>,
+        >,
+    },
+    /// Mark all currently-local notes as pending for an in-flight update tx.
+    MarkNotesPending {
+        digest: [u8; 33],
+        tx_id: String,
+        submitted_height: u64,
+        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
+    },
+    /// Promote all pending notes to confirmed after an update tx confirms.
+    ConfirmPendingNotes {
+        box_id: String,
+        height: u64,
+        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
+    },
+    /// Revert all pending notes back to local state (update tx dropped/rejected).
+    RevertPendingNotes {
+        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
+    },
+    /// Reconcile confirmation records with an observed on-chain digest.
+    ReconcileWithConfirmedDigest {
+        digest: [u8; 33],
+        box_id: String,
+        height: u64,
+        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
+    },
 }

@@ -6,10 +6,11 @@ use crate::{
     models::{
         ApiResponse, Asset, CheckAcceptanceRequest, CheckAcceptanceResponse,
         CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, KeyStatusResponse,
+        NoteConfirmationSummary, NoteStateRequest, NoteStateResponse, PendingTxResponse,
         ProofResponse, RedeemRequest, RedeemResponse, RedemptionPreparationRequest,
         RedemptionPreparationResponse, ReserveCreationResponse, ReservePaymentRequest,
         SerializableIouNote, TrackerEvent, TrackerSignatureRequest, TrackerSignatureResponse,
-        UploadPolicyRequest, UploadPolicyResponse,
+        TrackerStateResponse, UploadPolicyRequest, UploadPolicyResponse,
     },
     AppState, TrackerCommand,
 };
@@ -404,15 +405,21 @@ pub async fn get_notes_by_issuer(
                 );
             }
 
-            // Convert to serializable format with issuer pubkey
-            let serializable_notes: Vec<SerializableIouNote> = notes
-                .into_iter()
-                .map(|note| {
-                    let mut serializable_note = SerializableIouNote::from(note);
-                    serializable_note.issuer_pubkey = pubkey_hex.clone();
-                    serializable_note
-                })
-                .collect();
+            // Convert to serializable format with issuer pubkey and confirmation state
+            let mut serializable_notes = Vec::new();
+            for note in notes {
+                let confirmation = fetch_confirmation(
+                    &state.tx,
+                    issuer_pubkey,
+                    note.recipient_pubkey,
+                    note.amount_redeemed,
+                )
+                .await;
+                let mut serializable_note = SerializableIouNote::from(note);
+                serializable_note.issuer_pubkey = pubkey_hex.clone();
+                serializable_note.confirmation = confirmation;
+                serializable_notes.push(serializable_note);
+            }
             (
                 StatusCode::OK,
                 Json(crate::models::success_response(serializable_notes)),
@@ -510,15 +517,21 @@ pub async fn get_notes_by_recipient(
                 pubkey_hex
             );
 
-            // Convert to serializable format with correct issuer pubkey
-            let serializable_notes: Vec<SerializableIouNote> = notes_with_issuer
-                .into_iter()
-                .map(|(issuer_pubkey, note)| {
-                    let mut serializable_note = SerializableIouNote::from(note);
-                    serializable_note.issuer_pubkey = hex::encode(issuer_pubkey);
-                    serializable_note
-                })
-                .collect();
+            // Convert to serializable format with correct issuer pubkey and confirmation state
+            let mut serializable_notes = Vec::new();
+            for (issuer_pubkey, note) in notes_with_issuer {
+                let confirmation = fetch_confirmation(
+                    &state.tx,
+                    issuer_pubkey,
+                    note.recipient_pubkey,
+                    note.amount_redeemed,
+                )
+                .await;
+                let mut serializable_note = SerializableIouNote::from(note);
+                serializable_note.issuer_pubkey = hex::encode(issuer_pubkey);
+                serializable_note.confirmation = confirmation;
+                serializable_notes.push(serializable_note);
+            }
             (
                 StatusCode::OK,
                 Json(crate::models::success_response(serializable_notes)),
@@ -646,9 +659,17 @@ pub async fn get_note_by_issuer_and_recipient(
                 issuer_pubkey_hex,
                 recipient_pubkey_hex
             );
-            // Convert to serializable format with issuer pubkey
+            // Convert to serializable format with issuer pubkey and confirmation state
+            let confirmation = fetch_confirmation(
+                &state.tx,
+                issuer_pubkey,
+                note.recipient_pubkey,
+                note.amount_redeemed,
+            )
+            .await;
             let mut serializable_note = SerializableIouNote::from(note);
             serializable_note.issuer_pubkey = issuer_pubkey_hex.clone();
+            serializable_note.confirmation = confirmation;
             (
                 StatusCode::OK,
                 Json(crate::models::success_response(Some(serializable_note))),
@@ -731,22 +752,27 @@ pub async fn get_all_notes(
                 .unwrap()
                 .as_millis() as u64;
 
-            let serializable_notes: Vec<crate::models::SerializableIouNoteWithAge> =
-                notes_with_issuer
-                    .into_iter()
-                    .map(|(issuer_pubkey, note)| {
-                        let age_seconds = current_time_ms.saturating_sub(note.timestamp) / 1000;
-                        crate::models::SerializableIouNoteWithAge {
-                            issuer_pubkey: hex::encode(issuer_pubkey),
-                            recipient_pubkey: hex::encode(note.recipient_pubkey),
-                            amount_collected: note.amount_collected,
-                            amount_redeemed: note.amount_redeemed,
-                            timestamp: note.timestamp,
-                            signature: hex::encode(note.signature),
-                            age_seconds,
-                        }
-                    })
-                    .collect();
+            let mut serializable_notes: Vec<crate::models::SerializableIouNoteWithAge> = Vec::new();
+            for (issuer_pubkey, note) in notes_with_issuer {
+                let age_seconds = current_time_ms.saturating_sub(note.timestamp) / 1000;
+                let confirmation = fetch_confirmation(
+                    &state.tx,
+                    issuer_pubkey,
+                    note.recipient_pubkey,
+                    note.amount_redeemed,
+                )
+                .await;
+                serializable_notes.push(crate::models::SerializableIouNoteWithAge {
+                    issuer_pubkey: hex::encode(issuer_pubkey),
+                    recipient_pubkey: hex::encode(note.recipient_pubkey),
+                    amount_collected: note.amount_collected,
+                    amount_redeemed: note.amount_redeemed,
+                    timestamp: note.timestamp,
+                    signature: hex::encode(note.signature),
+                    age_seconds,
+                    confirmation,
+                });
+            }
 
             (
                 StatusCode::OK,
@@ -3516,4 +3542,252 @@ pub async fn get_basis_reserve_contract_p2s(
             reserve_contract_address.to_string(),
         )),
     )
+}
+
+/// Get the current tracker state: local digest, confirmed on-chain digest, and
+/// any in-flight pending update transaction.
+#[axum::debug_handler]
+pub async fn get_tracker_state(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<TrackerStateResponse>>) {
+    tracing::debug!("Getting tracker state");
+
+    let shared = state.shared_tracker_state.lock().await;
+    let local_digest = shared.get_avl_root_digest();
+    let confirmed = shared.get_confirmed();
+    let pending = shared.get_pending();
+    let tracker_box_id = shared.get_tracker_box_id();
+
+    let response = TrackerStateResponse {
+        local_digest: hex::encode(local_digest),
+        confirmed_digest: confirmed.digest.map(hex::encode),
+        confirmed_box_id: confirmed.box_id,
+        confirmed_height: confirmed.height,
+        pending_digest: pending.digest.map(hex::encode),
+        pending_tx_id: pending.tx_id,
+        pending_submitted_height: pending.submitted_height,
+        tracker_box_id,
+    };
+
+    tracing::info!(
+        "Tracker state: local_digest={}, confirmed_digest={:?}, pending_tx_id={:?}",
+        response.local_digest,
+        response.confirmed_digest,
+        response.pending_tx_id
+    );
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(response)),
+    )
+}
+
+/// Get the currently in-flight tracker box update transaction, if any.
+#[axum::debug_handler]
+pub async fn get_pending_tx(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<PendingTxResponse>>) {
+    tracing::debug!("Getting pending tracker update tx");
+
+    let shared = state.shared_tracker_state.lock().await;
+    let pending = shared.get_pending();
+
+    let response = PendingTxResponse {
+        pending_tx_id: pending.tx_id,
+        pending_digest: pending.digest.map(hex::encode),
+        submitted_height: pending.submitted_height,
+    };
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(response)),
+    )
+}
+
+/// Get the confirmation state for a single note.
+#[axum::debug_handler]
+pub async fn get_note_state(
+    State(state): State<AppState>,
+    Json(payload): Json<NoteStateRequest>,
+) -> (StatusCode, Json<ApiResponse<NoteStateResponse>>) {
+    tracing::debug!(
+        "Getting note state for issuer {} recipient {}",
+        payload.issuer_pubkey,
+        payload.recipient_pubkey
+    );
+
+    let issuer_pubkey = match parse_pubkey(&payload.issuer_pubkey) {
+        Ok(pk) => pk,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(msg)),
+            )
+        }
+    };
+
+    let recipient_pubkey = match parse_pubkey(&payload.recipient_pubkey) {
+        Ok(pk) => pk,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(msg)),
+            )
+        }
+    };
+
+    // Fetch the note.
+    let (note_tx, note_rx) = tokio::sync::oneshot::channel();
+    if let Err(e) = state
+        .tx
+        .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+            issuer_pubkey,
+            recipient_pubkey,
+            response_tx: note_tx,
+        })
+        .await
+    {
+        tracing::error!("Failed to send to tracker thread: {:?}", e);
+        return internal_error("Tracker thread unavailable");
+    }
+
+    let note = match note_rx.await {
+        Ok(Ok(Some(n))) => n,
+        Ok(Ok(None)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(crate::models::error_response("Note not found".to_string())),
+            )
+        }
+        Ok(Err(NoteError::StorageError(msg))) if msg == "Note not found" => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(crate::models::error_response("Note not found".to_string())),
+            )
+        }
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "Failed to get note: {:?}",
+                    e
+                ))),
+            )
+        }
+        Err(_) => return internal_error("Tracker thread response channel closed"),
+    };
+
+    // Fetch the confirmation record.
+    let (conf_tx, conf_rx) = tokio::sync::oneshot::channel();
+    if let Err(e) = state
+        .tx
+        .send(TrackerCommand::GetConfirmation {
+            issuer_pubkey,
+            recipient_pubkey,
+            response_tx: conf_tx,
+        })
+        .await
+    {
+        tracing::error!("Failed to send to tracker thread: {:?}", e);
+        return internal_error("Tracker thread unavailable");
+    }
+
+    let confirmation = match conf_rx.await {
+        Ok(Ok(Some(c))) => Some(c),
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "Failed to get confirmation: {:?}",
+                    e
+                ))),
+            )
+        }
+        Err(_) => return internal_error("Tracker thread response channel closed"),
+    };
+
+    let status = confirmation
+        .as_ref()
+        .map(|c| status_to_string(c.status))
+        .unwrap_or_else(|| "local_only".to_string());
+
+    let response = NoteStateResponse {
+        issuer_pubkey: payload.issuer_pubkey,
+        recipient_pubkey: payload.recipient_pubkey,
+        local: note.amount_collected,
+        confirmed: confirmation.as_ref().and_then(|c| c.confirmed_total_debt),
+        pending: confirmation.as_ref().and_then(|c| c.pending_total_debt),
+        already_redeemed: note.amount_redeemed,
+        redeemable: confirmation
+            .as_ref()
+            .map(|c| c.is_redeemable(note.amount_redeemed))
+            .unwrap_or(false),
+        redeemable_amount: confirmation
+            .as_ref()
+            .map(|c| c.redeemable_amount(note.amount_redeemed))
+            .unwrap_or(0),
+        status,
+    };
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(response)),
+    )
+}
+
+fn status_to_string(status: basis_store::NoteConfirmationStatus) -> String {
+    match status {
+        basis_store::NoteConfirmationStatus::LocalOnly => "local_only".to_string(),
+        basis_store::NoteConfirmationStatus::Pending => "pending".to_string(),
+        basis_store::NoteConfirmationStatus::Confirmed => "confirmed".to_string(),
+    }
+}
+
+fn parse_pubkey(hex_str: &str) -> Result<PubKey, String> {
+    let bytes = match hex::decode(hex_str) {
+        Ok(b) => b,
+        Err(_) => return Err("Public key must be hex-encoded".to_string()),
+    };
+
+    match bytes.try_into() {
+        Ok(arr) => Ok(arr),
+        Err(_) => Err("Public key must be 33 bytes".to_string()),
+    }
+}
+
+fn internal_error<T>(msg: &str) -> (StatusCode, Json<ApiResponse<T>>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(crate::models::error_response(msg.to_string())),
+    )
+}
+
+/// Fetch the confirmation summary for a note from the tracker thread.
+async fn fetch_confirmation(
+    tx: &tokio::sync::mpsc::Sender<TrackerCommand>,
+    issuer_pubkey: PubKey,
+    recipient_pubkey: PubKey,
+    amount_redeemed: u64,
+) -> Option<NoteConfirmationSummary> {
+    let (conf_tx, conf_rx) = tokio::sync::oneshot::channel();
+    if tx
+        .send(TrackerCommand::GetConfirmation {
+            issuer_pubkey,
+            recipient_pubkey,
+            response_tx: conf_tx,
+        })
+        .await
+        .is_err()
+    {
+        return None;
+    }
+
+    match conf_rx.await {
+        Ok(Ok(Some(c))) => Some(NoteConfirmationSummary::from_confirmation(
+            &c,
+            amount_redeemed,
+        )),
+        _ => None,
+    }
 }

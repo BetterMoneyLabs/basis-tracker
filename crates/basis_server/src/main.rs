@@ -400,6 +400,57 @@ async fn main() {
                     );
                     let _ = response_tx.send(result);
                 }
+                TrackerCommand::GetConfirmation {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = Ok(redemption_manager
+                        .tracker
+                        .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::GetAllConfirmations { response_tx } => {
+                    let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
+                }
+                TrackerCommand::MarkNotesPending {
+                    digest,
+                    tx_id,
+                    submitted_height,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.mark_notes_pending(
+                        digest,
+                        &tx_id,
+                        submitted_height,
+                    );
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::ConfirmPendingNotes {
+                    box_id,
+                    height,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .confirm_pending_notes(&box_id, height);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::RevertPendingNotes { response_tx } => {
+                    let result = redemption_manager.tracker.revert_pending_notes();
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::ReconcileWithConfirmedDigest {
+                    digest,
+                    box_id,
+                    height,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .reconcile_with_confirmed_digest(&digest, &box_id, height);
+                    let _ = response_tx.send(result);
+                }
             }
         }
     });
@@ -442,10 +493,16 @@ async fn main() {
     // Start the tracker box updater in the background
     let updater_config = tracker_box_config.clone();
     let shared_state_clone = shared_tracker_state_for_updater.clone();
+    let updater_cmd_tx = tx.clone();
     let updater_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        if let Err(e) =
-            TrackerBoxUpdater::start(updater_config, shared_state_clone, updater_shutdown_rx).await
+        if let Err(e) = TrackerBoxUpdater::start(
+            updater_config,
+            shared_state_clone,
+            updater_shutdown_rx,
+            Some(updater_cmd_tx),
+        )
+        .await
         {
             tracing::error!("Tracker box updater failed: {}", e);
         }
@@ -656,6 +713,8 @@ async fn main() {
         )
         .route("/proof/redemption", get(get_redemption_proof))
         .route("/tracker/proof", get(get_tracker_proof))
+        .route("/tracker/state", get(get_tracker_state))
+        .route("/tracker/pending-tx", get(get_pending_tx))
         .route("/reserve/proof", get(get_reserve_proof))
         .route(
             "/tracker/signature",
@@ -679,6 +738,7 @@ async fn main() {
         .route("/notes/issuer/{pubkey}", get(get_notes_by_issuer))
         .route("/notes/recipient/{pubkey}", get(get_notes_by_recipient))
         .route("/notes", get(get_all_notes)) // Get all notes with age
+        .route("/notes/state", post(get_note_state).options(handle_options))
         .route("/reserves/{box_id}", get(get_reserve_by_box_id))
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
@@ -704,6 +764,7 @@ async fn main() {
     tracing::debug!("  GET /notes/recipient/{{pubkey}}");
     tracing::debug!("  GET /notes/issuer/{{issuer_pubkey}}/recipient/{{recipient_pubkey}}");
     tracing::debug!("  GET /notes (all notes with age)");
+    tracing::debug!("  POST /notes/state");
     tracing::debug!("  GET /reserves");
     tracing::debug!("  GET /reserves/{{box_id}}");
     tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
@@ -715,6 +776,8 @@ async fn main() {
     tracing::debug!("  POST /acceptance/check");
     tracing::debug!("  POST /acceptance/policy");
     tracing::debug!("  GET /tracker/latest-box-id");
+    tracing::debug!("  GET /tracker/state");
+    tracing::debug!("  GET /tracker/pending-tx");
 
     // Run our app with hyper
     let addr = config.socket_addr();

@@ -77,6 +77,88 @@ pub struct TrackerState {
     pub last_update_timestamp: u64,
 }
 
+/// Confirmation status of a note relative to the on-chain tracker box commitment.
+///
+/// A note is only redeemable when its `totalDebt` is committed in the confirmed
+/// on-chain tracker box R5 (i.e. `Confirmed`). Notes that are only in the local
+/// tracker tree (`LocalOnly`) or in a submitted-but-unconfirmed update transaction
+/// (`Pending`) cannot be redeemed yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteConfirmationStatus {
+    /// Present only in the local tracker tree, not yet submitted on-chain.
+    LocalOnly,
+    /// Included in a tracker box update transaction that has been submitted but
+    /// not yet confirmed on-chain.
+    Pending,
+    /// Committed in the latest confirmed on-chain tracker box R5.
+    Confirmed,
+}
+
+/// Cached confirmation record for a single note, keyed by
+/// `blake2b256(issuer_pubkey || recipient_pubkey)`.
+///
+/// The record tracks the note's value at each commitment level so that clients
+/// can determine exactly how much is redeemable right now (the confirmed value)
+/// versus how much is only known locally or is still in flight.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NoteConfirmation {
+    /// Current confirmation status of the note.
+    pub status: NoteConfirmationStatus,
+    /// The `totalDebt` value committed in the latest confirmed on-chain tracker
+    /// box R5. `None` if the note has never been confirmed on-chain. This is the
+    /// maximum amount the contract will accept for redemption.
+    pub confirmed_total_debt: Option<u64>,
+    /// The `totalDebt` value included in the currently in-flight tracker box
+    /// update transaction. `None` if the note is not part of a pending update.
+    pub pending_total_debt: Option<u64>,
+    /// Box ID of the confirmed tracker box that committed `confirmed_total_debt`.
+    pub confirmed_box_id: Option<String>,
+    /// Height at which the confirmed tracker box was observed.
+    pub confirmed_height: Option<u64>,
+    /// Transaction ID of the in-flight tracker box update that covers this note.
+    pub pending_tx_id: Option<String>,
+}
+
+impl NoteConfirmation {
+    /// Create a fresh record for a note that exists only in the local tree.
+    pub fn local_only() -> Self {
+        Self {
+            status: NoteConfirmationStatus::LocalOnly,
+            confirmed_total_debt: None,
+            pending_total_debt: None,
+            confirmed_box_id: None,
+            confirmed_height: None,
+            pending_tx_id: None,
+        }
+    }
+
+    /// Returns true when the note has a confirmed value that exceeds the
+    /// `already_redeemed` amount, i.e. there is something left to redeem.
+    pub fn is_redeemable(&self, already_redeemed: u64) -> bool {
+        self.confirmed_total_debt
+            .map(|debt| debt > already_redeemed)
+            .unwrap_or(false)
+    }
+
+    /// Returns the amount that can be redeemed right now:
+    /// `max(0, confirmed_total_debt - already_redeemed)`.
+    pub fn redeemable_amount(&self, already_redeemed: u64) -> u64 {
+        self.confirmed_total_debt
+            .map(|debt| debt.saturating_sub(already_redeemed))
+            .unwrap_or(0)
+    }
+}
+
+impl Default for NoteConfirmation {
+    fn default() -> Self {
+        Self::local_only()
+    }
+}
+
+/// Note key (32 bytes) used to index confirmation records.
+pub type NoteKeyBytes = [u8; 32];
+
 /// Reserve information for a public key
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReserveInfo {
@@ -214,6 +296,8 @@ pub struct TrackerStateManager {
     storage: persistence::NoteStorage,
     /// Reserve AVL tree tracking hash(ownerKey || receiverKey) -> already_redeemed (8 bytes BE)
     reserve_avl_state: basis_trees::BasisAvlTree,
+    /// Per-note confirmation records, keyed by note key (32 bytes).
+    confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,
 }
 
 impl TrackerStateManager {
@@ -279,11 +363,16 @@ impl TrackerStateManager {
             },
             storage,
             reserve_avl_state,
+            confirmations: std::collections::HashMap::new(),
         };
 
         if let Err(e) = manager.rebuild_avl_tree() {
             tracing::warn!("Failed to rebuild AVL tree from storage: {:?}", e);
         }
+
+        // Rebuild confirmation records from storage and mark every stored note as
+        // LocalOnly until the updater confirms otherwise.
+        manager.rebuild_confirmations();
 
         tracing::debug!("TrackerStateManager created successfully");
         manager
@@ -426,7 +515,7 @@ impl TrackerStateManager {
         };
 
         tracing::debug!("TrackerStateManager created successfully");
-        Self {
+        let mut manager = Self {
             avl_state,
             current_state: TrackerState {
                 avl_root_digest: [0u8; 33],
@@ -435,7 +524,16 @@ impl TrackerStateManager {
             },
             storage,
             reserve_avl_state,
+            confirmations: std::collections::HashMap::new(),
+        };
+
+        // Rebuild AVL tree and confirmations so test instances mirror production.
+        if let Err(e) = manager.rebuild_avl_tree() {
+            tracing::warn!("Failed to rebuild AVL tree in test instance: {:?}", e);
         }
+        manager.rebuild_confirmations();
+
+        manager
     }
 
     /// Add a new note to the tracker state
@@ -482,10 +580,272 @@ impl TrackerStateManager {
                 // Now store note in persistent storage
                 self.storage.store_note(issuer_pubkey, note)?;
                 self.update_state();
+
+                // Recompute the confirmation status for this note based on the
+                // new local value versus the confirmed/pending values. The local
+                // value has just changed, so the note is only Confirmed/Pending
+                // if the new value matches what is already on-chain / in-flight.
+                let mut key32 = [0u8; 32];
+                key32.copy_from_slice(&key_bytes);
+                self.recompute_confirmation_status(&key32, note.amount_collected);
+
                 Ok(())
             }
             Err(e) => Err(NoteError::StorageError(e.to_string())),
         }
+    }
+
+    /// Convert an issuer/recipient pair into the fixed-size confirmation key.
+    fn confirmation_key(issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> NoteKeyBytes {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let bytes = key.to_bytes();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        out
+    }
+
+    /// Recompute a single note's confirmation status from its local value versus
+    /// the cached confirmed/pending values. Persists the result best-effort.
+    fn recompute_confirmation_status(&mut self, key: &NoteKeyBytes, local_value: u64) {
+        let entry = self
+            .confirmations
+            .entry(*key)
+            .or_insert_with(NoteConfirmation::local_only);
+
+        let confirmed = entry.confirmed_total_debt;
+        let pending = entry.pending_total_debt;
+
+        entry.status = if Some(local_value) == confirmed {
+            NoteConfirmationStatus::Confirmed
+        } else if Some(local_value) == pending {
+            NoteConfirmationStatus::Pending
+        } else {
+            NoteConfirmationStatus::LocalOnly
+        };
+
+        let _ = self.storage.store_confirmation(key, entry);
+    }
+
+    /// Rebuild the in-memory confirmation map from storage. Called on startup.
+    ///
+    /// On-chain state may have advanced while the server was offline, so we keep
+    /// the persisted `confirmed_total_debt` metadata but recompute the status from
+    /// the current local value and clear any pending in-flight state (pending
+    /// transactions do not survive a restart).
+    pub fn rebuild_confirmations(&mut self) {
+        self.confirmations.clear();
+
+        let notes = match self.storage.get_all_notes_with_issuer() {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("Failed to load notes for confirmation rebuild: {:?}", e);
+                return;
+            }
+        };
+
+        let stored = self.storage.get_all_confirmations().unwrap_or_default();
+        let stored_map: std::collections::HashMap<NoteKeyBytes, NoteConfirmation> =
+            stored.into_iter().collect();
+
+        for (issuer_pubkey, note) in &notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let mut record = stored_map.get(&key).cloned().unwrap_or_default();
+
+            // Pending state does not survive a restart.
+            record.pending_total_debt = None;
+            record.pending_tx_id = None;
+
+            let local_value = note.amount_collected;
+            record.status = if Some(local_value) == record.confirmed_total_debt {
+                NoteConfirmationStatus::Confirmed
+            } else {
+                NoteConfirmationStatus::LocalOnly
+            };
+
+            self.confirmations.insert(key, record);
+        }
+
+        tracing::info!(
+            "Rebuilt confirmation records for {} notes",
+            self.confirmations.len()
+        );
+    }
+
+    /// Get a clone of the confirmation record for a note, if one exists.
+    pub fn get_confirmation(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Option<NoteConfirmation> {
+        let key = Self::confirmation_key(issuer_pubkey, recipient_pubkey);
+        self.confirmations.get(&key).cloned()
+    }
+
+    /// Get a snapshot of all confirmation records keyed by note key.
+    pub fn all_confirmations(&self) -> std::collections::HashMap<NoteKeyBytes, NoteConfirmation> {
+        self.confirmations.clone()
+    }
+
+    /// Mark every note whose local value differs from its confirmed value as
+    /// `Pending`, recording the value that the in-flight update transaction will
+    /// commit. Returns the number of notes transitioned to `Pending`.
+    pub fn mark_notes_pending(
+        &mut self,
+        digest: [u8; 33],
+        tx_id: &str,
+        submitted_height: u64,
+    ) -> Result<usize, NoteError> {
+        let _ = (digest, submitted_height);
+        let notes = self.storage.get_all_notes_with_issuer()?;
+        let mut count = 0usize;
+
+        for (issuer_pubkey, note) in &notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let local_value = note.amount_collected;
+            let entry = self
+                .confirmations
+                .entry(key)
+                .or_insert_with(NoteConfirmation::local_only);
+
+            if Some(local_value) != entry.confirmed_total_debt {
+                entry.pending_total_debt = Some(local_value);
+                entry.pending_tx_id = Some(tx_id.to_string());
+                entry.status = NoteConfirmationStatus::Pending;
+                let _ = self.storage.store_confirmation(&key, entry);
+                count += 1;
+            }
+        }
+
+        tracing::info!(
+            "Marked {} notes as pending for update tx {} (digest {})",
+            count,
+            tx_id,
+            hex::encode(digest)
+        );
+        Ok(count)
+    }
+
+    /// Promote every `Pending` note to `Confirmed`, copying the pending value to
+    /// the confirmed value and recording the confirming box metadata. Returns the
+    /// number of notes transitioned to `Confirmed`.
+    pub fn confirm_pending_notes(&mut self, box_id: &str, height: u64) -> Result<usize, NoteError> {
+        let keys: Vec<NoteKeyBytes> = self.confirmations.keys().copied().collect();
+        let mut count = 0usize;
+
+        for key in keys {
+            let should_confirm = self
+                .confirmations
+                .get(&key)
+                .map(|c| c.status == NoteConfirmationStatus::Pending)
+                .unwrap_or(false);
+
+            if should_confirm {
+                if let Some(entry) = self.confirmations.get_mut(&key) {
+                    entry.confirmed_total_debt = entry.pending_total_debt;
+                    entry.pending_total_debt = None;
+                    entry.pending_tx_id = None;
+                    entry.confirmed_box_id = Some(box_id.to_string());
+                    entry.confirmed_height = Some(height);
+                    entry.status = NoteConfirmationStatus::Confirmed;
+                    let _ = self.storage.store_confirmation(&key, entry);
+                    count += 1;
+                }
+            }
+        }
+
+        tracing::info!(
+            "Confirmed {} notes in tracker box {} at height {}",
+            count,
+            box_id,
+            height
+        );
+        Ok(count)
+    }
+
+    /// Revert every `Pending` note back to its prior state (used when an update
+    /// transaction is dropped or rejected). Clears pending metadata and recomputes
+    /// the status from the local value versus the confirmed value. Returns the
+    /// number of notes reverted.
+    pub fn revert_pending_notes(&mut self) -> Result<usize, NoteError> {
+        let notes = self.storage.get_all_notes_with_issuer()?;
+        let mut count = 0usize;
+
+        for (issuer_pubkey, note) in &notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let is_pending = self
+                .confirmations
+                .get(&key)
+                .map(|c| c.status == NoteConfirmationStatus::Pending)
+                .unwrap_or(false);
+
+            if is_pending {
+                if let Some(entry) = self.confirmations.get_mut(&key) {
+                    entry.pending_total_debt = None;
+                    entry.pending_tx_id = None;
+                    let local_value = note.amount_collected;
+                    entry.status = if Some(local_value) == entry.confirmed_total_debt {
+                        NoteConfirmationStatus::Confirmed
+                    } else {
+                        NoteConfirmationStatus::LocalOnly
+                    };
+                    let _ = self.storage.store_confirmation(&key, entry);
+                    count += 1;
+                }
+            }
+        }
+
+        tracing::info!("Reverted {} pending notes to local state", count);
+        Ok(count)
+    }
+
+    /// Reconcile confirmation records with an observed on-chain digest. When the
+    /// confirmed digest equals the current local digest, every note's local value
+    /// is the confirmed value, so mark them all as `Confirmed` with the given box
+    /// metadata. Returns the number of notes promoted to `Confirmed`.
+    pub fn reconcile_with_confirmed_digest(
+        &mut self,
+        confirmed_digest: &[u8; 33],
+        box_id: &str,
+        height: u64,
+    ) -> Result<usize, NoteError> {
+        if confirmed_digest != &self.current_state.avl_root_digest {
+            return Ok(0);
+        }
+
+        let notes = self.storage.get_all_notes_with_issuer()?;
+        let mut count = 0usize;
+
+        for (issuer_pubkey, note) in &notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let local_value = note.amount_collected;
+            let entry = self
+                .confirmations
+                .entry(key)
+                .or_insert_with(NoteConfirmation::local_only);
+
+            if entry.status != NoteConfirmationStatus::Confirmed
+                || entry.confirmed_total_debt != Some(local_value)
+            {
+                entry.confirmed_total_debt = Some(local_value);
+                entry.pending_total_debt = None;
+                entry.pending_tx_id = None;
+                entry.confirmed_box_id = Some(box_id.to_string());
+                entry.confirmed_height = Some(height);
+                entry.status = NoteConfirmationStatus::Confirmed;
+                let _ = self.storage.store_confirmation(&key, entry);
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            tracing::info!(
+                "Reconciled {} notes to confirmed digest {} (box {})",
+                count,
+                hex::encode(confirmed_digest),
+                box_id
+            );
+        }
+        Ok(count)
     }
 
     /// Update an existing note in the tracker state

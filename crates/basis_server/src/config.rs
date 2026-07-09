@@ -81,7 +81,7 @@ impl AppConfig {
             .set_default("ergo.node.reserve_contract_p2s", "")?
             .set_default("ergo.node.node_url", "http://159.89.116.15:11088")?
             .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
-            .set_default("ergo.node.api_key", "")?            // Set via config file or BASIS_ERGO_NODE_API_KEY env var
+            .set_default("ergo.node.api_key", "")? // Set via config file or BASIS_ERGO_NODE_API_KEY env var
             // Transaction configuration defaults
             .set_default("transaction.fee", 1000000)? // 0.001 ERG
             // Tracker public key (optional)
