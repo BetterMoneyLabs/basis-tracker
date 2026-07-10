@@ -279,9 +279,9 @@ fn generate_unsigned_transaction(
 
 // Helper function to convert public key to a P2PK address using ergo-lib
 fn pubkey_to_address(pubkey_hex: &str) -> Result<String> {
-    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+    use ergo_lib::ergo_chain_types::EcPoint;
+    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
     let pubkey_bytes =
@@ -297,6 +297,7 @@ fn pubkey_to_address(pubkey_hex: &str) -> Result<String> {
     let prove_dlog = ProveDlog::new(ec_point);
     let address = Address::P2Pk(prove_dlog);
 
-    let encoder = ergo_lib::ergotree_ir::address::AddressEncoder::new(NetworkPrefix::Mainnet);
+    let encoder =
+        ergo_lib::ergotree_ir::chain::address::AddressEncoder::new(NetworkPrefix::Mainnet);
     Ok(encoder.address_to_str(&address))
 }

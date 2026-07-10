@@ -5,6 +5,16 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 
+use ergo_lib::chain::ergo_state_context::ErgoStateContext;
+use ergo_lib::chain::parameters::Parameters;
+use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
+use ergo_lib::ergo_chain_types::{Header, PreHeader};
+use ergo_lib::ergotree_ir::chain::ergo_box::ErgoBox;
+use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+use ergo_lib::wallet::secret_key::SecretKey;
+use ergo_lib::wallet::signing::TransactionContext;
+use ergo_lib::wallet::Wallet;
+
 const NODE_URL: &str = "http://127.0.0.1:9053";
 const API_KEY: &str = "hello";
 const TRANSACTION_FEE: u64 = 1_000_000;
@@ -27,36 +37,21 @@ fn vlq_encode(mut value: usize) -> Vec<u8> {
     bytes
 }
 
-/// Serialize bytes as Ergo `Coll[Byte]` constant: prefix `0x0e` + 1-byte length + data.
+/// Serialize bytes as an Ergo `Coll[Byte]` constant: type prefix `0x0e` + VLQ(length) + data.
+/// The length is VLQ-encoded (not a single byte), so collections of 128 bytes or more — e.g. larger
+/// AVL lookup/insert proofs — are encoded correctly.
 fn serialize_coll_bytes(data: &[u8]) -> String {
-    assert!(
-        data.len() <= 255,
-        "Coll[Byte] length {} exceeds 255-byte prefix",
-        data.len()
-    );
-    let mut bytes = vec![0x0e, data.len() as u8];
+    let mut bytes = vec![0x0e];
+    bytes.extend_from_slice(&vlq_encode(data.len()));
     bytes.extend_from_slice(data);
     hex::encode(bytes)
 }
 
-/// Serialize a long value as Ergo `Long` constant: prefix `0x05` + zigzag(VLQ),
+/// Serialize a long value as an Ergo `Long` constant: type prefix `0x05` + zigzag(VLQ),
 /// using Ergo's little-endian VLQ byte order.
 fn serialize_ergo_long(value: i64) -> String {
     let zigzag = ((value << 1) ^ (value >> 63)) as u64;
-    let mut vlq = Vec::new();
-    let mut n = zigzag;
-    loop {
-        let mut byte = (n & 0x7f) as u8;
-        n >>= 7;
-        if n != 0 {
-            byte |= 0x80;
-        }
-        vlq.push(byte);
-        if n == 0 {
-            break;
-        }
-    }
-    format!("05{}", hex::encode(vlq))
+    format!("05{}", hex::encode(vlq_encode(zigzag as usize)))
 }
 
 /// Serialize a byte value as Ergo constant (prefix 02).
@@ -101,6 +96,18 @@ pub enum TransactionCommands {
         /// Wallet change address for fee-input change output (optional; defaults to recipient address)
         #[arg(long)]
         change_address: Option<String>,
+        /// Sign the redemption locally with ergo-lib (client-side proveDlog for both inputs)
+        /// and broadcast it, instead of emitting an unsigned transaction for the node wallet.
+        #[arg(long, default_value = "false")]
+        local_sign: bool,
+        /// Recipient (receiver) dlog secret as 32-byte hex. Required for local signing of the
+        /// reserve input's proveDlog(receiver). If omitted, fetched from the node wallet.
+        #[arg(long)]
+        recipient_secret: Option<String>,
+        /// Fee-payer dlog secret as 32-byte hex. Used to sign the fee input locally. If omitted,
+        /// fetched from the node wallet for the change/fee address.
+        #[arg(long)]
+        fee_secret: Option<String>,
     },
 }
 
@@ -118,6 +125,9 @@ pub async fn handle_transaction_command(
             emergency,
             tracker_box_id,
             change_address,
+            local_sign,
+            recipient_secret,
+            fee_secret,
         } => {
             generate_redemption_transaction(
                 client,
@@ -129,6 +139,9 @@ pub async fn handle_transaction_command(
                 emergency,
                 tracker_box_id,
                 change_address,
+                local_sign,
+                recipient_secret,
+                fee_secret,
             )
             .await
         }
@@ -145,6 +158,9 @@ async fn generate_redemption_transaction(
     emergency: bool,
     tracker_box_id: Option<String>,
     change_address: Option<String>,
+    local_sign: bool,
+    recipient_secret: Option<String>,
+    fee_secret: Option<String>,
 ) -> Result<()> {
     // Validate public keys
     if hex::decode(issuer_pubkey)
@@ -408,52 +424,38 @@ async fn generate_redemption_transaction(
     // Use the reserve insert proof fetched from server
     let insert_proof = reserve_insert_proof.clone();
 
-    // Build context extension map with properly serialized Ergo constants.
-    let mut context_extension = HashMap::new();
+    // Build context extension map with properly serialized Ergo constants, as hex-encoded constant
+    // strings embedded into `inputs[0].extension` of the unsigned transaction JSON.
+    let mut context_extension: HashMap<String, String> = HashMap::new();
 
     // #0: Action byte (Byte constant)
-    context_extension.insert("0".to_string(), json!(serialize_ergo_byte(0))); // action = 0, index = 0
+    context_extension.insert("0".to_string(), serialize_ergo_byte(0)); // action = 0, index = 0
 
     // #1: Receiver pubkey (GroupElement constant)
-    context_extension.insert("1".to_string(), json!(format!("07{}", recipient_pubkey)));
+    context_extension.insert("1".to_string(), format!("07{}", recipient_pubkey));
 
     // #2: Reserve signature (Coll[Byte] constant, 65 bytes)
-    context_extension.insert(
-        "2".to_string(),
-        json!(serialize_coll_bytes(&issuer_signature)),
-    );
+    context_extension.insert("2".to_string(), serialize_coll_bytes(&issuer_signature));
 
     // #3: Total debt (Long constant)
-    context_extension.insert(
-        "3".to_string(),
-        json!(serialize_ergo_long(total_debt as i64)),
-    );
+    context_extension.insert("3".to_string(), serialize_ergo_long(total_debt as i64));
 
     // #4: Payment timestamp (Long constant, milliseconds since Unix epoch)
-    context_extension.insert(
-        "4".to_string(),
-        json!(serialize_ergo_long(note_timestamp as i64)),
-    );
+    context_extension.insert("4".to_string(), serialize_ergo_long(note_timestamp as i64));
 
     // #5: Insert proof (Coll[Byte] constant)
-    context_extension.insert("5".to_string(), json!(serialize_coll_bytes(&insert_proof)));
+    context_extension.insert("5".to_string(), serialize_coll_bytes(&insert_proof));
 
     // #6: Tracker signature (Coll[Byte] constant, 65 bytes)
-    context_extension.insert(
-        "6".to_string(),
-        json!(serialize_coll_bytes(&tracker_signature)),
-    );
+    context_extension.insert("6".to_string(), serialize_coll_bytes(&tracker_signature));
 
     // #7: Reserve lookup proof (optional, Coll[Byte] constant)
     if let Some(ref proof) = reserve_lookup_proof {
-        context_extension.insert("7".to_string(), json!(serialize_coll_bytes(proof)));
+        context_extension.insert("7".to_string(), serialize_coll_bytes(proof));
     }
 
     // #8: Tracker lookup proof (Coll[Byte] constant)
-    context_extension.insert(
-        "8".to_string(),
-        json!(serialize_coll_bytes(&tracker_lookup_proof)),
-    );
+    context_extension.insert("8".to_string(), serialize_coll_bytes(&tracker_lookup_proof));
 
     // Convert output addresses to ergoTree bytes for the signing request.
     let reserve_ergo_tree = address_to_ergo_tree(&reserve_contract_p2s)?;
@@ -541,8 +543,8 @@ async fn generate_redemption_transaction(
         }));
     }
 
-    let mut inputs_raw = vec![reserve_box_binary];
-    inputs_raw.extend(fee_input_binaries);
+    let mut inputs_raw = vec![reserve_box_binary.clone()];
+    inputs_raw.extend(fee_input_binaries.clone());
 
     // Build the unsigned transaction in the format expected by /wallet/transaction/sign.
     // CRITICAL: the reserve output must be at index 0 because the contract uses
@@ -566,6 +568,40 @@ async fn generate_redemption_transaction(
             "dlog": [recipient_private_key]
         }
     });
+
+    if local_sign {
+        return sign_and_broadcast_local(SignLocalParams {
+            client,
+            issuer_pubkey,
+            recipient_pubkey,
+            amount,
+            total_debt,
+            note_timestamp,
+            is_first_redemption,
+            emergency,
+            reserve_box_id: &reserve_box_id,
+            tracker_box_id: &tracker_box_id,
+            reserve_output_value,
+            recipient_output_value,
+            change_amount,
+            unsigned_tx: transaction_json["tx"].clone(),
+            reserve_box_binary: &reserve_box_binary,
+            fee_input_binaries: &fee_input_binaries,
+            tracker_box_binary: &tracker_box_binary,
+            issuer_signature_len: issuer_signature.len(),
+            tracker_signature_len: tracker_signature.len(),
+            insert_proof_len: insert_proof.len(),
+            reserve_lookup_proof_len: reserve_lookup_proof.as_ref().map(|p| p.len()),
+            tracker_lookup_proof_len: tracker_lookup_proof.len(),
+            fee_input_count: fee_input_ids.len(),
+            fee_input_total,
+            change_address: &change_address,
+            recipient_address: &recipient_address,
+            recipient_secret,
+            fee_secret,
+        })
+        .await;
+    }
 
     let json_string = serde_json::to_string_pretty(&transaction_json)?;
 
@@ -704,9 +740,9 @@ fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
 
 // Helper function to convert public key to a P2PK address using ergo-lib
 fn pubkey_to_address(pubkey_hex: &str) -> Result<String> {
-    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+    use ergo_lib::ergo_chain_types::EcPoint;
+    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
     let pubkey_bytes =
@@ -725,13 +761,14 @@ fn pubkey_to_address(pubkey_hex: &str) -> Result<String> {
     let address = Address::P2Pk(prove_dlog);
 
     // Encode address as base58 string (using mainnet prefix by default)
-    let encoder = ergo_lib::ergotree_ir::address::AddressEncoder::new(NetworkPrefix::Mainnet);
+    let encoder =
+        ergo_lib::ergotree_ir::chain::address::AddressEncoder::new(NetworkPrefix::Mainnet);
     Ok(encoder.address_to_str(&address))
 }
 
 // Helper function to convert a P2S or P2PK address string to its hex-encoded ergoTree.
 fn address_to_ergo_tree(address_str: &str) -> Result<String> {
-    use ergo_lib::ergotree_ir::address::{AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
     let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
@@ -741,5 +778,536 @@ fn address_to_ergo_tree(address_str: &str) -> Result<String> {
     let tree = address.script().map_err(|e| {
         anyhow::anyhow!("Failed to get script for address '{}': {}", address_str, e)
     })?;
-    Ok(hex::encode(tree.sigma_serialize_bytes()))
+    Ok(hex::encode(tree.sigma_serialize_bytes().map_err(|e| {
+        anyhow::anyhow!("Failed to serialize ergoTree: {:?}", e)
+    })?))
+}
+
+/// Parameters for the local (client-side) redemption signing path.
+struct SignLocalParams<'a> {
+    client: &'a TrackerClient,
+    issuer_pubkey: &'a str,
+    recipient_pubkey: &'a str,
+    amount: u64,
+    total_debt: u64,
+    note_timestamp: u64,
+    is_first_redemption: bool,
+    emergency: bool,
+    reserve_box_id: &'a str,
+    tracker_box_id: &'a str,
+    reserve_output_value: u64,
+    recipient_output_value: u64,
+    change_amount: u64,
+    /// Node-canonical unsigned transaction JSON (the `tx` object from the proven builder).
+    /// Parsed into an ergo-lib `UnsignedTransaction` so `bytes_to_sign` matches the node exactly.
+    unsigned_tx: serde_json::Value,
+    reserve_box_binary: &'a str,
+    fee_input_binaries: &'a [String],
+    tracker_box_binary: &'a str,
+    issuer_signature_len: usize,
+    tracker_signature_len: usize,
+    insert_proof_len: usize,
+    reserve_lookup_proof_len: Option<usize>,
+    tracker_lookup_proof_len: usize,
+    fee_input_count: usize,
+    fee_input_total: u64,
+    change_address: &'a str,
+    recipient_address: &'a str,
+    recipient_secret: Option<String>,
+    fee_secret: Option<String>,
+}
+
+async fn resolve_dlog_secret(
+    provided: &Option<String>,
+    client: &TrackerClient,
+    address: &str,
+    label: &str,
+) -> Result<[u8; 32]> {
+    let hexstr = match provided {
+        Some(h) => h.clone(),
+        None => {
+            println!(
+                "🔑 Fetching {} private key from node wallet ({})...",
+                label, address
+            );
+            client
+                .get_private_key(NODE_URL, Some(API_KEY), address)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to fetch {} private key for {} (provide --{}-secret to override): {}",
+                        label,
+                        address,
+                        label.replace(' ', "-"),
+                        e
+                    )
+                })?
+        }
+    };
+    let bytes = hex::decode(hexstr.trim())
+        .map_err(|e| anyhow::anyhow!("{} secret is not valid hex: {}", label, e))?;
+    if bytes.len() != 32 {
+        return Err(anyhow::anyhow!(
+            "{} secret must be 32 bytes, got {}",
+            label,
+            bytes.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn parse_broadcast_tx_id(body: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        match value {
+            serde_json::Value::String(s) => return s,
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(id)) = map.get("id") {
+                    return id.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+    body.trim().trim_matches('"').to_string()
+}
+
+/// Build an [`ErgoStateContext`] for local signing from the node's current view of the chain.
+///
+/// ergo-lib 0.28 requires the last 10 block headers plus chain parameters to construct a state
+/// context. The Basis reserve contract does not read `CONTEXT.headers` or chain parameters, so the
+/// parameters are left empty and the headers are only used to derive a valid `PreHeader` (height).
+async fn fetch_state_context() -> Result<ErgoStateContext> {
+    let headers_url = format!("{}/blocks/lastHeaders/10", NODE_URL);
+    let headers_resp = ureq::get(&headers_url)
+        .set("api_key", API_KEY)
+        .call()
+        .map_err(|e| anyhow::anyhow!("failed to fetch last headers: {}", e))?;
+    let headers_json: serde_json::Value = headers_resp
+        .into_json()
+        .map_err(|e| anyhow::anyhow!("failed to read headers response: {}", e))?;
+    let headers: Vec<Header> = serde_json::from_value(headers_json)
+        .map_err(|e| anyhow::anyhow!("failed to parse headers from node: {}", e))?;
+    if headers.len() < 10 {
+        return Err(anyhow::anyhow!(
+            "need at least 10 headers for state context, got {}",
+            headers.len()
+        ));
+    }
+
+    let pre_header = PreHeader::from(headers[0].clone());
+    let headers_array: [Header; 10] = headers
+        .into_iter()
+        .take(10)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("failed to collect headers into [Header; 10]"))?;
+    let parameters = Parameters {
+        parameters_table: HashMap::new(),
+    };
+
+    Ok(ErgoStateContext::new(pre_header, headers_array, parameters))
+}
+
+/// Scala `immutable.HashMap` (HashTrieMap, Scala 2.12) iteration order for the given byte keys.
+/// This is exactly the order `sigma.interpreter.ContextExtension` (a `Map[Byte, Constant]`) is
+/// serialized in (`obj.values.foreach`). `UnsignedInput` is `boxId ++ extension`, so the extension
+/// byte order is part of `bytes_to_sign`; ergo-lib serializes its insertion-ordered map as-is, hence
+/// the keys must be inserted in this order or the local `bytes_to_sign` diverges from the node and
+/// `proveDlog(receiver)` verification fails. Validated against a node-signed redemption for the
+/// first-redemption set `{0,1,2,3,4,5,6,8}` (order `0,5,1,6,2,3,8,4`); the same model yields the
+/// order for the full set `{0..8}` used by subsequent redemptions (which add `#7`).
+fn scala_context_extension_order(keys: &[u8]) -> Vec<u8> {
+    // `Byte.hashCode` widens the byte to Int; `improve` is Scala HashMap's hash mixing (Murmur3-style).
+    fn improve(h: u32) -> u32 {
+        let h = h.wrapping_add(!(h.wrapping_shl(9)));
+        let h = h ^ (h >> 14);
+        let h = h.wrapping_add(h.wrapping_shl(4));
+        h ^ (h >> 10)
+    }
+    fn build(level: u32, keys: &[u8], out: &mut Vec<u8>) {
+        use std::collections::BTreeMap;
+        // Group by the 5-bit trie index at this level; BTreeMap yields ascending bucket order,
+        // matching the bitmap/elems array iteration of HashTrieMap.
+        let mut groups: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+        for &k in keys {
+            let idx = (improve(k as u32) >> level) & 0x1f;
+            groups.entry(idx).or_default().push(k);
+        }
+        for (_idx, group) in groups {
+            if group.len() == 1 {
+                out.push(group[0]);
+            } else if level >= 30 {
+                // HashMapCollision1: iterates its list in insertion order.
+                out.extend(group);
+            } else {
+                build(level + 5, &group, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    build(0, keys, &mut out);
+    out
+}
+
+/// Reorder the reserve input's (`inputs[0]`) context-extension keys in the JSON so that ergo-lib
+/// parses them into its insertion-ordered map in Scala's `ContextExtension` serialization order,
+/// for whichever variable indices are present (first-redemption set without `#7`, or the full set
+/// `{0..8}` for subsequent redemptions).
+fn reorder_reserve_extension_scala(tx: &mut serde_json::Value) {
+    use serde_json::Map;
+    let ext = match tx
+        .get_mut("inputs")
+        .and_then(|i| i.get_mut(0))
+        .and_then(|inp| inp.get_mut("extension"))
+        .and_then(|e| e.as_object_mut())
+    {
+        Some(e) => e,
+        None => return,
+    };
+    let present: Vec<u8> = ext.keys().filter_map(|k| k.parse::<u8>().ok()).collect();
+    let order = scala_context_extension_order(&present);
+    let mut reordered: Map<String, serde_json::Value> = Map::new();
+    for k in &order {
+        let ks = k.to_string();
+        if let Some(v) = ext.remove(&ks) {
+            reordered.insert(ks, v);
+        }
+    }
+    let remaining: Vec<String> = ext.keys().cloned().collect();
+    for k in remaining {
+        if let Some(v) = ext.remove(&k) {
+            reordered.insert(k, v);
+        }
+    }
+    *ext = reordered;
+}
+
+/// Build the redemption transaction with ergo-lib and sign it locally (client-side), producing
+/// the `proveDlog` proofs for BOTH the reserve input (receiver) and the fee input (fee payer)
+/// in-process via a `Wallet`/`TestProver`, then broadcast the fully-signed transaction to the
+/// node. This mirrors what a TUI/client does without delegating signing to the node wallet.
+#[allow(clippy::too_many_arguments)]
+async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<()> {
+    println!("🖊️  Signing redemption locally (client-side proveDlog for both inputs)...");
+
+    // Parse the proven builder's unsigned transaction. Before parsing, reorder the reserve input's
+    // context-extension keys into Scala's `ContextExtension` serialization order: the extension is
+    // part of `bytes_to_sign` and Scala serializes its map in index (not insertion) order, so signing
+    // requires the exact same order or `proveDlog(receiver)` verification fails on the node.
+    let mut unsigned_tx = p.unsigned_tx;
+    reorder_reserve_extension_scala(&mut unsigned_tx);
+    let unsigned: UnsignedTransaction = serde_json::from_value(unsigned_tx)
+        .map_err(|e| anyhow::anyhow!("failed to parse unsigned transaction: {}", e))?;
+
+    // Parse input boxes from their sigma-serialized bytes (fetched via /utxo/byIdBinary).
+    let reserve_box =
+        ErgoBox::sigma_parse_bytes(&hex::decode(p.reserve_box_binary)?).map_err(|e| {
+            anyhow::anyhow!("failed to parse reserve box {}: {:?}", p.reserve_box_id, e)
+        })?;
+    let tracker_box =
+        ErgoBox::sigma_parse_bytes(&hex::decode(p.tracker_box_binary)?).map_err(|e| {
+            anyhow::anyhow!("failed to parse tracker box {}: {:?}", p.tracker_box_id, e)
+        })?;
+    let mut fee_boxes = Vec::with_capacity(p.fee_input_binaries.len());
+    for (i, fb) in p.fee_input_binaries.iter().enumerate() {
+        let b = ErgoBox::sigma_parse_bytes(&hex::decode(fb)?)
+            .map_err(|e| anyhow::anyhow!("failed to parse fee input box {}: {:?}", i, e))?;
+        fee_boxes.push(b);
+    }
+
+    let mut boxes_to_spend = vec![reserve_box];
+    boxes_to_spend.extend(fee_boxes);
+    let data_boxes = vec![tracker_box];
+    let tx_context = TransactionContext::new(unsigned, boxes_to_spend, data_boxes)
+        .map_err(|e| anyhow::anyhow!("failed to build transaction context: {:?}", e))?;
+
+    // Resolve the two dlog secrets (receiver + fee payer) and sign locally.
+    let recipient_secret = resolve_dlog_secret(
+        &p.recipient_secret,
+        p.client,
+        p.recipient_address,
+        "recipient",
+    )
+    .await?;
+    let fee_secret =
+        resolve_dlog_secret(&p.fee_secret, p.client, p.change_address, "fee-payer").await?;
+    let recipient_sk = SecretKey::dlog_from_bytes(&recipient_secret)
+        .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
+    let fee_sk = SecretKey::dlog_from_bytes(&fee_secret)
+        .ok_or_else(|| anyhow::anyhow!("invalid fee-payer dlog secret"))?;
+    let wallet = Wallet::from_secrets(vec![recipient_sk, fee_sk]);
+
+    let state_context = fetch_state_context().await?;
+
+    let signed = wallet
+        .sign_transaction(tx_context, &state_context, None)
+        .map_err(|e| anyhow::anyhow!("local signing failed: {:?}", e))?;
+
+    // Broadcast the fully-signed transaction to the node.
+    let signed_json = serde_json::to_value(&signed)?;
+    let local_id = signed_json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unknown>")
+        .to_string();
+    println!("✅ Signed locally. tx id: {}", local_id);
+    let _ = fs::write(
+        "/tmp/last_signed_tx.json",
+        serde_json::to_string_pretty(&signed_json)?,
+    );
+    let url = format!("{}/transactions", NODE_URL);
+    let result = ureq::post(&url)
+        .set("api_key", API_KEY)
+        .send_json(signed_json);
+    let body = match result {
+        Ok(resp) => resp
+            .into_string()
+            .map_err(|e| anyhow::anyhow!("failed to read broadcast response: {}", e))?,
+        Err(ureq::Error::Status(code, resp)) => {
+            let err_body = resp.into_string().unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "broadcast rejected by node (HTTP {}): {}",
+                code,
+                err_body
+            ));
+        }
+        Err(e) => return Err(anyhow::anyhow!("broadcast to {} failed: {}", url, e)),
+    };
+    let tx_id = parse_broadcast_tx_id(&body);
+
+    println!("✅ Redemption broadcast with LOCAL proveDlog signatures.");
+    println!("📋 Transaction details:");
+    println!("   Transaction ID: {}", tx_id);
+    println!("   Issuer: {}", p.issuer_pubkey);
+    println!("   Recipient: {}", p.recipient_pubkey);
+    println!("   Redemption amount: {} nanoERG", p.amount);
+    println!(
+        "   Recipient receives: {} nanoERG",
+        p.recipient_output_value
+    );
+    println!(
+        "   Reserve output value: {} nanoERG",
+        p.reserve_output_value
+    );
+    println!("   Total debt: {} nanoERG", p.total_debt);
+    println!("   First redemption: {}", p.is_first_redemption);
+    println!("   Emergency redemption: {}", p.emergency);
+    println!("   Reserve box ID: {}", p.reserve_box_id);
+    println!("   Tracker box ID: {}", p.tracker_box_id);
+    println!("   Transaction fee: {} nanoERG", TRANSACTION_FEE);
+    println!(
+        "   Fee inputs: {} box(es), {} nanoERG total",
+        p.fee_input_count, p.fee_input_total
+    );
+    if p.change_amount > 0 {
+        println!(
+            "   Change output: {} nanoERG to {}",
+            p.change_amount, p.change_address
+        );
+    }
+    println!("📝 Context Extension Variables:");
+    println!("   #0 (action): 0x00 (redemption, reserve output index 0)");
+    println!("   #1 (receiver): {}", p.recipient_pubkey);
+    println!("   #2 (reserveSig): {} bytes", p.issuer_signature_len);
+    println!("   #3 (totalDebt): {}", p.total_debt);
+    println!("   #4 (timestamp): {}", p.note_timestamp);
+    println!("   #5 (insertProof): {} bytes", p.insert_proof_len);
+    println!("   #6 (trackerSig): {} bytes", p.tracker_signature_len);
+    match p.reserve_lookup_proof_len {
+        Some(len) => println!("   #7 (reserveLookupProof): {} bytes", len),
+        None => println!("   #7 (reserveLookupProof): omitted (first redemption)"),
+    }
+    println!(
+        "   #8 (trackerLookupProof): {} bytes",
+        p.tracker_lookup_proof_len
+    );
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Map, Value};
+
+    /// A valid P2PK (proveDlog) ergoTree as returned by the node for a wallet address.
+    const P2PK_TREE: &str =
+        "0008cd02725e8878d5198ca7f5853dddf35560ddab05ab0a26adae7e664b84162c9962e5";
+    const GENERATOR_GE: &str =
+        "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// Expected Scala `ContextExtension` order for the first-redemption set `{0,1,2,3,4,5,6,8}`,
+    /// confirmed on-chain. Kept as a hardcoded regression guard for `scala_context_extension_order`.
+    const SCALA_EXT_ORDER_NO_R7: &[&str] = &["0", "5", "1", "6", "2", "3", "8", "4"];
+
+    /// Build a minimal, ergo-lib-parseable unsigned redemption tx whose reserve-input extension
+    /// keys are inserted in the given order (with valid, type-correct constant values).
+    fn tx_json_with_ext_keys(keys_in_order: &[&str]) -> Value {
+        let mut ext: Map<String, Value> = Map::new();
+        for k in keys_in_order {
+            let v = match *k {
+                "0" => serialize_ergo_byte(0),
+                "1" => GENERATOR_GE.to_string(),
+                "2" => serialize_coll_bytes(&[0u8; 65]),
+                "3" => serialize_ergo_long(400_000_000),
+                "4" => serialize_ergo_long(1_783_612_740_170),
+                "5" => serialize_coll_bytes(&[]),
+                "6" => serialize_coll_bytes(&[0u8; 65]),
+                "7" => serialize_coll_bytes(&[0u8; 32]),
+                "8" => serialize_coll_bytes(&[]),
+                _ => serialize_coll_bytes(&[]),
+            };
+            ext.insert((*k).to_string(), json!(v));
+        }
+        json!({
+            "inputs": [
+                { "boxId": "01".repeat(32), "extension": Value::Object(ext) }
+            ],
+            "dataInputs": [],
+            "outputs": [
+                {
+                    "value": 1_000_000,
+                    "ergoTree": P2PK_TREE,
+                    "creationHeight": 1,
+                    "assets": [],
+                    "additionalRegisters": {}
+                }
+            ]
+        })
+    }
+
+    fn ext_json_keys(tx: &Value) -> Vec<String> {
+        tx["inputs"][0]["extension"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn reorder_produces_scala_order_for_first_redemption_set() {
+        let mut tx = tx_json_with_ext_keys(&["6", "1", "3", "4", "8", "2", "0", "5"]);
+        reorder_reserve_extension_scala(&mut tx);
+        assert_eq!(ext_json_keys(&tx), SCALA_EXT_ORDER_NO_R7);
+    }
+
+    #[test]
+    fn reorder_is_idempotent_when_already_in_scala_order() {
+        let mut tx = tx_json_with_ext_keys(SCALA_EXT_ORDER_NO_R7);
+        reorder_reserve_extension_scala(&mut tx);
+        assert_eq!(ext_json_keys(&tx), SCALA_EXT_ORDER_NO_R7);
+    }
+
+    #[test]
+    fn reorder_produces_scala_order_for_subsequent_redemption_set() {
+        // Subsequent redemptions add #7 (reserveLookupProof): the full set {0..8} orders as below.
+        let mut tx = tx_json_with_ext_keys(&["6", "1", "3", "4", "7", "8", "2", "0", "5"]);
+        reorder_reserve_extension_scala(&mut tx);
+        assert_eq!(
+            ext_json_keys(&tx),
+            &["0", "5", "1", "6", "2", "7", "3", "8", "4"]
+        );
+    }
+
+    #[test]
+    fn reorder_orders_arbitrary_key_set_in_scala_order() {
+        // Full {0..9} set: keys are ordered by Scala HashTrieMap iteration, not by insertion.
+        let mut tx = tx_json_with_ext_keys(&["9", "6", "1", "7", "3", "4", "8", "2", "0", "5"]);
+        reorder_reserve_extension_scala(&mut tx);
+        assert_eq!(
+            ext_json_keys(&tx),
+            &["0", "5", "1", "6", "9", "2", "7", "3", "8", "4"]
+        );
+    }
+
+    #[test]
+    fn parsed_unsigned_tx_extension_iterates_in_scala_order() {
+        let mut tx = tx_json_with_ext_keys(&["6", "1", "3", "4", "8", "2", "0", "5"]);
+        reorder_reserve_extension_scala(&mut tx);
+        let unsigned: UnsignedTransaction = serde_json::from_value(tx).unwrap();
+        let order: Vec<u8> = unsigned.inputs.as_slice()[0]
+            .extension
+            .values
+            .keys()
+            .copied()
+            .collect();
+        let expected: Vec<u8> = SCALA_EXT_ORDER_NO_R7
+            .iter()
+            .map(|s| s.parse::<u8>().unwrap())
+            .collect();
+        assert_eq!(order, expected);
+    }
+
+    #[test]
+    fn scala_context_extension_order_matches_known_sets() {
+        assert_eq!(
+            scala_context_extension_order(&[0, 1, 2, 3, 4, 5, 6, 8]),
+            vec![0, 5, 1, 6, 2, 3, 8, 4]
+        );
+        assert_eq!(
+            scala_context_extension_order(&[0, 1, 2, 3, 4, 5, 6, 7, 8]),
+            vec![0, 5, 1, 6, 2, 7, 3, 8, 4]
+        );
+        // Order is independent of the input slice order.
+        assert_eq!(
+            scala_context_extension_order(&[8, 6, 5, 4, 3, 2, 1, 0]),
+            vec![0, 5, 1, 6, 2, 3, 8, 4]
+        );
+    }
+
+    #[test]
+    fn vlq_encode_matches_ergo_encoding() {
+        assert_eq!(vlq_encode(0), vec![0x00]);
+        assert_eq!(vlq_encode(127), vec![0x7f]);
+        assert_eq!(vlq_encode(128), vec![0x80, 0x01]);
+        assert_eq!(vlq_encode(200), vec![0xc8, 0x01]);
+        assert_eq!(vlq_encode(16384), vec![0x80, 0x80, 0x01]);
+    }
+
+    #[test]
+    fn serialize_ergo_byte_encodes_type_and_value() {
+        assert_eq!(serialize_ergo_byte(0), "0200");
+        assert_eq!(serialize_ergo_byte(255), "02ff");
+    }
+
+    #[test]
+    fn serialize_ergo_long_encodes_zigzag_vlq() {
+        assert_eq!(serialize_ergo_long(0), "0500");
+        // -1 zigzags to 1.
+        assert_eq!(serialize_ergo_long(-1), "0501");
+        // 1 zigzags to 2.
+        assert_eq!(serialize_ergo_long(1), "0502");
+    }
+
+    #[test]
+    fn serialize_coll_bytes_uses_vlq_length() {
+        // Empty: type 0x0e + length 0.
+        assert_eq!(serialize_coll_bytes(&[]), "0e00");
+        // 65 bytes (< 128): single-byte length 0x41.
+        let sig = serialize_coll_bytes(&[0u8; 65]);
+        assert!(sig.starts_with("0e41"));
+        assert_eq!(sig.len(), 2 + 2 + 65 * 2);
+        // 200 bytes (>= 128): length is VLQ 200 -> [0xc8, 0x01].
+        let long = serialize_coll_bytes(&[0u8; 200]);
+        assert!(long.starts_with("0ec801"));
+        assert_eq!(long.len(), 2 + 4 + 200 * 2);
+    }
+
+    #[test]
+    fn parse_broadcast_tx_id_handles_node_shapes() {
+        assert_eq!(parse_broadcast_tx_id("\"abc123\""), "abc123");
+        assert_eq!(parse_broadcast_tx_id("{\"id\":\"def456\"}"), "def456");
+        assert_eq!(parse_broadcast_tx_id("plainid"), "plainid");
+    }
+
+    #[test]
+    fn address_round_trip_yields_p2pk_ergo_tree() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let address = pubkey_to_address(pubkey).unwrap();
+        let tree = address_to_ergo_tree(&address).unwrap();
+        assert_eq!(tree, format!("0008cd{}", pubkey));
+    }
 }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 // Import Ergo address handling for P2PK address support
-use ergo_lib::ergotree_ir::address::{AddressEncoder, NetworkPrefix};
+use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
 
 /// Main application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,13 +164,13 @@ impl AppConfig {
                 // If hex decoding failed or wrong length, try parsing as P2PK address
                 let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
                 match encoder.parse_address_from_str(pubkey_input) {
-                    Ok(ergo_lib::ergotree_ir::address::Address::P2Pk(pubkey)) => {
+                    Ok(ergo_lib::ergotree_ir::chain::address::Address::P2Pk(pubkey)) => {
                         tracing::info!(
                             "Successfully parsed as P2PK address, extracting public key"
                         );
                         // Use sigma serialization to get the compressed public key bytes
                         use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-                        let pk_bytes = pubkey.h.sigma_serialize_bytes();
+                        let pk_bytes = pubkey.h.sigma_serialize_bytes()?;
                         tracing::info!("Extracted public key bytes length: {}", pk_bytes.len());
                         if pk_bytes.len() == 33 {
                             let mut result = [0u8; 33];
@@ -216,11 +216,11 @@ impl AppConfig {
 
                 // If input is P2PK address, extract and return the public key as hex
                 let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-                if let Ok(ergo_lib::ergotree_ir::address::Address::P2Pk(pubkey)) =
+                if let Ok(ergo_lib::ergotree_ir::chain::address::Address::P2Pk(pubkey)) =
                     encoder.parse_address_from_str(pubkey_input)
                 {
                     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-                    let pubkey_bytes = pubkey.h.sigma_serialize_bytes();
+                    let pubkey_bytes = pubkey.h.sigma_serialize_bytes().ok()?;
                     if pubkey_bytes.len() == 33 {
                         return Some(hex::encode(&pubkey_bytes));
                     }
@@ -288,9 +288,9 @@ impl AppConfig {
                         return Err("Invalid tracker public key length".into());
                     }
 
-                    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+                    use ergo_lib::ergo_chain_types::EcPoint;
+                    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
                     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-                    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
                     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
                     let ec_point = EcPoint::sigma_parse_bytes(&pubkey_bytes)?;

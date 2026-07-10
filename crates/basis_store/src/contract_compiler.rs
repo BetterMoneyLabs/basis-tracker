@@ -28,8 +28,8 @@ pub fn get_basis_reserve_ergo_tree_hex() -> Result<String, CompilerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_lib::ergotree_ir::address::AddressEncoder;
-    use ergo_lib::ergotree_ir::address::NetworkPrefix;
+    use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
+    use ergo_lib::ergotree_ir::chain::address::NetworkPrefix;
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
     #[test]
@@ -54,7 +54,7 @@ mod tests {
         let ergo_tree = address.script().expect("Failed to get script from address");
 
         // Serialize the ErgoTree to bytes (this gives us the raw ErgoTree bytes)
-        let ergo_tree_bytes = ergo_tree.sigma_serialize_bytes();
+        let ergo_tree_bytes = ergo_tree.sigma_serialize_bytes().unwrap();
         let ergo_tree_hex = hex::encode(&ergo_tree_bytes);
 
         // For now, we'll verify that we can parse the address and get the ErgoTree
@@ -88,7 +88,7 @@ mod tests {
         let ergo_tree = address.script().expect("Failed to get script from address");
 
         // Get the raw ErgoTree bytes
-        let ergo_tree_bytes = ergo_tree.sigma_serialize_bytes();
+        let ergo_tree_bytes = ergo_tree.sigma_serialize_bytes().unwrap();
 
         // Create a ByteArrayConstant with the ErgoTree bytes
         // In Rust ergo-lib, this would be equivalent to Constant::from(ergo_tree_bytes)
@@ -97,7 +97,7 @@ mod tests {
 
         // Serialize the ByteArrayConstant to bytes
         // This matches the Scala pattern: ValueSerializer.serialize(ByteArrayConstant(...))
-        let serialized_bytes = byte_array_constant.sigma_serialize_bytes();
+        let serialized_bytes = byte_array_constant.sigma_serialize_bytes().unwrap();
         let serialized_hex = hex::encode(&serialized_bytes);
 
         // The expected ByteArrayConstant-wrapped bytes that the Ergo node expects for scan registration

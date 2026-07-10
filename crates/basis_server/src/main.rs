@@ -475,7 +475,7 @@ async fn main() {
     }
 
     // Use mainnet network prefix for address encoding
-    let _network_prefix = ergo_lib::ergotree_ir::address::NetworkPrefix::Mainnet;
+    let _network_prefix = ergo_lib::ergotree_ir::chain::address::NetworkPrefix::Mainnet;
 
     let tracker_box_config = TrackerBoxUpdateConfig {
         node_url: config.ergo.node.node_url.clone(),

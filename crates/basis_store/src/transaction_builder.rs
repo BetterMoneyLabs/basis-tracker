@@ -653,7 +653,7 @@ impl RedemptionTransactionBuilder {
 
 /// Convert an Ergo address (P2PK or P2S) to its hex-encoded ergoTree bytes.
 fn address_to_ergo_tree(address_str: &str) -> Result<String, TransactionBuilderError> {
-    use ergo_lib::ergotree_ir::address::{AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
     let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
@@ -666,7 +666,9 @@ fn address_to_ergo_tree(address_str: &str) -> Result<String, TransactionBuilderE
             address_str, e
         ))
     })?;
-    Ok(hex::encode(tree.sigma_serialize_bytes()))
+    Ok(hex::encode(tree.sigma_serialize_bytes().map_err(|e| {
+        TransactionBuilderError::Configuration(format!("Failed to serialize ergoTree: {:?}", e))
+    })?))
 }
 
 #[cfg(test)]

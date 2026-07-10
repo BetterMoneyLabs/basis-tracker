@@ -517,6 +517,164 @@ The reserve now records the 0.2 ERG redemption under `blake2b256(Alice_pubkey ||
 
 ---
 
+## Fourth Redemption Test (0.2 ERG reserve, 0.4 ERG debt, 0.1 ERG partial redemption, NFT `2e13126a…`)
+
+### Summary
+
+A fourth end-to-end redemption validated the confirmation-aware API against a fresh 0.2 ERG reserve created with reserve NFT `2e13126ac35abb0ab35f9da5fbc50860707153fbd24c8f5c9f06e39f287eb0fe`. The previously confirmed 0.4 ERG Alice→Bob IOU note (totalDebt 400,000,000 nanoERG, 0.2 ERG still outstanding after the third test) was redeemed for 0.1 ERG against the new reserve. Because the new reserve's AVL tree was empty, this was the first redemption recorded against that reserve.
+
+1. Deployed a 0.2 ERG reserve with NFT `2e13126a…`.
+2. Created a token-free 0.6 ERG fee box to fund updater/redemption fees.
+3. Reused the already-confirmed Alice→Bob note (0.4 ERG totalDebt) rather than re-issuing a same-pair note (which would have altered totalDebt and desynced from the on-chain digest).
+4. Generated, signed, and broadcast a 0.1 ERG redemption transaction via the CLI flow.
+5. Verified the new reserve (0.1 ERG) and Bob's redemption output (0.1 ERG) on-chain.
+
+**Reserve creation transaction:** `b134d6ad229e11fe7cc3acdc4330517a35c9e287dcd510fc2eecd2e605bbbb5b`
+**Fee-box funding transaction:** `ff01f47ddd2a1cc678b45276880e19c6a079e68cc41b9597fd69e92836edeb14`
+**Redemption transaction:** `8f647e58676d18f7b048bb8b0b78befb724ff54632f0d7c795ac0a5204537a9e`
+**Result:** Success — Bob received 0.1 ERG, reserve collateral reduced from 0.2 ERG to 0.1 ERG.
+
+### Reserve Deployment
+
+```bash
+./target/debug/basis_cli reserve create \
+  --owner 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
+  --amount 200000000 \
+  --nft-id 2e13126ac35abb0ab35f9da5fbc50860707153fbd24c8f5c9f06e39f287eb0fe
+```
+
+| Field | Value |
+|-------|-------|
+| Reserve creation tx | `b134d6ad229e11fe7cc3acdc4330517a35c9e287dcd510fc2eecd2e605bbbb5b` (height 1825938) |
+| Reserve box ID | `b4a1c033e9c7e825bd63c945e0dc0a8748e62ba10e48c503a249ba190138a9f2` |
+| Collateral | 200,000,000 nanoERG (0.2 ERG) |
+| Reserve NFT | `2e13126ac35abb0ab35f9da5fbc50860707153fbd24c8f5c9f06e39f287eb0fe` |
+
+### Fee Box Funding
+
+The wallet held no token-free boxes after reserve creation, so a plain 0.6 ERG box was funded for updater/redemption fees:
+
+| Field | Value |
+|-------|-------|
+| Funding tx | `ff01f47ddd2a1cc678b45276880e19c6a079e68cc41b9597fd69e92836edeb14` (height 1825938) |
+| Token-free box | `eaacaf565467fcd0151f38ac17d8e99d5e27cab8046601057aae7f0aa2399385` |
+| Amount | 600,000,000 nanoERG (0.6 ERG) |
+
+### Redemption Transaction (0.1 ERG)
+
+```bash
+./target/debug/basis_cli transaction generate-redemption \
+  --issuer-pubkey 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
+  --recipient-pubkey 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea \
+  --amount 100000000 \
+  --tracker-box-id b9c4bdbd8de1cee5d41006baf32c1c0ba5621bd7749c8a3ee9bc603cb95a6f72 \
+  --change-address 9fPRvaMYzBPotu6NGvZn4A6N4J2jDmRGs4Zwc9UhFFeSXgRJ8pS \
+  --output-file /tmp/redemption_01_test.json
+
+curl -X POST http://127.0.0.1:9053/wallet/transaction/sign \
+  -H "Content-Type: application/json" -H "api_key: hello" \
+  -d @/tmp/redemption_01_test.json > /tmp/redemption_01_signed.json
+
+curl -X POST http://127.0.0.1:9053/transactions \
+  -H "Content-Type: application/json" -H "api_key: hello" \
+  -d @/tmp/redemption_01_signed.json
+```
+
+`generate-redemption` auto-selected reserve `b4a1c033…` (empty reserve tree → first redemption).
+
+**Confirmed transaction details (height 1825943):**
+
+| Field | Value |
+|-------|-------|
+| Transaction ID | `8f647e58676d18f7b048bb8b0b78befb724ff54632f0d7c795ac0a5204537a9e` |
+| Inputs spent | Reserve `b4a1c033…` (0.2 ERG), fee input `eaacaf56…` (0.6 ERG) |
+| Output 0 (new reserve) | `9f1a413a239a9ad61561924834c0e2b9acbb6a3d0443fdc4b6aa355a83aaf450` — 0.1 ERG (P2S `4ZhBzJfN…`) |
+| Output 1 (Bob's redemption) | `0beace95f9022d9407deaaa4e111d97297482a3bc3ac2e65dce548ffc9e3c867` — 0.1 ERG (`9hnupHc2…`) |
+| Output 2 (fee) | `3357d8744999e4ad493106d4fddae50d7cff4b9adee493e530e4e05331e55371` — 0.001 ERG |
+| Output 3 (wallet change) | `eaa24ce9494312af872e017eb37b22f3e97d4c61576c210a047dec5cab86c8fa` — 0.599 ERG (token-free) |
+
+The redemption tx id is also recorded in `/tmp/redemption_txid.txt`.
+
+### Lessons Learned from the Fourth Test
+
+1. **Redeeming against a fresh reserve with an existing confirmed note works.** Reusing the already-confirmed Alice→Bob note (0.4 ERG totalDebt) avoided re-issuing a same-pair note, which would have changed totalDebt and desynced the local state from the on-chain tracker digest.
+
+2. **Only the CLI `generate-redemption` path broadcasts on-chain.** `basis-ui` (`crates/basis_app/src/ui.rs`) and `basis_cli note redeem` only prepare/mark local state and never broadcast; `basis_cli transaction generate-redemption` is the proven path for confirmable redemptions.
+
+3. **Wallet change address differs from the server address.** Reserve/fee-box funding via `/wallet/payment/send` routes change (and all tokens) to the wallet's own address `9fPRvaMYz…`, keeping them spendable. Funding payloads must be a JSON array of `PaymentRequest` with camelCase `tokenId`.
+
+4. **A token-free change box is left for the next cycle.** After this redemption, change box `eaa24ce9…` (0.599 ERG, token-free) is available for subsequent updater/redemption fees, avoiding update stalls.
+
+5. **Empty reserve tree ⇒ first redemption.** Because reserve `b4a1c033…` had no prior redemptions, this 0.1 ERG redemption was the first entry written to the reserve's AVL tree under `blake2b256(Alice_pubkey || Bob_pubkey)`.
+
+## Fifth Redemption Test (0.1 ERG reserve, 0.4 ERG debt, 0.01 ERG partial redemption, **client-side `proveDlog`**)
+
+Goal: verify that a redemption can be **signed entirely off-chain** (client-side `proveDlog` for BOTH the reserve input's receiver and the fee input's fee payer) and accepted by the node, instead of delegating signing to the node wallet (`/wallet/transaction/sign`). This is the path a TUI/cold-signer uses: the tracker only supplies proofs + its own signature; the receiver produces the `proveDlog` locally.
+
+### Fixtures
+
+- Tracker server rebuilt on **ergo-lib 0.28** (the deployed Basis contract uses the `Modulo`/`Exponentiate`/`MultiplyGroup` opcodes, which older ergo-lib could not reduce) and restarted; the existing committed Alice→Bob note (totalDebt 0.4 ERG, redeemable 0.4 ERG) was reloaded into tracker box `b9c4bdbd…`.
+- Fresh empty reserve created by reusing an already-held singleton token as the reserve NFT (no new token mint):
+
+| Field | Value |
+|-------|-------|
+| Reserve creation tx | `223fc52ae7058cfbad8fa5ff469e539f426cb0589ae3a2f56ac0c80d1facf292` (height 1826107) |
+| Reserve box ID | `ddfd4223d3e6d3a9c4da0488b5daed0bbeaec51bcef9208ef4a756d5cbfecec1` |
+| Collateral | 100,000,000 nanoERG (0.1 ERG), empty AVL tree (first redemption) |
+| Reserve NFT | `68b5a5106ad1a1f54bea5a95cc4c6aebbc7bd0ee8b26eb52f9783efe719b3921` (reused singleton) |
+| Tracker NFT (R6) | `000b0695159e5f5c32c606385bd5f276d80133149c84c8b1325366381bf6f17f` |
+
+- Reserve creation consolidated the wallet into a single token-heavy box, so a fresh token-free fee box was funded: funding tx `dba382e73fdb528ed9978353307f02bd674a2091fee746c92a8a6bf3783144cb` (height 1826108), fee box `3e26e9d0bc1d4c0dd73cb84dc27c147b35eada8fbf3fccdb24dd641896e7a8da` (0.05 ERG, token-free).
+
+### Redemption Command (client-side signing)
+
+```bash
+./target/debug/basis_cli transaction generate-redemption \
+  --issuer-pubkey 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
+  --recipient-pubkey 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea \
+  --amount 10000000 \
+  --tracker-box-id b9c4bdbd8de1cee5d41006baf32c1c0ba5621bd7749c8a3ee9bc603cb95a6f72 \
+  --change-address 9fPRvaMYzBPotu6NGvZn4A6N4J2jDmRGs4Zwc9UhFFeSXgRJ8pS \
+  --local-sign
+```
+
+`generate-redemption` auto-selected reserve `ddfd4223…` (empty tree → first redemption), fetched the receiver + fee-payer dlog secrets from the node wallet (stand-in for a local keystore), and signed in-process with ergo-lib's `Wallet::sign_transaction`.
+
+### Root Cause Found and Fixed
+
+The first local-sign attempts were rejected: `HTTP 400 Malformed transaction: Scripts of all transaction inputs should pass verification. <txid>: #0 => Success((false,1273))`. Decisive isolation showed the contract + fixtures + extension *values* were correct (a node-signed control of the same tx passed `/transactions/check`, and the deterministic extension vars `#0,#1,#3,#4,#5,#8` were byte-identical between local and node-signed), yet the node hashed the local tx to a different id than ergo-lib did.
+
+**Cause:** the reserve input's `ContextExtension` is serialized as part of the `UnsignedInput` (`boxId ++ extension`), so the extension byte order is part of `bytes_to_sign`. The reference client (`sigma.interpreter.ContextExtension` in sigmastate-interpreter) stores variables in a `scala.collection.Map[Byte, _]` whose serializer does `obj.values.foreach { (id, v) => put(id); putValue(v) }` — i.e. it iterates the map in **index (HashMap) order, not insertion order**. ergo-lib serializes its insertion-ordered map in parse order, so the local `bytes_to_sign` diverged from the node's and `proveDlog(receiver)` failed. (A plain ERG payment — empty extension — matched node serialization, which masked this.)
+
+**Fix:** before parsing/signing the unsigned tx in `sign_and_broadcast_local`, reorder the reserve input's extension keys to Scala's index order for the first-redemption variable set `{0,1,2,3,4,5,6,8}`, which is `0,5,1,6,2,3,8,4` (helper `reorder_reserve_extension_scala` in `crates/basis_cli/src/commands/transaction.rs`). Confirmed by an ergo-lib tx-id parity test (reordered → id `2022a955…`, matching the node) and by the confirmed broadcast below.
+
+### Confirmed Transaction (height 1826140)
+
+| Field | Value |
+|-------|-------|
+| Transaction ID | `c897018c1d59661769688feffddc2121923c64cf0769e4961f4b7c9f681558cd` |
+| Inputs spent | Reserve `ddfd4223…` (0.1 ERG), fee input `3e26e9d0…` (0.05 ERG) |
+| Output 0 (new reserve) | `b4b2c78adff7651cdb23a6558da661658c8430529d6c6f65b1b2dd667a1e4118` — 0.09 ERG (reserve NFT `68b5a510…`) |
+| Output 1 (Bob's redemption) | `ac5af621b6c23bd84e64dff516def209b748495b1a93e36561da40ff266973fd` — 0.01 ERG (`9hnupHc2…`) |
+| Output 2 (fee) | `3bcadc9ba846dee67362ac727d69c7b7999a0541f434544c6c928883c72162be` — 0.001 ERG |
+| Output 3 (wallet change) | `350ecc812bcc4aee7557267743d763b071aa85b57d344f056268de4557ca3f4c` — 0.049 ERG (token-free) |
+
+The tx id is recorded in `/tmp/redemption_txid.txt`. This is the first redemption confirmed with **client-side** `proveDlog` for both inputs — the node only validated; it did not sign.
+
+### Lessons Learned from the Fifth Test
+
+1. **Context-extension variable order is part of `bytes_to_sign`.** Because `UnsignedInput = boxId ++ extension`, the order in which context variables are serialized changes the signed message. Rust signers must emit the reserve input's extension in Scala's `ContextExtension` (index/HashMap) order — for the first-redemption set `{0,1,2,3,4,5,6,8}` that order is `0,5,1,6,2,3,8,4`. ergo-lib's insertion order is not compatible by default.
+
+2. **`/transactions/check` validates without spending.** Useful as a no-cost control: the node-signed version of the exact redemption tx passed `/transactions/check`, proving the contract and fixtures were sound and isolating the failure to the locally-produced proof.
+
+3. **Extension order depends on the variable *set*.** The order `0,5,1,6,2,3,8,4` is specific to keys `{0,1,2,3,4,5,6,8}` (first redemption, no `#7`). A subsequent redemption adds `#7` (reserve lookup proof), changing Scala's iteration order to `0,5,1,6,2,7,3,8,4` for the set `{0,1,2,3,4,5,6,7,8}`. Both orders are produced by `scala_context_extension_order`, which reproduces Scala's `immutable.HashMap` (HashTrieMap) iteration and was self-validated against the on-chain-confirmed first-redemption order, so local signing works for subsequent redemptions too.
+
+4. **Empty extension ⇒ serializers agree.** A token-free, register-free, extension-free payment serialized identically in ergo-lib 0.28 and node 6.0.3; the divergence only appears once inputs carry a context extension, which is every Basis redemption/top-up.
+
+5. **ergo-lib 0.28 reduces the Basis contract.** The `Modulo`/`Exponentiate`/`MultiplyGroup` opcodes in `basis.es` require ergo-lib ≥ 0.28 to reduce the reserve script to its residual `proveDlog(receiver)`; earlier versions threw `NotImplementedOpCode` during signing.
+
+---
+
 - [Tracker Box Update Specification](server/tracker_box_update_spec.md)
 - [Redemption Transaction Format Specification](server/redemption_transaction_format_spec.md)
 - [Redemption State Specification](server/redemption_state_spec.md)

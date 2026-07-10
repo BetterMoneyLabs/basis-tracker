@@ -13,6 +13,6 @@ ergo_avltree_rust = "0.1.1"
 secp256k1 = "0.27"
 blake2 = "0.10"
 # Ergo blockchain dependencies for scanner - using compatible versions
-ergo-lib = "0.13.0"
+ergo-lib = "0.28.0"
 thiserror = "1.0"
 reqwest = "0.11"

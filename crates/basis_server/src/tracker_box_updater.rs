@@ -933,9 +933,9 @@ impl TrackerBoxUpdater {
 
 /// Derive a P2PK change address from a compressed tracker public key.
 fn derive_change_address(tracker_pubkey: &[u8; 33]) -> Result<String, TrackerBoxUpdaterError> {
-    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+    use ergo_lib::ergo_chain_types::EcPoint;
+    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
     let ec_point = EcPoint::sigma_parse_bytes(tracker_pubkey).map_err(|e| {
@@ -943,13 +943,14 @@ fn derive_change_address(tracker_pubkey: &[u8; 33]) -> Result<String, TrackerBox
     })?;
     let prove_dlog = ProveDlog::new(ec_point);
     let address = Address::P2Pk(prove_dlog);
-    let encoder = ergo_lib::ergotree_ir::address::AddressEncoder::new(NetworkPrefix::Mainnet);
+    let encoder =
+        ergo_lib::ergotree_ir::chain::address::AddressEncoder::new(NetworkPrefix::Mainnet);
     Ok(encoder.address_to_str(&address))
 }
 
 /// Convert a P2PK or P2S address string to its hex-encoded ergoTree bytes.
 fn change_address_to_ergo_tree(address_str: &str) -> Result<String, TrackerBoxUpdaterError> {
-    use ergo_lib::ergotree_ir::address::{AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
     let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
@@ -965,5 +966,7 @@ fn change_address_to_ergo_tree(address_str: &str) -> Result<String, TrackerBoxUp
             address_str, e
         ))
     })?;
-    Ok(hex::encode(tree.sigma_serialize_bytes()))
+    Ok(hex::encode(tree.sigma_serialize_bytes().map_err(|e| {
+        TrackerBoxUpdaterError::SerializationError(format!("Failed to serialize ergoTree: {:?}", e))
+    })?))
 }

@@ -178,9 +178,11 @@ mod cors_tests {
                         submitted_height,
                         response_tx,
                     } => {
-                        let result = redemption_manager
-                            .tracker
-                            .mark_notes_pending(digest, &tx_id, submitted_height);
+                        let result = redemption_manager.tracker.mark_notes_pending(
+                            digest,
+                            &tx_id,
+                            submitted_height,
+                        );
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::ConfirmPendingNotes {
@@ -188,8 +190,9 @@ mod cors_tests {
                         height,
                         response_tx,
                     } => {
-                        let result =
-                            redemption_manager.tracker.confirm_pending_notes(&box_id, height);
+                        let result = redemption_manager
+                            .tracker
+                            .confirm_pending_notes(&box_id, height);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::RevertPendingNotes { response_tx } => {

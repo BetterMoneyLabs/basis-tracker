@@ -1,7 +1,7 @@
 # Redemption Transaction Format Specification
 
 ## Overview
-This document specifies the format for redemption transactions that spend reserve boxes to pay out to note holders. The transaction is built for the Ergo node's `/wallet/transaction/sign` endpoint, then broadcast via `/transactions`. It includes all necessary context extension variables for the Basis reserve contract validation.
+This document specifies the format for redemption transactions that spend reserve boxes to pay out to note holders. The unsigned transaction can be signed either by the Ergo node (`/wallet/transaction/sign`) or entirely off-chain by the client, and is then broadcast via `/transactions`. It includes all necessary context extension variables for the Basis reserve contract validation. For the off-chain (client-side) signing path and its serialization requirements, see [offchain_redemption_signing.md](../client/offchain_redemption_signing.md).
 
 ## Transaction Request Format
 
@@ -310,6 +310,18 @@ Context extension values must be serialized as Ergo constants with type prefixes
 - **#6 (trackerSig)**: Must be Coll[Byte] constant (`0e` + length + 65-byte Schnorr signature hex), optional for emergency redemption after 3 days
 - **#7 (lookupProofReserve)**: Coll[Byte] constant, required for subsequent redemptions, omitted for first
 - **#8 (lookupProofTracker)**: Must be Coll[Byte] constant (`0e` + length + AVL proof hex)
+
+### Signed Message (`bytes_to_sign`) and Extension Ordering
+
+`proveDlog(receiver)` is computed over the transaction's `bytes_to_sign` — the serialization of the unsigned transaction. Each input is serialized as an `UnsignedInput = boxId (32 bytes) ++ ContextExtension`, so **the reserve input's serialized context extension is part of the signed message**. The extension must therefore be serialized in exactly the same byte order the node uses.
+
+The reference client (`sigma.interpreter.ContextExtension`) serializes variables by iterating a `scala.collection.Map[Byte, _]` (`obj.values.foreach { (id, v) => put(id); putValue(v) }`), which is **index (HashMap) order, not insertion order**, and the order depends on the index *set*. A signer that emits variables in a different order produces a different `bytes_to_sign` and the node rejects the proof (`Scripts of all transaction inputs should pass verification … #0 => Success((false, _))`).
+
+For the first-redemption set `{0,1,2,3,4,5,6,8}` the node (Scala) order is `0,5,1,6,2,3,8,4`; for the subsequent-redemption set `{0,1,2,3,4,5,6,7,8}` (with `#7`) it is `0,5,1,6,2,7,3,8,4`. Both are produced by reproducing Scala's `immutable.HashMap` (HashTrieMap) iteration order, validated against the on-chain-confirmed first-redemption order. See [offchain_redemption_signing.md](../client/offchain_redemption_signing.md) for details.
+
+### Output Ordering
+
+The redemption action encodes the reserve output index in context var `#0` (`index = action % 10`, action byte `0x00` ⇒ index `0`). **The updated reserve output must be at output index 0**, followed by the recipient output, the fee output, and the optional change output. (The `requests` examples below list the recipient first for readability; the on-wire `tx.outputs` must place the reserve at index 0.)
 
 ### Signature Message Format
 

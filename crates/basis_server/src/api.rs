@@ -16,7 +16,7 @@ use crate::{
 };
 use basis_store::reqwest;
 use basis_store::{IouNote, NoteError, PubKey, Signature};
-use ergo_lib::ergotree_ir::address::AddressEncoder;
+use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
 use serde::{Deserialize, Serialize};
 
 // Structs for the Schnorr signing API
@@ -1497,9 +1497,9 @@ pub async fn initiate_redemption(
     // Convert recipient public key to P2PK address
     let recipient_address = {
         // Convert the public key to a P2PK address
-        use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+        use ergo_lib::ergo_chain_types::EcPoint;
+        use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
         use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-        use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
         use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
         // Decode the hex public key
@@ -2480,9 +2480,9 @@ pub async fn request_tracker_signature(
         tracing::info!("No tracker secret key configured, using Ergo node API");
 
         // Convert tracker public key to P2PK address format for the Ergo node API
-        use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+        use ergo_lib::ergo_chain_types::EcPoint;
+        use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
         use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-        use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
         use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
         let tracker_ec_point = match EcPoint::sigma_parse_bytes(&tracker_pubkey_bytes) {
@@ -2671,9 +2671,9 @@ async fn get_tracker_signature_for_redemption(
     let message_to_sign = hex::encode(&message_to_sign_bytes);
 
     // Convert tracker public key to P2PK address
-    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+    use ergo_lib::ergo_chain_types::EcPoint;
+    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
     let tracker_ec_point = EcPoint::sigma_parse_bytes(&tracker_pubkey_bytes).map_err(|e| {
@@ -2872,9 +2872,9 @@ pub async fn prepare_redemption(
     let message_to_sign = hex::encode(&message_to_sign_bytes);
 
     // Convert tracker public key to P2PK address format for the Ergo node API
-    use ergo_lib::ergotree_ir::address::{Address, NetworkPrefix};
+    use ergo_lib::ergo_chain_types::EcPoint;
+    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-    use ergo_lib::ergotree_ir::sigma_protocol::dlog_group::EcPoint;
     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
     let tracker_ec_point = match EcPoint::sigma_parse_bytes(&tracker_pubkey_bytes) {
