@@ -448,6 +448,59 @@ pub struct RedemptionPreparationResponse {
     pub tracker_box_id: String, // ID of the tracker box used for the proof
 }
 
+// Tracker-assisted 2-phase redemption build/submit (POST /redemption/build, /redemption/submit).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedemptionBuildRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub amount: u64,
+    pub timestamp: u64,
+    /// Issuer's 65-byte Schnorr signature (hex) over the redemption signing message.
+    pub issuer_signature: String,
+    #[serde(default)]
+    pub emergency: bool,
+    #[serde(default)]
+    pub tracker_box_id: Option<String>,
+    #[serde(default)]
+    pub change_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedemptionBuildResponse {
+    pub unsigned_tx: serde_json::Value,
+    pub partial_tx: serde_json::Value,
+    pub input_box_binaries: Vec<String>,
+    pub data_box_binaries: Vec<String>,
+    pub headers: Vec<ergo_lib::ergo_chain_types::Header>,
+    pub reserve_box_id: String,
+    pub tracker_box_id: String,
+    pub reserve_output_value: u64,
+    pub recipient_output_value: u64,
+    pub total_debt: u64,
+    pub change_amount: u64,
+    pub change_address: String,
+    pub recipient_address: String,
+    pub is_first_redemption: bool,
+    pub fee: u64,
+    /// Cumulative reserve-tree `already_redeemed` proven by the build; round-trip to submit.
+    #[serde(default)]
+    pub new_already_redeemed: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedemptionSubmitRequest {
+    pub signed_tx: serde_json::Value,
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub redeemed_amount: u64,
+    pub new_already_redeemed: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedemptionSubmitResponse {
+    pub tx_id: String,
+}
+
 // Tracker proof response for context var #8
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerProofResponse {
@@ -577,6 +630,90 @@ impl TrackerClient {
                 "Failed to prepare redemption: {}",
                 error_text
             ))
+        }
+    }
+
+    /// Build the unsigned redemption transaction on the tracker and have it sign the fee input(s)
+    /// locally. Returns the unsigned tx, the fee-signed partial tx, the sigma-serialized input/data
+    /// boxes, and the block headers the client needs to add the reserve-input proof.
+    /// POST /redemption/build
+    pub async fn redemption_build(
+        &self,
+        request: RedemptionBuildRequest,
+    ) -> Result<RedemptionBuildResponse> {
+        let url = format!("{}/redemption/build", self.base_url);
+        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(code, resp)) => {
+                let error_text = resp
+                    .into_string()
+                    .unwrap_or_else(|_| format!("HTTP {}", code));
+                return Err(anyhow::anyhow!("redemption build failed: {}", error_text));
+            }
+            Err(e) => return Err(anyhow::anyhow!("redemption build request failed: {}", e)),
+        };
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<RedemptionBuildResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!(
+                    "redemption build API error: {:?}",
+                    api_response.error
+                ))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("redemption build failed: {}", error_text))
+        }
+    }
+
+    /// Broadcast a fully-signed redemption transaction via the tracker. POST /redemption/submit.
+    /// Returns the node-accepted transaction id.
+    ///
+    /// `redeemed_amount` and `new_already_redeemed` let the tracker sync its local note and
+    /// reserve-tree state after a successful broadcast.
+    pub async fn redemption_submit(
+        &self,
+        signed_tx: serde_json::Value,
+        issuer_pubkey: &str,
+        recipient_pubkey: &str,
+        redeemed_amount: u64,
+        new_already_redeemed: u64,
+    ) -> Result<String> {
+        let url = format!("{}/redemption/submit", self.base_url);
+        let request = RedemptionSubmitRequest {
+            signed_tx,
+            issuer_pubkey: issuer_pubkey.to_string(),
+            recipient_pubkey: recipient_pubkey.to_string(),
+            redeemed_amount,
+            new_already_redeemed,
+        };
+        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(code, resp)) => {
+                let error_text = resp
+                    .into_string()
+                    .unwrap_or_else(|_| format!("HTTP {}", code));
+                return Err(anyhow::anyhow!("redemption submit failed: {}", error_text));
+            }
+            Err(e) => return Err(anyhow::anyhow!("redemption submit request failed: {}", e)),
+        };
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<RedemptionSubmitResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap().tx_id)
+            } else {
+                Err(anyhow::anyhow!(
+                    "redemption submit API error: {:?}",
+                    api_response.error
+                ))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("redemption submit failed: {}", error_text))
         }
     }
 

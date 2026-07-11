@@ -1956,6 +1956,7 @@ pub async fn complete_redemption(
         issuer_pubkey,
         recipient_pubkey,
         redeemed_amount: payload.redeemed_amount,
+        new_already_redeemed: payload.new_already_redeemed,
         response_tx,
     };
 

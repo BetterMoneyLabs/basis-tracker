@@ -35,6 +35,8 @@ generic-array = "0.14"
 basis_store = { path = "../basis_store" }
 # Core functionality
 basis_core = { path = "../basis_core" }
+# Offchain signing helpers (single-input prove + splice)
+basis_offchain = { path = "../basis_offchain" }
 # Ergo library for address encoding
 ergo-lib = { workspace = true }
 

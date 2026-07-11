@@ -105,7 +105,6 @@ impl AvlTreeState {
     /// This performs a `Lookup` operation and returns the proof bytes that
     /// can be used to verify the key's existence (or non-existence) in the tree.
     pub fn generate_lookup_proof(&mut self, key: Vec<u8>) -> (Vec<u8>, Option<Vec<u8>>) {
-        use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
         let operation = Operation::Lookup(key.into());
         let result = self.prover.perform_one_operation(&operation).ok().flatten();
         let proof = self.prover.generate_proof().to_vec();

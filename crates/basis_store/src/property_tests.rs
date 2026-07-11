@@ -399,7 +399,7 @@ mod property_tests {
                 let result = redemption_manager.initiate_redemption(&request);
                 if result.is_ok() {
                     total_redeemed += redeem_amount;
-                    let _ = redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount);
+                    let _ = redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount, None);
                 }
             }
 

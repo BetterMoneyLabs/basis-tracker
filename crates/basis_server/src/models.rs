@@ -169,6 +169,10 @@ pub struct CompleteRedemptionRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub redeemed_amount: u64,
+    /// Optional explicit cumulative reserve-tree value (from the on-chain build).
+    /// When omitted, the note's cumulative redeemed amount is used.
+    #[serde(default)]
+    pub new_already_redeemed: Option<u64>,
 }
 
 // Redemption response

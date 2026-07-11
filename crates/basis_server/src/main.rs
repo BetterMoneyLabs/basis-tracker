@@ -3,9 +3,9 @@ use axum::{
     Router,
 };
 use basis_server::{
-    api::*, reserve_api::*, store::EventStore, AppConfig, AppState, ErgoConfig, EventType,
-    ServerConfig, SharedTrackerState, TrackerBoxUpdateConfig, TrackerBoxUpdater, TrackerCommand,
-    TrackerEvent, TransactionConfig,
+    api::*, build_redemption, reserve_api::*, store::EventStore, submit_redemption, AppConfig,
+    AppState, ErgoConfig, EventType, ServerConfig, SharedTrackerState, TrackerBoxUpdateConfig,
+    TrackerBoxUpdater, TrackerCommand, TrackerEvent, TransactionConfig,
 };
 use basis_store::{
     ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
@@ -334,12 +334,14 @@ async fn main() {
                     issuer_pubkey,
                     recipient_pubkey,
                     redeemed_amount,
+                    new_already_redeemed,
                     response_tx,
                 } => {
                     let result = redemption_manager.complete_redemption(
                         &issuer_pubkey,
                         &recipient_pubkey,
                         redeemed_amount,
+                        new_already_redeemed,
                     );
 
                     // Update shared state for tracker box updater if successful
@@ -399,6 +401,10 @@ async fn main() {
                         new_already_redeemed,
                     );
                     let _ = response_tx.send(result);
+                }
+                TrackerCommand::GetReserveStateDigest { response_tx } => {
+                    let digest = redemption_manager.tracker.reserve_state_digest();
+                    let _ = response_tx.send(digest);
                 }
                 TrackerCommand::GetConfirmation {
                     issuer_pubkey,
@@ -723,6 +729,14 @@ async fn main() {
         .route(
             "/redemption/prepare",
             post(prepare_redemption).options(handle_options),
+        )
+        .route(
+            "/redemption/build",
+            post(build_redemption).options(handle_options),
+        )
+        .route(
+            "/redemption/submit",
+            post(submit_redemption).options(handle_options),
         )
         .route("/reserves", get(get_all_reserves))
         .route(

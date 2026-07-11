@@ -4,6 +4,7 @@ pub mod acceptance;
 pub mod api;
 pub mod config;
 pub mod models;
+pub mod redemption_build;
 pub mod reserve_api;
 pub mod store;
 pub mod tracker_box_updater;
@@ -18,6 +19,7 @@ pub use acceptance::*;
 pub use api::*;
 pub use config::*;
 pub use models::*;
+pub use redemption_build::*;
 pub use reserve_api::*;
 pub use store::*;
 pub use tracker_box_updater::*;
@@ -88,6 +90,9 @@ pub enum TrackerCommand {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
         redeemed_amount: u64,
+        /// Explicit cumulative reserve-tree value to sync (from the on-chain build).
+        /// Falls back to the note's cumulative redeemed amount when `None`.
+        new_already_redeemed: Option<u64>,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::RedemptionError>>,
     },
     GenerateProof {
@@ -117,6 +122,10 @@ pub enum TrackerCommand {
         new_already_redeemed: u64,
         response_tx:
             tokio::sync::oneshot::Sender<Result<(Vec<u8>, Vec<u8>), basis_store::NoteError>>,
+    },
+    /// Get the current reserve AVL tree root digest (33 bytes).
+    GetReserveStateDigest {
+        response_tx: tokio::sync::oneshot::Sender<Vec<u8>>,
     },
     /// Get the confirmation record for a single note.
     GetConfirmation {

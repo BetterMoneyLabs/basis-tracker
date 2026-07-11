@@ -118,8 +118,6 @@ impl BasisAvlTree {
     /// This performs a `Lookup` operation and returns the proof bytes that
     /// can be used to verify the key's existence (or non-existence) in the tree.
     pub fn generate_lookup_proof(&mut self, key: Vec<u8>) -> (Vec<u8>, Option<Vec<u8>>) {
-        use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-
         // Commit any pending modifications so the lookup proof only covers the
         // lookup operation, not previous insert/update operations.
         let _ = self.prover.generate_proof();
@@ -181,22 +179,31 @@ impl BasisAvlTree {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<(Vec<u8>, [u8; 33]), TreeError> {
-        // Clone the current tree so the persistent prover is not modified.
-        let cloned_tree = self.prover.base.tree.clone();
-        let mut temp_prover = BatchAVLProver::new(cloned_tree, true);
+        // Rebuild a temporary tree from the in-memory cache. `AVLTree::clone()` is shallow
+        // (`Rc<RefCell<Node>>`), so operating on a clone would mutate the persistent tree's
+        // shared nodes and corrupt its state.
+        let mut temp_prover = BatchAVLProver::new(AVLTree::new(tree_resolver, 32, None), true);
+        for (cached_key, cached_value) in &self.cache {
+            temp_prover
+                .perform_one_operation(&Operation::Insert(KeyValue {
+                    key: cached_key.clone().into(),
+                    value: cached_value.clone().into(),
+                }))
+                .map_err(|e| {
+                    TreeError::StorageError(format!("AVL tree rebuild failed: {:?}", e))
+                })?;
+        }
+        // Commit the rebuild so the proof below covers only the single insert-or-update
+        // operation against the committed starting digest.
+        let _ = temp_prover.generate_proof();
 
-        let key_exists = self.get(&key).is_some();
-        let operation = if key_exists {
-            Operation::Update(KeyValue {
-                key: key.into(),
-                value: value.into(),
-            })
-        } else {
-            Operation::Insert(KeyValue {
-                key: key.into(),
-                value: value.into(),
-            })
-        };
+        // Match JVM scrypto `Insert` semantics used by the on-chain contract (`AvlTree.insert`
+        // replays `Insert` on the verifier, which updates the value when the key already
+        // exists). `Operation::Update` proofs do not verify on-chain as `insert`.
+        let operation = Operation::InsertOrUpdate(KeyValue {
+            key: key.into(),
+            value: value.into(),
+        });
 
         temp_prover
             .perform_one_operation(&operation)
@@ -323,5 +330,68 @@ mod tests {
         let mut verified_digest_arr = [0u8; 33];
         verified_digest_arr.copy_from_slice(&verified_digest);
         assert_eq!(verified_digest_arr, expected_digest);
+    }
+
+    /// Regression test for the on-chain "Incorrect insert" failure: updating an existing key
+    /// must produce a proof that replays as an insert-style operation (JVM scrypto `Insert`
+    /// updates existing keys; `Operation::Update` proofs do not verify on-chain as `insert`).
+    #[test]
+    fn generate_insert_proof_updates_existing_key_with_verifiable_proof() {
+        use bytes::Bytes;
+        use ergo_avltree_rust::{
+            batch_avl_verifier::BatchAVLVerifier,
+            batch_node::AVLTree,
+            operation::{KeyValue, Operation},
+        };
+
+        let mut tree = BasisAvlTree::new().unwrap();
+        let key = vec![7u8; 32];
+        let value_v1 = vec![1u8; 16];
+        let value_v2 = vec![2u8; 16];
+
+        // Commit the first version into the persistent tree.
+        tree.insert(key.clone(), value_v1.clone()).unwrap();
+        let committed_digest = tree.root_digest();
+
+        // Generate a proof for updating the same key to v2; persistent state must not change.
+        let (proof, expected_digest) = tree
+            .generate_insert_proof(key.clone(), value_v2.clone())
+            .unwrap();
+        assert_eq!(tree.root_digest(), committed_digest);
+        assert_ne!(expected_digest, committed_digest);
+        assert!(!proof.is_empty());
+
+        // Deterministic: a second call returns the same proof and digest.
+        let (proof2, expected_digest2) = tree
+            .generate_insert_proof(key.clone(), value_v2.clone())
+            .unwrap();
+        assert_eq!(proof2, proof);
+        assert_eq!(expected_digest2, expected_digest);
+
+        // The proof must replay successfully from the committed digest under insert-or-update
+        // semantics (the semantics the on-chain contract relies on for cumulative redemptions).
+        // NOTE: the resulting verifier digest is NOT asserted here: ergo_avltree_rust 0.1.1's
+        // verifier miscomputes the final label for the update path (it diverges from the
+        // prover), while JVM scrypto 2.3.0's verifier matches the prover exactly — verified
+        // via scala/src/main/scala/chaincash/compare/AvlUpdateDigestCheck.scala.
+        let avl_tree = AVLTree::new(tree_resolver, 32, None);
+        let mut verifier = BatchAVLVerifier::new(
+            &Bytes::copy_from_slice(&committed_digest),
+            &Bytes::copy_from_slice(&proof),
+            avl_tree,
+            Some(1),
+            Some(0),
+        )
+        .unwrap();
+        verifier
+            .perform_one_operation(&Operation::InsertOrUpdate(KeyValue {
+                key: key.clone().into(),
+                value: value_v2.clone().into(),
+            }))
+            .unwrap();
+
+        // The prover-side digest must match a real persistent update.
+        tree.update(key.clone(), value_v2.clone()).unwrap();
+        assert_eq!(tree.root_digest(), expected_digest);
     }
 }

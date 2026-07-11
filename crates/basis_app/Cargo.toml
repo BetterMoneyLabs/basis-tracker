@@ -44,3 +44,4 @@ toml = "0.8"
 basis_cli = { path = "../basis_cli" }
 basis_store = { path = "../basis_store" }
 basis_core = { path = "../basis_core" }
+basis_offchain = { path = "../basis_offchain" }

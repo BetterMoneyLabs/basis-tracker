@@ -1,6 +1,8 @@
 //! Offchain logic for Basis tracker
 
+pub mod ergo_tx;
 pub mod schnorr;
+pub mod signing;
 pub mod transaction_builder;
 
 #[cfg(test)]

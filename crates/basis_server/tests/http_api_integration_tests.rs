@@ -88,12 +88,14 @@ mod http_api_tests {
                         issuer_pubkey,
                         recipient_pubkey,
                         redeemed_amount,
+                        new_already_redeemed,
                         response_tx,
                     } => {
                         let result = redemption_manager.complete_redemption(
                             &issuer_pubkey,
                             &recipient_pubkey,
                             redeemed_amount,
+                            new_already_redeemed,
                         );
                         let _ = response_tx.send(result);
                     }
@@ -209,6 +211,10 @@ mod http_api_tests {
                             .tracker
                             .reconcile_with_confirmed_digest(&digest, &box_id, height);
                         let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::GetReserveStateDigest { response_tx } => {
+                        let digest = redemption_manager.tracker.reserve_state_digest();
+                        let _ = response_tx.send(digest);
                     }
                 }
             }

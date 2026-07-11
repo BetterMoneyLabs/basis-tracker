@@ -4,6 +4,13 @@ use crate::acceptance_policy::{
 };
 use crate::app::{App, NoteInfo, Screen};
 use anyhow::Result;
+use basis_offchain::signing::{add_input_proof, redemption_signing_message};
+use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
+use ergo_lib::chain::transaction::Transaction;
+use ergo_lib::ergo_chain_types::{Header, PreHeader};
+use ergo_lib::ergotree_ir::chain::ergo_box::ErgoBox;
+use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+use ergo_lib::wallet::secret_key::SecretKey;
 use std::io::{self, Write};
 
 // ANSI Color codes
@@ -841,101 +848,166 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
         }
     };
 
-    // Get full note details from server
-    match app.client.get_note(&issuer, &recipient).await {
-        Ok(Some(note)) => {
-            let timestamp = note.timestamp;
-
-            // Create signing message
-            let issuer_bytes = hex::decode(&issuer)?;
-            let recipient_bytes = hex::decode(&recipient)?;
-
-            let mut key_hash_input = Vec::new();
-            key_hash_input.extend_from_slice(&issuer_bytes);
-            key_hash_input.extend_from_slice(&recipient_bytes);
-
-            use blake2::{Blake2b, Digest};
-            use generic_array::typenum::U32;
-            let key_hash = Blake2b::<U32>::new()
-                .chain_update(&key_hash_input)
-                .finalize()
-                .to_vec();
-
-            let mut message = Vec::new();
-            message.extend_from_slice(&key_hash);
-            message.extend_from_slice(&note.amount_collected.to_be_bytes());
-            message.extend_from_slice(&timestamp.to_be_bytes());
-
-            if let Some(ref acc) = app.current_account {
-                if let Some(account) = app.account_manager.get_account(&acc.name) {
-                    match account.sign_message(&message) {
-                        Ok(signature) => {
-                            let request = basis_cli_lib::api::RedeemRequest {
-                                issuer_pubkey: issuer.clone(),
-                                recipient_pubkey: recipient.clone(),
-                                amount,
-                                timestamp,
-                                reserve_box_id: String::new(),
-                                tracker_box_id: String::new(),
-                                tracker_nft_id: String::new(),
-                                current_height: 0,
-                                recipient_address: String::new(),
-                                change_address: String::new(),
-                                issuer_signature: hex::encode(&signature),
-                                emergency: false,
-                                tracker_signature: None,
-                            };
-
-                            match app.client.initiate_redemption(request).await {
-                                Ok(_response) => {
-                                    let complete_request =
-                                        basis_cli_lib::api::CompleteRedemptionRequest {
-                                            issuer_pubkey: issuer,
-                                            recipient_pubkey: recipient,
-                                            redeemed_amount: amount,
-                                        };
-
-                                    match app.client.complete_redemption(complete_request).await {
-                                        Ok(_) => {
-                                            app.set_notification(
-                                                format!("Redeemed {} nanoERG", amount),
-                                                false,
-                                            );
-                                            app.refresh_data().await?;
-                                        }
-                                        Err(e) => {
-                                            app.set_notification(
-                                                format!("Failed to complete redemption: {}", e),
-                                                true,
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    app.set_notification(
-                                        format!("Failed to initiate redemption: {}", e),
-                                        true,
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            app.set_notification(format!("Signing error: {}", e), true);
-                        }
-                    }
-                }
-            }
-        }
+    // Fetch the full note (payment timestamp) from the server.
+    let note = match app.client.get_note(&issuer, &recipient).await {
+        Ok(Some(n)) => n,
         Ok(None) => {
             app.set_notification("Note not found".to_string(), true);
+            app.navigate_to(Screen::Notes);
+            return Ok(());
         }
         Err(e) => {
-            app.set_notification(format!("Error: {}", e), true);
+            app.set_notification(format!("Error fetching note: {}", e), true);
+            app.navigate_to(Screen::Notes);
+            return Ok(());
+        }
+    };
+
+    println!("\n  {}Building redemption via tracker...{}", CYAN, RESET);
+    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp).await {
+        Ok(tx_id) => {
+            let short = &tx_id[..16.min(tx_id.len())];
+            app.set_notification(format!("Redeemed {} nanoERG, tx {}", amount, short), false);
+            let _ = app.refresh_data().await;
+        }
+        Err(e) => {
+            app.set_notification(format!("Redemption failed: {}", e), true);
         }
     }
 
     app.navigate_to(Screen::Notes);
     Ok(())
+}
+
+/// Tracker-assisted redemption. The tracker builds the unsigned transaction and signs the fee
+/// input(s) (`POST /redemption/build`); the TUI signs the issuer message with the local issuer
+/// account, adds the reserve input's `proveDlog(recipient)` proof over the same `bytes_to_sign`,
+/// and submits the fully-signed transaction (`POST /redemption/submit`).
+///
+/// Returns the broadcast transaction id on success.
+async fn tracker_assisted_redeem(
+    app: &App,
+    issuer: &str,
+    recipient: &str,
+    amount: u64,
+    timestamp: u64,
+) -> Result<String, String> {
+    let issuer_pk: [u8; 33] = hex::decode(issuer)
+        .map_err(|e| format!("issuer hex: {}", e))?
+        .try_into()
+        .map_err(|_| "issuer pubkey must be 33 bytes".to_string())?;
+    let recipient_pk: [u8; 33] = hex::decode(recipient)
+        .map_err(|e| format!("recipient hex: {}", e))?
+        .try_into()
+        .map_err(|_| "recipient pubkey must be 33 bytes".to_string())?;
+
+    // Authoritative total debt from the tracker (must match context var #3 exactly).
+    let total_debt = app
+        .client
+        .get_tracker_proof(issuer, recipient)
+        .await
+        .map_err(|e| format!("tracker proof failed: {}", e))?
+        .total_debt;
+
+    // Issuer (reserve owner) signs the redemption message.
+    let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, timestamp);
+    let issuer_account = app
+        .account_manager
+        .accounts
+        .values()
+        .find(|a| a.get_pubkey_hex() == issuer)
+        .ok_or_else(|| {
+            format!(
+                "no local account for issuer {}... (the issuer must co-sign the redemption)",
+                &issuer[..16.min(issuer.len())]
+            )
+        })?;
+    let issuer_sig = issuer_account
+        .sign_message(&message)
+        .map_err(|e| format!("issuer signing failed: {}", e))?;
+
+    // Recipient (receiver) secret for the reserve input's proveDlog(recipient).
+    let cur = app.current_account.as_ref().ok_or("no current account")?;
+    let receiver_account = app
+        .account_manager
+        .get_account(&cur.name)
+        .ok_or("current account not found")?;
+    let receiver_secret: [u8; 32] = hex::decode(receiver_account.get_private_key_hex())
+        .map_err(|e| format!("receiver secret hex: {}", e))?
+        .try_into()
+        .map_err(|_| "receiver secret must be 32 bytes".to_string())?;
+    let receiver_sk = SecretKey::dlog_from_bytes(&receiver_secret)
+        .ok_or("invalid receiver dlog secret".to_string())?;
+
+    // Tracker builds the unsigned tx and signs the fee input(s).
+    let build = app
+        .client
+        .redemption_build(basis_cli_lib::api::RedemptionBuildRequest {
+            issuer_pubkey: issuer.to_string(),
+            recipient_pubkey: recipient.to_string(),
+            amount,
+            timestamp,
+            issuer_signature: hex::encode(issuer_sig),
+            emergency: false,
+            tracker_box_id: None,
+            change_address: None,
+        })
+        .await
+        .map_err(|e| format!("tracker build failed: {}", e))?;
+
+    // Reconstruct the signing material the tracker produced.
+    let unsigned: UnsignedTransaction = serde_json::from_value(build.unsigned_tx)
+        .map_err(|e| format!("parse unsigned tx: {}", e))?;
+    let partial: Transaction =
+        serde_json::from_value(build.partial_tx).map_err(|e| format!("parse partial tx: {}", e))?;
+    let parse_box = |h: &str| -> Result<ErgoBox, String> {
+        let bytes = hex::decode(h).map_err(|e| format!("box hex: {}", e))?;
+        ErgoBox::sigma_parse_bytes(&bytes).map_err(|e| format!("box parse: {:?}", e))
+    };
+    let mut input_boxes = Vec::with_capacity(build.input_box_binaries.len());
+    for h in &build.input_box_binaries {
+        input_boxes.push(parse_box(h)?);
+    }
+    let mut data_boxes = Vec::with_capacity(build.data_box_binaries.len());
+    for h in &build.data_box_binaries {
+        data_boxes.push(parse_box(h)?);
+    }
+    if build.headers.len() < 10 {
+        return Err(format!(
+            "tracker returned {} headers (need 10)",
+            build.headers.len()
+        ));
+    }
+    let pre_header = PreHeader::from(build.headers[0].clone());
+    let headers: [Header; 10] = build.headers[..10]
+        .to_vec()
+        .try_into()
+        .map_err(|_| "headers array".to_string())?;
+
+    // Add the reserve input (index 0) proveDlog(recipient) proof over the same bytes_to_sign.
+    let signed = add_input_proof(
+        &unsigned,
+        Some(&partial),
+        &input_boxes,
+        &data_boxes,
+        &pre_header,
+        &headers,
+        0,
+        &receiver_sk,
+    )
+    .map_err(|e| format!("reserve proof failed: {:?}", e))?;
+
+    let tx_json = serde_json::to_value(&signed).map_err(|e| format!("serialize tx: {}", e))?;
+    app.client
+        .redemption_submit(
+            tx_json,
+            issuer,
+            recipient,
+            amount,
+            build.new_already_redeemed,
+        )
+        .await
+        .map_err(|e| format!("submit failed: {}", e))
 }
 
 async fn draw_create_reserve(app: &mut App) -> Result<()> {

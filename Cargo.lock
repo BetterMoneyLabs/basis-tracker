@@ -277,6 +277,7 @@ dependencies = [
  "anyhow",
  "basis_cli",
  "basis_core",
+ "basis_offchain",
  "basis_store",
  "blake2",
  "dirs",
@@ -299,6 +300,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "basis_core",
+ "basis_offchain",
  "basis_store",
  "blake2",
  "clap",
@@ -348,6 +350,7 @@ dependencies = [
  "rand 0.8.5",
  "secp256k1",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
@@ -416,6 +419,7 @@ dependencies = [
  "blake2",
  "bytes",
  "ergo_avltree_rust",
+ "hex",
  "serde",
  "serde_json",
  "tempfile",

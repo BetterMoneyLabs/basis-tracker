@@ -331,7 +331,7 @@ mod tests {
 
         // Complete redemption
         redemption_manager
-            .complete_redemption(&alice_pubkey, &bob_pubkey, total_debt)
+            .complete_redemption(&alice_pubkey, &bob_pubkey, total_debt, None)
             .expect("Failed to complete redemption");
 
         // Verify note is fully redeemed

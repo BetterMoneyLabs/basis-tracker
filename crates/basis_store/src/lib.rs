@@ -1061,6 +1061,12 @@ impl TrackerStateManager {
         Ok((insert_proof, updated_digest.to_vec()))
     }
 
+    /// Current reserve AVL tree root digest (33 bytes). The on-chain reserve box being spent must
+    /// have exactly this R5 digest for the insert proof to verify on-chain.
+    pub fn reserve_state_digest(&self) -> Vec<u8> {
+        self.reserve_avl_state.root_digest().to_vec()
+    }
+
     /// Update the already_redeemed amount in the reserve AVL tree.
     /// Called after a successful redemption to prevent double-spending.
     /// Value format: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes total

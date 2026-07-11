@@ -12,8 +12,8 @@ use ergo_lib::ergo_chain_types::{Header, PreHeader};
 use ergo_lib::ergotree_ir::chain::ergo_box::ErgoBox;
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use ergo_lib::wallet::secret_key::SecretKey;
-use ergo_lib::wallet::signing::TransactionContext;
-use ergo_lib::wallet::Wallet;
+
+use basis_offchain::signing::{add_input_proof, redemption_signing_message};
 
 const NODE_URL: &str = "http://127.0.0.1:9053";
 const API_KEY: &str = "hello";
@@ -109,6 +109,25 @@ pub enum TransactionCommands {
         #[arg(long)]
         fee_secret: Option<String>,
     },
+    /// Tracker-assisted redemption: the tracker builds the unsigned transaction and signs the fee
+    /// input(s) (POST /redemption/build); the CLI signs the issuer message with the current account
+    /// and adds the reserve input's proveDlog(recipient) proof, then submits (POST
+    /// /redemption/submit). This exercises the new 2-phase server endpoints end-to-end.
+    RedeemAssisted {
+        /// Issuer public key (hex). The current account should be this issuer.
+        #[arg(long)]
+        issuer_pubkey: String,
+        /// Recipient (receiver) public key (hex).
+        #[arg(long)]
+        recipient_pubkey: String,
+        /// Redemption amount in nanoERG
+        #[arg(long)]
+        amount: u64,
+        /// Recipient (receiver) dlog secret as 32-byte hex for the reserve input's
+        /// proveDlog(receiver). If omitted, fetched from the node wallet.
+        #[arg(long)]
+        recipient_secret: Option<String>,
+    },
 }
 
 pub async fn handle_transaction_command(
@@ -142,6 +161,22 @@ pub async fn handle_transaction_command(
                 local_sign,
                 recipient_secret,
                 fee_secret,
+            )
+            .await
+        }
+        TransactionCommands::RedeemAssisted {
+            issuer_pubkey,
+            recipient_pubkey,
+            amount,
+            recipient_secret,
+        } => {
+            redeem_tracker_assisted(
+                client,
+                account_manager,
+                &issuer_pubkey,
+                &recipient_pubkey,
+                amount,
+                recipient_secret,
             )
             .await
         }
@@ -206,14 +241,19 @@ async fn generate_redemption_transaction(
 
     println!("🔍 Retrieving issuer's reserve box...");
     let reserves_response = client.get_reserves_by_issuer(issuer_pubkey).await?;
+    // Pick the smallest reserve that can cover the redemption while leaving a valid (>= min box
+    // value) post-redemption reserve output, so we don't drain a larger reserve or leave a zero box.
+    const MIN_RESERVE_REMAINDER: u64 = 1_000_000; // 0.001 ERG min box value
+    let required = amount.saturating_add(MIN_RESERVE_REMAINDER);
     let reserve_box = reserves_response
         .iter()
-        .filter(|r| r.base_info.collateral_amount >= amount)
-        .max_by_key(|r| r.base_info.last_updated_height)
+        .filter(|r| r.base_info.collateral_amount >= required)
+        .min_by_key(|r| r.base_info.collateral_amount)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No reserve box with sufficient collateral found for issuer {}",
-                issuer_pubkey
+                "No reserve box with sufficient collateral found for issuer {} (need >= {} nanoERG)",
+                issuer_pubkey,
+                required
             )
         })?;
 
@@ -378,8 +418,16 @@ async fn generate_redemption_transaction(
         fee_input_total
     );
 
-    // Determine change address. Default to the recipient's P2PK address.
-    let change_address = change_address.unwrap_or_else(|| recipient_address.clone());
+    // Determine change address. Default to the address that owns the first selected fee-input box
+    // (so the locally-fetched fee-payer secret matches the box we actually sign); fall back to the
+    // recipient's P2PK address if it can't be derived.
+    let change_address = change_address.unwrap_or_else(|| {
+        wallet_boxes
+            .iter()
+            .find(|b| b.box_id == fee_input_ids[0])
+            .and_then(|b| ergo_tree_to_p2pk_address(&b.ergo_tree).ok())
+            .unwrap_or_else(|| recipient_address.clone())
+    });
 
     println!("📦 Preparing box IDs for transaction...");
 
@@ -663,6 +711,154 @@ async fn generate_redemption_transaction(
     Ok(())
 }
 
+/// Tracker-assisted redemption driver (mirrors the TUI flow). The tracker builds the unsigned
+/// transaction and signs the fee input(s); the CLI signs the issuer message with the current
+/// account and adds the reserve input's proveDlog(recipient) proof, then submits via the tracker.
+async fn redeem_tracker_assisted(
+    client: &TrackerClient,
+    account_manager: &crate::account::AccountManager,
+    issuer_pubkey: &str,
+    recipient_pubkey: &str,
+    amount: u64,
+    recipient_secret: Option<String>,
+) -> Result<()> {
+    use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
+    use ergo_lib::chain::transaction::Transaction;
+    use ergo_lib::ergo_chain_types::{Header, PreHeader};
+
+    let issuer_pk: [u8; 33] = hex::decode(issuer_pubkey)
+        .map_err(|e| anyhow::anyhow!("issuer hex: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("issuer pubkey must be 33 bytes"))?;
+    let recipient_pk: [u8; 33] = hex::decode(recipient_pubkey)
+        .map_err(|e| anyhow::anyhow!("recipient hex: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("recipient pubkey must be 33 bytes"))?;
+
+    println!("🔍 Fetching note and tracker proof...");
+    let note = client
+        .get_note(issuer_pubkey, recipient_pubkey)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("note not found for issuer/recipient"))?;
+    let total_debt = client
+        .get_tracker_proof(issuer_pubkey, recipient_pubkey)
+        .await?
+        .total_debt;
+    let timestamp = note.timestamp;
+    println!("✅ total_debt={} timestamp={}", total_debt, timestamp);
+
+    // Issuer signs the redemption message with the current account.
+    let current = account_manager
+        .get_current()
+        .ok_or_else(|| anyhow::anyhow!("no current account (should be the issuer)"))?;
+    if current.get_pubkey_hex() != issuer_pubkey {
+        println!(
+            "⚠️  current account {}... != issuer {}...; signature may be rejected",
+            &current.get_pubkey_hex()[..16],
+            &issuer_pubkey[..16]
+        );
+    }
+    let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, timestamp);
+    let issuer_sig = current.sign_message(&message)?;
+    println!("✅ issuer signature ({} bytes)", issuer_sig.len());
+
+    // Tracker builds the unsigned tx and signs the fee input(s).
+    println!("🔍 Requesting tracker build (POST /redemption/build)...");
+    let build = client
+        .redemption_build(crate::api::RedemptionBuildRequest {
+            issuer_pubkey: issuer_pubkey.to_string(),
+            recipient_pubkey: recipient_pubkey.to_string(),
+            amount,
+            timestamp,
+            issuer_signature: hex::encode(issuer_sig),
+            emergency: false,
+            tracker_box_id: None,
+            change_address: None,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("tracker build failed: {}", e))?;
+    println!(
+        "✅ build ok: reserve {} (out {} nanoERG), fee {} nanoERG, change {} to {}",
+        &build.reserve_box_id[..16.min(build.reserve_box_id.len())],
+        build.reserve_output_value,
+        build.fee,
+        build.change_amount,
+        build.change_address
+    );
+
+    // Reconstruct signing material.
+    let unsigned: UnsignedTransaction = serde_json::from_value(build.unsigned_tx)
+        .map_err(|e| anyhow::anyhow!("parse unsigned tx: {}", e))?;
+    let partial: Transaction = serde_json::from_value(build.partial_tx)
+        .map_err(|e| anyhow::anyhow!("parse partial tx: {}", e))?;
+    let parse_box = |h: &str| -> Result<ErgoBox> {
+        let bytes = hex::decode(h).map_err(|e| anyhow::anyhow!("box hex: {}", e))?;
+        ErgoBox::sigma_parse_bytes(&bytes).map_err(|e| anyhow::anyhow!("box parse: {:?}", e))
+    };
+    let mut input_boxes = Vec::with_capacity(build.input_box_binaries.len());
+    for h in &build.input_box_binaries {
+        input_boxes.push(parse_box(h)?);
+    }
+    let mut data_boxes = Vec::with_capacity(build.data_box_binaries.len());
+    for h in &build.data_box_binaries {
+        data_boxes.push(parse_box(h)?);
+    }
+    if build.headers.len() < 10 {
+        return Err(anyhow::anyhow!(
+            "tracker returned {} headers (need 10)",
+            build.headers.len()
+        ));
+    }
+    let pre_header = PreHeader::from(build.headers[0].clone());
+    let headers: [Header; 10] = build.headers[..10]
+        .to_vec()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("headers array"))?;
+
+    // Recipient (receiver) secret for the reserve input's proveDlog(recipient).
+    let recipient_address = pubkey_to_address(recipient_pubkey)?;
+    let receiver_secret =
+        resolve_dlog_secret(&recipient_secret, client, &recipient_address, "recipient").await?;
+    let receiver_sk = SecretKey::dlog_from_bytes(&receiver_secret)
+        .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
+
+    // Add the reserve input (index 0) proof over the same bytes_to_sign.
+    println!("🖊️  Adding reserve proveDlog(recipient) proof...");
+    let signed = add_input_proof(
+        &unsigned,
+        Some(&partial),
+        &input_boxes,
+        &data_boxes,
+        &pre_header,
+        &headers,
+        0,
+        &receiver_sk,
+    )
+    .map_err(|e| anyhow::anyhow!("reserve proof failed: {:?}", e))?;
+
+    let tx_json = serde_json::to_value(&signed)?;
+    let local_id = tx_json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unknown>")
+        .to_string();
+    println!("✅ signed tx id: {}", local_id);
+
+    println!("📡 Submitting via tracker (POST /redemption/submit)...");
+    let tx_id = client
+        .redemption_submit(
+            tx_json,
+            issuer_pubkey,
+            recipient_pubkey,
+            amount,
+            build.new_already_redeemed,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("submit failed: {}", e))?;
+    println!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
+    Ok(())
+}
+
 /// Select wallet boxes covering the required fee amount.
 ///
 /// Prefer boxes without tokens and exclude the reserve box being spent (the wallet
@@ -783,6 +979,25 @@ fn address_to_ergo_tree(address_str: &str) -> Result<String> {
     })?))
 }
 
+/// Derive the P2PK address from a P2PK (proveDlog) ergoTree (hex). Used to find the address that
+/// owns a fee-input box so the correct local secret is used to sign it. A P2PK ergoTree serializes
+/// as `00 08 cd <33-byte compressed point>`, so the public key is bytes `[3..36]`.
+fn ergo_tree_to_p2pk_address(ergo_tree_hex: &str) -> Result<String> {
+    use ergo_lib::ergo_chain_types::EcPoint;
+    use ergo_lib::ergotree_ir::chain::address::{Address, AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+
+    let bytes = hex::decode(ergo_tree_hex)?;
+    if bytes.len() != 36 || bytes[0] != 0x00 || bytes[1] != 0x08 || bytes[2] != 0xcd {
+        return Err(anyhow::anyhow!("ergoTree is not a P2PK (proveDlog) script"));
+    }
+    let point = EcPoint::sigma_parse_bytes(&bytes[3..])
+        .map_err(|e| anyhow::anyhow!("failed to parse P2PK point: {:?}", e))?;
+    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
+    Ok(encoder.address_to_str(&Address::P2Pk(ProveDlog::from(point))))
+}
+
 /// Parameters for the local (client-side) redemption signing path.
 struct SignLocalParams<'a> {
     client: &'a TrackerClient,
@@ -878,7 +1093,7 @@ fn parse_broadcast_tx_id(body: &str) -> String {
 /// ergo-lib 0.28 requires the last 10 block headers plus chain parameters to construct a state
 /// context. The Basis reserve contract does not read `CONTEXT.headers` or chain parameters, so the
 /// parameters are left empty and the headers are only used to derive a valid `PreHeader` (height).
-async fn fetch_state_context() -> Result<ErgoStateContext> {
+async fn fetch_state_context() -> Result<(ErgoStateContext, PreHeader, [Header; 10])> {
     let headers_url = format!("{}/blocks/lastHeaders/10", NODE_URL);
     let headers_resp = ureq::get(&headers_url)
         .set("api_key", API_KEY)
@@ -907,7 +1122,8 @@ async fn fetch_state_context() -> Result<ErgoStateContext> {
         parameters_table: HashMap::new(),
     };
 
-    Ok(ErgoStateContext::new(pre_header, headers_array, parameters))
+    let ctx = ErgoStateContext::new(pre_header.clone(), headers_array.clone(), parameters);
+    Ok((ctx, pre_header, headers_array))
 }
 
 /// Scala `immutable.HashMap` (HashTrieMap, Scala 2.12) iteration order for the given byte keys.
@@ -1020,8 +1236,6 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<()> {
     let mut boxes_to_spend = vec![reserve_box];
     boxes_to_spend.extend(fee_boxes);
     let data_boxes = vec![tracker_box];
-    let tx_context = TransactionContext::new(unsigned, boxes_to_spend, data_boxes)
-        .map_err(|e| anyhow::anyhow!("failed to build transaction context: {:?}", e))?;
 
     // Resolve the two dlog secrets (receiver + fee payer) and sign locally.
     let recipient_secret = resolve_dlog_secret(
@@ -1037,13 +1251,41 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
     let fee_sk = SecretKey::dlog_from_bytes(&fee_secret)
         .ok_or_else(|| anyhow::anyhow!("invalid fee-payer dlog secret"))?;
-    let wallet = Wallet::from_secrets(vec![recipient_sk, fee_sk]);
 
-    let state_context = fetch_state_context().await?;
+    let (_state_context, pre_header, headers) = fetch_state_context().await?;
 
-    let signed = wallet
-        .sign_transaction(tx_context, &state_context, None)
-        .map_err(|e| anyhow::anyhow!("local signing failed: {:?}", e))?;
+    // Two-phase single-input signing (tracker-assisted pattern): sign every fee input first
+    // (indices 1..N), then the reserve input (index 0), chaining `base_signed` so each previously
+    // produced proof is preserved. This mirrors the TUI flow where the tracker (fee) and the
+    // receiver (reserve) sign independently over the same `bytes_to_sign`.
+    let n_inputs = unsigned.inputs.len();
+    let mut partial: Option<ergo_lib::chain::transaction::Transaction> = None;
+    for fee_idx in 1..n_inputs {
+        partial = Some(
+            add_input_proof(
+                &unsigned,
+                partial.as_ref(),
+                &boxes_to_spend,
+                &data_boxes,
+                &pre_header,
+                &headers,
+                fee_idx,
+                &fee_sk,
+            )
+            .map_err(|e| anyhow::anyhow!("fee input {} signing failed: {:?}", fee_idx, e))?,
+        );
+    }
+    let signed = add_input_proof(
+        &unsigned,
+        partial.as_ref(),
+        &boxes_to_spend,
+        &data_boxes,
+        &pre_header,
+        &headers,
+        0,
+        &recipient_sk,
+    )
+    .map_err(|e| anyhow::anyhow!("reserve input signing failed: {:?}", e))?;
 
     // Broadcast the fully-signed transaction to the node.
     let signed_json = serde_json::to_value(&signed)?;

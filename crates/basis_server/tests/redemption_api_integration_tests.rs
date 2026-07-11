@@ -108,12 +108,14 @@ mod redemption_api_tests {
                         issuer_pubkey,
                         recipient_pubkey,
                         redeemed_amount,
+                        new_already_redeemed,
                         response_tx,
                     } => {
                         let result = redemption_manager.complete_redemption(
                             &issuer_pubkey,
                             &recipient_pubkey,
                             redeemed_amount,
+                            new_already_redeemed,
                         );
                         let _ = response_tx.send(result);
                     }
@@ -212,6 +214,10 @@ mod redemption_api_tests {
                     TrackerCommand::RevertPendingNotes { response_tx } => {
                         let result = redemption_manager.tracker.revert_pending_notes();
                         let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::GetReserveStateDigest { response_tx } => {
+                        let digest = redemption_manager.tracker.reserve_state_digest();
+                        let _ = response_tx.send(digest);
                     }
                     TrackerCommand::ReconcileWithConfirmedDigest {
                         digest,
@@ -460,6 +466,7 @@ mod redemption_api_tests {
             recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
                 .to_string(),
             redeemed_amount: 1000,
+            new_already_redeemed: None,
         };
 
         let response =
@@ -485,6 +492,7 @@ mod redemption_api_tests {
             recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
                 .to_string(),
             redeemed_amount: 1000,
+            new_already_redeemed: None,
         };
 
         let response =
@@ -508,6 +516,7 @@ mod redemption_api_tests {
             recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
                 .to_string(),
             redeemed_amount: 1000,
+            new_already_redeemed: None,
         };
 
         let response =
