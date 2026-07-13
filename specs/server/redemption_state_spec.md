@@ -383,6 +383,100 @@ Request tracker signature for redemption.
 }
 ```
 
+## Tracker-Assisted 2-Phase Endpoints (`/redemption/build`, `/redemption/submit`)
+
+In this flow the tracker builds the unsigned transaction and signs the fee input(s)
+locally (using the configured `tracker_secret_key`); the client (CLI/TUI/cold signer)
+adds the reserve input's `proveDlog(recipient)` over the identical `bytes_to_sign` and
+returns the fully-signed transaction for broadcast. Neither end reorders the reserve
+input's context extension — the build emits it in the node's canonical (Scala index)
+order, and the client splices the proof into that exact transaction.
+
+### POST /redemption/build
+
+Builds the unsigned redemption transaction, generates all AVL proofs, computes the
+tracker Schnorr signature (context var `#6`), selects the reserve and fee boxes, and
+signs the fee input(s).
+
+**Reserve selection:** smallest sufficient reserve that is unspent (`/utxo/byId`) and
+whose on-chain R5 digest equals the tracker's local reserve-tree digest. A mismatch
+means local state is stale and the reserve is skipped.
+
+**`new_already_redeemed`:** computed from the **reserve-tree lookup** (previous
+cumulative value for this reserve, `0` for a first redemption) plus the requested
+amount — *not* from the note record. With multiple reserves per issuer (each reserve
+has its own AVL tree) the note's `amount_redeemed` can differ from a given reserve's
+tree entry; the on-chain contract only sees the spent reserve's tree.
+
+**Response (excerpt):**
+```json
+{
+  "unsigned_tx": { "...": "node-canonical unsigned tx (extension in Scala order)" },
+  "partial_tx": { "...": "fee-signed tx; reserve input proof empty" },
+  "input_box_binaries": ["sigma-serialized boxes, tx-input order"],
+  "data_box_binaries": ["tracker box"],
+  "headers": ["last 10 block headers for PreHeader/ErgoStateContext"],
+  "reserve_box_id": "...",
+  "new_already_redeemed": 100000000,
+  "is_first_redemption": true,
+  "fee": 1000000
+}
+```
+
+### POST /redemption/submit
+
+Broadcasts the fully-signed transaction via the node and then **syncs local state**.
+
+**Request Body:**
+```json
+{
+  "signed_tx": { "...": "fully-signed transaction JSON" },
+  "issuer_pubkey": "hex_encoded_33_byte_key",
+  "recipient_pubkey": "hex_encoded_33_byte_key",
+  "redeemed_amount": 100000000,
+  "new_already_redeemed": 100000000
+}
+```
+
+**State-sync contract (required):** after a successful broadcast the tracker MUST:
+
+1. Increment the note's `amount_redeemed` by `redeemed_amount` (note accounting;
+   cumulative redeemed against total debt), refreshing the note timestamp.
+2. Sync the reserve AVL tree entry to `new_already_redeemed` keyed with the note's
+   **pre-refresh** payment timestamp (the on-chain reserve tree value is
+   `payment_timestamp || already_redeemed`). This value comes from the build response,
+   not from the note record — the two diverge for fresh reserves or repaired state.
+
+If the sync fails, the tx is already on-chain: the error is logged and the response
+still returns the tx id; state must then be repaired manually (see below). A submit
+that skips this sync leaves the reserve tree stale, and the next `/redemption/build`
+will find no reserve whose on-chain R5 matches the local digest.
+
+### POST /redeem/complete (manual completion / repair)
+
+The legacy completion endpoint accepts an optional `new_already_redeemed` field; when
+provided it is used as the reserve-tree value instead of the note's cumulative amount.
+This is the supported way to repair local state after an out-of-band redemption:
+
+```json
+{
+  "redemption_id": "repair-<txid>",
+  "issuer_pubkey": "...",
+  "recipient_pubkey": "...",
+  "redeemed_amount": 100000000,
+  "new_already_redeemed": 100000000
+}
+```
+
+### Known contract limitation
+
+The deployed reserve contract (`contract/basis.es:345`) uses strict `insert` into the
+reserve AVL tree, so a redemption only verifies against a reserve whose tree does not
+yet contain the note key — in practice a freshly created empty-tree reserve. Repeated
+redemptions against one reserve fail local/node evaluation with
+`AvlTree: Incorrect insert` until the contract switches to `insertOrUpdate` (see the
+TODO at `basis.es:345`).
+
 ## Integration with Blockchain Scanner
 
 The redemption process integrates with the blockchain scanner to:

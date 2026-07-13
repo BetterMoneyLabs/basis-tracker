@@ -675,6 +675,73 @@ The tx id is recorded in `/tmp/redemption_txid.txt`. This is the first redemptio
 
 ---
 
+## Sixth Redemption Test (tracker-assisted 2-phase server endpoints, CLI-driven)
+
+Goal: verify the new tracker-assisted 2-phase flow — `POST /redemption/build` (tracker builds the unsigned tx and signs the fee input(s) locally) → the client adds the reserve input's `proveDlog(recipient)` over the identical `bytes_to_sign` → `POST /redemption/submit` (tracker broadcasts). Neither end reorders the reserve input's context extension, so the Scala-order serialization produced by the build is preserved.
+
+### Prerequisites fixed in this cycle
+
+1. **`basis_trees/src/avl_tree.rs` `generate_insert_proof`** now always uses `Operation::InsertOrUpdate` (the deployed contract calls strict `insert`, but the proof bytes for an insert-or-update of a new key are identical, and this also supports the future `insertOrUpdate` contract).
+2. **Deep rebuild of the temp tree from the proof cache** — `AVLTree::clone()` is a shallow `Rc<RefCell<Node>>` clone, so proof generation must rebuild from cached nodes instead of cloning.
+3. **`complete_redemption` (`basis_store/src/redemption.rs`)** syncs the reserve AVL tree with the note's **pre-refresh** payment timestamp (the on-chain reserve tree value is `payment_timestamp || already_redeemed`; refreshing the note timestamp first would make subsequent proofs diverge from the on-chain entry).
+4. **Reserve selection** picks the smallest sufficient unspent reserve whose on-chain R5 digest equals the tracker's local reserve-tree digest (`/utxo/byId` unspent check + R5 digest compare).
+
+### Confirmed Transaction (height 1826973)
+
+| Field | Value |
+|-------|-------|
+| Transaction ID | `e5a2845276d6294749bef40db2bab6fe4263ae18cfab00131f5d9a65a267f825` |
+| Reserve spent | `6dda1af8…` (fresh, empty tree) |
+| Output 0 (new reserve) | `61b1764c…` — 0.05 ERG, R5 digest `22259cd9…` |
+| Recipient payout | Bob +0.05 ERG |
+
+---
+
+## Seventh Redemption Test (TUI-driven tracker-assisted redemption, submit state-sync fix)
+
+Goal: exercise the same 2-phase endpoints from the TUI (`basis-ui`, account `bob`): Notes → redeem → amount → the TUI signs the issuer message locally, calls `/redemption/build`, adds `proveDlog(recipient)`, calls `/redemption/submit`.
+
+### Setup
+
+- Fresh reserve created (NFT `3ab6b8b19de05f0fefc1f9e62c1e9c20f8de717339624802d6710afad58937ab`, creation tx `7b087df542357c4f826e6ec974a7938106a206d41a85ea0afbc5b264c0664155`, height 1827020) → reserve box `2ced1079ef2a5869f5a3ea9f284bf04c84d22e6a3de80190aeff72060858eec5` (0.2 ERG, empty tree), picked up by the reserve scanner.
+- Node-wallet fee box had to be recreated first (`/wallet/payment/send` of 0.05 ERG to the wallet's own address, tx `b72af2d2…`, height 1827030) — wallet payment txs consume token-free boxes, so a fee box must be recreated before each redemption test.
+
+### Confirmed Transaction (height 1827032)
+
+| Field | Value |
+|-------|-------|
+| Transaction ID | `85b14cc0dc5a0c65d009cf0c60159f7943caa0b39f6ccb5822e0f2890c92a273` |
+| Inputs spent | Reserve `2ced1079…` (0.2 ERG), fee box `8e3b802b…` (0.05 ERG) |
+| Output 0 (new reserve) | `9b7481643c8791be…` — 0.1 ERG, R5 digest `616188e2…` (entry: ts `1783796933524`, already_redeemed 0.1 ERG) |
+| Output 1 (Bob's redemption) | `96e1f70c…` — 0.1 ERG (P2PK of Bob's key `03af13e3…`) |
+| Output 2 (fee) | `3d81be40…` — 0.001 ERG |
+| Output 3 (wallet change) | `b7f56bf6…` — 0.049 ERG (token-free) |
+
+### Bug found: `/redemption/submit` did not sync local state
+
+After this redemption the note still showed `amount_redeemed = 0.1 ERG` (should be 0.2 ERG) and the local reserve AVL tree was still empty while the on-chain reserve had the entry — the next redemption would have failed the reserve-selection R5 match. Root cause: `submit_redemption` only broadcast the transaction; it never updated the note or the reserve tree.
+
+**Fix (this cycle):**
+
+- `RedemptionBuildResponse` returns `new_already_redeemed` (the cumulative reserve-tree value proven on-chain, computed from the reserve-tree lookup, not the note record).
+- `RedemptionSubmitRequest` carries `issuer_pubkey`, `recipient_pubkey`, `redeemed_amount`, `new_already_redeemed`; after a successful broadcast, `submit_redemption` sends `TrackerCommand::CompleteRedemption` with them. A state-sync failure is logged but does not fail the response (the tx is already on-chain).
+- `complete_redemption(…, new_already_redeemed: Option<u64>)`: the note always accumulates `redeemed_amount`, but the reserve tree is synced to the explicit on-chain cumulative value when provided — the two can diverge (fresh reserves, repaired state) because each reserve has its own tree. Regression test: `test_complete_redemption_with_explicit_reserve_tree_value`.
+- `POST /redeem/complete` accepts an optional `new_already_redeemed` (used for one-off state repairs); CLI (`transaction redeem-assisted`) and TUI pass the new fields through.
+
+### State repair applied
+
+`POST /redeem/complete` with `redeemed_amount=100000000, new_already_redeemed=100000000` → note `amount_redeemed = 0.2 ERG` (outstanding 0.2 ERG of 0.4 ERG), reserve tree entry `(ts 1783796933524, 0.1 ERG)` matching the on-chain R5. A subsequent CLI `redeem-assisted` dry run confirmed the build now selects reserve `9b748164…` (digest match) and generates proofs; it then fails local evaluation with `AvlTree: Incorrect insert` — the **known contract limitation** (`contract/basis.es:345` strict `insert`): the reserve already contains the note's entry, so further redemptions require a fresh empty-tree reserve until the contract switches to `insertOrUpdate`.
+
+### Lessons Learned from the Sixth/Seventh Tests
+
+1. **Broadcast is not state sync.** Any redemption path that mutates on-chain reserve/note state must update the tracker's note record *and* reserve AVL tree after broadcast, using the exact cumulative value proven on-chain.
+2. **Note cumulative ≠ reserve-tree cumulative in general.** With multiple reserves per issuer (each with its own tree) or after state repair, the reserve-tree `already_redeemed` for a given reserve can differ from the note's `amount_redeemed`; the build must compute from the reserve-tree lookup and the submit must round-trip that value.
+3. **Strict `insert` means one redemption per reserve.** Every on-chain redemption today must spend a reserve whose tree does not yet contain the note key (in practice: a freshly created empty-tree reserve). The deployed contract's `insertOrUpdate` TODO (`basis.es:345`) is the blocker for repeated redemptions against one reserve.
+4. **Fee boxes are consumable test fixtures.** Node-wallet payment txs consolidate/consume token-free boxes; recreate a ~0.05 ERG token-free fee box before each redemption test or `select_fee_inputs` fails with "no wallet boxes covering 1000000 nanoERG fee".
+5. **The TUI is fully scriptable.** `basis-ui` reads line-based stdin (`read_line`); e.g. `printf '\n2\nr\n1\n100000000\nb\nq\n' | ./target/debug/basis-ui` drives a complete redemption non-interactively.
+
+---
+
 - [Tracker Box Update Specification](server/tracker_box_update_spec.md)
 - [Redemption Transaction Format Specification](server/redemption_transaction_format_spec.md)
 - [Redemption State Specification](server/redemption_state_spec.md)

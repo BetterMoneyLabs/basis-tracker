@@ -153,6 +153,32 @@ The first off-chain-signed redemption was confirmed on mainnet:
 See the "Fifth Redemption Test" section in
 [redemption_execution_report.md](../redemption_execution_report.md) for the full execution details.
 
+## Tracker-Assisted Variant (`/redemption/build` + `/redemption/submit`)
+
+A second off-chain signing topology shifts more work to the tracker: the tracker's
+`POST /redemption/build` endpoint builds the unsigned transaction (reserve-input
+extension already in Scala order), signs the **fee input(s)** itself with the
+configured `tracker_secret_key`, and returns the partial transaction plus all signing
+material (input/data box binaries, last 10 headers). The client only adds the reserve
+input's `proveDlog(recipient)` over the same `bytes_to_sign` and posts the fully-signed
+transaction to `POST /redemption/submit`, which broadcasts it and syncs the tracker's
+note/reserve-tree state (see
+[redemption_state_spec.md](../server/redemption_state_spec.md#tracker-assisted-2-phase-endpoints-redemptionbuild-redemptionsubmit)).
+
+Because the tracker produces the canonical extension order and the client never
+re-serializes the extension, this variant avoids the reorder pitfall entirely. It is
+implemented by `basis_cli transaction redeem-assisted` and by the TUI (`basis-ui`,
+Notes → Redeem), and was confirmed on-chain twice (txs `e5a28452…` at height 1826973
+and `85b14cc0…` at height 1827032 — see the "Sixth/Seventh Redemption Test" sections
+in [redemption_execution_report.md](../redemption_execution_report.md)).
+
+| Party | Produces in this variant |
+|-------|--------------------------|
+| Issuer (client) | issuer Schnorr signature over the 48-byte message (build request) |
+| Tracker server | unsigned tx, all AVL proofs, tracker Schnorr signature (`#6`), **fee-input `proveDlog`**, broadcast, state sync |
+| Receiver (client) | `proveDlog(receiver)` over `bytes_to_sign` spliced into the reserve input |
+| Ergo node | validates only; does not sign |
+
 ## References
 
 - [redemption_transaction_format_spec.md](../server/redemption_transaction_format_spec.md) — transaction and context-extension layout
