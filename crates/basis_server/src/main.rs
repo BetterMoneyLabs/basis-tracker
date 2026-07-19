@@ -42,7 +42,7 @@ async fn main() {
                             scan_name: Some("Basis Reserve Scanner".to_string()),
                             api_key: None,
                         },
-                        basis_reserve_contract_p2s: "4ZhBzJfNoUL9Bp993NzJcdUr6CNfuwvwNMgHC2JPHs8ane1jjE3K7gzUQVBNQfJccoLbB2P8xMsa9qZNFgRwgrWs6WGEa38gwF1BDkGwMLh6RJUez5Ge6toZzu7tZo5qYtqUinmckb5q9hcVo6Cpn3w2gcuwCd2sKmRohedxxbpP7vnrQmCNQveB22RN5ZVv8VGJaDUEC3ADCSRjzr5ZzJNBmVbAw2k5sTmoXGm7qJ1YT9gzmAPi97ptJJQXqNJoi1W6coMFwg34Dc21K9TMkKQexnXxon21XrbyWL6fzLGbYBRBiVpiRTeMah9Tc33yN93NVTjHWKvBcxSYiJU7eJy6aiwAHhqxYPtZNhwE196qUEYHX5gnN1xB4CpZA2W2HDuEZREpDPV4xy6g2qucW2fyhgDpscHMxrbaGfRq1zkrvML54z2Da9jpkM6nmZx2KB29HTh1do6L3rrLxnvg5cgANzfYuaWPFEoo6j2ZqjPzLDeSSVhPbkMnw6HhQp2qtzayqWVgCKGRzMFuh8BkpmkFCPKjhUwX6Dgv6DpkuHbJRM7k9YSvPCHRQTSeDJa4B5wuyXMsfFMkAnjR4oaLbSBU2QCgKBLFbGvrRKgAJG9eTSc31x6EtqKFoLN2urEWGsEh1F6cxDh2Ma3izwFLyHAgCcUurRXndm5gy3U4GpKdaJiWtwfhcZspwtJ72gWUBEzuPdcqjEyBc95jVtubHeN95QcZLJkJM88c6m1DPXaTBSfDpL8s3sBySa7".to_string(),
+                        basis_reserve_contract_p2s: "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT".to_string(),
                         tracker_nft_id: None,
                         tracker_public_key: None,
                         tracker_secret_key: None,
@@ -263,6 +263,35 @@ async fn main() {
         );
 
         let mut redemption_manager = RedemptionManager::new(tracker);
+
+        // Temporary startup repair: allow re-inserting a lost reserve AVL tree entry
+        // from the environment so a restarted server can continue a redemption sequence.
+        if let (Ok(issuer_hex), Ok(recipient_hex), Ok(ts_str), Ok(already_str)) = (
+            std::env::var("REPAIR_RESERVE_ISSUER"),
+            std::env::var("REPAIR_RESERVE_RECIPIENT"),
+            std::env::var("REPAIR_RESERVE_TIMESTAMP"),
+            std::env::var("REPAIR_RESERVE_ALREADY_REDEEMED"),
+        ) {
+            if let (Ok(ts), Ok(already)) = (ts_str.parse::<u64>(), already_str.parse::<u64>()) {
+                let issuer = hex::decode(&issuer_hex)
+                    .ok()
+                    .and_then(|v| v.try_into().ok());
+                let recipient = hex::decode(&recipient_hex)
+                    .ok()
+                    .and_then(|v| v.try_into().ok());
+                if let (Some(issuer), Some(recipient)) = (issuer, recipient) {
+                    match redemption_manager
+                        .tracker
+                        .update_already_redeemed(&issuer, &recipient, ts, already)
+                    {
+                        Ok(_) => tracing::info!(
+                            "Reserve tree repaired: ts={ts}, already_redeemed={already}"
+                        ),
+                        Err(e) => tracing::warn!("Failed to repair reserve tree: {e:?}"),
+                    }
+                }
+            }
+        }
 
         while let Some(cmd) = rx.blocking_recv() {
             tracing::debug!("Tracker thread received command: {:?}", cmd);
@@ -890,12 +919,18 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                         }
                     };
 
+                    let refund_initiation_height =
+                        basis_store::ergo_scanner::decode_ergo_long_register(
+                            scan_box.additional_registers.get("R7"),
+                        );
+
                     let mut reserve_info = basis_store::ExtendedReserveInfo::new(
                         scan_box.box_id.as_bytes(),
                         &owner_pubkey,
                         scan_box.value,
                         tracker_nft_bytes_option.as_deref(),
                         scanner.last_scanned_height().await,
+                        refund_initiation_height,
                     );
 
                     // Set contract address from configuration
@@ -974,6 +1009,7 @@ async fn process_reserve_event(
                 collateral_amount,
                 tracker_nft_bytes_option.as_deref(),
                 height,
+                0, // Newly created reserves have no pending refund
             );
             reserve_info.set_contract_address(config.basis_reserve_contract_p2s().to_string());
             tracker.update_reserve(reserve_info)?;

@@ -250,9 +250,10 @@ mod property_tests {
                 emergency: false,
                 tracker_signature: Some("02".repeat(65)),
                 reserve_box_value: amount + 1000000 + 1000000, // Reserve must cover debt + fee + buffer
-                fee_input_box_ids: Vec::new(),
-                fee_input_total_value: 0,
-            };
+            fee_input_box_ids: Vec::new(),
+            fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
+        };
 
             // Basic validation: amount should be positive
             prop_assert!(request.amount > 0);
@@ -298,6 +299,7 @@ mod property_tests {
                 &issuer_pubkey,
                 &context,
                 redemption_amount + fee + 1000000, // Reserve box value: enough to cover redemption + fee + buffer
+                0, // No pending refund
                 None, // First redemption: no reserve lookup proof
                 vec![0x03, 0x04],
                 redemption_amount,
@@ -343,6 +345,7 @@ mod property_tests {
                 &issuer_pubkey,
                 &context,
                 note_amount + 1000000 + 1000000, // Reserve box value: enough to cover max debt + fee + buffer
+                0, // No pending refund
                 None,
                 vec![0x03, 0x04],
                 redemption_amount,
@@ -392,9 +395,10 @@ mod property_tests {
                 emergency: false,
                 tracker_signature: Some("02".repeat(65)),
                 reserve_box_value: initial_amount + 1000000 + 1000000, // Reserve must cover max debt + fee + buffer
-                fee_input_box_ids: Vec::new(),
-                fee_input_total_value: 0,
-            };
+            fee_input_box_ids: Vec::new(),
+            fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
+        };
 
                 let result = redemption_manager.initiate_redemption(&request);
                 if result.is_ok() {

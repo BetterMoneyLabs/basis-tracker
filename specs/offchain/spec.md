@@ -40,7 +40,7 @@ The `transaction_builder` module contains the core logic for creating redemption
   - #1: Receiver pubkey (GroupElement)
   - #2: Reserve owner's signature bytes
   - #3: Total debt amount (Long)
-  - #5: AVL proof for reserve tree insertion
+  - #5: AVL proof for reserve tree insert/update
   - #6: Tracker's signature bytes
   - #7: AVL proof for reserve tree lookup (optional, omit for first redemption)
   - #8: AVL proof for tracker tree lookup (required)
@@ -75,7 +75,7 @@ The `avl_proof` module handles AVL tree proof generation and verification for bo
 
 - **`generate_tracker_lookup_proof`**: Generates proof for looking up `hash(ownerKey||receiverKey) -> totalDebt` in tracker's AVL tree (context var #8)
 - **`generate_reserve_lookup_proof`**: Generates proof for looking up `hash(ownerKey||receiverKey) -> redeemedDebt` in reserve's AVL tree (context var #7, optional)
-- **`generate_reserve_insert_proof`**: Generates proof for inserting updated redeemed amount into reserve's AVL tree (context var #5)
+- **`generate_reserve_insert_proof`**: Generates proof for inserting or updating the redeemed amount in reserve's AVL tree (context var #5)
 - **`verify_tracker_commitment`**: Verifies that totalDebt matches the value committed in tracker's AVL tree
 
 ### 4. Error Handling
@@ -96,7 +96,7 @@ The crate defines comprehensive error types:
 4. **Proof Generation**: 
    - AVL proof for tracker tree lookup (context var #8, required)
    - AVL proof for reserve tree lookup (context var #7, optional for first redemption)
-   - AVL proof for reserve tree insertion (context var #5)
+    - AVL proof for reserve tree insert/update (context var #5)
 5. **Signature Collection**:
    - Reserve owner's signature on `key || totalDebt || timestamp` (48 bytes)
    - Tracker's signature on `key || totalDebt || timestamp` (48 bytes)
@@ -159,7 +159,7 @@ The offchain crate is designed to work with:
 | #1 | GroupElement | Receiver pubkey | Yes |
 | #2 | Coll[Byte] | Reserve owner's signature bytes | Yes |
 | #3 | Long | Total debt amount | Yes |
-| #5 | Coll[Byte] | AVL proof for reserve tree insertion | Yes |
+| #5 | Coll[Byte] | AVL proof for reserve tree insert/update | Yes |
 | #6 | Coll[Byte] | Tracker's signature bytes | Yes |
 | #7 | Coll[Byte] | AVL proof for reserve tree lookup | No (optional, omit for first redemption) |
 | #8 | Coll[Byte] | AVL proof for tracker tree lookup | Yes |

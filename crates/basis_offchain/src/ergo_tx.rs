@@ -73,7 +73,7 @@ pub fn build_savl_tree_from_digest(digest_hex: &str) -> Vec<u8> {
     let mut r5_bytes = Vec::with_capacity(38);
     r5_bytes.push(0x64u8); // SAvlTree type byte
     r5_bytes.extend_from_slice(&root_digest); // 33-byte digest from the AVL prover
-    r5_bytes.push(0x01u8); // flags: insertions allowed
+    r5_bytes.push(0x03u8); // flags: insertions and updates allowed (insertOrUpdate contract)
     r5_bytes.extend_from_slice(&vlq_encode(32)); // key length
     r5_bytes.extend_from_slice(&vlq_encode(0)); // value length: variable (0)
 
@@ -427,18 +427,18 @@ mod tests {
     fn build_savl_tree_from_digest_matches_onchain_r5_format() {
         // Real empty-tree reserve R5 created on-chain (tx 2a5e653a...): the digest of an empty
         // AVL tree is 4ec61f48... and the serialized SAvlTree register is
-        // 0x64 || 33-byte digest || 0x01 flags || VLQ(32) keylen || VLQ(0) valuelen.
+        // 0x64 || 33-byte digest || 0x03 flags (insert+update) || VLQ(32) keylen || VLQ(0) valuelen.
         let empty_digest = "4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900";
         let bytes = build_savl_tree_from_digest(empty_digest);
         assert_eq!(
             hex::encode(&bytes),
-            "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900012000"
+            "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000"
         );
         // Layout invariants.
         assert_eq!(bytes.len(), 37);
         assert_eq!(bytes[0], 0x64);
         assert_eq!(&bytes[1..34], &hex::decode(empty_digest).unwrap()[..]);
-        assert_eq!(&bytes[34..], &[0x01, 0x20, 0x00]);
+        assert_eq!(&bytes[34..], &[0x03, 0x20, 0x00]);
     }
 
     #[test]

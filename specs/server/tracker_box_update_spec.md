@@ -233,7 +233,7 @@ The tracker box R5 register contains a serialized `SAvlTree` constant. The exact
 |-------|------|-------------|
 | Type identifier | 1 byte | `0x64` (SAvlTree type code) |
 | Root digest | 33 bytes | AVL tree root digest |
-| Flags | 1 byte | AVL tree flags (e.g. `0x01` for insert-only) |
+| Flags | 1 byte | AVL tree flags (`0x03` = insert + update allowed) |
 | Key length | VLQ | Key length in bytes (`0x20` for 32) |
 | Value length | VLQ | `0x00` for variable / `None` |
 
@@ -243,12 +243,12 @@ For a tracker tree with `PlasmaParameters(32, None)` (32-byte keys, variable val
 
 Empty tree (digest all zeros):
 ```
-64000000000000000000000000000000000000000000000000000000000000000000012000
+64000000000000000000000000000000000000000000000000000000000000000000032000
 ```
 
 Real on-chain example observed during live testing:
 ```
-64d5d44e152c7e42673dea178b918d9195c2ba689da94046384dc40c55a64c836a01012000
+64d5d44e152c7e42673dea178b918d9195c2ba689da94046384dc40c55a64c836a01032000
 ```
 
 Bytes 1-33 of this example are the digest:

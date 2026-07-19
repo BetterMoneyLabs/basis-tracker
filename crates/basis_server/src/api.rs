@@ -884,9 +884,7 @@ pub async fn check_acceptance(
             );
 
             // Parse the stored policy
-            match serde_json::from_str::<basis_core::acceptance::AcceptanceConfig>(
-                &stored_policy.policy_json,
-            ) {
+            match parse_acceptance_policy_json(&stored_policy.policy_json) {
                 Ok(policy_config) => {
                     // Build predicate tree from stored policy
                     match crate::acceptance::builder::build_predicate_tree(policy_config) {
@@ -1027,6 +1025,19 @@ pub async fn check_acceptance(
     )
 }
 
+/// Parse an acceptance policy JSON string into an `AcceptanceConfig`.
+///
+/// This works around a serde_json limitation when the `arbitrary_precision` feature is
+/// enabled (pulled in by ergo-lib): internally tagged enums with `f64` fields fail to
+/// deserialize directly from a stream, so we first parse to `Value` and then to the
+/// target type.
+fn parse_acceptance_policy_json(
+    policy_json: &str,
+) -> Result<basis_core::acceptance::AcceptanceConfig, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(policy_json)?;
+    serde_json::from_value(value)
+}
+
 /// Upload a signed acceptance policy for a recipient
 #[axum::debug_handler]
 pub async fn upload_policy(
@@ -1091,7 +1102,7 @@ pub async fn upload_policy(
 
     // Parse policy JSON to validate structure
     let policy_config: basis_core::acceptance::AcceptanceConfig =
-        match serde_json::from_str(&payload.policy_json) {
+        match parse_acceptance_policy_json(&payload.policy_json) {
             Ok(config) => config,
             Err(e) => {
                 return (
@@ -1431,37 +1442,45 @@ pub async fn get_key_status(
     // Normalize the public key to handle different representations (e.g., 07 prefix for GroupElement)
     let normalized_pubkey = basis_store::normalize_public_key(&pubkey_hex);
 
-    // Find reserve for this issuer - check multiple key representations for comprehensive correlation
-    let reserve = all_reserves.into_iter().find(|reserve| {
-        let normalized_reserve_key = basis_store::normalize_public_key(&reserve.owner_pubkey);
-        let original_reserve_key = &reserve.owner_pubkey;
+    // Find all reserves for this issuer - check multiple key representations for comprehensive correlation
+    let matching_reserves: Vec<_> = all_reserves
+        .into_iter()
+        .filter(|reserve| {
+            let normalized_reserve_key = basis_store::normalize_public_key(&reserve.owner_pubkey);
+            let original_reserve_key = &reserve.owner_pubkey;
 
-        // Check multiple matching possibilities to ensure comprehensive key correlation:
-        // 1. Direct match between normalized keys (main case)
-        // 2. Match between original pubkey and normalized reserve key
-        // 3. Match between original pubkey and original reserve key (backup)
-        // 4. Special case: original pubkey matches the part of reserve key after '07' prefix
-        normalized_pubkey == normalized_reserve_key
-            || pubkey_hex == normalized_reserve_key
-            || pubkey_hex == *original_reserve_key
-            || (original_reserve_key.starts_with("07")
-                && original_reserve_key.len() >= 66
-                && &original_reserve_key[2..] == pubkey_hex.as_str())
-    });
+            // Check multiple matching possibilities to ensure comprehensive key correlation:
+            // 1. Direct match between normalized keys (main case)
+            // 2. Match between original pubkey and normalized reserve key
+            // 3. Match between original pubkey and original reserve key (backup)
+            // 4. Special case: original pubkey matches the part of reserve key after '07' prefix
+            normalized_pubkey == normalized_reserve_key
+                || pubkey_hex == normalized_reserve_key
+                || pubkey_hex == *original_reserve_key
+                || (original_reserve_key.starts_with("07")
+                    && original_reserve_key.len() >= 66
+                    && &original_reserve_key[2..] == pubkey_hex.as_str())
+        })
+        .collect();
 
-    let (collateral, collateralization_ratio, last_updated) = if let Some(reserve) = reserve {
-        let collateral = reserve.base_info.collateral_amount;
-        let ratio = if total_debt > 0 {
-            collateral as f64 / total_debt as f64
+    let has_pending_refund = matching_reserves
+        .iter()
+        .any(|reserve| reserve.is_refund_pending());
+
+    let (collateral, collateralization_ratio, last_updated) =
+        if let Some(reserve) = matching_reserves.first() {
+            let collateral = reserve.base_info.collateral_amount;
+            let ratio = if total_debt > 0 {
+                collateral as f64 / total_debt as f64
+            } else {
+                // Use a very high ratio when there's no debt
+                999999.0
+            };
+            (collateral, ratio, reserve.last_updated_timestamp)
         } else {
-            // Use a very high ratio when there's no debt
-            999999.0
+            // No reserve found - use zero collateral
+            (0, if total_debt > 0 { 0.0 } else { 999999.0 }, 0)
         };
-        (collateral, ratio, reserve.last_updated_timestamp)
-    } else {
-        // No reserve found - use zero collateral
-        (0, if total_debt > 0 { 0.0 } else { 999999.0 }, 0)
-    };
 
     let status = KeyStatusResponse {
         total_debt,
@@ -1470,6 +1489,7 @@ pub async fn get_key_status(
         note_count,
         last_updated,
         issuer_pubkey: pubkey_hex.clone(),
+        has_pending_refund,
     };
 
     tracing::info!(
@@ -1539,7 +1559,7 @@ pub async fn initiate_redemption(
     };
 
     // Find the reserve box ID and value for the issuer using normalized key matching
-    let (reserve_box_id, reserve_box_value) = {
+    let (reserve_box_id, reserve_box_value, reserve_refund_initiation_height) = {
         // Read reserves directly from database (not in-memory tracker) to avoid
         // issues with scanner removing manually-inserted reserves
         let scanner = state.ergo_scanner.lock().await;
@@ -1563,7 +1583,7 @@ pub async fn initiate_redemption(
         let normalized_issuer_key = basis_store::normalize_public_key(&payload.issuer_pubkey);
 
         // Find a reserve where the owner key matches (considering normalized forms)
-        let mut found_reserve: Option<(String, u64)> = None;
+        let mut found_reserve: Option<(String, u64, u64)> = None;
         for reserve in &all_reserves {
             // Handle the case where the owner key might be double-encoded
             // The database might store the hex string as ASCII characters, which are hex-encoded again
@@ -1606,7 +1626,11 @@ pub async fn initiate_redemption(
                     reserve.box_id,
                     reserve.base_info.collateral_amount
                 );
-                found_reserve = Some((reserve.box_id.clone(), reserve.base_info.collateral_amount));
+                found_reserve = Some((
+                    reserve.box_id.clone(),
+                    reserve.base_info.collateral_amount,
+                    reserve.base_info.refund_initiation_height,
+                ));
                 break;
             }
         }
@@ -1764,6 +1788,7 @@ pub async fn initiate_redemption(
         emergency: payload.emergency,
         tracker_signature: tracker_signature_hex,
         reserve_box_value, // Actual reserve box value from blockchain
+        reserve_refund_initiation_height, // R7 refund height from blockchain
         fee_input_box_ids: Vec::new(),
         fee_input_total_value: 0,
     };
@@ -3429,8 +3454,9 @@ pub async fn create_reserve_payload(
 
     // R5: SAvlTree (empty AVL tree) - prefix 64 + 33-byte digest + flags + key_len + value_len
     // Empty tree digest for PlasmaParameters(32, None) is 4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900
+    // Flags: 0x03 (insert + update allowed) for the insertOrUpdate reserve contract.
     let empty_tree_hex =
-        "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900012000";
+        "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000";
     let r5_value = format!("{}", empty_tree_hex);
 
     // R6: Coll[Byte] (tracker NFT ID) - prefix 0e + 2-byte length + 32-byte NFT ID
@@ -3462,11 +3488,15 @@ pub async fn create_reserve_payload(
     }
     let r6_value = format!("0e{:02x}{}", tracker_nft_bytes.len(), tracker_nft_id);
 
+    // R7: Long (refund initiation height, 0 for a new reserve with no pending refund)
+    let r7_value = "05000000000000000000".to_string();
+
     // Create registers map
     let mut registers = std::collections::HashMap::new();
     registers.insert("R4".to_string(), r4_value);
     registers.insert("R5".to_string(), r5_value);
     registers.insert("R6".to_string(), r6_value);
+    registers.insert("R7".to_string(), r7_value);
 
     let payment_request = ReservePaymentRequest {
         address: reserve_contract_address,

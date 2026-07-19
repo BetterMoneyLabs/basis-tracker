@@ -168,6 +168,39 @@ impl NotePredicate for CollateralizationPredicate {
     }
 }
 
+/// No-pending-refund predicate - rejects if the issuer's reserve has a pending refund
+#[derive(Debug, Clone)]
+pub struct NoPendingRefundPredicate {
+    name: String,
+}
+
+impl NoPendingRefundPredicate {
+    /// Create a new no-pending-refund predicate
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl NotePredicate for NoPendingRefundPredicate {
+    fn acceptable(&self, ctx: &PredicateContext) -> bool {
+        let tracker = match &ctx.reserve_tracker {
+            Some(t) => t,
+            None => return false,
+        };
+
+        let reserve = match tracker.get_reserve_by_owner(&hex::encode(&ctx.issuer_pubkey)) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+
+        !reserve.is_refund_pending()
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// All-of (AND) composite predicate
 #[derive(Debug)]
 pub struct AllOfPredicate {
@@ -624,6 +657,135 @@ mod tests {
         let cloned = pred.clone();
 
         assert_eq!(pred.min_ratio, cloned.min_ratio);
+        assert_eq!(pred.name(), cloned.name());
+    }
+
+    #[test]
+    fn test_no_pending_refund_accepts_no_refund() {
+        use basis_store::{ReserveInfo, ReserveTracker};
+
+        let mut tracker = ReserveTracker::new();
+        let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
+            base_info: ReserveInfo {
+                collateral_amount: 1000,
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
+            },
+            total_debt: 100,
+            box_id: "box1".to_string(),
+            owner_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                hex::encode(key)
+            },
+            last_updated_timestamp: 0,
+        };
+        tracker.update_reserve(reserve).unwrap();
+
+        let pred = NoPendingRefundPredicate::new("no_refund");
+        let ctx = PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+        };
+
+        assert!(pred.acceptable(&ctx));
+    }
+
+    #[test]
+    fn test_no_pending_refund_rejects_pending_refund() {
+        use basis_store::{ReserveInfo, ReserveTracker};
+
+        let mut tracker = ReserveTracker::new();
+        let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
+            base_info: ReserveInfo {
+                collateral_amount: 1000,
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 1000,
+            },
+            total_debt: 100,
+            box_id: "box1".to_string(),
+            owner_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                hex::encode(key)
+            },
+            last_updated_timestamp: 0,
+        };
+        tracker.update_reserve(reserve).unwrap();
+
+        let pred = NoPendingRefundPredicate::new("no_refund");
+        let ctx = PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+        };
+
+        assert!(!pred.acceptable(&ctx));
+    }
+
+    #[test]
+    fn test_no_pending_refund_rejects_missing_tracker() {
+        let pred = NoPendingRefundPredicate::new("no_refund");
+        let ctx = PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: None,
+        };
+
+        assert!(!pred.acceptable(&ctx));
+    }
+
+    #[test]
+    fn test_no_pending_refund_rejects_missing_reserve() {
+        use basis_store::ReserveTracker;
+
+        let tracker = ReserveTracker::new();
+        let pred = NoPendingRefundPredicate::new("no_refund");
+        let ctx = PredicateContext {
+            issuer_pubkey: {
+                let mut key = [0u8; 33];
+                key[0] = 0x02;
+                key[1] = 1;
+                key
+            },
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+        };
+
+        assert!(!pred.acceptable(&ctx));
+    }
+
+    #[test]
+    fn test_no_pending_refund_clone() {
+        let pred = NoPendingRefundPredicate::new("no_refund");
+        let cloned = pred.clone();
+
         assert_eq!(pred.name(), cloned.name());
     }
 }

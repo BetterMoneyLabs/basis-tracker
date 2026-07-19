@@ -35,6 +35,7 @@ mod api_tests {
             reserve_box_value: 500 + 1000000 + 1000000, // Reserve must cover debt + fee + buffer
             fee_input_box_ids: vec![],
             fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
         };
 
         assert!(!request.issuer_pubkey.is_empty());

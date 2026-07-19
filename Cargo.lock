@@ -419,7 +419,6 @@ dependencies = [
  "blake2",
  "bytes",
  "ergo_avltree_rust",
- "hex",
  "serde",
  "serde_json",
  "tempfile",

@@ -154,6 +154,7 @@ pub struct ReserveInfo {
     pub ratio: f64,
     pub note_count: usize,
     pub _last_updated: u64,
+    pub has_pending_refund: bool,
 }
 
 impl App {
@@ -216,6 +217,7 @@ impl App {
                         ratio: status.collateralization_ratio,
                         note_count: status.note_count,
                         _last_updated: status.last_updated,
+                        has_pending_refund: status.has_pending_refund,
                     });
                 }
                 Err(_) => {}

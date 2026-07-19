@@ -248,7 +248,12 @@ async fn generate_redemption_transaction(
     let reserve_box = reserves_response
         .iter()
         .filter(|r| r.base_info.collateral_amount >= required)
-        .min_by_key(|r| r.base_info.collateral_amount)
+        .min_by(|a, b| {
+            a.base_info
+                .collateral_amount
+                .cmp(&b.base_info.collateral_amount)
+                .then_with(|| b.base_info.last_updated_height.cmp(&a.base_info.last_updated_height))
+        })
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "No reserve box with sufficient collateral found for issuer {} (need >= {} nanoERG)",
@@ -290,12 +295,24 @@ async fn generate_redemption_transaction(
     println!("🔗 Converting public keys to addresses...");
     let recipient_address = pubkey_to_address(recipient_pubkey)?;
 
-    // Fetch the recipient's private key from the node wallet so the node can satisfy
-    // the `proveDlog(receiver)` condition in the Basis reserve contract when signing.
-    println!("🔍 Fetching recipient private key from node wallet...");
-    let recipient_private_key = client.get_private_key(NODE_URL, Some(API_KEY), &recipient_address).await
-        .map_err(|e| anyhow::anyhow!("Failed to fetch recipient private key from node wallet. Ensure the recipient address {} is in the wallet: {}", recipient_address, e))?;
-    println!("✅ Fetched recipient private key");
+    // Fetch the recipient's private key so the node can satisfy the `proveDlog(receiver)`
+    // condition in the Basis reserve contract when signing. If the caller supplied the secret
+    // explicitly (e.g. for local-signing with an external recipient), use it instead of querying
+    // the node wallet.
+    println!("🔍 Resolving recipient private key...");
+    let recipient_private_key = match recipient_secret.as_ref() {
+        Some(secret) => {
+            println!("✅ Using provided recipient secret");
+            secret.clone()
+        }
+        None => {
+            println!("🔍 Fetching recipient private key from node wallet...");
+            let key = client.get_private_key(NODE_URL, Some(API_KEY), &recipient_address).await
+                .map_err(|e| anyhow::anyhow!("Failed to fetch recipient private key from node wallet. Ensure the recipient address {} is in the wallet: {}", recipient_address, e))?;
+            println!("✅ Fetched recipient private key");
+            key
+        }
+    };
 
     // Get tracker lookup proof for context var #8 from server
     println!("🔍 Retrieving tracker lookup proof from server...");
@@ -391,6 +408,11 @@ async fn generate_redemption_transaction(
         .first()
         .map(|asset| asset.token_id.clone())
         .unwrap_or_else(|| tracker_nft_id.clone());
+
+    // Preserve the refund initiation height from the spent reserve box's R7 register.
+    let refund_initiation_height = basis_store::ergo_scanner::decode_ergo_long_register(
+        reserve_box_details.additional_registers.get("R7"),
+    );
 
     // Fetch wallet-owned fee input boxes from the node.
     println!("🔍 Retrieving wallet fee inputs from Ergo node...");
@@ -561,7 +583,8 @@ async fn generate_redemption_transaction(
             "additionalRegisters": {
                 "R4": format!("07{}", issuer_pubkey),
                 "R5": r5_hex,
-                "R6": format!("0e{:02x}{}", tracker_nft_id.len() / 2, tracker_nft_id)
+                "R6": format!("0e{:02x}{}", tracker_nft_id.len() / 2, tracker_nft_id),
+                "R7": serialize_ergo_long(refund_initiation_height as i64)
             }
         }),
         json!({
@@ -917,7 +940,7 @@ fn build_savl_tree_from_digest(digest_hex: &str) -> Vec<u8> {
     let mut r5_bytes = Vec::with_capacity(38);
     r5_bytes.push(0x64u8); // SAvlTree type byte
     r5_bytes.extend_from_slice(&root_digest); // 33-byte digest from the AVL prover
-    r5_bytes.push(0x01u8); // flags: insertions allowed
+    r5_bytes.push(0x03u8); // flags: insertions and updates allowed (insertOrUpdate contract)
     r5_bytes.extend_from_slice(&vlq_encode(32)); // key length
     r5_bytes.extend_from_slice(&vlq_encode(0)); // value length: variable (0)
 

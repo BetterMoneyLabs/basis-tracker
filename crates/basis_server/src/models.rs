@@ -140,6 +140,7 @@ pub struct KeyStatusResponse {
     pub note_count: usize,
     pub last_updated: u64,
     pub issuer_pubkey: String,
+    pub has_pending_refund: bool,
 }
 
 // Redemption request

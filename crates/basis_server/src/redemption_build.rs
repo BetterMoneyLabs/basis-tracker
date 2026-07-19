@@ -747,6 +747,11 @@ async fn build_redemption_inner(
     let r5_bytes = build_savl_tree_from_digest(&hex::encode(&new_reserve_digest));
     let r5_hex = hex::encode(&r5_bytes);
 
+    // Preserve the refund initiation height from the spent reserve box's R7 register.
+    let refund_initiation_height = basis_store::ergo_scanner::decode_ergo_long_register(
+        reserve_box.additional_registers.get("R7"),
+    );
+
     // Context extension (Scala order applied below, before parsing).
     let mut context_extension: HashMap<String, String> = HashMap::new();
     context_extension.insert("0".to_string(), serialize_ergo_byte(0));
@@ -815,7 +820,8 @@ async fn build_redemption_inner(
             "additionalRegisters": {
                 "R4": format!("07{}", payload.issuer_pubkey),
                 "R5": r5_hex,
-                "R6": format!("0e{:02x}{}", tracker_nft_id.len() / 2, tracker_nft_id)
+                "R6": format!("0e{:02x}{}", tracker_nft_id.len() / 2, tracker_nft_id),
+                "R7": serialize_ergo_long(refund_initiation_height as i64)
             }
         }),
         json!({
@@ -1194,8 +1200,9 @@ mod tests {
     #[test]
     fn r5_digest_hex_extracts_digest_from_real_onchain_r5() {
         // Real R5 from the empty-tree reserve created on-chain (tx 2a5e653a...).
+        // The new reserve uses flags 0x03 (insert+update allowed) for insertOrUpdate.
         let b = r5_box(Some(
-            "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900012000",
+            "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000",
         ));
         assert_eq!(
             b.r5_digest_hex().unwrap(),

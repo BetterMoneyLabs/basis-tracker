@@ -55,6 +55,7 @@ pub async fn get_all_reserves(
                         last_updated_height: info.base_info.last_updated_height,
                         last_updated_timestamp: info.last_updated_timestamp,
                         collateralization_ratio,
+                        refund_initiation_height: info.base_info.refund_initiation_height,
                     }
                 })
                 .collect();
@@ -104,6 +105,7 @@ pub async fn get_reserves_by_issuer(
                         last_updated_height: info.base_info.last_updated_height,
                         last_updated_timestamp: info.last_updated_timestamp,
                         collateralization_ratio,
+                        refund_initiation_height: info.base_info.refund_initiation_height,
                     }
                 })
                 .collect();
@@ -156,6 +158,7 @@ pub async fn get_reserve_by_box_id(
                 last_updated_height: reserve_info.base_info.last_updated_height,
                 last_updated_timestamp: reserve_info.last_updated_timestamp,
                 collateralization_ratio,
+                refund_initiation_height: reserve_info.base_info.refund_initiation_height,
             };
 
             tracing::info!("Successfully retrieved reserve with box ID: {}", box_id);
@@ -192,4 +195,5 @@ pub struct SerializableReserveInfo {
     pub last_updated_height: u64,
     pub last_updated_timestamp: u64,
     pub collateralization_ratio: f64,
+    pub refund_initiation_height: u64,
 }

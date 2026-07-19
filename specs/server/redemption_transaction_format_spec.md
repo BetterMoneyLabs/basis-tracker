@@ -81,7 +81,7 @@ A redemption transaction has the following structure:
           "1": "0703receiver_pubkey_hex...",
           "2": "0e4102reserve_owner_sig_hex...",
           "3": "05long_to_vlq(totalDebt)",
-          "5": "0e...insert_proof_hex...",
+          "5": "0e...insert_or_update_proof_hex...",
           "6": "0e4102tracker_sig_hex...",
           "8": "0e...tracker_lookup_proof_hex..."
         }
@@ -112,7 +112,8 @@ A redemption transaction has the following structure:
         "additionalRegisters": {
           "R4": "0703issuer_pubkey_hex...",
           "R5": "hex_encoded_updated_avl_tree_root_digest",
-          "R6": "0e20tracker_nft_id_hex"
+          "R6": "0e20tracker_nft_id_hex",
+          "R7": "05000000000000000000"
         }
       },
       {
@@ -153,10 +154,11 @@ A redemption transaction has the following structure:
 - `assets`: Contains the tracker NFT token to maintain reserve identity
 - `registers`:
   - `R4`: The issuer's public key (33-byte compressed format / GroupElement) - identifies the reserve owner (unchanged from input)
-  - `R5`: The **updated** AVL tree root digest after inserting new redeemed amount
+  - `R5`: The **updated** AVL tree root digest after inserting or updating the reserve entry
     - Stores: `hash(ownerKey || receiverKey) -> cumulativeRedeemedAmount`
     - Must be updated with: `newRedeemed = oldRedeemed + redeemedAmount`
   - `R6`: The NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to (unchanged from input)
+  - `R7`: The refund initiation height (Long) from the spent reserve's `R7` register; `0` means no refund is pending. This value must be preserved unchanged in the updated reserve output.
 
 #### 3. Data Inputs
 - `dataInputsRaw[0]`: Serialized bytes of the tracker commitment box (for state verification)
@@ -171,7 +173,7 @@ A redemption transaction has the following structure:
 | #1 | receiver | GroupElement | Receiver's public key | Yes |
 | #2 | reserveSig | Coll[Byte] | Reserve owner's Schnorr signature (65 bytes) | Yes |
 | #3 | totalDebt | Long | Total cumulative debt amount | Yes |
-| #5 | insertProof | Coll[Byte] | AVL proof for inserting into reserve tree | Yes |
+| #5 | insertOrUpdateProof | Coll[Byte] | AVL proof for inserting or updating the reserve tree entry | Yes |
 | #6 | trackerSig | Coll[Byte] | Tracker's Schnorr signature (65 bytes) | Yes |
 | #7 | lookupProofReserve | Coll[Byte] | AVL proof for looking up in reserve tree | No (omit for first redemption) |
 | #8 | lookupProofTracker | Coll[Byte] | AVL proof for looking up in tracker tree | Yes |
@@ -205,7 +207,8 @@ A redemption transaction has the following structure:
       "registers": {
         "R4": "02d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b",
         "R5": "b2c3d4e5f6789012345678901234567890123456789012345678901234567890",
-        "R6": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b"
+        "R6": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b",
+        "R7": "05000000000000000000"
       }
     }
   ],
@@ -250,7 +253,8 @@ A redemption transaction has the following structure:
       "registers": {
         "R4": "02d1b60084a5af8dc3e006802a36dddfd09684eaf90164a5ad978b6e9b97eb328b",
         "R5": "c3d4e5f678901234567890123456789012345678901234567890123456789012",
-        "R6": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b"
+        "R6": "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b",
+        "R7": "05000000000000000000"
       }
     }
   ],
@@ -289,6 +293,7 @@ A redemption transaction has the following structure:
 - The AVL tree root in R5 must match the proof provided
 - The public key in R4 must match the note issuer's public key
 - Tracker NFT ID in R6 must match the tracker box's NFT ID
+- Refund initiation height in R7 must be preserved unchanged from the input reserve box (or `0` for reserves with no pending refund)
 
 ### Context Extension Format
 
@@ -306,7 +311,7 @@ Context extension values must be serialized as Ergo constants with type prefixes
 - **#1 (receiver)**: Must be valid GroupElement constant (`07` + 33-byte compressed pubkey hex)
 - **#2 (reserveSig)**: Must be Coll[Byte] constant (`0e` + length + 65-byte Schnorr signature hex)
 - **#3 (totalDebt)**: Must be Long constant (`05` + 8-byte big-endian hex), must match value in tracker's AVL tree
-- **#5 (insertProof)**: Must be Coll[Byte] constant (`0e` + length + AVL proof hex)
+- **#5 (insertOrUpdateProof)**: Must be Coll[Byte] constant (`0e` + length + AVL proof hex)
 - **#6 (trackerSig)**: Must be Coll[Byte] constant (`0e` + length + 65-byte Schnorr signature hex), optional for emergency redemption after 3 days
 - **#7 (lookupProofReserve)**: Coll[Byte] constant, required for subsequent redemptions, omitted for first
 - **#8 (lookupProofTracker)**: Must be Coll[Byte] constant (`0e` + length + AVL proof hex)
@@ -383,14 +388,14 @@ message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
 5. Build updated reserve output with remaining collateral
 6. Include tracker NFT in updated reserve output
 7. Set R4 register to issuer public key (unchanged)
-8. Set R5 register to **updated** AVL tree root (after inserting new redeemed amount)
+8. Set R5 register to **updated** AVL tree root (after inserting or updating the reserve entry)
 9. Set R6 register to tracker NFT ID (unchanged)
 10. Generate context extension variables:
     - #0: Action byte (0x00)
     - #1: Receiver pubkey
     - #2: Reserve owner's signature
     - #3: Total debt amount
-    - #5: AVL insert proof
+    - #5: AVL insert-or-update proof
     - #6: Tracker's signature
     - #7: Reserve lookup proof (if not first redemption)
     - #8: Tracker lookup proof
@@ -404,7 +409,7 @@ message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
 key = blake2b256(ownerKeyBytes || receiverBytes)
 oldRedeemed = reserveTree.get(key, lookupProof) // 0 for first redemption
 newRedeemed = oldRedeemed + redeemedAmount
-updatedTree = reserveTree.insert((key, longToByteArray(newRedeemed)), insertProof)
+updatedTree = reserveTree.insertOrUpdate((key, longToByteArray(newRedeemed)), insertOrUpdateProof)
 ```
 
 #### Tracker Tree Verification

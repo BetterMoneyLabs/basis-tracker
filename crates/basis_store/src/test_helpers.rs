@@ -113,6 +113,7 @@ pub fn create_test_redemption_request(
         reserve_box_value: amount + 1000000 + 1000000, // Reserve must cover debt + fee + buffer
         fee_input_box_ids: Vec::new(),
         fee_input_total_value: 0,
+        reserve_refund_initiation_height: 0,
     }
 }
 
@@ -129,6 +130,7 @@ pub fn create_test_reserve_info(
         collateral_amount,
         None, // tracker_nft_id
         height,
+        0,
     )
 }
 

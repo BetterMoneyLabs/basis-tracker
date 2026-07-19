@@ -32,6 +32,7 @@ pub struct AvlTreeData {
   - Bit 1 (0x02): Update allowed flag
   - Bit 2 (0x04): Remove allowed flag
   - Bits 3-7: Reserved for future use
+- Example: `0x03` means insert and update are allowed (the flag value used by the Basis reserve/tracker trees).
 
 ## Serialization Format
 

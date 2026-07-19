@@ -97,7 +97,7 @@ Addresses are derived from public keys using `ergo-lib` (compressed point -> `Pr
 | #2 | reserveSig | Coll[Byte] | Reserve owner's 65-byte Schnorr signature (33-byte a + 32-byte z) | Yes |
 | #3 | totalDebt | Long | Total cumulative debt amount (nanoERG) | Yes |
 | #4 | timestamp | Long | Payment timestamp (milliseconds since Unix epoch) | Yes |
-| #5 | insertProof | Coll[Byte] | AVL proof for inserting into the reserve tree | Yes |
+| #5 | insertOrUpdateProof | Coll[Byte] | AVL proof for inserting or updating the reserve tree entry | Yes |
 | #6 | trackerSig | Coll[Byte] | Tracker's 65-byte Schnorr signature | Yes (normal redemption) |
 | #7 | lookupProofReserve | Coll[Byte] | AVL proof for looking up `(timestamp, redeemedDebt)` in reserve tree | No (omit for first redemption) |
 | #8 | lookupProofTracker | Coll[Byte] | AVL proof for looking up `totalDebt` in tracker tree | Yes |
@@ -127,7 +127,7 @@ Query the server:
 
 ### Step 4: Retrieve AVL Proofs
 - `GET /proof/redemption?issuer_pubkey={issuer}&recipient_pubkey={recipient}` returns the tracker lookup proof and total debt.
-- `POST /redemption/prepare` (or equivalent server endpoint) returns the reserve insert proof and, for subsequent redemptions, the reserve lookup proof.
+- `POST /redemption/prepare` (or equivalent server endpoint) returns the reserve insert/update proof and, for subsequent redemptions, the reserve lookup proof.
 
 ### Step 5: Fetch Wallet Inputs and Recipient Secret
 - Query the Ergo node wallet for boxes covering the fee (`/wallet/boxes/unspentByErgoTree` or similar).
@@ -165,7 +165,7 @@ Construct the unsigned transaction in the format expected by the Ergo node `/wal
           "2": "0e41<reserve_signature_hex>",
           "3": "05<long_to_vlq(totalDebt)>",
           "4": "05<long_to_vlq(timestamp)>",
-          "5": "0e<insert_proof_hex>",
+          "5": "0e<insert_or_update_proof_hex>",
           "6": "0e41<tracker_signature_hex>",
           "8": "0e<tracker_lookup_proof_hex>"
         }

@@ -84,7 +84,19 @@ accept if: assets >= liabilities * min_ratio
 
 **Use Case**: Risk-based acceptance, requiring minimum backing for IOUs.
 
-### 4. Composite Predicates
+### 4. No-Pending-Refund Predicate
+
+Rejects notes if the issuer's reserve has a pending on-chain refund. This prevents a creditor from accepting payment that is backed by collateral that is currently being withdrawn.
+
+**Behavior**:
+- Look up the reserve owned by the issuer via the reserve tracker
+- If the tracker is unavailable or the reserve cannot be found: REJECT
+- If the reserve's refund initiation height is non-zero (`is_refund_pending()`): REJECT
+- Otherwise: ACCEPT
+
+**Use Case**: Refund-safe acceptance policies, ensuring collateral is not withdrawn while a note is in circulation.
+
+### 5. Composite Predicates
 
 Combine multiple predicates using logical operators.
 
@@ -162,7 +174,7 @@ root = "lets_policy"
 # Predicate array - order matters for evaluation
 [[acceptance.predicates]]
 name = "<string>"           # Unique identifier for the predicate
-type = "<predicate_type>"   # One of: whitelist, blacklist, collateralization, all_of, any_of, not
+type = "<predicate_type>"   # One of: whitelist, blacklist, collateralization, no_pending_refund, all_of, any_of, not
 
 # For whitelist type:
 holders = ["<33-byte hex pubkey>", ...]  # List of compressed secp256k1 public keys
@@ -173,6 +185,9 @@ holders = ["<33-byte hex pubkey>", ...]  # List of compressed secp256k1 public k
 
 # For collateralization type:
 min_ratio = <f64>           # Minimum collateralization ratio (e.g., 1.0 = 100%)
+
+# For no_pending_refund type:
+# No additional fields; the predicate uses the issuer's reserve from PredicateContext
 
 # For all_of/any_of types:
 predicates = ["<name>", ...]  # References to other named predicates
@@ -343,7 +358,31 @@ type = "collateralization"
 min_ratio = 1.0
 ```
 
-### Example 5: Local Exchange Trading System (LETS)
+### Example 5: Refund-Safe Collateral Policy
+
+Require the issuer to be well-collateralized and not have a pending refund:
+
+```toml
+[acceptance]
+default = "reject"
+root = "safe_collateral"
+
+[[acceptance.predicates]]
+name = "well_collateralized"
+type = "collateralization"
+min_ratio = 1.0
+
+[[acceptance.predicates]]
+name = "no_refund"
+type = "no_pending_refund"
+
+[[acceptance.predicates]]
+name = "safe_collateral"
+type = "all_of"
+predicates = ["well_collateralized", "no_refund"]
+```
+
+### Example 6: Local Exchange Trading System (LETS)
 
 A LETS is a local mutual credit association where members create common credit money individually. On Basis, LETS members whitelist each other so they accept notes regardless of collateralization.
 

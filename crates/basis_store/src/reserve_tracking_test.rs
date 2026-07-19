@@ -237,6 +237,7 @@ mod tests {
             1000000000, // 1 ERG
             Some(b"nft_1"),
             1000,
+            0,
         );
 
         tracker.update_reserve(reserve_info).unwrap();

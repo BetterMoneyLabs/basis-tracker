@@ -797,7 +797,7 @@ impl TrackerBoxUpdater {
 
         let mut r5_bytes = vec![0x64u8];
         r5_bytes.extend_from_slice(avl_root_digest);
-        r5_bytes.push(0x01u8);
+        r5_bytes.push(0x03u8); // insert + update allowed (insertOrUpdate contract)
         r5_bytes.extend_from_slice(&vlq_encode(32));
         r5_bytes.extend_from_slice(&vlq_encode(0));
         let r5_value = hex::encode(&r5_bytes);

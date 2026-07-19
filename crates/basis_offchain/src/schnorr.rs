@@ -14,14 +14,6 @@ pub enum NoteError {
     StorageError(String),
     UnsupportedOperation,
 }
-
-impl From<secp256k1::Error> for NoteError {
-    fn from(_: secp256k1::Error) -> Self {
-        NoteError::InvalidSignature
-    }
-}
-
-/// Public key type (Secp256k1)
 pub type PubKey = [u8; 33];
 
 /// Signature type (Secp256k1) - following chaincash-rs format: 33 bytes a + 32 bytes z

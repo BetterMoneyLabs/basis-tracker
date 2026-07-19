@@ -352,7 +352,7 @@ Bob generates an unsigned redemption transaction using the CLI:
 1. CLI queries tracker server for note details and outstanding debt
 2. Retrieves Alice's reserve box from the tracker
 3. Gets latest tracker box ID
-4. Fetches AVL proofs (tracker lookup proof, reserve insert proof)
+4. Fetches AVL proofs (tracker lookup proof, reserve insert/update proof)
 5. Requests tracker signature from server
 6. Fetches Bob's private key from the Ergo node wallet (`/wallet/getPrivateKey`) to include in `secrets.dlog`
 7. Selects wallet-owned fee inputs from the node
@@ -403,7 +403,7 @@ cat redemption_tx.json | jq .
           "1": "0703receiver_pubkey_hex...",
           "2": "0e4102reserve_owner_sig_hex...",
           "3": "05long_to_vlq(totalDebt)",
-          "5": "0e...insert_proof_hex...",
+          "5": "0e...insert_or_update_proof_hex...",
           "6": "0e4102tracker_sig_hex...",
           "8": "0e...tracker_lookup_proof_hex..."
         }
@@ -660,7 +660,7 @@ Context extensions are attached to the **reserve input** (the first input in `tx
 - **#1 (receiver)**: Must be `07` + 33-byte pubkey hex (GroupElement)
 - **#2 (reserveSig)**: Must be `0e` + 2-byte length + 65-byte signature (Coll[Byte])
 - **#3 (totalDebt)**: Must be `05` + 8-byte big-endian Long
-- **#5 (insertProof)**: AVL proof for reserve tree insert (Coll[Byte])
+- **#5 (insertOrUpdateProof)**: AVL proof for reserve tree insert/update (Coll[Byte])
 - **#6 (trackerSig)**: Tracker's 65-byte Schnorr signature (Coll[Byte])
 - **#8 (lookupProof)**: AVL proof for tracker tree lookup (Coll[Byte])
 

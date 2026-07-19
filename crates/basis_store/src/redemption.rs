@@ -84,6 +84,9 @@ pub struct RedemptionRequest {
     /// Total value provided by the fee input boxes. Must be >= the required fee.
     #[serde(default)]
     pub fee_input_total_value: u64,
+    /// Refund initiation height from the reserve box's R7 register (0 if no refund pending)
+    #[serde(default)]
+    pub reserve_refund_initiation_height: u64,
 }
 
 /// Redemption proof and transaction data
@@ -271,6 +274,7 @@ impl RedemptionManager {
                 &issuer_pubkey_bytes,
                 context,
                 reserve_box_value,
+                request.reserve_refund_initiation_height,
                 reserve_lookup_proof.proof,
                 tracker_lookup_proof.proof,
                 request.amount,
@@ -495,6 +499,7 @@ mod tests {
             reserve_box_value: 20000000, // 0.02 ERG reserve box value
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
         };
 
         let proof = crate::NoteProof {
@@ -565,6 +570,7 @@ mod tests {
             reserve_box_value: 20000000, // 0.02 ERG reserve box value
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
         };
 
         let proof = crate::NoteProof {
@@ -635,6 +641,7 @@ mod tests {
             reserve_box_value: 20000000, // 0.02 ERG reserve box value
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
         };
 
         let proof = crate::NoteProof {
@@ -704,6 +711,7 @@ mod tests {
             reserve_box_value: 20000000, // 0.02 ERG reserve box value
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
         };
 
         let proof = crate::NoteProof {
@@ -773,6 +781,7 @@ mod tests {
             reserve_box_value: 20000000, // 0.02 ERG reserve box value
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
         };
 
         let proof = crate::NoteProof {
@@ -842,6 +851,7 @@ mod tests {
             reserve_box_value: 20000000, // 0.02 ERG reserve box value
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
         };
 
         let proof = crate::NoteProof {
@@ -911,6 +921,7 @@ mod tests {
             reserve_box_value: 20000000, // 0.02 ERG reserve box value
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
         };
 
         let proof = crate::NoteProof {
@@ -1251,6 +1262,7 @@ fn build_redemption_transaction(
             network_prefix: 0,
         },
         request.reserve_box_value, // Use actual reserve box value from blockchain
+        request.reserve_refund_initiation_height,
         reserve_lookup_proof_bytes,
         tracker_lookup_proof_bytes,
         request.amount,

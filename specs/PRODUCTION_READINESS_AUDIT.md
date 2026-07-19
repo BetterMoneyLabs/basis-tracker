@@ -368,10 +368,12 @@ Various test files contain placeholder implementations that don't affect product
 
 ### Phase 4: Testing & Validation (1 day)
 
-- [ ] End-to-end redemption test
-- [ ] Tracker box update test
-- [ ] Multiple redemption test
+- [x] End-to-end redemption test (completed 2026-07-19)
+- [x] Tracker box update test
+- [x] Multiple redemption test (completed 2026-07-19, two consecutive 0.1 ERG redemptions against one 0.3 ERG reserve on mainnet)
 - [ ] Emergency redemption test
+
+> **Note:** As of 2026-07-19, the tracker box updater R5 format (Issue #4) and CLI address generation (Issue #5) are resolved, and the sequential multiple-redemption flow is verified on mainnet. Emergency redemption remains to be end-to-end tested.
 
 ---
 
@@ -410,7 +412,7 @@ Various test files contain placeholder implementations that don't affect product
 
 ## Conclusion
 
-**Current Status:** ✅ **PRODUCTION READY** (single redemption)
+**Current Status:** ✅ **PRODUCTION READY** (single and sequential multiple redemptions)
 
 The Basis Tracker has a complete core protocol implementation. All critical placeholders have been resolved:
 
@@ -419,8 +421,10 @@ The Basis Tracker has a complete core protocol implementation. All critical plac
 - ✅ Proper transaction building with Ergo constant serialization
 - ✅ Tracker box updates with correct address and R4/R5
 - ✅ Contract addresses populated from config
+- ✅ Sequential redemptions against a single reserve using the `insertOrUpdate` reserve contract (R5 flags `0x03`)
 
-**Known Limitation:**
-- Only **single redemption per reserve** is supported. Multiple redemptions require reserve tree lookup implementation (Issue #3).
+**Known Limitations:**
+- Emergency redemption has been specified but not yet end-to-end tested on mainnet.
+- The tracker blockchain scanner currently detects reserve collateral changes but does not automatically derive redemption events from reserve box changes; state is advanced via `POST /redeem/complete` after broadcast.
 
-**Recommendation:** Ready for production deployment with single-redemption workflows.
+**Recommendation:** Ready for production deployment with single- and sequential-redemption workflows.

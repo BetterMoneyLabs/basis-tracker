@@ -40,6 +40,8 @@ pub struct KeyStatusResponse {
     pub note_count: usize,
     pub last_updated: u64,
     pub issuer_pubkey: String,
+    #[serde(default)]
+    pub has_pending_refund: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -877,6 +879,8 @@ struct FlattenedReserveInfo {
     pub last_updated_height: u64,
     pub last_updated_timestamp: u64,
     pub collateralization_ratio: Option<f64>,
+    #[serde(default)]
+    pub refund_initiation_height: u64,
 }
 
 fn decode_box_id(raw: &str) -> String {
@@ -899,6 +903,7 @@ impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
             last_updated_height: flattened.last_updated_height,
             contract_address: String::new(), // Set by get_reserves_by_issuer() after fetching from server config
             tracker_nft_id: flattened.tracker_nft_id.unwrap_or_default(),
+            refund_initiation_height: flattened.refund_initiation_height,
         };
 
         ExtendedReserveInfo {

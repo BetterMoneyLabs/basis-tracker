@@ -464,12 +464,17 @@ impl ServerState {
             )));
         }
 
+        // Extract refund initiation height from R7 register (optional; absent = 0)
+        let refund_initiation_height =
+            decode_ergo_long_register(scan_box.additional_registers.get("R7"));
+
         let reserve_info = ExtendedReserveInfo::new(
             box_id.as_bytes(),
             &owner_pubkey_bytes,
             value,
             Some(&tracker_nft_id_bytes),
             creation_height,
+            refund_initiation_height,
         );
 
         Ok(reserve_info)
@@ -744,6 +749,43 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
         };
         tokio::time::sleep(wait_time).await;
     }
+}
+
+/// Decode an Ergo `Long` constant from its serialized hex representation.
+/// Format: type byte `05` followed by zigzag-VLQ encoded value.
+/// Missing, malformed, or negative values are treated as `0`.
+pub fn decode_ergo_long_register(value: Option<&String>) -> u64 {
+    let hex = match value {
+        Some(h) if h.starts_with("05") && h.len() > 2 => &h[2..],
+        _ => return 0,
+    };
+    let bytes = match hex::decode(hex) {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    decode_vlq_long(&bytes)
+        .ok()
+        .and_then(|v| if v >= 0 { Some(v as u64) } else { None })
+        .unwrap_or(0)
+}
+
+/// Decode a zigzag-VLQ encoded signed long.
+fn decode_vlq_long(bytes: &[u8]) -> Result<i64, String> {
+    let mut zigzag: u64 = 0;
+    let mut shift = 0;
+    for &byte in bytes {
+        let value = (byte & 0x7f) as u64;
+        zigzag |= value << shift;
+        if byte & 0x80 == 0 {
+            let n = zigzag as i64;
+            return Ok((n >> 1) ^ -(n & 1));
+        }
+        shift += 7;
+        if shift > 63 {
+            return Err("VLQ overflow".to_string());
+        }
+    }
+    Err("Incomplete VLQ".to_string())
 }
 
 #[cfg(test)]

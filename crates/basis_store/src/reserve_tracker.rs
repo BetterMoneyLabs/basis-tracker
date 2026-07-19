@@ -54,9 +54,14 @@ impl ExtendedReserveInfo {
         self.collateralization_ratio() <= 1.25 // 80% utilization
     }
 
-    /// Check if reserve is at critical level (100% utilization)  
+    /// Check if reserve is at critical level (100% utilization)
     pub fn is_critical_level(&self) -> bool {
         self.collateralization_ratio() <= 1.0 // 100% utilization
+    }
+
+    /// Check if a refund is pending (R7 is set)
+    pub fn is_refund_pending(&self) -> bool {
+        self.base_info.refund_initiation_height > 0
     }
 }
 
@@ -218,6 +223,7 @@ impl ExtendedReserveInfo {
         collateral_amount: u64,
         tracker_nft_id: Option<&[u8]>,
         last_updated_height: u64,
+        refund_initiation_height: u64,
     ) -> Self {
         Self {
             base_info: ReserveInfo {
@@ -227,6 +233,7 @@ impl ExtendedReserveInfo {
                 tracker_nft_id: tracker_nft_id
                     .map(|id| hex::encode(id))
                     .unwrap_or_else(|| "".to_string()),
+                refund_initiation_height,
             },
             total_debt: 0,
             box_id: hex::encode(box_id),
@@ -259,6 +266,7 @@ mod tests {
             1000000000, // 1 ERG
             Some(b"test_tracker_nft_1234567890"),
             1000,
+            0,
         );
 
         // Add reserve
@@ -315,6 +323,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test_nft_id".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 0,
             box_id: "test".to_string(),
@@ -331,6 +340,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test_nft_id".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 800,
             ..reserve.clone()
@@ -347,6 +357,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test_nft_id".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 1000,
             ..reserve

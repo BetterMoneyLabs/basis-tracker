@@ -535,6 +535,12 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
             "  {}Status:{}         {}{}{}",
             BOLD, RESET, ratio_color, status, RESET
         );
+        if reserve.has_pending_refund {
+            println!(
+                "  {}⚠ Warning:{} Refund initiated for at least one reserve",
+                YELLOW, RESET
+            );
+        }
         println!(
             "  {}Note Count:{}     {}\n",
             BOLD, RESET, reserve.note_count

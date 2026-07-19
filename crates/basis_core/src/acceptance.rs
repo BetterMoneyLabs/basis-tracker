@@ -131,6 +131,11 @@ pub enum PredicateConfig {
         /// Name of the predicate to negate
         predicate: String,
     },
+    /// No-pending-refund predicate - rejects if the issuer's reserve has a pending refund
+    NoPendingRefund {
+        /// Predicate name
+        name: String,
+    },
 }
 
 impl PredicateConfig {
@@ -143,6 +148,7 @@ impl PredicateConfig {
             PredicateConfig::AllOf { name, .. } => name,
             PredicateConfig::AnyOf { name, .. } => name,
             PredicateConfig::Not { name, .. } => name,
+            PredicateConfig::NoPendingRefund { name } => name,
         }
     }
 
@@ -379,6 +385,11 @@ mod tests {
             predicate: "inner".to_string(),
         };
         assert_eq!(n.name(), "not");
+
+        let r = PredicateConfig::NoPendingRefund {
+            name: "no_refund".to_string(),
+        };
+        assert_eq!(r.name(), "no_refund");
     }
 
     #[test]
@@ -403,6 +414,19 @@ mod tests {
             predicate: "inner".to_string(),
         };
         assert!(n.is_composite());
+
+        let r = PredicateConfig::NoPendingRefund {
+            name: "no_refund".to_string(),
+        };
+        assert!(!r.is_composite());
+        assert!(r.is_leaf());
+    }
+
+    #[test]
+    fn test_parse_no_pending_refund_json() {
+        let json = r#"{"default":"reject","predicates":[{"name":"no_refund","type":"no_pending_refund"}]}"#;
+        let config: AcceptanceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.predicates.len(), 1);
     }
 
     #[test]

@@ -10,14 +10,40 @@ The redemption request contains the parameters needed to initiate a redemption:
 
 ```rust
 pub struct RedemptionRequest {
-    /// Issuer's public key (hex encoded)
+    /// Issuer's public key (hex encoded, 33-byte compressed secp256k1)
     pub issuer_pubkey: String,
-    /// Recipient's public key (hex encoded)
+    /// Recipient's public key (hex encoded, 33-byte compressed secp256k1)
     pub recipient_pubkey: String,
-    /// Total cumulative debt amount (not just redemption amount)
-    pub total_debt: u64,
-    /// Flag indicating if this is emergency redemption
+    /// Amount to redeem (nanoERG)
+    pub amount: u64,
+    /// Timestamp of the note being redeemed (milliseconds since Unix epoch)
+    pub timestamp: u64,
+    /// Reserve contract box ID being spent
+    pub reserve_box_id: String,
+    /// Tracker commitment box ID used as data input
+    pub tracker_box_id: String,
+    /// Tracker NFT ID from the reserve box's R6 register (32 bytes hex)
+    pub tracker_nft_id: String,
+    /// Current blockchain height
+    pub current_height: u64,
+    /// Recipient's address for the redemption output
+    pub recipient_address: String,
+    /// Change address for transaction outputs
+    pub change_address: String,
+    /// Issuer's 65-byte Schnorr signature (130 hex chars)
+    pub issuer_signature: String,
+    /// Whether this is an emergency redemption
     pub emergency: bool,
+    /// Optional tracker 65-byte Schnorr signature (server-generated if omitted)
+    pub tracker_signature: Option<String>,
+    /// Value of the reserve box being spent (nanoERG)
+    pub reserve_box_value: u64,
+    /// Optional wallet-owned fee input box IDs
+    pub fee_input_box_ids: Vec<String>,
+    /// Total value provided by the fee input boxes (must be >= fee)
+    pub fee_input_total_value: u64,
+    /// Refund initiation height from the reserve box's R7 register (0 if none)
+    pub reserve_refund_initiation_height: u64,
 }
 ```
 
@@ -38,7 +64,7 @@ pub struct RedemptionData {
     pub tracker_lookup_proof: Vec<u8>,
     /// AVL proof for reserve tree lookup (context var #7, optional)
     pub reserve_lookup_proof: Option<Vec<u8>>,
-    /// AVL proof for reserve tree insertion (context var #5)
+    /// AVL proof for reserve tree insert/update (context var #5)
     pub reserve_insert_proof: Vec<u8>,
     /// Reserve owner's signature (65-byte Schnorr signature)
     pub reserve_signature: Vec<u8>,
@@ -134,7 +160,7 @@ The redemption process begins when a recipient initiates a redemption request:
 8. **Generate AVL Proofs**
    - Generate tracker tree lookup proof (context var #8)
    - Generate reserve tree lookup proof (context var #7, omit for first redemption)
-   - Generate reserve tree insert proof (context var #5)
+   - Generate reserve tree insert/update proof (context var #5)
    - Return `RedemptionError::AvlProofError` if proof generation fails
 
 9. **Request Signatures**
@@ -468,14 +494,17 @@ This is the supported way to repair local state after an out-of-band redemption:
 }
 ```
 
-### Known contract limitation
+### Known contract limitation / upgrade
 
-The deployed reserve contract (`contract/basis.es:345`) uses strict `insert` into the
-reserve AVL tree, so a redemption only verifies against a reserve whose tree does not
-yet contain the note key — in practice a freshly created empty-tree reserve. Repeated
-redemptions against one reserve fail local/node evaluation with
-`AvlTree: Incorrect insert` until the contract switches to `insertOrUpdate` (see the
-TODO at `basis.es:345`).
+The legacy reserve contract (`contract/basis.es:345`) used strict `insert` into the reserve AVL tree. With that contract a redemption only verifies against a reserve whose tree does not yet contain the note key — in practice a freshly created empty-tree reserve. Repeated redemptions against one reserve fail local/node evaluation with `AvlTree: Incorrect insert`.
+
+The current compiled reserve contract uses `insertOrUpdate` for the reserve AVL tree, which removes this limitation: a note can be redeemed multiple times against the same reserve as long as the cumulative redeemed amount is increased correctly and the R7 refund initiation height is preserved. The tracker code reflects this:
+
+- `basis_trees/src/avl_tree.rs::generate_insert_proof` uses `Operation::InsertOrUpdate` so proofs are valid for both new and existing reserve-tree keys.
+- `RedemptionRequest` carries `reserve_refund_initiation_height` and the transaction builder preserves the value in the updated reserve output's `R7` register.
+- Acceptance policies can include a `no_pending_refund` predicate to reject notes backed by a reserve with a non-zero R7 refund height.
+
+Deploying systems should ensure the configured reserve contract P2S matches the contract they intend to use; the tracker will emit the correct transaction format for either, but the strict-insert contract cannot support consecutive redemptions. The legacy P2S begins with `4ZhBzJfN...`; the current default P2S begins with `3PQnJ92K...`. Both constants are maintained in `crates/basis_store/src/contract_compiler.rs`.
 
 ## Integration with Blockchain Scanner
 
@@ -547,7 +576,7 @@ For redemption transactions:
 | #1 | GroupElement | Receiver pubkey | Request |
 | #2 | Coll[Byte] | Reserve owner signature | Signature API |
 | #3 | Long | Total debt amount | Tracker AVL tree |
-| #5 | Coll[Byte] | Reserve insert proof | AVL proof generator |
+| #5 | Coll[Byte] | Reserve insert/update proof | AVL proof generator |
 | #6 | Coll[Byte] | Tracker signature | Tracker server (`/tracker/signature`) |
 | #7 | Coll[Byte] | Reserve lookup proof | AVL proof generator (optional) |
 | #8 | Coll[Byte] | Tracker lookup proof | AVL proof generator |

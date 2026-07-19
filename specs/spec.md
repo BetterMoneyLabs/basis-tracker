@@ -44,7 +44,7 @@ Basis is a protocol for off-chain payments with on-chain redemption capabilities
 6. Additionally, the contract verifies that `totalDebt` is committed in the tracker's AVL tree (context var #8 provides lookup proof)
 7. The contract also verifies that the note's timestamp is **greater than** any previously redeemed timestamp, preventing replay attacks with old notes
 8. To redeem: B contacts tracker to obtain signature on the debt note, then presents reserve owner's signature (from original IOU note) and tracker's signature to the on-chain contract along with AVL tree proofs:
-   - Proof for reserve tree insertion (context var #5, required)
+   - Proof for reserve tree insert/update (context var #5, required)
    - Proof for reserve tree lookup (context var #7, optional for first redemption)
    - Proof for tracker tree lookup (context var #8, required)
 
@@ -197,7 +197,7 @@ Where:
 - **#2**: Reserve owner's signature bytes for the debt record (Schnorr signature on `key || totalDebt || timestamp`, 65 bytes)
 - **#3**: Current total debt amount (Long)
 - **#4**: Timestamp of the payment (Long, milliseconds since Unix epoch)
-- **#5**: Proof for insertion into reserve's AVL tree (Coll[Byte])
+- **#5**: Proof for insert/update into reserve's AVL tree (Coll[Byte])
 - **#6**: Tracker's signature bytes (Schnorr signature on `key || totalDebt || timestamp`, 65 bytes)
 - **#7**: [OPTIONAL] Proof for AVL tree lookup in reserve's tree for `hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)`
   - Not needed for first redemption (when redeemedDebt = 0)

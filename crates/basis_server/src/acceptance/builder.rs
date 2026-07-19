@@ -5,8 +5,8 @@
 
 use super::config::{AcceptanceConfig, PredicateConfig};
 use super::{
-    AllOfPredicate, AnyOfPredicate, BlacklistPredicate, CollateralizationPredicate, NotPredicate,
-    NotePredicate, WhitelistPredicate,
+    AllOfPredicate, AnyOfPredicate, BlacklistPredicate, CollateralizationPredicate,
+    NoPendingRefundPredicate, NotPredicate, NotePredicate, WhitelistPredicate,
 };
 use basis_store::PubKey;
 use std::collections::{BTreeMap, HashSet};
@@ -135,6 +135,9 @@ impl PredicateBuilder {
             } => {
                 let inner = self.build_predicate(&ref_name)?;
                 Ok(Box::new(NotPredicate::new(name, inner)) as Box<dyn NotePredicate>)
+            }
+            PredicateConfig::NoPendingRefund { name } => {
+                Ok(Box::new(NoPendingRefundPredicate::new(name)) as Box<dyn NotePredicate>)
             }
         };
 
@@ -266,13 +269,28 @@ mod tests {
             default: DefaultPolicy::Reject,
             predicates: vec![PredicateConfig::Collateralization {
                 name: "collat".to_string(),
-                min_ratio: 1.5,
+                min_ratio: 1.0,
             }],
         };
 
         let result = build_predicate_tree(config).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().name(), "collat");
+    }
+
+    #[test]
+    fn test_build_no_pending_refund() {
+        let config = AcceptanceConfig {
+            root: None,
+            default: DefaultPolicy::Reject,
+            predicates: vec![PredicateConfig::NoPendingRefund {
+                name: "no_refund".to_string(),
+            }],
+        };
+
+        let result = build_predicate_tree(config).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name(), "no_refund");
     }
 
     #[test]
@@ -572,6 +590,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 100,
             box_id: "box1".to_string(),
@@ -622,6 +641,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 100,
             box_id: "box1".to_string(),
@@ -673,6 +693,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 100,
             box_id: "box1".to_string(),
@@ -724,6 +745,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 100,
             box_id: "box1".to_string(),
@@ -775,6 +797,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 0, // Zero debt
             box_id: "box1".to_string(),
@@ -861,6 +884,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 100,
             box_id: "box1".to_string(),
@@ -925,6 +949,7 @@ mod tests {
                 last_updated_height: 0,
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
             },
             total_debt: 100,
             box_id: "box1".to_string(),

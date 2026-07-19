@@ -736,9 +736,46 @@ After this redemption the note still showed `amount_redeemed = 0.1 ERG` (should 
 
 1. **Broadcast is not state sync.** Any redemption path that mutates on-chain reserve/note state must update the tracker's note record *and* reserve AVL tree after broadcast, using the exact cumulative value proven on-chain.
 2. **Note cumulative ≠ reserve-tree cumulative in general.** With multiple reserves per issuer (each with its own tree) or after state repair, the reserve-tree `already_redeemed` for a given reserve can differ from the note's `amount_redeemed`; the build must compute from the reserve-tree lookup and the submit must round-trip that value.
-3. **Strict `insert` means one redemption per reserve.** Every on-chain redemption today must spend a reserve whose tree does not yet contain the note key (in practice: a freshly created empty-tree reserve). The deployed contract's `insertOrUpdate` TODO (`basis.es:345`) is the blocker for repeated redemptions against one reserve.
+3. **Strict `insert` contract limitation resolved.** The reserve contract was updated to use `insertOrUpdate` for the reserve AVL tree (R5 flags `0x03`). Two consecutive redemptions against a single reserve are now possible; see the Eighth Redemption Test below. The old strict-insert P2S is still documented for historical reference.
 4. **Fee boxes are consumable test fixtures.** Node-wallet payment txs consolidate/consume token-free boxes; recreate a ~0.05 ERG token-free fee box before each redemption test or `select_fee_inputs` fails with "no wallet boxes covering 1000000 nanoERG fee".
 5. **The TUI is fully scriptable.** `basis-ui` reads line-based stdin (`read_line`); e.g. `printf '\n2\nr\n1\n100000000\nb\nq\n' | ./target/debug/basis-ui` drives a complete redemption non-interactively.
+
+---
+
+## Eighth Redemption Test (two consecutive 0.1 ERG redemptions against one 0.3 ERG reserve, mainnet)
+
+Goal: verify the updated `insertOrUpdate` reserve contract supports sequential redemptions against the same reserve without needing a fresh empty-tree reserve.
+
+### Setup
+
+- Local Ergo node mainnet (`http://127.0.0.1:9053`, API key `hello`).
+- Issuer/reserve owner: `022880fde8cace85c2c810fb32c5441a32198b0f7a122b9a672cfb7e50eb898cdc`.
+- Recipient: `03dbc83fe0c803d370575d2a513247b741f2fe4fe45756cd9983ce087d788697a7`.
+- Tracker public key: `024e564477ff457c601c01ad1cc31903f8b27b7d5e515bd03138891d8152d787b2`.
+- Minted a new reserve NFT (tx `070fda838d6a019ed930370afb581ff9b834c5638ed4f7e371989d86220ab190`, token ID `e350a0f8112b7868f3c0ab56c04a10040e6afc037644e71f35e5f4b94f0ff254`).
+- Deployed a 0.3 ERG reserve with the updated `insertOrUpdate` P2S (tx `d83e8b537f254ae0bad687fa4f9299410ade64636e33eae0b442f306386e68af`, reserve box `ddf6397150d1acca9a6a6986d8e6a2749d5e9732971692be1bd43b7292c51057`).
+- Created a 0.2 ERG IOU note from issuer to recipient.
+- The issuer's wallet only held token-bearing change boxes, so a token-free fee box was created first via `/wallet/payment/send` before each redemption.
+- The old `InsertOnly` reserve (`acc414ec...`) still existed on-chain; the CLI reserve-selection code was updated to prefer the newest reserve when multiple reserves have the same collateral, avoiding the stale reserve.
+
+### Transactions
+
+| # | Tx ID | Inputs | Outputs |
+|---|-------|--------|---------|
+| First redemption | `b6d45ae533099f403b070a6706b1c2dd0a687d95d22d0a0c737149b5efa656f8` | Reserve `ddf63971...` (0.3 ERG), fee box (0.01 ERG) | New reserve `1c740dcc...` (0.2 ERG), recipient payout 0.1 ERG, fee 0.001 ERG, change 0.009 ERG |
+| Second redemption | `bd95f930ec6a77fefa8c680b405fe69d72b6c6ee8ead8c79c1b20965764f7203` | Reserve `1c740dcc...` (0.2 ERG), fee box (0.009 ERG) | New reserve (0.1 ERG), recipient payout 0.1 ERG, fee 0.001 ERG, change 0.008 ERG |
+
+### Result
+
+Both transactions were accepted by the local node and confirmed on mainnet. The note was fully redeemed (0.2 ERG issued, 0.2 ERG redeemed, 0 ERG outstanding) and the reserve ended with 0.1 ERG collateral.
+
+### Lessons Learned from the Eighth Test
+
+1. **`insertOrUpdate` contract enables sequential redemptions.** The reserve R5 tree now uses flags `0x03` (insert + update), so a reserve can be updated multiple times for the same issuer/recipient pair.
+2. **Reserve selection must avoid stale reserves.** When multiple reserves share the same issuer and collateral, the redemption builder should select the newest one (e.g., by `last_updated_height`), otherwise it may pick an older, un-spendable `InsertOnly` reserve.
+3. **Token-free fee boxes remain required.** The wallet's consolidated change box contained tokens, so each redemption test required creating a new token-free fee box first.
+4. **The tracker does not yet auto-detect on-chain redemptions.** After each redemption, the server state was advanced manually via `POST /redeem/complete` with the correct `redeemed_amount` and `new_already_redeemed`. The blockchain scanner currently updates reserve collateral but does not derive redemption events from reserve box changes.
+5. **The tracker box updater and reserve output builder now both emit R5 flags `0x03`.** Consistency across the codebase is important: the tracker box updater previously used `0x01`, which would create a mismatch with the `insertOrUpdate` semantics.
 
 ---
 

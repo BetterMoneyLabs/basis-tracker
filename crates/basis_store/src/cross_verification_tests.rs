@@ -17,6 +17,7 @@ mod tests {
             1000000000, // 1 ERG
             None,
             1000,
+            0,
         );
 
         // Add reserve to tracker
@@ -47,9 +48,9 @@ mod tests {
 
         // Add multiple reserves
         let reserves = vec![
-            ExtendedReserveInfo::new(b"reserve_1", b"issuer_1", 1000000000, None, 1000),
-            ExtendedReserveInfo::new(b"reserve_2", b"issuer_1", 2000000000, None, 1001),
-            ExtendedReserveInfo::new(b"reserve_3", b"issuer_2", 1500000000, None, 1002),
+            ExtendedReserveInfo::new(b"reserve_1", b"issuer_1", 1000000000, None, 1000, 0),
+            ExtendedReserveInfo::new(b"reserve_2", b"issuer_1", 2000000000, None, 1001, 0),
+            ExtendedReserveInfo::new(b"reserve_3", b"issuer_2", 1500000000, None, 1002, 0),
         ];
 
         for reserve in reserves {
@@ -82,6 +83,7 @@ mod tests {
             1000000000, // 1 ERG
             None,
             1000,
+            0,
         );
 
         reserve_tracker.update_reserve(reserve_info).unwrap();
@@ -131,7 +133,8 @@ mod tests {
         };
 
         // Create reserve info from event
-        let reserve_info = ExtendedReserveInfo::new(b"box_1", b"issuer_1", 1000000000, None, 1000);
+        let reserve_info =
+            ExtendedReserveInfo::new(b"box_1", b"issuer_1", 1000000000, None, 1000, 0);
 
         let result = reserve_tracker.update_reserve(reserve_info);
         assert!(result.is_ok(), "Should process creation event");
@@ -149,6 +152,7 @@ mod tests {
             1500000000, // Increased collateral
             None,
             1001,
+            0,
         );
 
         let result = reserve_tracker.update_reserve(updated_reserve_info);
@@ -168,6 +172,7 @@ mod tests {
             1200000000, // Reduced collateral after redemption
             None,
             1002,
+            0,
         );
 
         let result = reserve_tracker.update_reserve(redeemed_reserve_info);
@@ -194,7 +199,7 @@ mod tests {
 
         // Try to update non-existent reserve
         let reserve_info =
-            ExtendedReserveInfo::new(b"non_existent_box", b"issuer_1", 500000000, None, 1000);
+            ExtendedReserveInfo::new(b"non_existent_box", b"issuer_1", 500000000, None, 1000, 0);
 
         let result = reserve_tracker.update_reserve(reserve_info);
         assert!(result.is_ok(), "Should be able to add new reserve");
@@ -206,6 +211,7 @@ mod tests {
             100000000, // 0.1 ERG
             None,
             1000,
+            0,
         );
 
         reserve_tracker.update_reserve(small_reserve_info).unwrap();

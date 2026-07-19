@@ -182,6 +182,8 @@ pub struct RedemptionTransactionData {
     /// Updated reserve AVL tree digest after insert operation (for R5 register)
     /// This is the serialized AVL tree that includes the new redemption entry
     pub updated_reserve_tree: Option<Vec<u8>>,
+    /// Refund initiation height from the spent reserve box's R7 register (0 if none)
+    pub reserve_refund_initiation_height: u64,
     /// Wallet-owned fee input boxes (boxId only) used to pay the miner fee.
     /// Each box must have an empty context extension.
     pub fee_input_box_ids: Vec<String>,
@@ -224,6 +226,7 @@ impl RedemptionTransactionBuilder {
     /// - `tracker_sig`: 65-byte Schnorr signature from tracker
     /// - `context`: Transaction context (fee, height, network)
     /// - `reserve_box_value`: Value of the reserve box being spent (in nanoERG)
+    /// - `reserve_refund_initiation_height`: Refund initiation height from the reserve box's R7 register (0 if none)
     /// - `reserve_lookup_proof`: Optional AVL proof for looking up already_redeemed in reserve tree (None for first redemption)
     /// - `tracker_lookup_proof`: AVL proof for looking up totalDebt in tracker tree
     ///
@@ -241,6 +244,7 @@ impl RedemptionTransactionBuilder {
         issuer_pubkey: &crate::PubKey,
         context: &TxContext,
         reserve_box_value: u64,
+        reserve_refund_initiation_height: u64,
         reserve_lookup_proof: Option<Vec<u8>>,
         tracker_lookup_proof: Vec<u8>,
         redemption_amount: u64,
@@ -392,6 +396,7 @@ impl RedemptionTransactionBuilder {
             current_height: context.current_height,
             issuer_pubkey: issuer_pubkey.to_vec(),
             reserve_box_value,
+            reserve_refund_initiation_height,
             updated_reserve_tree: None, // Will be set by caller after generating insert proof
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
@@ -585,9 +590,10 @@ impl RedemptionTransactionBuilder {
                     "R4": format!("07{}", hex::encode(&tx_data.issuer_pubkey)),
                     "R5": match &tx_data.updated_reserve_tree {
                         Some(tree_bytes) => format!("0e{:04x}{}", tree_bytes.len(), hex::encode(tree_bytes)),
-                        None => "64000000000000000000000000000000000000000000000000000000000000000000012000".to_string(),
+                        None => "64000000000000000000000000000000000000000000000000000000000000000000032000".to_string(),
                     },
-                    "R6": format!("0e20{}", tx_data.tracker_nft_id)
+                    "R6": format!("0e20{}", tx_data.tracker_nft_id),
+                    "R7": Self::serialize_ergo_long(tx_data.reserve_refund_initiation_height as i64)
                 },
                 "creationHeight": tx_data.current_height
             }),
@@ -725,6 +731,7 @@ mod tests {
             issuer_pubkey: vec![0x02; 33],
             reserve_box_value: 200000000, // 0.2 ERG reserve box value
             updated_reserve_tree: None,
+            reserve_refund_initiation_height: 0,
             fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
             fee_input_total_value: 1000000,
             change_address: None,
@@ -801,6 +808,7 @@ mod tests {
                 issuer_pubkey: vec![0x02; 33],
                 reserve_box_value: amount + 100000000, // Reserve must cover redemption + some buffer
                 updated_reserve_tree: None,
+                reserve_refund_initiation_height: 0,
                 fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
                 fee_input_total_value: 1000000,
                 change_address: None,
@@ -870,6 +878,7 @@ mod tests {
                 issuer_pubkey: vec![0x02; 33],
                 reserve_box_value: 200000000, // 0.2 ERG reserve box value
                 updated_reserve_tree: None,
+                reserve_refund_initiation_height: 0,
                 fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
                 fee_input_total_value: fee,
                 change_address: Some(
@@ -926,6 +935,7 @@ mod tests {
             issuer_pubkey: vec![0x02; 33],
             reserve_box_value: 200000000, // 0.2 ERG reserve box value
             updated_reserve_tree: None,
+            reserve_refund_initiation_height: 0,
             fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
             fee_input_total_value: 1000000,
             change_address: None,
@@ -963,6 +973,7 @@ mod tests {
             issuer_pubkey: vec![0x02; 33],
             reserve_box_value: 200000000, // 0.2 ERG reserve box value
             updated_reserve_tree: None,
+            reserve_refund_initiation_height: 0,
             fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
             fee_input_total_value: 1000000,
             change_address: None,
@@ -1010,6 +1021,7 @@ mod tests {
             issuer_pubkey: vec![0x02; 33],
             reserve_box_value: 200000000, // 0.2 ERG reserve box value
             updated_reserve_tree: None,
+            reserve_refund_initiation_height: 0,
             fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
             fee_input_total_value: 1000000,
             change_address: None,

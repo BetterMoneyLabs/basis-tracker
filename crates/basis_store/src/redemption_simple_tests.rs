@@ -171,6 +171,7 @@ fn test_redemption_request_structure() {
         reserve_box_value: 100000000 + 1000000, // Reserve must cover debt + fee
         fee_input_box_ids: Vec::new(),
         fee_input_total_value: 0,
+        reserve_refund_initiation_height: 0,
     };
 
     // Verify request structure
