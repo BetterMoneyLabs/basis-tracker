@@ -779,6 +779,58 @@ Both transactions were accepted by the local node and confirmed on mainnet. The 
 
 ---
 
+## Ninth Redemption Test (scanner height-cache fix + note-timestamp desync repair, two 0.1 ERG redemptions against one 0.3 ERG reserve, mainnet)
+
+Goal: reproduce the eighth-test flow end-to-end, fixing two operational bugs found along the way: (1) the reserve scanner stopped seeing new blocks, and (2) a repaired note state desynced the in-memory reserve AVL tree from the on-chain R5.
+
+### Setup
+
+- Same participants as the eighth test: issuer `022880fde8…`, recipient `03dbc83fe0…`, tracker `024e564477…`.
+- Plain fee box: tx `606415c411b769cac4f8cb2c6be3f180a9bc00b459e1e815f18a1a49c7618607`.
+- Reserve NFT: tx `6df8b04999e7ee973717cc2b6498a96117e350a99adda07bd154fdef443dfbeb`, token ID `018d29f4da1ea43f9d752b927200c54d9230637cc677c8a66d477f1684bd3098`.
+- Reserve creation (0.3 ERG): tx `f3a6014870408cb9d84abe94d1cc6f4333e06cbd16ab0f2003af09085d402679`, reserve box `aa8340fc8ef5fa1ebb1edd31dd70d04f89f3b1357999f755a40e7d6b415185b6`.
+- 0.2 ERG note from issuer to recipient (payment timestamp `1784494415054`).
+
+### Bug 1: Reserve scanner stuck on cached blockchain height
+
+**Symptom:** after the first redemption confirmed, `GET /reserves` kept returning the old spent reserve box. Server logs showed only `Starting reserve scanner background loop` and no further reserve updates for 10+ minutes.
+
+**Root cause:** `reserve_scanner_loop` used `ServerState::get_current_height`, which caches the node height for 10 minutes **and persists the cache to disk** (`ScannerMetadataStorage`). After processing one block, the loop kept reading the same cached height, so `height > last_scanned_height` stayed false and `process_scan_boxes` never ran again.
+
+**Fix (`crates/basis_store/src/ergo_scanner.rs`):**
+- Added `ServerState::fetch_current_height` — always queries `/info` directly (and refreshes the shared cache for other callers).
+- `reserve_scanner_loop` now uses `fetch_current_height` instead of the cached `get_current_height`.
+
+After the fix, the scanner promptly detects each new block and persists reserve changes; the spent reserve is replaced by the new one within one scan cycle.
+
+### Bug 2: Note timestamp desync broke the reserve-tree proof
+
+**Symptom:** after a server restart, the second redemption's node-wallet signing failed with `Malformed request: null`. Incremental context-extension testing showed the failure appeared exactly when context var `#7` (reserve lookup proof) was present — i.e. the lookup proof did not verify against the on-chain reserve R5.
+
+**Root cause:** the in-memory reserve AVL tree is lost on restart. Re-syncing it via `POST /redeem/complete` uses the note's **current** timestamp (`complete_redemption` refreshes `note.timestamp` on every call), but the on-chain reserve-tree value is `payment_timestamp || already_redeemed` with the note's **original** payment timestamp (`1784494415054`). With a mismatched timestamp the local tree root (`321a4ad5…`) diverged from the on-chain R5 digest (`f91e7e76…`), so the lookup proof failed on-chain.
+
+**Repair:** reset the persisted note to `amount_redeemed = 0` and the original on-chain payment timestamp (one-off repair modeled on `basis_store/tests/fix_note_state.rs`), restarted the server, then re-ran `POST /redeem/complete` with `redeemed_amount = 100000000, new_already_redeemed = 100000000`. The local reserve-tree digest then matched the on-chain R5 exactly, and the redemption built and signed on the first attempt.
+
+### Transactions
+
+| # | Tx ID | Inputs | Outputs |
+|---|-------|--------|---------|
+| First redemption | `4b65c7cdf46ba7fdb741803e5d6534de70911f07a409c285532821054cc2959b` (height 1832709) | Reserve `aa8340fc…` (0.3 ERG) | New reserve `8dc21481ed3f084f99d021124c9923e418c1ece60f2d44f8885d48923b29dcd0` (0.2 ERG), recipient +0.1 ERG |
+| Second redemption | `cfcd857961d06bfae66781dfe4a5a7f8581732a2c3e3f7f16571c979971d5863` (height 1833071) | Reserve `8dc21481…` (0.2 ERG), fee box (0.049 ERG) | New reserve `3ae59d54b1f57a9d…` (0.1 ERG, R5 `64d077c133e112d2d1…01032000`), recipient +0.1 ERG, fee 0.001 ERG, change 0.048 ERG |
+
+### Result
+
+Both redemptions confirmed on mainnet. The note is fully redeemed (`amount_collected = amount_redeemed = 200000000`, `redeemable = false`) and the reserve ends with 0.1 ERG collateral. After each redemption the server state was advanced via `POST /redeem/complete`, and the fixed scanner now keeps `GET /reserves` in sync with the chain (the spent `8dc21481…` was removed and `3ae59d54…` persisted within one scan cycle).
+
+### Lessons Learned from the Ninth Test
+
+1. **Never use a long-lived cached height in a scanner loop.** Any cache for `/info` must have a TTL far below the scan interval, or the scanner must bypass it entirely (`fetch_current_height`).
+2. **Restarting the server loses the in-memory reserve AVL tree.** Re-syncing it requires the note's *original* payment timestamp, because the on-chain reserve-tree value is `payment_timestamp || already_redeemed`. Since `complete_redemption` refreshes `note.timestamp`, repeated `/redeem/complete` calls write later timestamps into the tree and desync it from the chain. A repair flow must reset the note timestamp first (as in `fix_note_state.rs`) or the API should accept an explicit timestamp.
+3. **Node-wallet signing errors are diagnosable by adding context vars incrementally.** `None.get` (missing var) → `Script reduced to false` (vars present but proof/state mismatch) → `null` (var present but invalid against on-chain state, here the `#7` lookup proof).
+4. **Recipient secret can be supplied without `--local-sign`.** `generate-redemption --recipient-secret <hex>` emits the unsigned tx with `secrets.dlog` populated, so the node wallet can sign even when the recipient key is not in the wallet.
+
+---
+
 - [Tracker Box Update Specification](server/tracker_box_update_spec.md)
 - [Redemption Transaction Format Specification](server/redemption_transaction_format_spec.md)
 - [Redemption State Specification](server/redemption_state_spec.md)

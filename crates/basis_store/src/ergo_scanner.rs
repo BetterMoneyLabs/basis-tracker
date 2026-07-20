@@ -242,8 +242,49 @@ impl ServerState {
         })
     }
 
-    /// Get current blockchain height from cache or Ergo node
-    /// Uses cached value if less than 10 minutes old, otherwise fetches from node
+    /// Fetch current blockchain height directly from the node, bypassing cache.
+    /// Used by the scanner loop so it detects new blocks immediately instead of
+    /// reusing a potentially stale cached value for up to 10 minutes.
+    pub async fn fetch_current_height(&self) -> Result<u64, ScannerError> {
+        let url = format!("{}/info", self.config.node_url);
+        info!("Fetching current blockchain height from: {}", url);
+
+        let response = self
+            .request_builder(reqwest::Method::GET, &url)
+            .send()
+            .await
+            .map_err(|e| ScannerError::HttpError(format!("Failed to connect to node: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(ScannerError::NodeError(format!(
+                "Node returned status: {}",
+                response.status()
+            )));
+        }
+
+        let info: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
+
+        let height = info["fullHeight"].as_u64().ok_or_else(|| {
+            ScannerError::NodeError("Failed to parse fullHeight from node info".to_string())
+        })?;
+
+        // Keep the cache fresh for other callers that don't need the latest height.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if let Err(e) = self.metadata_storage.store_blockchain_height(height, now) {
+            warn!("Failed to cache blockchain height: {:?}", e);
+        }
+
+        Ok(height)
+    }
+
+    /// Get current blockchain height from cache or Ergo node.
+    /// Uses cached value if less than 10 minutes old, otherwise fetches from node.
     pub async fn get_current_height(&self) -> Result<u64, ScannerError> {
         const CACHE_TTL_MS: u64 = 600_000; // 10 minutes in milliseconds
 
@@ -684,7 +725,7 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
 
     loop {
         // Update current height
-        match state.get_current_height().await {
+        match state.fetch_current_height().await {
             Ok(height) => {
                 // Log height update at INFO level
                 let previous_height = {
