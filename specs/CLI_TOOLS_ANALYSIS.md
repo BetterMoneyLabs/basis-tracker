@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This repository contains **3 compiled CLI binaries** and **6 shell scripts** that provide command-line interfaces for the Basis Tracker system. The primary CLI tool is `basis_cli` (Rust-based), the secondary is `basis_server` (Rust-based daemon), and the third is `basis_app` (TUI wallet, also Rust-based). Supporting shell scripts handle server lifecycle management, database cleanup, and deployment. Integration testing is covered by Rust test suite (`cargo test`).
+This repository contains **3 compiled CLI binaries** and **7 shell scripts** that provide command-line interfaces for the Basis Tracker system. The primary CLI tool is `basis_cli` (Rust-based), the secondary is `basis_server` (Rust-based daemon), and the third is `basis_app` (TUI wallet, also Rust-based). Supporting shell scripts handle server lifecycle management, database cleanup, deployment, and TUI wallet launch. Integration testing is covered by Rust test suite (`cargo test`).
 
 ---
 
@@ -208,7 +208,18 @@ This is a minimal utility that runs `basis_store::tests::run_all_tests()` and ex
 
 ---
 
+### 6. `tui.sh` - TUI Wallet Launcher
 
+**Purpose**: Build (if needed) and run the interactive TUI wallet in the foreground
+**Features**:
+- Auto-detects project root regardless of where it is invoked from
+- Builds the `basis-ui` binary if missing (`cargo build -p basis_app --release`)
+- Runs `target/release/basis-ui` interactively
+- Colored status output
+
+**Usage**: `./tui.sh`
+
+---
 
 ## Tool Interactions
 
@@ -233,6 +244,7 @@ This is a minimal utility that runs `basis_store::tests::run_all_tests()` and ex
 │ server_status.sh│
 │ clean_database  │
 │ redeploy.sh     │
+│ tui.sh          │
 └─────────────────┘
 ```
 
