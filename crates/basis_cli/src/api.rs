@@ -122,16 +122,6 @@ pub struct Asset {
     pub amount: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProofResponse {
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub proof_data: String,
-    pub tracker_state_digest: String,
-    pub block_height: u64,
-    pub timestamp: u64,
-}
-
 // Tracker signature request/response for redemption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerSignatureRequest {
