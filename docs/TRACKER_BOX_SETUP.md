@@ -411,8 +411,8 @@ The tracker box update mechanism requires:
 
 ## Related Documentation
 
-- [CONFIGURATION.md](../CONFIGURATION.md) - Server configuration reference
-- [BUILD_AND_CREATE_RESERVE.md](../BUILD_AND_CREATE_RESERVE.md) - Reserve creation guide
+- [CONFIGURATION.md](CONFIGURATION.md) - Server configuration reference
+- [BUILD_AND_CREATE_RESERVE.md](BUILD_AND_CREATE_RESERVE.md) - Reserve creation guide
 - [specs/spec.md](../specs/spec.md) - Basis protocol specification
 
 ---
