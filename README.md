@@ -1,7 +1,9 @@
 # basis-tracker
 
 Tracker for Basis offchain notes. Foundational tool for monetary democratic federalism (as any community can run the 
-tracker for its own money, having optional common ground with the rest of the world via Ergo blockchain and its assets). 
+tracker for its own money, having optional common ground with the rest of the world via Ergo blockchain and its assets).
+
+Released under public domain (CC0) license.
 
 ## Basis - offchain IOU money for digital economies and real-world communities
 
