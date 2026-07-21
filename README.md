@@ -1,10 +1,12 @@
 # basis-tracker
-Tracker for Basis offchain notes
+
+Tracker for Basis offchain notes. Foundational tool for monetary democratic federalism (as any community can run the 
+tracker for its own money, having optional common ground with the rest of the world via Ergo blockchain and its assets). 
 
 ## Basis - offchain IOU money for digital economies and real-world communities
 
-In this writing, we propose Basis, efficient offchain cash system, backed by on-chain reserves but also allowing for
-creating credit (unbacked IOU money). Its use cases are now thought as follows:
+Basis is efficient offchain peer-to-peer cash, optionally backed by on-chain reserves but also allowed to be created 
+purely on trust, and so creating credit (unbacked IOU money). Its use cases are now thought as follows:
 
 * micropayments, such as payments for content, services, resources usage in p2p and distributed systems. Notable
   difference from Lightning / FediMint / Cashu etc is that here a service can be provided on credit (within certain limits),
@@ -13,6 +15,10 @@ creating credit (unbacked IOU money). Its use cases are now thought as follows:
 * community currencies, which can be about small circles where there is trust to each other, using fully unbacked offchain cash,
   more complex environments using fully or partially backed cash, potentially with tokenized local reserves (such as gold and silver)
   etc. Small circles maybe powered by just mesh networks, with no or very limited access to Internet.
+
+* informal and formal clearing systems
+
+* agentic economic networks
 
 Such use cases would definitely win from simple but secure design, no on-chain fees, and no need to work with blockchain
 at all before need to back issued cash or redeem cash for blockchain asssets.
@@ -105,14 +111,6 @@ protection can be used.
 
 ## Future Extensions
 
-* Anti-Censorship Protection
-
-If tracker is starting censoring notes associated with a public key, by not including them into on-chain update, it is still
-possible to redeem them with anti-censorship protection. For that, tracker box should be protected with a contract which
-has condition to include spent tracker input's id into a tree stored in a register. Then tracker is storing commitment to
-all it previous states, basically, and we can use that to add a condition to the reserve contract to allow redemption of
-a note which was tracked before but not tracked now, and also not withdrawn.
-
 * Federated trackers
 
 Instead of a single tracker, we may have federation, like done in Oracle Pools, or double layered federation like done
@@ -136,7 +134,7 @@ are few of them.
 For most reserves that does not make sense probably, but multi-tracker reserves can be used as gateways between
 different trackers, to rebalance liquidity etc.
 
-* Privacy
+* On-chain Privacy
 
 Not hard to do redemptions to stealth addresses.
 
@@ -160,14 +158,10 @@ See [.github/workflows/test.yml](.github/workflows/test.yml) for the complete wo
 The following implementation plan is targeting catching micropayments in P2P networks, agentic networks, etc ASAP and then
 develop tools for community trading:
 
-* Do tests for Basis contract, like ChainCashSpec or Dexy contracts (Scala)
-* Do a token-based variant of reserve contract (ErgoScript)
-* Do tracker service (Rust), which is collecting offchain notes and also tracking on-chain reserves, writing
-  periodically commitments on chain, informing clients about state of notes / reserves (collateralization etc)
+* Do a wallet for community trading (in progress)
 * Do Celaut payment module, where peers can set credit limits and pay each other. Add support for agentic layer, so AI agents can buy computations
   over Celaut, then requests to other APIs as well.
 * Do showcase for agent-to-agent payments
-* Do a wallet for community trading (maybe in form of telegram bots? like one wallet bot for one community)
 
 and so on
 
