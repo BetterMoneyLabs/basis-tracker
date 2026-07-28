@@ -27,6 +27,11 @@ at all before need to back issued cash or redeem cash for blockchain asssets.
 
 But there can be more use cases discovered with time!
 
+## Community
+
+We have chats over:
+* Telegram: [https://t.me/chaincashtalks](https://t.me/chaincashtalks)
+
 ## Basis Design
 
 As we have offchain cash with possibility to create credit (unbacked money), we have need to track all the money in form
