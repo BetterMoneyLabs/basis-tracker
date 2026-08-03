@@ -88,12 +88,38 @@ fn participant_from_secret(name: &'static str, secret_hex: &str, address: &str) 
     }
 }
 
+/// Deterministic test-only secrets used when `secrets/participants.csv` is not
+/// present. These are **TEST KEYS ONLY** and must never be used in production.
+#[cfg(test)]
+fn test_secret_for(name: &str) -> Option<String> {
+    match name {
+        "alice" => {
+            Some("71fd4b0fa40a8f8bbbf07929b9890dc1e989e2cbbe88f1da4560d2c868721d25".to_string())
+        }
+        "tracker" => {
+            Some("0fc83b2616eacf152a1f839c7c011d756601176adc58f510fd939e5211fbc4b7".to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Alice - reserve owner and IOU issuer
 ///
-/// Public key: 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83
+/// Public key is derived from the secret in `secrets/participants.csv` when
+/// available; otherwise tests use a deterministic fallback key.
 pub fn alice() -> DemoParticipant {
-    let secret_hex =
-        load_secret_from_csv("alice").expect("Alice secret not found in secrets/participants.csv");
+    let secret_hex = load_secret_from_csv("alice")
+        .or_else(|| {
+            #[cfg(test)]
+            {
+                test_secret_for("alice")
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        })
+        .expect("Alice secret not found in secrets/participants.csv");
     participant_from_secret(
         "alice",
         &secret_hex,
@@ -129,8 +155,21 @@ pub fn bob() -> DemoParticipant {
 }
 
 /// Tracker - off-chain debt witness
+///
+/// Public key is derived from the secret in `secrets/participants.csv` when
+/// available; otherwise tests use a deterministic fallback key.
 pub fn tracker() -> DemoParticipant {
     let secret_hex = load_secret_from_csv("tracker")
+        .or_else(|| {
+            #[cfg(test)]
+            {
+                test_secret_for("tracker")
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        })
         .expect("Tracker secret not found in secrets/participants.csv");
     participant_from_secret(
         "tracker",

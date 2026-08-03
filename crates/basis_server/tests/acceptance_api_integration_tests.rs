@@ -646,6 +646,29 @@ async fn test_check_acceptance_fallback_to_global_policy() {
 // Helper functions
 // ============================================================================
 
+/// Generate a unique temporary directory path for test storage.
+///
+/// Fjall/Loro storage locks its directory, so concurrent tests (including tests
+/// in different binaries) must use distinct paths.
+fn unique_test_storage_path(prefix: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "{}_{}_{}",
+        prefix,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+/// Global lock to serialize Fjall storage initialization across concurrent tests.
+///
+/// Fjall's keyspace creation can race when multiple databases are opened
+/// concurrently in the same process, leading to intermittent "No such file or
+/// directory" errors. Holding this lock while creating test storage avoids that.
+static STORAGE_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Helper to create a test app with optional acceptance predicate
 async fn create_test_app(
     acceptance_predicate: Option<std::sync::Arc<dyn basis_server::acceptance::NotePredicate>>,
@@ -687,6 +710,22 @@ async fn create_test_app(
     })
     .unwrap();
 
+    let tracker_storage_path = unique_test_storage_path("basis_test_tracker_storage_acceptance");
+    std::fs::create_dir_all(&tracker_storage_path)
+        .expect("Failed to create tracker storage directory");
+    let policy_storage_path = unique_test_storage_path("basis_test_policy_storage_acceptance");
+    std::fs::create_dir_all(&policy_storage_path)
+        .expect("Failed to create policy storage directory");
+
+    let (tracker_storage, policy_storage) = {
+        let _guard = STORAGE_INIT_LOCK.lock().unwrap();
+        let tracker_storage =
+            basis_store::persistence::TrackerStorage::open(&tracker_storage_path).unwrap();
+        let policy_storage =
+            basis_store::persistence::AcceptancePolicyStorage::open(&policy_storage_path).unwrap();
+        (tracker_storage, policy_storage)
+    };
+
     let app_state = AppState {
         tx,
         event_store,
@@ -696,10 +735,9 @@ async fn create_test_app(
         shared_tracker_state: Arc::new(tokio::sync::Mutex::new(
             tracker_box_updater::SharedTrackerState::new(),
         )),
-        tracker_storage: basis_store::persistence::TrackerStorage::open("test_tracker").unwrap(),
+        tracker_storage,
         acceptance_predicate,
-        policy_storage: basis_store::persistence::AcceptancePolicyStorage::open("test_policies")
-            .unwrap(),
+        policy_storage,
     };
 
     axum::Router::new()
@@ -751,6 +789,24 @@ async fn create_test_app_with_policy_routes(
     })
     .unwrap();
 
+    let tracker_storage_path =
+        unique_test_storage_path("basis_test_tracker_storage_acceptance_policy");
+    std::fs::create_dir_all(&tracker_storage_path)
+        .expect("Failed to create tracker storage directory");
+    let policy_storage_path =
+        unique_test_storage_path("basis_test_policy_storage_acceptance_policy");
+    std::fs::create_dir_all(&policy_storage_path)
+        .expect("Failed to create policy storage directory");
+
+    let (tracker_storage, policy_storage) = {
+        let _guard = STORAGE_INIT_LOCK.lock().unwrap();
+        let tracker_storage =
+            basis_store::persistence::TrackerStorage::open(&tracker_storage_path).unwrap();
+        let policy_storage =
+            basis_store::persistence::AcceptancePolicyStorage::open(&policy_storage_path).unwrap();
+        (tracker_storage, policy_storage)
+    };
+
     let app_state = AppState {
         tx,
         event_store,
@@ -760,13 +816,9 @@ async fn create_test_app_with_policy_routes(
         shared_tracker_state: Arc::new(tokio::sync::Mutex::new(
             tracker_box_updater::SharedTrackerState::new(),
         )),
-        tracker_storage: basis_store::persistence::TrackerStorage::open("test_tracker_policy")
-            .unwrap(),
+        tracker_storage,
         acceptance_predicate,
-        policy_storage: basis_store::persistence::AcceptancePolicyStorage::open(
-            "test_policies_policy",
-        )
-        .unwrap(),
+        policy_storage,
     };
 
     axum::Router::new()
@@ -822,6 +874,23 @@ async fn create_test_app_with_all_routes(
     })
     .unwrap();
 
+    let tracker_storage_path =
+        unique_test_storage_path("basis_test_tracker_storage_acceptance_all");
+    std::fs::create_dir_all(&tracker_storage_path)
+        .expect("Failed to create tracker storage directory");
+    let policy_storage_path = unique_test_storage_path("basis_test_policy_storage_acceptance_all");
+    std::fs::create_dir_all(&policy_storage_path)
+        .expect("Failed to create policy storage directory");
+
+    let (tracker_storage, policy_storage) = {
+        let _guard = STORAGE_INIT_LOCK.lock().unwrap();
+        let tracker_storage =
+            basis_store::persistence::TrackerStorage::open(&tracker_storage_path).unwrap();
+        let policy_storage =
+            basis_store::persistence::AcceptancePolicyStorage::open(&policy_storage_path).unwrap();
+        (tracker_storage, policy_storage)
+    };
+
     let app_state = AppState {
         tx,
         event_store,
@@ -831,13 +900,9 @@ async fn create_test_app_with_all_routes(
         shared_tracker_state: Arc::new(tokio::sync::Mutex::new(
             tracker_box_updater::SharedTrackerState::new(),
         )),
-        tracker_storage: basis_store::persistence::TrackerStorage::open("test_tracker_all")
-            .unwrap(),
+        tracker_storage,
         acceptance_predicate,
-        policy_storage: basis_store::persistence::AcceptancePolicyStorage::open(
-            "test_policies_all",
-        )
-        .unwrap(),
+        policy_storage,
     };
 
     axum::Router::new()

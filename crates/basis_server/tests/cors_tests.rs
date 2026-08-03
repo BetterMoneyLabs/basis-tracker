@@ -14,6 +14,13 @@ mod cors_tests {
     use tower::ServiceExt;
     use tower_http::cors::{Any, CorsLayer};
 
+    /// Global lock to serialize Fjall storage initialization across concurrent tests.
+    ///
+    /// Fjall's keyspace creation can race when multiple databases are opened
+    /// concurrently in the same process, leading to intermittent "No such file or
+    /// directory" errors. Holding this lock while creating test storage avoids that.
+    static STORAGE_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // Test helper to create a mock app state with CORS enabled
     async fn create_mock_app_with_cors() -> Router {
         let (tx, mut rx) = mpsc::channel(100);
@@ -257,8 +264,16 @@ mod cors_tests {
             unique_id
         ));
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-        let tracker_storage = basis_store::persistence::TrackerStorage::open(&temp_dir)
-            .expect("Failed to create tracker storage");
+
+        let (tracker_storage, policy_storage) = {
+            let _guard = STORAGE_INIT_LOCK.lock().unwrap();
+            let tracker_storage = basis_store::persistence::TrackerStorage::open(&temp_dir)
+                .expect("Failed to create tracker storage");
+            let policy_storage =
+                basis_store::persistence::AcceptancePolicyStorage::open(temp_dir.join("policies"))
+                    .expect("Failed to create policy storage");
+            (tracker_storage, policy_storage)
+        };
 
         let app_state = AppState {
             tx,
@@ -271,10 +286,7 @@ mod cors_tests {
             )),
             tracker_storage,
             acceptance_predicate: None,
-            policy_storage: basis_store::persistence::AcceptancePolicyStorage::open(
-                temp_dir.join("policies"),
-            )
-            .expect("Failed to create policy storage"),
+            policy_storage,
         };
 
         // Build the app with CORS enabled (same as main server)

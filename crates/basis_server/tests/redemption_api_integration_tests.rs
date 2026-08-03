@@ -33,6 +33,13 @@ mod redemption_api_tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
+    /// Global lock to serialize Fjall storage initialization across concurrent tests.
+    ///
+    /// Fjall's keyspace creation can race when multiple databases are opened
+    /// concurrently in the same process, leading to intermittent "No such file or
+    /// directory" errors. Holding this lock while creating test storage avoids that.
+    static STORAGE_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // ============================================================================
     // Test helper: create mock app state with tracker thread handling redemption commands
     // ============================================================================
@@ -271,8 +278,16 @@ mod redemption_api_tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-        let tracker_storage = basis_store::persistence::TrackerStorage::open(&temp_dir)
-            .expect("Failed to create tracker storage");
+
+        let (tracker_storage, policy_storage) = {
+            let _guard = STORAGE_INIT_LOCK.lock().unwrap();
+            let tracker_storage = basis_store::persistence::TrackerStorage::open(&temp_dir)
+                .expect("Failed to create tracker storage");
+            let policy_storage =
+                basis_store::persistence::AcceptancePolicyStorage::open(temp_dir.join("policies"))
+                    .expect("Failed to create policy storage");
+            (tracker_storage, policy_storage)
+        };
 
         AppState {
             tx,
@@ -285,10 +300,7 @@ mod redemption_api_tests {
             )),
             tracker_storage,
             acceptance_predicate: None,
-            policy_storage: basis_store::persistence::AcceptancePolicyStorage::open(
-                temp_dir.join("policies"),
-            )
-            .expect("Failed to create policy storage"),
+            policy_storage,
         }
     }
 

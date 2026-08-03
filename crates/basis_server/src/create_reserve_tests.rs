@@ -11,6 +11,19 @@ mod create_reserve_tests {
     };
     use basis_store::ergo_scanner::{NodeConfig, ServerState};
 
+    // Helper function to create a unique temporary directory for test storage
+    fn unique_test_storage_path(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
     // Helper function to create a test AppState that doesn't require file system access
     fn create_test_app_state() -> AppState {
         let (tx, _rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
@@ -63,6 +76,33 @@ mod create_reserve_tests {
 
         let reserve_tracker = Arc::new(Mutex::new(basis_store::ReserveTracker::new()));
 
+        let tracker_storage_path =
+            unique_test_storage_path("basis_test_tracker_storage_create_reserve");
+        std::fs::create_dir_all(&tracker_storage_path)
+            .expect("Failed to create tracker storage directory");
+        let tracker_storage = basis_store::persistence::TrackerStorage::open(&tracker_storage_path)
+            .unwrap_or_else(|_| {
+                basis_store::persistence::TrackerStorage::open(unique_test_storage_path(
+                    "basis_test_tracker_storage_create_reserve_fallback",
+                ))
+                .unwrap()
+            });
+
+        let policy_storage_path =
+            unique_test_storage_path("basis_test_policy_storage_create_reserve");
+        std::fs::create_dir_all(&policy_storage_path)
+            .expect("Failed to create policy storage directory");
+        let policy_storage =
+            basis_store::persistence::AcceptancePolicyStorage::open(&policy_storage_path)
+                .unwrap_or_else(|_| {
+                    basis_store::persistence::AcceptancePolicyStorage::open(
+                        unique_test_storage_path(
+                            "basis_test_policy_storage_create_reserve_fallback",
+                        ),
+                    )
+                    .unwrap()
+                });
+
         AppState {
             tx,
             event_store,
@@ -72,18 +112,9 @@ mod create_reserve_tests {
             shared_tracker_state: Arc::new(tokio::sync::Mutex::new(
                 crate::tracker_box_updater::SharedTrackerState::new(),
             )),
-            tracker_storage: basis_store::persistence::TrackerStorage::open("test_tracker")
-                .unwrap_or_else(|_| {
-                    basis_store::persistence::TrackerStorage::open("test_tracker_fallback").unwrap()
-                }),
+            tracker_storage,
             acceptance_predicate: None,
-            policy_storage: basis_store::persistence::AcceptancePolicyStorage::open(
-                "test_policies",
-            )
-            .unwrap_or_else(|_| {
-                basis_store::persistence::AcceptancePolicyStorage::open("test_policies_fallback")
-                    .unwrap()
-            }),
+            policy_storage,
         }
     }
 
