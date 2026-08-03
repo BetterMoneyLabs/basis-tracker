@@ -48,7 +48,7 @@ impl InteractiveMode {
                     self.show_help();
                 }
                 "status" | "s" => {
-                    status::handle_status_command(&self.client).await?;
+                    status::handle_status_command(&self.client, false).await?;
                 }
                 _ => {
                     self.handle_command(input).await?;
@@ -94,22 +94,26 @@ impl InteractiveMode {
                             let cmd = account::AccountCommands::Create {
                                 name: name.to_string(),
                             };
-                            account::handle_account_command(cmd, &mut self.account_manager).await?;
+                            account::handle_account_command(cmd, &mut self.account_manager, false)
+                                .await?;
                         }
                         "list" => {
                             let cmd = account::AccountCommands::List;
-                            account::handle_account_command(cmd, &mut self.account_manager).await?;
+                            account::handle_account_command(cmd, &mut self.account_manager, false)
+                                .await?;
                         }
                         "switch" if parts.len() >= 3 => {
                             let name = parts[2];
                             let cmd = account::AccountCommands::Switch {
                                 name: name.to_string(),
                             };
-                            account::handle_account_command(cmd, &mut self.account_manager).await?;
+                            account::handle_account_command(cmd, &mut self.account_manager, false)
+                                .await?;
                         }
                         "info" => {
                             let cmd = account::AccountCommands::Info;
-                            account::handle_account_command(cmd, &mut self.account_manager).await?;
+                            account::handle_account_command(cmd, &mut self.account_manager, false)
+                                .await?;
                         }
                         _ => {
                             println!("Unknown account command. Use 'help' for available commands.");
@@ -153,8 +157,13 @@ impl InteractiveMode {
                                     demo: false,
                                     output: None,
                                 };
-                                note::handle_note_command(cmd, &self.account_manager, &self.client)
-                                    .await?;
+                                note::handle_note_command(
+                                    cmd,
+                                    &self.account_manager,
+                                    &self.client,
+                                    false,
+                                )
+                                .await?;
                             } else {
                                 println!("Note create requires --recipient <pubkey> and --amount <amount>");
                             }
@@ -172,8 +181,13 @@ impl InteractiveMode {
                             }
 
                             let cmd = note::NoteCommands::List { issuer, recipient };
-                            note::handle_note_command(cmd, &self.account_manager, &self.client)
-                                .await?;
+                            note::handle_note_command(
+                                cmd,
+                                &self.account_manager,
+                                &self.client,
+                                false,
+                            )
+                            .await?;
                         }
                         _ => {
                             println!("Unknown note command. Use 'help' for available commands.");
@@ -209,6 +223,7 @@ impl InteractiveMode {
                                 cmd,
                                 &self.account_manager,
                                 &self.client,
+                                false,
                             )
                             .await?;
                         }
@@ -233,6 +248,7 @@ impl InteractiveMode {
                                 cmd,
                                 &self.account_manager,
                                 &self.client,
+                                false,
                             )
                             .await?;
                         }

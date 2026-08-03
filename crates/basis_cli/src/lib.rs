@@ -5,3 +5,4 @@ pub mod config;
 pub mod crypto;
 pub mod demo_keys;
 pub mod interactive;
+pub mod output;

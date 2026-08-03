@@ -279,16 +279,28 @@ A modular CLI tool for account management, note operations, reserve monitoring, 
 - Unsigned redemption transaction generation with full Ergo node integration
 - Polling-based automated redemption testing
 - Demo mode with pre-configured Alice/Bob/Tracker keys
+- Agent-friendly `--json` output mode with a documented exit-code contract (see `docs/AGENT_INTERFACE.md`); command logic is exposed as typed, serde-serializable cores in `basis_cli_lib::commands` for reuse by other frontends
 
 ### `basis_app` - TUI Wallet
 
 A terminal-based interactive wallet built on top of `basis_cli_lib`. Provides a full-screen menu-driven interface for all Basis operations with real-time data refresh and visual feedback.
 
 **Key capabilities:**
-- Interactive menus for accounts, notes, reserves, and transactions
-- Address book with demo contacts
+- First-run intro screen: a `default` account is auto-created when none exists and its public key is shown to the user
+- Main menu: Notes, Reserves, Redemption, My Acceptance Policy, Address Book, Settings
+- Account management (create, switch, import, export) lives under Settings
+- Address book with auto-synced account contacts
 - Server connectivity monitoring
 - ANSI-colored terminal UI with "Free Banking For Everyone" branding
+
+### `basis_mcp` - MCP Server for AI Agents
+
+An MCP (Model Context Protocol) server over stdio exposing wallet operations as typed tools for AI agents. Built on the typed command cores of `basis_cli_lib`. See `docs/AGENT_INTERFACE.md` for the tool reference and client configuration snippets.
+
+**Key capabilities:**
+- Read-only tools: `server_status`, `account_list`, `account_current`, `note_list`, `note_get`, `reserve_status`, `policy_get`
+- Write tools: `account_create`, `account_switch`, `account_import`, `note_create`, `note_redeem`, `reserve_create`, `policy_set`
+- Signing happens in-process; private keys are never exposed through any tool
 
 ## Possible Extensions
 

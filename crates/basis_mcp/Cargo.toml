@@ -1,0 +1,28 @@
+[package]
+name = "basis_mcp"
+version = "0.1.0"
+edition = "2021"
+license = "CC0-1.0"
+
+[[bin]]
+name = "basis-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# MCP server SDK (Model Context Protocol)
+rmcp = { version = "0.17", features = ["server", "transport-io"] }
+schemars = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
+dirs = "5.0"
+hex = "0.4"
+
+# Workspace dependencies
+basis_cli = { path = "../basis_cli" }
+basis_core = { path = "../basis_core" }

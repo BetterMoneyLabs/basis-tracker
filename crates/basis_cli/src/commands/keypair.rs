@@ -1,19 +1,37 @@
 use crate::crypto::KeyPair;
 use anyhow::Result;
 use clap::Args;
+use serde::Serialize;
 
 #[derive(Args)]
 #[command(name = "generate-keypair", about = "Generate a new secp256k1 keypair")]
 pub struct GenerateKeypairArgs {}
 
-pub async fn handle_generate_keypair_command(_args: GenerateKeypairArgs) -> Result<()> {
-    let keypair = KeyPair::new()?;
-    let public_key = keypair.get_public_key_bytes();
-    let private_key = keypair.get_private_key_bytes();
+/// A freshly generated secp256k1 keypair (hex-encoded).
+#[derive(Debug, Serialize)]
+pub struct KeypairResult {
+    pub public_key_hex: String,
+    pub private_key_hex: String,
+}
 
-    println!("Keypair generated successfully!");
-    println!("Public Key (hex): {}", hex::encode(public_key));
-    println!("Private Key (hex): {}", hex::encode(private_key));
+/// Generate a new secp256k1 keypair.
+pub fn generate_keypair() -> Result<KeypairResult> {
+    let keypair = KeyPair::new()?;
+    Ok(KeypairResult {
+        public_key_hex: hex::encode(keypair.get_public_key_bytes()),
+        private_key_hex: hex::encode(keypair.get_private_key_bytes()),
+    })
+}
+
+pub async fn handle_generate_keypair_command(_args: GenerateKeypairArgs, json: bool) -> Result<()> {
+    let result = generate_keypair()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Keypair generated successfully!");
+        println!("Public Key (hex): {}", result.public_key_hex);
+        println!("Private Key (hex): {}", result.private_key_hex);
+    }
 
     Ok(())
 }

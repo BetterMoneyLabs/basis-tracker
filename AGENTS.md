@@ -19,7 +19,7 @@
 
 ## Project Structure
 - Multi-crate workspace under `crates/` directory
-- Each crate has specific purpose (app, server, store, cli, offchain)
+- Each crate has specific purpose (app, server, store, cli, mcp, offchain)
 - Shared dependencies in workspace Cargo.toml
 
 ## Testing

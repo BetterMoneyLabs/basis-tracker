@@ -1,6 +1,8 @@
 use crate::api::{CompleteRedemptionRequest, TrackerClient};
+use crate::output::progress;
 use anyhow::Result;
 use clap::Subcommand;
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
@@ -130,10 +132,51 @@ pub enum TransactionCommands {
     },
 }
 
+/// Result of a redemption that was signed locally and broadcast to the network.
+#[derive(Debug, Serialize)]
+pub struct RedemptionBroadcastResult {
+    pub tx_id: String,
+}
+
+/// Result of generating an unsigned redemption transaction for the node wallet.
+#[derive(Debug, Serialize)]
+pub struct UnsignedRedemptionResult {
+    /// The unsigned transaction payload (node wallet format).
+    pub transaction: serde_json::Value,
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub amount: u64,
+    pub recipient_output_value: u64,
+    pub reserve_output_value: u64,
+    pub total_debt: u64,
+    pub already_redeemed: u64,
+    pub reserve_box_id: String,
+    pub tracker_box_id: String,
+    pub fee: u64,
+    pub fee_input_count: usize,
+    pub fee_input_total: u64,
+    pub change_amount: u64,
+    pub change_address: String,
+    pub emergency: bool,
+    pub first_redemption: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_file: Option<String>,
+}
+
+/// Typed result of `transaction generate-redemption`: either a broadcast tx id
+/// (`--local-sign`) or an unsigned transaction payload for the node wallet.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum GenerateRedemptionResult {
+    Broadcast(RedemptionBroadcastResult),
+    Unsigned(Box<UnsignedRedemptionResult>),
+}
+
 pub async fn handle_transaction_command(
     cmd: TransactionCommands,
     client: &TrackerClient,
     account_manager: &crate::account::AccountManager,
+    json: bool,
 ) -> Result<()> {
     match cmd {
         TransactionCommands::GenerateRedemption {
@@ -148,7 +191,7 @@ pub async fn handle_transaction_command(
             recipient_secret,
             fee_secret,
         } => {
-            generate_redemption_transaction(
+            let result = generate_redemption_transaction(
                 client,
                 account_manager,
                 &issuer_pubkey,
@@ -162,7 +205,11 @@ pub async fn handle_transaction_command(
                 recipient_secret,
                 fee_secret,
             )
-            .await
+            .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            Ok(())
         }
         TransactionCommands::RedeemAssisted {
             issuer_pubkey,
@@ -170,7 +217,7 @@ pub async fn handle_transaction_command(
             amount,
             recipient_secret,
         } => {
-            redeem_tracker_assisted(
+            let result = redeem_tracker_assisted(
                 client,
                 account_manager,
                 &issuer_pubkey,
@@ -178,7 +225,11 @@ pub async fn handle_transaction_command(
                 amount,
                 recipient_secret,
             )
-            .await
+            .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            Ok(())
         }
     }
 }
@@ -244,7 +295,7 @@ async fn build_redemption_tx(
         ));
     }
 
-    println!("🔍 Retrieving note information...");
+    progress!("🔍 Retrieving note information...");
     let note = client
         .get_note(issuer_pubkey, recipient_pubkey)
         .await?
@@ -267,14 +318,14 @@ async fn build_redemption_tx(
 
     // Resolve the current tracker box early so we can match reserves by tracker NFT ID.
     let tracker_box_id = if let Some(id) = tracker_box_id {
-        println!("✅ Using provided tracker box: {}", &id[..16]);
+        progress!("✅ Using provided tracker box: {}", &id[..16]);
         id
     } else {
-        println!("🔍 Retrieving latest tracker box...");
+        progress!("🔍 Retrieving latest tracker box...");
         let tracker_box_response = client.get_latest_tracker_box_id().await;
         match tracker_box_response {
             Ok(response) => {
-                println!("✅ Found tracker box: {}", &response.tracker_box_id[..16]);
+                progress!("✅ Found tracker box: {}", &response.tracker_box_id[..16]);
                 response.tracker_box_id
             }
             Err(e) => {
@@ -289,19 +340,25 @@ async fn build_redemption_tx(
     // The tracker NFT ID is the first asset in the tracker box. Reserves whose R6
     // tracker NFT ID does not match this cannot be redeemed against the current
     // tracker box (the contract checks tracker.tokens(0)._1 == SELF.R6).
-    println!("🔍 Retrieving tracker NFT ID from tracker box...");
+    progress!("🔍 Retrieving tracker NFT ID from tracker box...");
     let tracker_box_details = client
         .get_box_from_node(&tracker_box_id, NODE_URL, Some(API_KEY))
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to retrieve tracker box {} from Ergo node: {}", tracker_box_id, e))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to retrieve tracker box {} from Ergo node: {}",
+                tracker_box_id,
+                e
+            )
+        })?;
     let expected_tracker_nft_id = tracker_box_details
         .assets
         .first()
         .map(|a| a.token_id.clone())
         .ok_or_else(|| anyhow::anyhow!("Tracker box {} contains no assets", tracker_box_id))?;
-    println!("✅ Tracker NFT ID: {}", &expected_tracker_nft_id);
+    progress!("✅ Tracker NFT ID: {}", &expected_tracker_nft_id);
 
-    println!("🔍 Retrieving issuer's reserve box...");
+    progress!("🔍 Retrieving issuer's reserve box...");
     let reserves_response = client.get_reserves_by_issuer(issuer_pubkey).await?;
     const MIN_RESERVE_REMAINDER: u64 = 1_000_000; // 0.001 ERG min box value
     let required = amount.saturating_add(MIN_RESERVE_REMAINDER);
@@ -324,7 +381,7 @@ async fn build_redemption_tx(
             )
         })?;
 
-    println!(
+    progress!(
         "✅ Selected reserve box: {} (collateral: {} nanoERG, height: {}, tracker NFT: {})",
         decode_box_id(&reserve_box.box_id),
         reserve_box.base_info.collateral_amount,
@@ -335,19 +392,19 @@ async fn build_redemption_tx(
     let reserve_box_id = decode_box_id(&reserve_box.box_id);
     let tracker_nft_id = &reserve_box.base_info.tracker_nft_id;
 
-    println!("🔗 Converting public keys to addresses...");
+    progress!("🔗 Converting public keys to addresses...");
     let recipient_address = pubkey_to_address(recipient_pubkey)?;
 
     // Fetch the recipient's private key for the node-wallet JSON path.
-    println!("🔍 Resolving recipient private key...");
+    progress!("🔍 Resolving recipient private key...");
     let recipient_private_key = client
         .get_private_key(NODE_URL, Some(API_KEY), &recipient_address)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to fetch recipient private key from node wallet. Ensure the recipient address {} is in the wallet: {}", recipient_address, e))?;
-    println!("✅ Fetched recipient private key");
+    progress!("✅ Fetched recipient private key");
 
     // Get tracker lookup proof for context var #8 from server
-    println!("🔍 Retrieving tracker lookup proof from server...");
+    progress!("🔍 Retrieving tracker lookup proof from server...");
     let tracker_proof = client
         .get_tracker_proof(issuer_pubkey, recipient_pubkey)
         .await?;
@@ -357,7 +414,7 @@ async fn build_redemption_tx(
     let note_timestamp = note.timestamp;
 
     // Get the reserve proof from the server.
-    println!("🔍 Retrieving reserve insert proof from server...");
+    progress!("🔍 Retrieving reserve insert proof from server...");
     let reserve_proof = client
         .get_reserve_proof(issuer_pubkey, recipient_pubkey, amount, note_timestamp)
         .await
@@ -368,7 +425,7 @@ async fn build_redemption_tx(
     let r5_hex = hex::encode(&r5_bytes);
 
     // Get the reserve contract P2S address from the server configuration
-    println!("🔍 Retrieving reserve contract P2S address from server configuration...");
+    progress!("🔍 Retrieving reserve contract P2S address from server configuration...");
     let reserve_contract_p2s = client.get_basis_reserve_contract_p2s().await.map_err(|e| {
         anyhow::anyhow!(
             "Failed to retrieve reserve contract P2S address from server: {}",
@@ -389,15 +446,16 @@ async fn build_redemption_tx(
 
     let is_first_redemption = note.amount_redeemed == 0;
     let (reserve_lookup_proof, reserve_insert_proof) = if is_first_redemption {
-        println!("🔍 First redemption - using reserve insert proof...");
+        progress!("🔍 First redemption - using reserve insert proof...");
         let insert_proof = hex::decode(&reserve_proof.insert_proof)
             .map_err(|e| anyhow::anyhow!("Invalid reserve insert proof hex: {}", e))?;
         (None, insert_proof)
     } else {
-        println!("🔍 Using reserve lookup and insert proofs...");
-        println!(
+        progress!("🔍 Using reserve lookup and insert proofs...");
+        progress!(
             "✅ Got reserve proof: already_redeemed={} nanoERG, is_first={}",
-            reserve_proof.already_redeemed, reserve_proof.is_first_redemption
+            reserve_proof.already_redeemed,
+            reserve_proof.is_first_redemption
         );
         let lookup_proof = if let Some(proof_hex) = &reserve_proof.proof {
             Some(
@@ -415,12 +473,12 @@ async fn build_redemption_tx(
     };
 
     // Verify tracker box exists on Ergo node
-    println!("🔍 Verifying tracker box on Ergo node...");
+    progress!("🔍 Verifying tracker box on Ergo node...");
     client.get_box_from_node(&tracker_box_id, NODE_URL, Some(API_KEY)).await
         .map_err(|e| anyhow::anyhow!("Failed to retrieve tracker box {} from Ergo node: {}. Cannot generate redemption transaction.", tracker_box_id, e))?;
 
     // Retrieve the actual reserve box from the Ergo node
-    println!("🔍 Retrieving reserve box from Ergo node...");
+    progress!("🔍 Retrieving reserve box from Ergo node...");
     let reserve_box_details = client
         .get_box_from_node(&reserve_box_id, NODE_URL, Some(API_KEY))
         .await
@@ -437,7 +495,7 @@ async fn build_redemption_tx(
     );
 
     // Fetch wallet-owned fee input boxes from the node.
-    println!("🔍 Retrieving wallet fee inputs from Ergo node...");
+    progress!("🔍 Retrieving wallet fee inputs from Ergo node...");
     let wallet_boxes = client
         .get_wallet_boxes(NODE_URL, Some(API_KEY))
         .await
@@ -470,7 +528,7 @@ async fn build_redemption_tx(
         TRANSACTION_FEE, TRANSACTION_FEE
     ))?;
 
-    println!(
+    progress!(
         "✅ Selected {} fee input box(es) totaling {} nanoERG",
         fee_inputs.len(),
         fee_input_total
@@ -484,7 +542,7 @@ async fn build_redemption_tx(
         recipient_address.clone()
     };
 
-    println!("📦 Preparing box IDs for transaction...");
+    progress!("📦 Preparing box IDs for transaction...");
 
     let issuer_signature = hex::decode(issuer_signature_hex)
         .map_err(|e| anyhow::anyhow!("Invalid issuer signature hex: {}", e))?;
@@ -677,7 +735,7 @@ pub async fn execute_local_redemption(
     recipient_secret: Option<String>,
     fee_secret: Option<String>,
 ) -> Result<String> {
-    println!("🔍 Retrieving note information...");
+    progress!("🔍 Retrieving note information...");
     let note = client
         .get_note(issuer_pubkey, recipient_pubkey)
         .await?
@@ -692,13 +750,13 @@ pub async fn execute_local_redemption(
     // The reserve signature must be freshly generated for the current redemption because the
     // contract requires `timestamp > storedTimestamp`. After a prior redemption the note's
     // timestamp is refreshed, so the signature stored on the note is stale.
-    println!("🔍 Fetching tracker proof for total debt...");
+    progress!("🔍 Fetching tracker proof for total debt...");
     let tracker_proof = client
         .get_tracker_proof(issuer_pubkey, recipient_pubkey)
         .await?;
     let total_debt = tracker_proof.total_debt;
 
-    println!("🔑 Signing redemption message with the current issuer account...");
+    progress!("🔑 Signing redemption message with the current issuer account...");
     let current = account_manager
         .get_current()
         .ok_or_else(|| anyhow::anyhow!("No current account selected; issuer account is required to sign the redemption message"))?;
@@ -784,16 +842,16 @@ pub async fn execute_local_redemption(
             e
         );
     } else {
-        println!("✅ Tracker state synced for next redemption.");
+        progress!("✅ Tracker state synced for next redemption.");
     }
 
-    println!("✅ Redemption broadcast with LOCAL proveDlog signatures.");
-    println!("📋 Transaction ID: {}", tx_id);
+    progress!("✅ Redemption broadcast with LOCAL proveDlog signatures.");
+    progress!("📋 Transaction ID: {}", tx_id);
 
     Ok(tx_id)
 }
 
-async fn generate_redemption_transaction(
+pub async fn generate_redemption_transaction(
     client: &TrackerClient,
     account_manager: &crate::account::AccountManager,
     issuer_pubkey: &str,
@@ -806,7 +864,7 @@ async fn generate_redemption_transaction(
     local_sign: bool,
     recipient_secret: Option<String>,
     fee_secret: Option<String>,
-) -> Result<()> {
+) -> Result<GenerateRedemptionResult> {
     if local_sign {
         let tx_id = execute_local_redemption(
             client,
@@ -821,12 +879,14 @@ async fn generate_redemption_transaction(
             fee_secret,
         )
         .await?;
-        println!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
-        return Ok(());
+        progress!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
+        return Ok(GenerateRedemptionResult::Broadcast(
+            RedemptionBroadcastResult { tx_id },
+        ));
     }
 
     // Fetch the note so we can compute the issuer signature with the current account.
-    println!("🔍 Retrieving note information...");
+    progress!("🔍 Retrieving note information...");
     let note = client
         .get_note(issuer_pubkey, recipient_pubkey)
         .await?
@@ -848,7 +908,7 @@ async fn generate_redemption_transaction(
     }
 
     // Get issuer signature from CLI wallet
-    println!("🔑 Signing redemption with issuer key...");
+    progress!("🔑 Signing redemption with issuer key...");
     let current_account = account_manager
         .get_current()
         .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
@@ -884,81 +944,104 @@ async fn generate_redemption_transaction(
     )
     .await?;
 
-    let transaction_json = build.transaction_json;
+    let transaction_json = build.transaction_json.clone();
 
     let json_string = serde_json::to_string_pretty(&transaction_json)?;
 
-    match output_file {
+    match &output_file {
         Some(file_path) => {
-            fs::write(&file_path, &json_string)?;
-            println!("✅ Transaction JSON written to: {}", file_path);
+            fs::write(file_path, &json_string)?;
+            progress!("✅ Transaction JSON written to: {}", file_path);
         }
         None => {
-            println!("{}", json_string);
+            progress!("{}", json_string);
         }
     }
 
-    println!("✅ Redemption transaction generated successfully!");
-    println!("📋 Transaction details:");
-    println!("   Issuer: {}", issuer_pubkey);
-    println!("   Recipient: {}", recipient_pubkey);
-    println!("   Redemption amount: {} nanoERG", amount);
-    println!(
+    progress!("✅ Redemption transaction generated successfully!");
+    progress!("📋 Transaction details:");
+    progress!("   Issuer: {}", issuer_pubkey);
+    progress!("   Recipient: {}", recipient_pubkey);
+    progress!("   Redemption amount: {} nanoERG", amount);
+    progress!(
         "   Recipient receives: {} nanoERG",
         build.recipient_output_value
     );
-    println!(
+    progress!(
         "   Reserve output value: {} nanoERG",
         build.reserve_output_value
     );
-    println!("   Total debt: {} nanoERG", build.total_debt);
-    println!("   Already redeemed: {} nanoERG", note.amount_redeemed);
-    println!("   Reserve box ID: {}", build.reserve_box_id);
-    println!("   Tracker box ID: {}", build.tracker_box_id);
-    println!("   Transaction fee: {} nanoERG", TRANSACTION_FEE);
-    println!(
+    progress!("   Total debt: {} nanoERG", build.total_debt);
+    progress!("   Already redeemed: {} nanoERG", note.amount_redeemed);
+    progress!("   Reserve box ID: {}", build.reserve_box_id);
+    progress!("   Tracker box ID: {}", build.tracker_box_id);
+    progress!("   Transaction fee: {} nanoERG", TRANSACTION_FEE);
+    progress!(
         "   Fee inputs: {} box(es), {} nanoERG total",
-        build.fee_input_count, build.fee_input_total
+        build.fee_input_count,
+        build.fee_input_total
     );
     if build.change_amount > 0 {
-        println!(
+        progress!(
             "   Change output: {} nanoERG to {}",
-            build.change_amount, build.change_address
+            build.change_amount,
+            build.change_address
         );
     }
-    println!("   Emergency redemption: {}", emergency);
-    println!("   First redemption: {}", build.is_first_redemption);
-    println!("📝 Context Extension Variables:");
-    println!("   #0 (action): 0x00 (redemption, reserve output index 0)");
-    println!("   #1 (receiver): {}", recipient_pubkey);
-    println!("   #2 (reserveSig): {} bytes", build.issuer_signature_len);
-    println!("   #3 (totalDebt): {}", build.total_debt);
-    println!("   #5 (insertProof): {} bytes", build.insert_proof_len);
-    println!("   #6 (trackerSig): {} bytes", build.tracker_signature_len);
+    progress!("   Emergency redemption: {}", emergency);
+    progress!("   First redemption: {}", build.is_first_redemption);
+    progress!("📝 Context Extension Variables:");
+    progress!("   #0 (action): 0x00 (redemption, reserve output index 0)");
+    progress!("   #1 (receiver): {}", recipient_pubkey);
+    progress!("   #2 (reserveSig): {} bytes", build.issuer_signature_len);
+    progress!("   #3 (totalDebt): {}", build.total_debt);
+    progress!("   #5 (insertProof): {} bytes", build.insert_proof_len);
+    progress!("   #6 (trackerSig): {} bytes", build.tracker_signature_len);
     if let Some(len) = build.reserve_lookup_proof_len {
-        println!("   #7 (reserveLookupProof): {} bytes", len);
+        progress!("   #7 (reserveLookupProof): {} bytes", len);
     } else {
-        println!("   #7 (reserveLookupProof): omitted (first redemption)");
+        progress!("   #7 (reserveLookupProof): omitted (first redemption)");
     }
-    println!(
+    progress!(
         "   #8 (trackerLookupProof): {} bytes",
         build.tracker_lookup_proof_len
     );
 
-    Ok(())
+    Ok(GenerateRedemptionResult::Unsigned(Box::new(
+        UnsignedRedemptionResult {
+            transaction: transaction_json,
+            issuer_pubkey: issuer_pubkey.to_string(),
+            recipient_pubkey: recipient_pubkey.to_string(),
+            amount,
+            recipient_output_value: build.recipient_output_value,
+            reserve_output_value: build.reserve_output_value,
+            total_debt: build.total_debt,
+            already_redeemed: note.amount_redeemed,
+            reserve_box_id: build.reserve_box_id,
+            tracker_box_id: build.tracker_box_id,
+            fee: TRANSACTION_FEE,
+            fee_input_count: build.fee_input_count,
+            fee_input_total: build.fee_input_total,
+            change_amount: build.change_amount,
+            change_address: build.change_address,
+            emergency,
+            first_redemption: build.is_first_redemption,
+            output_file,
+        },
+    )))
 }
 
 /// Tracker-assisted redemption driver (mirrors the TUI flow). The tracker builds the unsigned
 /// transaction and signs the fee input(s); the CLI signs the issuer message with the current
 /// account and adds the reserve input's proveDlog(recipient) proof, then submits via the tracker.
-async fn redeem_tracker_assisted(
+pub async fn redeem_tracker_assisted(
     client: &TrackerClient,
     account_manager: &crate::account::AccountManager,
     issuer_pubkey: &str,
     recipient_pubkey: &str,
     amount: u64,
     recipient_secret: Option<String>,
-) -> Result<()> {
+) -> Result<RedemptionBroadcastResult> {
     use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
     use ergo_lib::chain::transaction::Transaction;
     use ergo_lib::ergo_chain_types::{Header, PreHeader};
@@ -972,7 +1055,7 @@ async fn redeem_tracker_assisted(
         .try_into()
         .map_err(|_| anyhow::anyhow!("recipient pubkey must be 33 bytes"))?;
 
-    println!("🔍 Fetching note and tracker proof...");
+    progress!("🔍 Fetching note and tracker proof...");
     let note = client
         .get_note(issuer_pubkey, recipient_pubkey)
         .await?
@@ -982,14 +1065,14 @@ async fn redeem_tracker_assisted(
         .await?
         .total_debt;
     let timestamp = note.timestamp;
-    println!("✅ total_debt={} timestamp={}", total_debt, timestamp);
+    progress!("✅ total_debt={} timestamp={}", total_debt, timestamp);
 
     // Issuer signs the redemption message with the current account.
     let current = account_manager
         .get_current()
         .ok_or_else(|| anyhow::anyhow!("no current account (should be the issuer)"))?;
     if current.get_pubkey_hex() != issuer_pubkey {
-        println!(
+        progress!(
             "⚠️  current account {}... != issuer {}...; signature may be rejected",
             &current.get_pubkey_hex()[..16],
             &issuer_pubkey[..16]
@@ -997,10 +1080,10 @@ async fn redeem_tracker_assisted(
     }
     let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, timestamp);
     let issuer_sig = current.sign_message(&message)?;
-    println!("✅ issuer signature ({} bytes)", issuer_sig.len());
+    progress!("✅ issuer signature ({} bytes)", issuer_sig.len());
 
     // Tracker builds the unsigned tx and signs the fee input(s).
-    println!("🔍 Requesting tracker build (POST /redemption/build)...");
+    progress!("🔍 Requesting tracker build (POST /redemption/build)...");
     let build = client
         .redemption_build(crate::api::RedemptionBuildRequest {
             issuer_pubkey: issuer_pubkey.to_string(),
@@ -1014,7 +1097,7 @@ async fn redeem_tracker_assisted(
         })
         .await
         .map_err(|e| anyhow::anyhow!("tracker build failed: {}", e))?;
-    println!(
+    progress!(
         "✅ build ok: reserve {} (out {} nanoERG), fee {} nanoERG, change {} to {}",
         &build.reserve_box_id[..16.min(build.reserve_box_id.len())],
         build.reserve_output_value,
@@ -1060,7 +1143,7 @@ async fn redeem_tracker_assisted(
         .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
 
     // Add the reserve input (index 0) proof over the same bytes_to_sign.
-    println!("🖊️  Adding reserve proveDlog(recipient) proof...");
+    progress!("🖊️  Adding reserve proveDlog(recipient) proof...");
     let signed = add_input_proof(
         &unsigned,
         Some(&partial),
@@ -1079,9 +1162,9 @@ async fn redeem_tracker_assisted(
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>")
         .to_string();
-    println!("✅ signed tx id: {}", local_id);
+    progress!("✅ signed tx id: {}", local_id);
 
-    println!("📡 Submitting via tracker (POST /redemption/submit)...");
+    progress!("📡 Submitting via tracker (POST /redemption/submit)...");
     let tx_id = client
         .redemption_submit(
             tx_json,
@@ -1092,8 +1175,8 @@ async fn redeem_tracker_assisted(
         )
         .await
         .map_err(|e| anyhow::anyhow!("submit failed: {}", e))?;
-    println!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
-    Ok(())
+    progress!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
+    Ok(RedemptionBroadcastResult { tx_id })
 }
 
 /// Select wallet boxes covering the required fee amount.
@@ -1306,9 +1389,10 @@ async fn resolve_dlog_secret(
     let hexstr = match provided {
         Some(h) => h.clone(),
         None => {
-            println!(
+            progress!(
                 "🔑 Fetching {} private key from node wallet ({})...",
-                label, address
+                label,
+                address
             );
             client
                 .get_private_key(NODE_URL, Some(API_KEY), address)
@@ -1469,7 +1553,7 @@ fn reorder_reserve_extension_scala(tx: &mut serde_json::Value) {
 /// node. This mirrors what a TUI/client does without delegating signing to the node wallet.
 #[allow(clippy::too_many_arguments)]
 async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
-    println!("🖊️  Signing redemption locally (client-side proveDlog for both inputs)...");
+    progress!("🖊️  Signing redemption locally (client-side proveDlog for both inputs)...");
 
     // Parse the proven builder's unsigned transaction. Before parsing, reorder the reserve input's
     // context-extension keys into Scala's `ContextExtension` serialization order: the extension is
@@ -1557,7 +1641,7 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>")
         .to_string();
-    println!("✅ Signed locally. tx id: {}", local_id);
+    progress!("✅ Signed locally. tx id: {}", local_id);
     let _ = fs::write(
         "/tmp/last_signed_tx.json",
         serde_json::to_string_pretty(&signed_json)?,
@@ -1582,49 +1666,51 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
     };
     let tx_id = parse_broadcast_tx_id(&body);
 
-    println!("✅ Redemption broadcast with LOCAL proveDlog signatures.");
-    println!("📋 Transaction details:");
-    println!("   Transaction ID: {}", tx_id);
-    println!("   Issuer: {}", p.issuer_pubkey);
-    println!("   Recipient: {}", p.recipient_pubkey);
-    println!("   Redemption amount: {} nanoERG", p.amount);
-    println!(
+    progress!("✅ Redemption broadcast with LOCAL proveDlog signatures.");
+    progress!("📋 Transaction details:");
+    progress!("   Transaction ID: {}", tx_id);
+    progress!("   Issuer: {}", p.issuer_pubkey);
+    progress!("   Recipient: {}", p.recipient_pubkey);
+    progress!("   Redemption amount: {} nanoERG", p.amount);
+    progress!(
         "   Recipient receives: {} nanoERG",
         p.recipient_output_value
     );
-    println!(
+    progress!(
         "   Reserve output value: {} nanoERG",
         p.reserve_output_value
     );
-    println!("   Total debt: {} nanoERG", p.total_debt);
-    println!("   First redemption: {}", p.is_first_redemption);
-    println!("   Emergency redemption: {}", p.emergency);
-    println!("   Reserve box ID: {}", p.reserve_box_id);
-    println!("   Tracker box ID: {}", p.tracker_box_id);
-    println!("   Transaction fee: {} nanoERG", TRANSACTION_FEE);
-    println!(
+    progress!("   Total debt: {} nanoERG", p.total_debt);
+    progress!("   First redemption: {}", p.is_first_redemption);
+    progress!("   Emergency redemption: {}", p.emergency);
+    progress!("   Reserve box ID: {}", p.reserve_box_id);
+    progress!("   Tracker box ID: {}", p.tracker_box_id);
+    progress!("   Transaction fee: {} nanoERG", TRANSACTION_FEE);
+    progress!(
         "   Fee inputs: {} box(es), {} nanoERG total",
-        p.fee_input_count, p.fee_input_total
+        p.fee_input_count,
+        p.fee_input_total
     );
     if p.change_amount > 0 {
-        println!(
+        progress!(
             "   Change output: {} nanoERG to {}",
-            p.change_amount, p.change_address
+            p.change_amount,
+            p.change_address
         );
     }
-    println!("📝 Context Extension Variables:");
-    println!("   #0 (action): 0x00 (redemption, reserve output index 0)");
-    println!("   #1 (receiver): {}", p.recipient_pubkey);
-    println!("   #2 (reserveSig): {} bytes", p.issuer_signature_len);
-    println!("   #3 (totalDebt): {}", p.total_debt);
-    println!("   #4 (timestamp): {}", p.note_timestamp);
-    println!("   #5 (insertProof): {} bytes", p.insert_proof_len);
-    println!("   #6 (trackerSig): {} bytes", p.tracker_signature_len);
+    progress!("📝 Context Extension Variables:");
+    progress!("   #0 (action): 0x00 (redemption, reserve output index 0)");
+    progress!("   #1 (receiver): {}", p.recipient_pubkey);
+    progress!("   #2 (reserveSig): {} bytes", p.issuer_signature_len);
+    progress!("   #3 (totalDebt): {}", p.total_debt);
+    progress!("   #4 (timestamp): {}", p.note_timestamp);
+    progress!("   #5 (insertProof): {} bytes", p.insert_proof_len);
+    progress!("   #6 (trackerSig): {} bytes", p.tracker_signature_len);
     match p.reserve_lookup_proof_len {
-        Some(len) => println!("   #7 (reserveLookupProof): {} bytes", len),
-        None => println!("   #7 (reserveLookupProof): omitted (first redemption)"),
+        Some(len) => progress!("   #7 (reserveLookupProof): {} bytes", len),
+        None => progress!("   #7 (reserveLookupProof): omitted (first redemption)"),
     }
-    println!(
+    progress!(
         "   #8 (trackerLookupProof): {} bytes",
         p.tracker_lookup_proof_len
     );

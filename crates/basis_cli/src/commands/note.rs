@@ -1,9 +1,11 @@
 use crate::account::AccountManager;
 use crate::api::{
-    CompleteRedemptionRequest, CreateNoteRequest, KeyStatusResponse, RedeemRequest, TrackerClient,
+    CompleteRedemptionRequest, CreateNoteRequest, KeyStatusResponse, RedeemRequest,
+    SerializableIouNote, TrackerClient,
 };
 use crate::commands::transaction::execute_local_redemption;
 use crate::demo_keys;
+use crate::output::progress;
 use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
@@ -31,6 +33,56 @@ pub struct DemoNote {
 pub struct SignatureComponent {
     pub a: String,
     pub z: String,
+}
+
+/// Result of creating a note in normal (non-demo) mode.
+#[derive(Debug, Serialize)]
+pub struct NoteCreatedResult {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub amount: u64,
+    pub timestamp: u64,
+    pub signature: String,
+    pub reserve_status_before: KeyStatusResponse,
+    pub reserve_status_after: KeyStatusResponse,
+}
+
+/// A single note entry as printed by `note list --json`.
+#[derive(Debug, Serialize)]
+pub struct NoteListEntry {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub amount: u64,
+    pub redeemed: u64,
+    pub outstanding: u64,
+    pub timestamp: u64,
+}
+
+/// Which side of the note the current account is on for `note list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteListDirection {
+    Issuer,
+    Recipient,
+}
+
+/// Typed result of `note list`: a direction plus the matching notes.
+#[derive(Debug)]
+pub struct NoteListResult {
+    pub direction: NoteListDirection,
+    pub notes: Vec<NoteListEntry>,
+}
+
+/// Result of `note redeem` (either the server-signed or the locally-signed path).
+#[derive(Debug, Serialize)]
+pub struct NoteRedeemResult {
+    pub amount: u64,
+    pub server_sign: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redemption_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_id: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -86,6 +138,7 @@ pub async fn handle_note_command(
     cmd: NoteCommands,
     account_manager: &AccountManager,
     client: &TrackerClient,
+    json: bool,
 ) -> Result<()> {
     match cmd {
         NoteCommands::Create {
@@ -96,66 +149,79 @@ pub async fn handle_note_command(
         } => {
             if demo {
                 // Demo mode: Alice → Bob with tracker signature
-                create_demo_note(amount, output).await?
+                let note = create_demo_note(amount, output.clone()).await?;
+                if json || output.is_none() {
+                    println!("{}", serde_json::to_string_pretty(&note)?);
+                }
             } else {
                 // Normal mode: use CLI accounts
                 let recipient = recipient
                     .ok_or_else(|| anyhow::anyhow!("--recipient required in non-demo mode"))?;
 
-                create_normal_note(account_manager, client, &recipient, amount).await?
+                let result =
+                    create_normal_note(account_manager, client, &recipient, amount).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("\n✅ Note created successfully");
+                    println!("📝 Note Details:");
+                    println!("  Issuer: {}", result.issuer_pubkey);
+                    println!("  Recipient: {}", result.recipient_pubkey);
+                    println!(
+                        "  Amount: {} nanoERG ({:.6} ERG)",
+                        result.amount,
+                        result.amount as f64 / 1_000_000_000.0
+                    );
+                    println!("  Timestamp: {}", result.timestamp);
+                }
             }
         }
         NoteCommands::List { issuer, recipient } => {
-            let current_account = account_manager
-                .get_current()
-                .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
-
-            if issuer {
-                let notes = client
-                    .get_issuer_notes(&current_account.get_pubkey_hex())
-                    .await?;
-                if notes.is_empty() {
-                    println!("No notes found where you are the issuer");
-                } else {
-                    println!("Notes where you are the issuer:");
-                    for note in notes {
-                        println!("  To: {}", note.recipient_pubkey);
-                        println!("    Amount: {} nanoERG", note.amount_collected);
-                        println!("    Redeemed: {} nanoERG", note.amount_redeemed);
-                        println!(
-                            "    Outstanding: {} nanoERG",
-                            note.amount_collected - note.amount_redeemed
-                        );
-                        println!("    Created: {}", note.timestamp);
-                    }
-                }
-            } else if recipient {
-                let notes = client
-                    .get_recipient_notes(&current_account.get_pubkey_hex())
-                    .await?;
-                if notes.is_empty() {
-                    println!("No notes found where you are the recipient");
-                } else {
-                    println!("Notes where you are the recipient:");
-                    for note in notes {
-                        println!("  From: {}", note.issuer_pubkey);
-                        println!("    Amount: {} nanoERG", note.amount_collected);
-                        println!("    Redeemed: {} nanoERG", note.amount_redeemed);
-                        println!(
-                            "    Outstanding: {} nanoERG",
-                            note.amount_collected - note.amount_redeemed
-                        );
-                        println!("    Created: {}", note.timestamp);
-                    }
-                }
+            let result = list_notes(account_manager, client, issuer, recipient).await?;
+            if json {
+                let notes: Vec<NoteListEntry> = result.map(|r| r.notes).unwrap_or_default();
+                println!("{}", serde_json::to_string_pretty(&notes)?);
             } else {
-                println!("Please specify --issuer or --recipient");
+                match result {
+                    None => println!("Please specify --issuer or --recipient"),
+                    Some(list) => match list.direction {
+                        NoteListDirection::Issuer => {
+                            if list.notes.is_empty() {
+                                println!("No notes found where you are the issuer");
+                            } else {
+                                println!("Notes where you are the issuer:");
+                                for note in &list.notes {
+                                    println!("  To: {}", note.recipient_pubkey);
+                                    println!("    Amount: {} nanoERG", note.amount);
+                                    println!("    Redeemed: {} nanoERG", note.redeemed);
+                                    println!("    Outstanding: {} nanoERG", note.outstanding);
+                                    println!("    Created: {}", note.timestamp);
+                                }
+                            }
+                        }
+                        NoteListDirection::Recipient => {
+                            if list.notes.is_empty() {
+                                println!("No notes found where you are the recipient");
+                            } else {
+                                println!("Notes where you are the recipient:");
+                                for note in &list.notes {
+                                    println!("  From: {}", note.issuer_pubkey);
+                                    println!("    Amount: {} nanoERG", note.amount);
+                                    println!("    Redeemed: {} nanoERG", note.redeemed);
+                                    println!("    Outstanding: {} nanoERG", note.outstanding);
+                                    println!("    Created: {}", note.timestamp);
+                                }
+                            }
+                        }
+                    },
+                }
             }
         }
         NoteCommands::Get { issuer, recipient } => {
-            let note = client.get_note(&issuer, &recipient).await?;
-
-            if let Some(note) = note {
+            let note = get_note(client, &issuer, &recipient).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&note)?);
+            } else if let Some(note) = note {
                 println!("Note found:");
                 println!("  Issuer: {}", note.issuer_pubkey);
                 println!("  Recipient: {}", note.recipient_pubkey);
@@ -175,92 +241,10 @@ pub async fn handle_note_command(
             amount,
             server_sign,
         } => {
-            let current_account = account_manager
-                .get_current()
-                .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
-
-            let recipient_pubkey = current_account.get_pubkey_hex();
-            let recipient_secret = current_account.get_private_key_hex();
-
-            // First, get the note to retrieve its original timestamp and validate debt
-            let note = client
-                .get_note(&issuer, &recipient_pubkey)
-                .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Note not found for issuer {} and recipient {}",
-                        issuer,
-                        recipient_pubkey
-                    )
-                })?;
-
-            // Verify that the note has sufficient outstanding debt
-            if note.outstanding_debt() < amount {
-                return Err(anyhow::anyhow!(
-                    "Insufficient outstanding debt: {} nanoERG available, {} nanoERG requested",
-                    note.outstanding_debt(),
-                    amount
-                ));
-            }
-
-            let new_already_redeemed = note.amount_redeemed.saturating_add(amount);
-
-            if server_sign {
-                // Server-side signing path (legacy).
-                let timestamp = note.timestamp;
-
-                let redeem_request = RedeemRequest {
-                    issuer_pubkey: issuer.clone(),
-                    recipient_pubkey: recipient_pubkey.clone(),
-                    amount,
-                    timestamp,
-                    reserve_box_id: String::new(), // Will be looked up by server
-                    tracker_box_id: String::new(), // Will be fetched by server
-                    tracker_nft_id: String::new(), // Will be fetched by server
-                    current_height: 0,             // Will be fetched by server
-                    recipient_address: String::new(), // Will be derived from recipient_pubkey by server
-                    change_address: String::new(), // Will be derived from tracker pubkey by server
-                    issuer_signature: note.signature.clone(),
-                    emergency: false,
-                    tracker_signature: None, // Server will generate tracker signature
-                };
-
-                let response = client.initiate_redemption(redeem_request).await?;
-                println!("✅ Redemption initiated");
-                println!("  Redemption ID: {}", response.redemption_id);
-                println!("  Amount: {} nanoERG", response.amount);
-                println!("  Proof available: {}", response.proof_available);
-
-                // Complete redemption with the proper payload including redemption_id.
-                let complete_request = CompleteRedemptionRequest {
-                    redemption_id: response.redemption_id,
-                    issuer_pubkey: issuer,
-                    recipient_pubkey,
-                    redeemed_amount: amount,
-                    new_already_redeemed: Some(new_already_redeemed),
-                };
-
-                client.complete_redemption(complete_request).await?;
-                println!("✅ Redemption completed");
-            } else {
-                // Local signing path (default): the CLI wallet signs the reserve and fee inputs
-                // and broadcasts directly to the Ergo node; the server only provides the tracker
-                // Schnorr signature. `execute_local_redemption` also syncs tracker state after
-                // broadcast so the reserve tree is ready for the next redemption.
-                let tx_id = execute_local_redemption(
-                    client,
-                    account_manager,
-                    &issuer,
-                    &recipient_pubkey,
-                    amount,
-                    false, // emergency
-                    None,  // tracker_box_id
-                    None,  // change_address
-                    Some(recipient_secret),
-                    None, // fee_secret
-                )
-                .await?;
-
+            let result = redeem_note(account_manager, client, &issuer, amount, server_sign).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else if let Some(tx_id) = result.tx_id {
                 println!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
             }
         }
@@ -270,7 +254,7 @@ pub async fn handle_note_command(
 }
 
 /// Create a demo note (Alice → Bob with tracker signature)
-async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<()> {
+pub async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<DemoNote> {
     let alice = demo_keys::alice();
     let bob = demo_keys::bob();
 
@@ -348,14 +332,11 @@ async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<()> {
         },
     };
 
-    let note_json = serde_json::to_string_pretty(&note)?;
-
-    // Output JSON
+    // Save to file when requested
     if let Some(path) = output {
+        let note_json = serde_json::to_string_pretty(&note)?;
         fs::write(&path, &note_json)?;
         eprintln!("✓ Note saved to: {}", path.display());
-    } else {
-        println!("{}", note_json);
     }
 
     eprintln!();
@@ -371,19 +352,19 @@ async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<()> {
     eprintln!("  Tracker Sig Valid: ✓");
     eprintln!();
     eprintln!("=== Usage ===");
-    eprintln!("  Redeem:  basis-cli transaction generate-redemption --issuer {} --recipient {} --amount {}", 
+    eprintln!("  Redeem:  basis-cli transaction generate-redemption --issuer {} --recipient {} --amount {}",
               alice.public_key_hex(), bob.public_key_hex(), amount);
 
-    Ok(())
+    Ok(note)
 }
 
 /// Create a normal note using CLI accounts
-async fn create_normal_note(
+pub async fn create_normal_note(
     account_manager: &AccountManager,
     client: &TrackerClient,
     recipient: &str,
     amount: u64,
-) -> Result<()> {
+) -> Result<NoteCreatedResult> {
     let current_account = account_manager
         .get_current()
         .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
@@ -394,7 +375,7 @@ async fn create_normal_note(
         .as_millis() as u64;
 
     // Get reserve status before note creation
-    println!("📊 Reserve Status Before Note Creation:");
+    progress!("📊 Reserve Status Before Note Creation:");
     let status_before = client.get_reserve_status(&issuer_pubkey).await?;
     print_reserve_status(&status_before);
 
@@ -423,47 +404,207 @@ async fn create_normal_note(
         recipient_pubkey: recipient.to_string(),
         amount,
         timestamp,
-        signature: signature_hex,
+        signature: signature_hex.clone(),
     };
 
     client.create_note(request).await?;
 
     // Get reserve status after note creation
-    println!("\n📊 Reserve Status After Note Creation:");
+    progress!("\n📊 Reserve Status After Note Creation:");
     let status_after = client.get_reserve_status(&issuer_pubkey).await?;
     print_reserve_status(&status_after);
 
-    println!("\n✅ Note created successfully");
-    println!("📝 Note Details:");
-    println!("  Issuer: {}", issuer_pubkey);
-    println!("  Recipient: {}", recipient);
-    println!(
-        "  Amount: {} nanoERG ({:.6} ERG)",
+    Ok(NoteCreatedResult {
+        issuer_pubkey,
+        recipient_pubkey: recipient.to_string(),
         amount,
-        amount as f64 / 1_000_000_000.0
-    );
-    println!("  Timestamp: {}", timestamp);
+        timestamp,
+        signature: signature_hex,
+        reserve_status_before: status_before,
+        reserve_status_after: status_after,
+    })
+}
 
-    Ok(())
+/// List notes where the current account is the issuer or the recipient.
+/// Returns `None` when neither `--issuer` nor `--recipient` was given.
+pub async fn list_notes(
+    account_manager: &AccountManager,
+    client: &TrackerClient,
+    issuer: bool,
+    recipient: bool,
+) -> Result<Option<NoteListResult>> {
+    let current_account = account_manager
+        .get_current()
+        .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
+
+    let to_entry = |note: &SerializableIouNote| NoteListEntry {
+        issuer_pubkey: note.issuer_pubkey.clone(),
+        recipient_pubkey: note.recipient_pubkey.clone(),
+        amount: note.amount_collected,
+        redeemed: note.amount_redeemed,
+        outstanding: note.amount_collected - note.amount_redeemed,
+        timestamp: note.timestamp,
+    };
+
+    if issuer {
+        let notes = client
+            .get_issuer_notes(&current_account.get_pubkey_hex())
+            .await?;
+        Ok(Some(NoteListResult {
+            direction: NoteListDirection::Issuer,
+            notes: notes.iter().map(to_entry).collect(),
+        }))
+    } else if recipient {
+        let notes = client
+            .get_recipient_notes(&current_account.get_pubkey_hex())
+            .await?;
+        Ok(Some(NoteListResult {
+            direction: NoteListDirection::Recipient,
+            notes: notes.iter().map(to_entry).collect(),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Get a specific note by issuer and recipient.
+pub async fn get_note(
+    client: &TrackerClient,
+    issuer: &str,
+    recipient: &str,
+) -> Result<Option<SerializableIouNote>> {
+    client.get_note(issuer, recipient).await
+}
+
+/// Redeem a note, either via server-side signing or (default) local signing.
+pub async fn redeem_note(
+    account_manager: &AccountManager,
+    client: &TrackerClient,
+    issuer: &str,
+    amount: u64,
+    server_sign: bool,
+) -> Result<NoteRedeemResult> {
+    let current_account = account_manager
+        .get_current()
+        .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
+
+    let recipient_pubkey = current_account.get_pubkey_hex();
+    let recipient_secret = current_account.get_private_key_hex();
+
+    // First, get the note to retrieve its original timestamp and validate debt
+    let note = client
+        .get_note(issuer, &recipient_pubkey)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Note not found for issuer {} and recipient {}",
+                issuer,
+                recipient_pubkey
+            )
+        })?;
+
+    // Verify that the note has sufficient outstanding debt
+    if note.outstanding_debt() < amount {
+        return Err(anyhow::anyhow!(
+            "Insufficient outstanding debt: {} nanoERG available, {} nanoERG requested",
+            note.outstanding_debt(),
+            amount
+        ));
+    }
+
+    let new_already_redeemed = note.amount_redeemed.saturating_add(amount);
+
+    if server_sign {
+        // Server-side signing path (legacy).
+        let timestamp = note.timestamp;
+
+        let redeem_request = RedeemRequest {
+            issuer_pubkey: issuer.to_string(),
+            recipient_pubkey: recipient_pubkey.clone(),
+            amount,
+            timestamp,
+            reserve_box_id: String::new(), // Will be looked up by server
+            tracker_box_id: String::new(), // Will be fetched by server
+            tracker_nft_id: String::new(), // Will be fetched by server
+            current_height: 0,             // Will be fetched by server
+            recipient_address: String::new(), // Will be derived from recipient_pubkey by server
+            change_address: String::new(), // Will be derived from tracker pubkey by server
+            issuer_signature: note.signature.clone(),
+            emergency: false,
+            tracker_signature: None, // Server will generate tracker signature
+        };
+
+        let response = client.initiate_redemption(redeem_request).await?;
+        progress!("✅ Redemption initiated");
+        progress!("  Redemption ID: {}", response.redemption_id);
+        progress!("  Amount: {} nanoERG", response.amount);
+        progress!("  Proof available: {}", response.proof_available);
+
+        // Complete redemption with the proper payload including redemption_id.
+        let complete_request = CompleteRedemptionRequest {
+            redemption_id: response.redemption_id.clone(),
+            issuer_pubkey: issuer.to_string(),
+            recipient_pubkey,
+            redeemed_amount: amount,
+            new_already_redeemed: Some(new_already_redeemed),
+        };
+
+        client.complete_redemption(complete_request).await?;
+        progress!("✅ Redemption completed");
+
+        Ok(NoteRedeemResult {
+            amount,
+            server_sign: true,
+            redemption_id: Some(response.redemption_id),
+            proof_available: Some(response.proof_available),
+            tx_id: None,
+        })
+    } else {
+        // Local signing path (default): the CLI wallet signs the reserve and fee inputs
+        // and broadcasts directly to the Ergo node; the server only provides the tracker
+        // Schnorr signature. `execute_local_redemption` also syncs tracker state after
+        // broadcast so the reserve tree is ready for the next redemption.
+        let tx_id = execute_local_redemption(
+            client,
+            account_manager,
+            issuer,
+            &recipient_pubkey,
+            amount,
+            false, // emergency
+            None,  // tracker_box_id
+            None,  // change_address
+            Some(recipient_secret),
+            None, // fee_secret
+        )
+        .await?;
+
+        Ok(NoteRedeemResult {
+            amount,
+            server_sign: false,
+            redemption_id: None,
+            proof_available: None,
+            tx_id: Some(tx_id),
+        })
+    }
 }
 
 fn print_reserve_status(status: &KeyStatusResponse) {
-    println!(
+    progress!(
         "  Total Debt: {} nanoERG ({:.6} ERG)",
         status.total_debt,
         status.total_debt as f64 / 1_000_000_000.0
     );
-    println!(
+    progress!(
         "  Collateral: {} nanoERG ({:.6} ERG)",
         status.collateral,
         status.collateral as f64 / 1_000_000_000.0
     );
-    println!(
+    progress!(
         "  Collateralization Ratio: {:.4}",
         status.collateralization_ratio
     );
-    println!("  Note Count: {}", status.note_count);
-    println!("  Last Updated: {}", status.last_updated);
+    progress!("  Note Count: {}", status.note_count);
+    progress!("  Last Updated: {}", status.last_updated);
 
     // Show collateralization status
     let status_text = match status.collateralization_ratio {
@@ -473,7 +614,7 @@ fn print_reserve_status(status: &KeyStatusResponse) {
         r if r < 3.0 => "GOOD",
         _ => "EXCELLENT",
     };
-    println!("  Status: {}", status_text);
+    progress!("  Status: {}", status_text);
 }
 
 /// Blake2b256 hash function for creating signing message keys

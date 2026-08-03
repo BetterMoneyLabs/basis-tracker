@@ -9,17 +9,23 @@ crates/basis_cli/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs
+│   ├── lib.rs
 │   ├── account.rs
 │   ├── api.rs
 │   ├── config.rs
 │   ├── crypto.rs
+│   ├── demo_keys.rs
 │   ├── interactive.rs
+│   ├── output.rs
 │   └── commands/
 │       ├── mod.rs
 │       ├── account.rs
+│       ├── keypair.rs
 │       ├── note.rs
 │       ├── reserve.rs
-│       └── status.rs
+│       ├── status.rs
+│       ├── test_redemption.rs
+│       └── transaction.rs
 └── tests/
 ```
 
@@ -45,16 +51,21 @@ crates/basis_cli/
 
 #### 1. CLI Interface (`main.rs`)
 - Uses `clap` for command parsing with derive macros
-- Defines subcommands: Account, Note, Reserve, Interactive, Status
+- Defines subcommands: Account, GenerateKeypair, Note, Reserve, Transaction, Test, Interactive, Status
+- Global `--json` flag: switches all command output to machine-readable JSON
 - Manages configuration loading and account management
 - Initializes the API client for server communication
+- Implements the exit-code contract (0 success, 1 error, 2 server unreachable; errors printed as `{"error": ...}` to stderr in `--json` mode)
 
 #### 2. Command Handlers (`commands/`)
-Different modules handle various command categories:
+Different modules handle various command categories. Each module exposes `pub` typed-core functions returning serde-serializable result structs (rendered as human text by default, as JSON with `--json`, and reused by the `basis_mcp` MCP server):
 - `account.rs` - Account management (create, list, switch, import/export)
+- `keypair.rs` - Keypair generation
 - `note.rs` - IOU note operations
 - `reserve.rs` - Reserve and collateral operations
 - `status.rs` - System status checks
+- `test_redemption.rs` - Polling-based redemption test utility
+- `transaction.rs` - Redemption transaction generation
 
 #### 3. Account Management (`account.rs`)
 - Manages cryptographic key pairs (secp256k1)
@@ -145,3 +156,8 @@ Different modules handle various command categories:
 - Configuration management pattern for persistent settings
 - Service layer pattern for API communication
 - State management for accounts and session data
+
+## Agent Interface
+- All commands support a global `--json` flag that prints typed result structs as JSON to stdout (diagnostics to stderr), with an exit-code contract (0 success, 1 error, 2 server unreachable)
+- The typed command cores are reused by `basis_mcp`, an MCP (Model Context Protocol) stdio server exposing the wallet to AI agents
+- See `docs/AGENT_INTERFACE.md` for details

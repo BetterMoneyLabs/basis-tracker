@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This repository contains **3 compiled CLI binaries** and **7 shell scripts** that provide command-line interfaces for the Basis Tracker system. The primary CLI tool is `basis_cli` (Rust-based), the secondary is `basis_server` (Rust-based daemon), and the third is `basis_app` (TUI wallet, also Rust-based). Supporting shell scripts handle server lifecycle management, database cleanup, deployment, and TUI wallet launch. Integration testing is covered by Rust test suite (`cargo test`).
+This repository contains **4 compiled CLI binaries** and **7 shell scripts** that provide command-line interfaces for the Basis Tracker system. The primary CLI tool is `basis_cli` (Rust-based), the secondary is `basis_server` (Rust-based daemon), the third is `basis_app` (TUI wallet, also Rust-based), and the fourth is `basis_mcp` (MCP server for AI agents). Supporting shell scripts handle server lifecycle management, database cleanup, deployment, and TUI wallet launch. Integration testing is covered by Rust test suite (`cargo test`).
 
 ---
 
@@ -22,14 +22,15 @@ The CLI is structured as a library crate with an optional binary feature. It use
 ```
 Cargo.toml (lib + bin configuration)
 src/
-├── lib.rs              (module declarations: account, api, commands, config, crypto, demo_keys, interactive)
-├── main.rs             (entry point, command routing)
+├── lib.rs              (module declarations: account, api, commands, config, crypto, demo_keys, interactive, output)
+├── main.rs             (entry point, command routing, --json flag, exit-code contract)
 ├── account.rs          (Account model & manager with persistent storage)
 ├── api.rs              (HTTP client for server API with redemption support)
 ├── config.rs           (Configuration management for ~/.basis/cli.toml)
 ├── crypto.rs           (Schnorr signature implementation using secp256k1)
 ├── demo_keys.rs        (Demo key fixtures loaded from secrets/participants.csv)
 ├── interactive.rs      (Interactive REPL mode)
+├── output.rs           (JSON-mode flag + progress! macro routing diagnostics to stderr)
 └── commands/
     ├── mod.rs          (Module declarations)
     ├── account.rs      (Account management: create, list, switch, info, export, import)
@@ -62,6 +63,12 @@ src/
 - **Demo Mode**: Pre-configured Alice/Bob/Tracker keys for testing (loaded from `secrets/participants.csv`)
 - **Redemption Transaction Generation**: Full unsigned transaction generation with AVL proofs, signatures, and Ergo node box retrieval
 - **Polling Test Utility**: Automated polling for redeemable notes with sufficient collateral
+
+#### Agent-Friendly JSON Mode
+- **Global `--json` flag**: every command prints a single JSON document to stdout (typed result structs defined per command module); human-readable output remains the default
+- **Typed command cores**: each `commands/*` module exposes `pub` functions returning serde-serializable result structs, reused by `basis_mcp`
+- **Exit-code contract**: `0` success, `1` error, `2` server unreachable; in JSON mode errors are printed as `{"error": ...}` to stderr
+- See `docs/AGENT_INTERFACE.md` for per-command JSON examples
 
 #### Cryptographic Details
 - **Curve**: secp256k1
@@ -103,29 +110,49 @@ src/
 ```
 
 #### Screens
-- **MainMenu**: Primary navigation menu
-- **Accounts**: Account management (create, list, switch)
+- **Intro** (first run only): shown when no account exists — a `default` account is auto-created and its public key is displayed to the user
+- **MainMenu**: Primary navigation menu (Notes, Reserves, Redemption, My Acceptance Policy, Address Book, Settings)
+- **Accounts**: Account management (create, switch, import, export) — reached via Settings
 - **Notes**: Note listing and management
 - **Reserves**: Reserve status and collateralization display
-- **Transactions**: Transaction history and generation
-- **AddressBook**: Contact management (with demo contacts: bob, charlie)
-- **Settings**: Server URL and configuration
+- **Transactions**: Redemption transaction generation
+- **AddressBook**: Contact management (auto-synced with accounts)
+- **Settings**: Server URL and accounts management
 - **CreateNote**: Interactive note creation form
 - **RedeemNote**: Interactive redemption workflow
 - **CreateReserve**: Reserve creation form
 - **GenerateTransaction**: Transaction generation interface
+- **AcceptancePolicy**: Acceptance policy editor (collateral level, whitelist, blacklist)
 
 #### Key Features
 - **Terminal UI**: Full-screen interactive interface with ANSI colors and banners
 - **Free Banking Branding**: "Free Banking For Everyone" tagline
+- **First-Run Setup**: Auto-creates a default account on first launch and shows its public key in a welcome screen
 - **Real-time Data**: Auto-refreshes reserve status, issued notes, and received notes
-- **Address Book**: Pre-configured demo contacts for quick payments
+- **Address Book**: Contacts auto-synced from accounts, plus manual entries
 - **Server Connectivity**: Health check and connection status display
 - **Notification System**: Success/error messages with visual indicators
 
 ---
 
-### 4. `basis_store` - Test Runner
+### 4. `basis_mcp` - MCP Server for AI Agents
+
+**Location**: `crates/basis_mcp/`
+**Binary name**: `basis-mcp`
+**Language**: Rust (Edition 2021)
+**Dependencies**: rmcp, schemars, clap, tokio, serde, basis_cli_lib, basis_core
+
+An MCP (Model Context Protocol) server over stdio that exposes the Basis wallet to AI agents as typed tools. It wraps the typed command cores of `basis_cli_lib` and shares `~/.basis/cli.toml` (accounts) and `~/.basis/ui.toml` (acceptance policy) with the CLI and TUI.
+
+#### Tools
+- **Read-only** (`readOnlyHint`): `server_status`, `account_list`, `account_current`, `note_list`, `note_get`, `reserve_status`, `policy_get`
+- **Write**: `account_create`, `account_switch`, `account_import`, `note_create`, `note_redeem` (local signing), `reserve_create`, `policy_set` (`destructiveHint` where applicable)
+
+Private-key export is deliberately not exposed through any tool; signing happens in-process. See `docs/AGENT_INTERFACE.md` for the full tool reference and client configuration snippets.
+
+---
+
+### 5. `basis_store` - Test Runner
 
 **Location**: `crates/basis_store/src/main.rs`
 **Binary name**: Not explicitly defined in Cargo.toml `[[bin]]`, but has a `main.rs`

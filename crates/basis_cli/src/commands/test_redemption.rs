@@ -1,7 +1,9 @@
 use crate::api::TrackerClient;
+use crate::output::progress;
 use anyhow::Result;
 use basis_store;
 use clap::Subcommand;
+use serde::Serialize;
 use serde_json::json;
 use std::fs;
 use std::thread;
@@ -25,30 +27,53 @@ pub enum TestCommands {
     },
 }
 
-pub async fn handle_test_command(cmd: TestCommands, client: &TrackerClient) -> Result<()> {
+/// Result of a completed `test test-redemption` run.
+#[derive(Debug, Serialize)]
+pub struct TestRedemptionResult {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub redemption_amount: u64,
+    pub output_file: String,
+    /// The unsigned redemption transaction that was written to `output_file`.
+    pub transaction: serde_json::Value,
+}
+
+pub async fn handle_test_command(
+    cmd: TestCommands,
+    client: &TrackerClient,
+    json: bool,
+) -> Result<()> {
     match cmd {
         TestCommands::TestRedemption {
             output_file,
             amount,
             poll_interval,
-        } => test_redemption_transaction(client, output_file, amount, poll_interval).await,
+        } => {
+            let result = run_test_redemption(client, output_file, amount, poll_interval).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            Ok(())
+        }
     }
 }
 
-async fn test_redemption_transaction(
+/// Poll the tracker for a note with sufficient collateral and generate an
+/// unsigned redemption transaction for it, written to a JSON file.
+pub async fn run_test_redemption(
     client: &TrackerClient,
     output_file: Option<String>,
     amount: Option<u64>,
     poll_interval: u64,
-) -> Result<()> {
-    println!("🚀 Starting redemption transaction test...");
-    println!("📡 Connecting to server: {}", "configured server URL");
+) -> Result<TestRedemptionResult> {
+    progress!("🚀 Starting redemption transaction test...");
+    progress!("📡 Connecting to server: {}", "configured server URL");
 
     // Verify server health
     match client.health_check().await {
         Ok(healthy) => {
             if healthy {
-                println!("✅ Server connection verified");
+                progress!("✅ Server connection verified");
             } else {
                 return Err(anyhow::anyhow!("❌ Server health check failed"));
             }
@@ -58,32 +83,32 @@ async fn test_redemption_transaction(
         }
     }
 
-    println!(
+    progress!(
         "🔄 Starting note polling loop (checking every {} seconds)...",
         poll_interval
     );
 
     loop {
-        println!("🔍 Polling for notes...");
+        progress!("🔍 Polling for notes...");
 
         // Get all notes from the server
         let notes = match client.get_all_notes().await {
             Ok(notes) => notes,
             Err(e) => {
                 eprintln!("⚠️  Failed to retrieve notes: {}", e);
-                println!("⏳ Retrying in {} seconds...", poll_interval);
+                progress!("⏳ Retrying in {} seconds...", poll_interval);
                 thread::sleep(Duration::from_secs(poll_interval));
                 continue;
             }
         };
 
-        println!("📊 Retrieved {} notes", notes.len());
+        progress!("📊 Retrieved {} notes", notes.len());
 
         // Find a note with sufficient collateral
         if let Some((note, reserve_info)) =
             find_note_with_sufficient_collateral(client, &notes, amount).await
         {
-            println!("✅ Found suitable note with sufficient collateral!");
+            progress!("✅ Found suitable note with sufficient collateral!");
 
             // Determine redemption amount
             let redemption_amount = amount.unwrap_or_else(|| {
@@ -93,16 +118,16 @@ async fn test_redemption_transaction(
             });
 
             if redemption_amount == 0 {
-                println!("⚠️  Redemption amount is 0, skipping this note");
-                println!("⏳ Continuing to poll for notes...");
+                progress!("⚠️  Redemption amount is 0, skipping this note");
+                progress!("⏳ Continuing to poll for notes...");
                 thread::sleep(Duration::from_secs(poll_interval));
                 continue;
             }
 
-            println!("💰 Redemption amount: {} nanoERG", redemption_amount);
+            progress!("💰 Redemption amount: {} nanoERG", redemption_amount);
 
             // Prepare redemption data
-            println!("🔧 Preparing redemption data...");
+            progress!("🔧 Preparing redemption data...");
             let redemption_data = match client
                 .prepare_redemption(
                     &note.issuer_pubkey,
@@ -114,26 +139,26 @@ async fn test_redemption_transaction(
                 Ok(data) => data,
                 Err(e) => {
                     eprintln!("⚠️  Failed to prepare redemption: {}", e);
-                    println!("⏳ Continuing to poll for notes...");
+                    progress!("⏳ Continuing to poll for notes...");
                     thread::sleep(Duration::from_secs(poll_interval));
                     continue;
                 }
             };
 
-            println!("✅ Redemption data prepared successfully");
-            println!("   - AVL proof: {} bytes", redemption_data.avl_proof.len());
-            println!(
+            progress!("✅ Redemption data prepared successfully");
+            progress!("   - AVL proof: {} bytes", redemption_data.avl_proof.len());
+            progress!(
                 "   - Tracker signature: {} bytes",
                 redemption_data.tracker_signature.len()
             );
-            println!(
+            progress!(
                 "   - Tracker state digest: {}",
                 redemption_data.tracker_state_digest
             );
-            println!("   - Block height: {}", redemption_data.block_height);
+            progress!("   - Block height: {}", redemption_data.block_height);
 
             // Generate unsigned transaction JSON
-            println!("📝 Generating unsigned transaction...");
+            progress!("📝 Generating unsigned transaction...");
             let transaction_json = generate_unsigned_transaction(
                 &note.issuer_pubkey,
                 &note.recipient_pubkey,
@@ -155,21 +180,27 @@ async fn test_redemption_transaction(
             };
 
             // Write transaction to file
-            println!("💾 Writing transaction to file: {}", filename);
+            progress!("💾 Writing transaction to file: {}", filename);
             fs::write(&filename, serde_json::to_string_pretty(&transaction_json)?)?;
 
-            println!("🎉 Redemption transaction test completed successfully!");
-            println!("📋 Transaction details:");
-            println!("   - Issuer: {}", note.issuer_pubkey);
-            println!("   - Recipient: {}", note.recipient_pubkey);
-            println!("   - Redemption amount: {} nanoERG", redemption_amount);
-            println!("   - Transaction saved to: {}", filename);
-            println!("   - Source Ergo node: 159.89.116.15:11088");
+            progress!("🎉 Redemption transaction test completed successfully!");
+            progress!("📋 Transaction details:");
+            progress!("   - Issuer: {}", note.issuer_pubkey);
+            progress!("   - Recipient: {}", note.recipient_pubkey);
+            progress!("   - Redemption amount: {} nanoERG", redemption_amount);
+            progress!("   - Transaction saved to: {}", filename);
+            progress!("   - Source Ergo node: 159.89.116.15:11088");
 
-            return Ok(());
+            return Ok(TestRedemptionResult {
+                issuer_pubkey: note.issuer_pubkey.clone(),
+                recipient_pubkey: note.recipient_pubkey.clone(),
+                redemption_amount,
+                output_file: filename,
+                transaction: transaction_json,
+            });
         } else {
-            println!("⚠️  No suitable notes found with sufficient collateral");
-            println!("⏳ Continuing to poll for notes...");
+            progress!("⚠️  No suitable notes found with sufficient collateral");
+            progress!("⏳ Continuing to poll for notes...");
             thread::sleep(Duration::from_secs(poll_interval));
         }
     }
@@ -199,11 +230,11 @@ async fn find_note_with_sufficient_collateral(
 
             // Check if the note has sufficient collateral
             if outstanding_debt > 0 && available_collateral >= check_amount {
-                println!("🎯 Found suitable note:");
-                println!("   - Issuer: {}", note.issuer_pubkey);
-                println!("   - Recipient: {}", note.recipient_pubkey);
-                println!("   - Outstanding debt: {} nanoERG", outstanding_debt);
-                println!(
+                progress!("🎯 Found suitable note:");
+                progress!("   - Issuer: {}", note.issuer_pubkey);
+                progress!("   - Recipient: {}", note.recipient_pubkey);
+                progress!("   - Outstanding debt: {} nanoERG", outstanding_debt);
+                progress!(
                     "   - Available collateral: {} nanoERG",
                     available_collateral
                 );

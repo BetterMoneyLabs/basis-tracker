@@ -26,7 +26,11 @@ pub const GRAY: &str = "\x1b[90m";
 
 pub async fn run(app: &mut App) -> Result<()> {
     clear_screen();
-    print_banner();
+    if app.intro_account.is_some() {
+        draw_intro(app);
+    } else {
+        print_banner();
+    }
     wait_for_enter("Press Enter to continue...");
 
     while app.running {
@@ -76,6 +80,31 @@ fn print_banner() {
     println!();
 }
 
+/// First-run intro screen: shown when a default account was auto-created,
+/// informing the user about their new public key.
+fn draw_intro(app: &App) {
+    print_banner();
+    if let Some(ref acc) = app.intro_account {
+        println!("{}  WELCOME TO BASIS WALLET{}", BOLD, RESET);
+        println!("{}  ────────────────────────{}\n", CYAN, RESET);
+        println!("  A new account has been created for you:\n");
+        println!("    {}Name:{}      {}", BOLD, RESET, acc.name);
+        println!("    {}Public Key:{}", BOLD, RESET);
+        println!("    {}{}{}\n", GREEN, acc.pubkey, RESET);
+        println!("  Share this public key to receive notes (IOUs) from others.");
+        println!(
+            "  You can manage your accounts anytime in {}Settings → Accounts Management{}.",
+            CYAN, RESET
+        );
+        println!();
+        println!(
+            "  {}⚠ Back up your private key (Settings → Accounts Management → Export).{}",
+            YELLOW, RESET
+        );
+        println!();
+    }
+}
+
 fn draw_header(app: &App) {
     println!(
         "{}═══════════════════════════════════════════════════════════════{}",
@@ -115,25 +144,23 @@ async fn draw_main_menu(app: &mut App) -> Result<()> {
     println!("{}  MAIN MENU{}", BOLD, RESET);
     println!("{}  ─────────{}\n", CYAN, RESET);
 
-    println!("  {}[1]{} Accounts Management", CYAN, RESET);
-    println!("  {}[2]{} Notes (IOU Debt)", CYAN, RESET);
-    println!("  {}[3]{} Reserves & Collateral", CYAN, RESET);
-    println!("  {}[4]{} Transactions & Redemptions", CYAN, RESET);
+    println!("  {}[1]{} Notes (IOU Debt)", CYAN, RESET);
+    println!("  {}[2]{} Reserves", CYAN, RESET);
+    println!("  {}[3]{} Redemption", CYAN, RESET);
+    println!("  {}[4]{} My Acceptance Policy", CYAN, RESET);
     println!("  {}[5]{} Address Book", CYAN, RESET);
     println!("  {}[6]{} Settings", CYAN, RESET);
-    println!("  {}[7]{} Acceptance Policy", CYAN, RESET);
     println!();
     println!("  {}[r]{} Refresh Data", YELLOW, RESET);
     println!("  {}[q]{} Quit\n", RED, RESET);
 
     match read_choice("Select option: ").as_str() {
-        "1" => app.navigate_to(Screen::Accounts),
-        "2" => app.navigate_to(Screen::Notes),
-        "3" => app.navigate_to(Screen::Reserves),
-        "4" => app.navigate_to(Screen::Transactions),
+        "1" => app.navigate_to(Screen::Notes),
+        "2" => app.navigate_to(Screen::Reserves),
+        "3" => app.navigate_to(Screen::Transactions),
+        "4" => app.navigate_to(Screen::AcceptancePolicy),
         "5" => app.navigate_to(Screen::AddressBook),
         "6" => app.navigate_to(Screen::Settings),
-        "7" => app.navigate_to(Screen::AcceptancePolicy),
         "r" | "R" => {
             app.refresh_data().await?;
             if app.server_connected {
@@ -203,7 +230,7 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
     println!("  {}[e]{} Export Private Key", CYAN, RESET);
     println!("  {}[d]{} Delete Account", RED, RESET);
     println!();
-    println!("  {}[b]{} Back to Menu\n", YELLOW, RESET);
+    println!("  {}[b]{} Back to Settings\n", YELLOW, RESET);
 
     match read_choice("Select option: ").as_str() {
         "c" => {
@@ -304,7 +331,7 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
                 }
             }
         }
-        "b" | "B" => app.navigate_to(Screen::MainMenu),
+        "b" | "B" => app.navigate_to(Screen::Settings),
         _ => {
             app.set_notification("Invalid option".to_string(), true);
         }
@@ -605,6 +632,7 @@ async fn draw_settings(app: &mut App) -> Result<()> {
     println!();
 
     println!("  {}[1]{} Change Tracker URL", CYAN, RESET);
+    println!("  {}[2]{} Accounts Management", CYAN, RESET);
     println!();
     println!("  {}[b]{} Back to Menu\n", YELLOW, RESET);
 
@@ -622,6 +650,7 @@ async fn draw_settings(app: &mut App) -> Result<()> {
                 app.set_notification(format!("Tracker URL updated to: {}", new_url), false);
             }
         }
+        "2" => app.navigate_to(Screen::Accounts),
         "b" | "B" => app.navigate_to(Screen::MainMenu),
         _ => {
             app.set_notification("Invalid option".to_string(), true);

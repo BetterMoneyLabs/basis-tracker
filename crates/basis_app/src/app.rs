@@ -89,6 +89,9 @@ pub struct App {
     pub client: TrackerClient,
     pub server_url: String,
     pub current_account: Option<AccountInfo>,
+    /// Set when a default account was auto-created on first run; the intro
+    /// screen displays its public key to the user before the main menu.
+    pub intro_account: Option<AccountInfo>,
     pub reserve_status: Option<ReserveInfo>,
     pub issued_notes: Vec<NoteInfo>,
     pub received_notes: Vec<NoteInfo>,
@@ -160,7 +163,22 @@ pub struct ReserveInfo {
 impl App {
     pub async fn new() -> Result<Self> {
         let config_manager = ConfigManager::new(None)?;
-        let account_manager = AccountManager::new(config_manager.clone())?;
+        let mut account_manager = AccountManager::new(config_manager.clone())?;
+
+        // First run: no accounts exist yet — auto-create a default account so
+        // the wallet is usable immediately. The intro screen will show its
+        // public key to the user.
+        let intro_account = if account_manager.accounts.is_empty() {
+            let account = account_manager.create_account("default")?;
+            Some(AccountInfo {
+                name: account.name.clone(),
+                pubkey: account.get_pubkey_hex(),
+                _created_at: account.created_at,
+            })
+        } else {
+            None
+        };
+
         let server_url = config_manager.get_config().server_url.clone();
         let client = TrackerClient::new(server_url.clone());
 
@@ -173,7 +191,7 @@ impl App {
         let mut address_book = HashMap::new();
 
         // Auto-populate address book with existing accounts (accounts are source of truth)
-        for account in account_manager.list_accounts() {
+        for account in account_manager.accounts.values() {
             address_book.insert(account.name.clone(), account.get_pubkey_hex());
         }
 
@@ -187,6 +205,7 @@ impl App {
             client,
             server_url,
             current_account,
+            intro_account,
             reserve_status: None,
             issued_notes: Vec::new(),
             received_notes: Vec::new(),

@@ -123,6 +123,9 @@ impl AccountManager {
         self.config_manager.set_current_account(name)
     }
 
+    /// List in-memory accounts. Used by the TUI (basis_cli_lib); the CLI binary renders
+    /// account listings through `commands::account::list_account_entries` instead.
+    #[allow(dead_code)]
     pub fn list_accounts(&self) -> Vec<&Account> {
         if self.accounts.is_empty() {
             println!("No accounts in memory. Use 'basis-cli account create <name>' to create one.");
