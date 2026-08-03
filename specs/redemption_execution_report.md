@@ -2,17 +2,18 @@
 
 ## Summary
 
-This report documents the successful end-to-end execution of a Basis protocol redemption on a local Ergo testnet node. The flow covered:
+This report documents successful end-to-end Basis protocol redemptions, beginning on a local Ergo testnet node and culminating in mainnet multi-redemption runs against a wallet-owned tracker. The flows covered:
 
 1. Starting the tracker server with the updated tracker box updater.
-2. Deploying a 1 ERG reserve by Alice.
-3. Creating a 0.7 ERG Alice→Bob IOU note.
-4. Waiting for the tracker server to commit the note to its on-chain tracker box.
-5. Generating, signing, and broadcasting the redemption transaction.
-6. Verifying the new reserve and redemption outputs on-chain.
+2. Deploying reserves and creating IOU notes.
+3. Waiting for the tracker server to commit notes to its on-chain tracker box.
+4. Generating, signing, and broadcasting redemption transactions.
+5. Verifying new reserves and redemption outputs on-chain.
 
-**Redemption transaction:** `241ae6f475eb8599d50f11d722a0c3464af91a8c675a08ec314e8ae43605577e`  
+**First local redemption transaction:** `241ae6f475eb8599d50f11d722a0c3464af91a8c675a08ec314e8ae43605577e`  
 **Result:** Success — Bob received 0.7 ERG, reserve collateral reduced to 0.3 ERG.
+
+**Latest mainnet multi-redemption:** two consecutive 0.1 ERG redemptions against one 0.3 ERG reserve (collateral reduced from 0.3 ERG → 0.2 ERG → 0.1 ERG). See the [Tenth Redemption Test](#tenth-redemption-test-automated-integration-runner-two-01-erg-local-sign-redemptions-against-one-03-erg-reserve) for full details.
 
 ---
 
@@ -828,6 +829,110 @@ Both redemptions confirmed on mainnet. The note is fully redeemed (`amount_colle
 2. **Restarting the server loses the in-memory reserve AVL tree.** Re-syncing it requires the note's *original* payment timestamp, because the on-chain reserve-tree value is `payment_timestamp || already_redeemed`. Since `complete_redemption` refreshes `note.timestamp`, repeated `/redeem/complete` calls write later timestamps into the tree and desync it from the chain. A repair flow must reset the note timestamp first (as in `fix_note_state.rs`) or the API should accept an explicit timestamp.
 3. **Node-wallet signing errors are diagnosable by adding context vars incrementally.** `None.get` (missing var) → `Script reduced to false` (vars present but proof/state mismatch) → `null` (var present but invalid against on-chain state, here the `#7` lookup proof).
 4. **Recipient secret can be supplied without `--local-sign`.** `generate-redemption --recipient-secret <hex>` emits the unsigned tx with `secrets.dlog` populated, so the node wallet can sign even when the recipient key is not in the wallet.
+
+---
+
+## Tenth Redemption Test (automated integration runner, two 0.1 ERG local-sign redemptions against one 0.3 ERG reserve)
+
+### Goal
+
+Automate the Eighth/Ninth Redemption Test flow with a single self-contained script that:
+
+- issues or reuses a reserve NFT,
+- deploys a 0.3 ERG reserve,
+- creates a 0.2 ERG IOU note,
+- waits for on-chain tracker confirmation,
+- creates a token-free fee box,
+- runs two 0.1 ERG redemptions with `--local-sign`,
+- advances tracker state after each redemption via `POST /redeem/complete`,
+- verifies the note is fully redeemed.
+
+### Script
+
+`tests/test_local_sign_multiple_redemptions.sh` (Python runner: `tests/test_local_sign_multiple_redemptions.py`)
+
+```bash
+ISSUER_PRIVATE_KEY=<32-byte-hex-issuer-secret> \
+  ./tests/test_local_sign_multiple_redemptions.sh
+```
+
+Optional overrides:
+
+```bash
+NODE_URL=http://127.0.0.1:9053 \
+API_KEY=hello \
+TRACKER_URL=http://127.0.0.1:3048 \
+WALLET_ADDRESS=9fPRvaMYzBPotu6NGvZn4A6N4J2jDmRGs4Zwc9UhFFeSXgRJ8pS \
+RESERVE_AMOUNT=300000000 \
+NOTE_AMOUNT=200000000 \
+REDEEM_AMOUNT=100000000 \
+FEE_BOX_AMOUNT=50000000 \
+  ./tests/test_local_sign_multiple_redemptions.sh
+```
+
+### Requirements
+
+- A funded Ergo node wallet at `NODE_URL` (defaults to `127.0.0.1:9053`).
+- A running Basis tracker server at `TRACKER_URL` (defaults to `127.0.0.1:3048`) with the reserve contract P2S and tracker NFT configured.
+- `ISSUER_PRIVATE_KEY` set to the 32-byte hex secret of the reserve owner; the script imports it as a throw-away CLI account.
+- `WALLET_ADDRESS` must be a wallet-owned P2PK address; it is used as the recipient/fee-payer and the destination for the issued reserve NFT. If omitted, the first address from `/wallet/addresses` is used.
+- `RECIPIENT_PUBKEY` can be omitted; it is derived from `WALLET_ADDRESS` via `/utils/addressToRaw`.
+- `basis_cli` local-signing currently derives P2PK addresses with mainnet prefix; run against a mainnet-equivalent node wallet so the derived recipient address is present in the wallet.
+
+### Flow
+
+1. **Build** `basis_cli` if missing.
+2. **Import** the issuer secret into a temporary CLI config.
+3. **Issue** a fresh reserve NFT to `WALLET_ADDRESS` unless `RESERVE_NFT_ID` is provided.
+4. **Create** a 0.3 ERG reserve via `POST /reserves/create`, convert the payload to `/wallet/payment/send`, and submit it.
+5. **Create** a 0.2 ERG note via `basis_cli note create --recipient <pubkey> --amount <amt>`.
+6. **Wait** for `POST /notes/state` to report `status = confirmed` and `redeemable = true`.
+7. **Fund** a token-free fee box via `/wallet/payment/send`.
+8. **Redeem** 0.1 ERG with `basis_cli transaction generate-redemption ... --local-sign`.
+9. **Complete** tracker state via `POST /redeem/complete` with `new_already_redeemed = 100000000`.
+10. **Redeem** the second 0.1 ERG the same way.
+11. **Complete** tracker state via `POST /redeem/complete` with `new_already_redeemed = 200000000`.
+12. **Verify** `POST /notes/state` returns `redeemable = false` and `redeemable_amount = 0`.
+
+### Setup Details
+
+- Network: mainnet
+- Ergo node: `http://127.0.0.1:9053` (local mainnet node)
+- Tracker server: `http://127.0.0.1:3048`
+- Issuer / recipient: `02725e8878d5198ca7f5853dddf35560ddab05ab0a26adae7e664b84162c9962e5` (address `9fPRvaMYzBPotu6NGvZn4A6N4J2jDmRGs4Zwc9UhFFeSXgRJ8pS`)
+- Fee payer / tracker box owner: `03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea` (address `9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73`)
+- Tracker NFT: `b159ad5c9062ec4c3f83cc478f1580f8312fd13439868551cc5905bc3c0ef42f`
+
+### Transactions
+
+| # | Tx ID | Height | Inputs | Outputs |
+|---|-------|--------|--------|---------|
+| Reserve NFT issuance | `91f9da52a510707da67f6839de43ca999f9a222f9c657f35f1fc3cfcc2c07c14` | 1842385 | Wallet input | NFT box `d87a6f5a314c62a3b83b2d5c4bd8ad36f35dab1f5ab0611bddc364dce1e8559b` holding token `44a901792054559ea73e1509634ec159564b606047cec3e62f280051c8cba6af` |
+| Reserve creation | `f759077c0d951b3f9088c7785b2fa284699c0a16d1d016e59a7b909f500991ff` | 1842387 | Wallet inputs | Reserve box `414d8e83045066f8615cc7b6c4109d32c48466e3da4930fd5fd30a06623e6e85` (0.3 ERG) |
+| Tracker update | `3c53d0c55282f4f8ddba32a3f2b6e4a3dfd52b10f390f6125f5eefc12fd6e5a6` | 1842408 | Old tracker box | New tracker box `0be254c7a3f39afa5eef85a8adff503359582c657b735d570c5dbf442170186b` (R5 digest `2d149875…`) |
+| First redemption | `73c89a30dca3a1a85fc5eed25b8f170cf74841926fbf8f6e8a4230a7fa93cf31` | 1842764 | Reserve `414d8e83…` (0.3 ERG), fee box `ccdc74f8…` (0.049 ERG), data input tracker `0be254c7…` | New reserve `9034e962…` (0.2 ERG), recipient payout `9a6987b7…` (0.1 ERG), fee `4559ca71…` (0.001 ERG), change `7ff05e12…` (0.048 ERG) |
+| Second redemption | `816349dfea63e7d39434d55eef04fc74ff0dabbfed5628fd013283bfa8217307` | 1842767 | Reserve `9034e962…` (0.2 ERG), fee/change box `7ff05e12…` (0.048 ERG), data input tracker `0be254c7…` | New reserve `aac7c1f2…` (0.1 ERG), recipient payout `6937708c…` (0.1 ERG), fee `aaeb520b…` (0.001 ERG), change `314161b4…` (0.047 ERG) |
+
+### Result
+
+| Field | Value |
+|-------|-------|
+| Reserve NFT | `44a901792054559ea73e1509634ec159564b606047cec3e62f280051c8cba6af` |
+| Reserve creation tx | `f759077c0d951b3f9088c7785b2fa284699c0a16d1d016e59a7b909f500991ff` |
+| Reserve box | `414d8e83045066f8615cc7b6c4109d32c48466e3da4930fd5fd30a06623e6e85` |
+| First redemption tx | `73c89a30dca3a1a85fc5eed25b8f170cf74841926fbf8f6e8a4230a7fa93cf31` |
+| Second redemption tx | `816349dfea63e7d39434d55eef04fc74ff0dabbfed5628fd013283bfa8217307` |
+
+Both redemptions confirmed on mainnet. The reserve collateral decreased from 0.3 ERG → 0.2 ERG → 0.1 ERG, and the note was fully redeemed.
+
+### Lessons Learned
+
+1. **Tracker box is now wallet-owned and must be protected from fee selection.** The tracker address `9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73` holds the tracker NFT. The integration script explicitly excludes any wallet box containing the tracker NFT when selecting fee/issuance inputs, so the tracker box is never accidentally spent.
+2. **Recipient and fee payer can be different wallet addresses.** The first redemption's recipient payout went to `9fPRvaMYzBPotu6NGvZn4A6N4J2jDmRGs4Zwc9UhFFeSXgRJ8pS`, while the fee input and change output used the tracker address `9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73`. `basis_cli --local-sign` fetched both secrets from the same node wallet.
+3. **Automating the wait for tracker confirmation is the slowest part.** The background updater runs every 10 seconds in the current server configuration, so the script polls `POST /notes/state` until the note is confirmed.
+4. **A token-free fee box must be created before the first redemption.** The reserve-creation transaction consumes the wallet's token-free boxes; the script creates a fresh 0.05 ERG fee box before the first redemption, and the first redemption's change output funds the second.
+5. **The tracker state must be advanced after each on-chain redemption.** `POST /redeem/complete` carries the cumulative `new_already_redeemed` so the next redemption's reserve lookup/insert proofs match the on-chain reserve R5.
+6. **Local-signing depends on the node wallet containing the recipient and fee-payer keys.** The CLI derives the mainnet P2PK address from the recipient public key and fetches the secret from the node wallet; ensure the wallet was created on the same network.
 
 ---
 

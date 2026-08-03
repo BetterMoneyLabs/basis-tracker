@@ -2,6 +2,7 @@ use crate::account::AccountManager;
 use crate::api::{
     CompleteRedemptionRequest, CreateNoteRequest, KeyStatusResponse, RedeemRequest, TrackerClient,
 };
+use crate::commands::transaction::execute_local_redemption;
 use crate::demo_keys;
 use anyhow::Result;
 use clap::Subcommand;
@@ -75,6 +76,9 @@ pub enum NoteCommands {
         /// Amount to redeem in nanoERG
         #[arg(long)]
         amount: u64,
+        /// Use server-side signing and broadcasting instead of local signing (default is local).
+        #[arg(long, default_value = "false")]
+        server_sign: bool,
     },
 }
 
@@ -166,14 +170,19 @@ pub async fn handle_note_command(
                 println!("Note not found");
             }
         }
-        NoteCommands::Redeem { issuer, amount } => {
+        NoteCommands::Redeem {
+            issuer,
+            amount,
+            server_sign,
+        } => {
             let current_account = account_manager
                 .get_current()
                 .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
 
             let recipient_pubkey = current_account.get_pubkey_hex();
+            let recipient_secret = current_account.get_private_key_hex();
 
-            // First, get the note to retrieve its original timestamp
+            // First, get the note to retrieve its original timestamp and validate debt
             let note = client
                 .get_note(&issuer, &recipient_pubkey)
                 .await?
@@ -194,68 +203,66 @@ pub async fn handle_note_command(
                 ));
             }
 
-            // Use the note's original timestamp for redemption
-            let timestamp = note.timestamp;
+            let new_already_redeemed = note.amount_redeemed.saturating_add(amount);
 
-            // Generate issuer signature for redemption
-            // Message format: key || totalDebt || timestamp (48 bytes)
-            // where key = blake2b256(ownerKey || receiverKey)
-            let issuer_pubkey_bytes = hex::decode(&issuer)
-                .map_err(|e| anyhow::anyhow!("Invalid issuer pubkey hex: {}", e))?;
-            let recipient_pubkey_bytes = hex::decode(&recipient_pubkey)
-                .map_err(|e| anyhow::anyhow!("Invalid recipient pubkey hex: {}", e))?;
+            if server_sign {
+                // Server-side signing path (legacy).
+                let timestamp = note.timestamp;
 
-            // Compute key hash
-            use blake2::{Blake2b, Digest};
-            use generic_array::typenum::U32;
-            let mut key_hash_input = Vec::new();
-            key_hash_input.extend_from_slice(&issuer_pubkey_bytes);
-            key_hash_input.extend_from_slice(&recipient_pubkey_bytes);
-            let key_hash = Blake2b::<U32>::new()
-                .chain_update(&key_hash_input)
-                .finalize()
-                .to_vec();
+                let redeem_request = RedeemRequest {
+                    issuer_pubkey: issuer.clone(),
+                    recipient_pubkey: recipient_pubkey.clone(),
+                    amount,
+                    timestamp,
+                    reserve_box_id: String::new(), // Will be looked up by server
+                    tracker_box_id: String::new(), // Will be fetched by server
+                    tracker_nft_id: String::new(), // Will be fetched by server
+                    current_height: 0,             // Will be fetched by server
+                    recipient_address: String::new(), // Will be derived from recipient_pubkey by server
+                    change_address: String::new(), // Will be derived from tracker pubkey by server
+                    issuer_signature: note.signature.clone(),
+                    emergency: false,
+                    tracker_signature: None, // Server will generate tracker signature
+                };
 
-            // Build signing message: key || totalDebt || timestamp (48 bytes)
-            let mut message = key_hash;
-            message.extend_from_slice(&note.amount_collected.to_be_bytes());
-            message.extend_from_slice(&timestamp.to_be_bytes());
+                let response = client.initiate_redemption(redeem_request).await?;
+                println!("✅ Redemption initiated");
+                println!("  Redemption ID: {}", response.redemption_id);
+                println!("  Amount: {} nanoERG", response.amount);
+                println!("  Proof available: {}", response.proof_available);
 
-            // Sign the message with issuer's private key
-            let issuer_signature = current_account.sign_message(&message)?;
+                // Complete redemption with the proper payload including redemption_id.
+                let complete_request = CompleteRedemptionRequest {
+                    redemption_id: response.redemption_id,
+                    issuer_pubkey: issuer,
+                    recipient_pubkey,
+                    redeemed_amount: amount,
+                    new_already_redeemed: Some(new_already_redeemed),
+                };
 
-            // Initiate redemption
-            let redeem_request = RedeemRequest {
-                issuer_pubkey: issuer.clone(),
-                recipient_pubkey: recipient_pubkey.clone(),
-                amount,
-                timestamp,
-                reserve_box_id: String::new(), // Will be looked up by server
-                tracker_box_id: String::new(), // Will be fetched by server
-                tracker_nft_id: String::new(), // Will be fetched by server
-                current_height: 0,             // Will be fetched by server
-                recipient_address: String::new(), // Will be derived from recipient_pubkey by server
-                change_address: String::new(), // Will be derived from tracker pubkey by server
-                issuer_signature: hex::encode(&issuer_signature),
-                emergency: false,
-                tracker_signature: None, // Server will generate tracker signature
-            };
+                client.complete_redemption(complete_request).await?;
+                println!("✅ Redemption completed");
+            } else {
+                // Local signing path (default): the CLI wallet signs the reserve and fee inputs
+                // and broadcasts directly to the Ergo node; the server only provides the tracker
+                // Schnorr signature. `execute_local_redemption` also syncs tracker state after
+                // broadcast so the reserve tree is ready for the next redemption.
+                let tx_id = execute_local_redemption(
+                    client,
+                    account_manager,
+                    &issuer,
+                    &recipient_pubkey,
+                    amount,
+                    false, // emergency
+                    None,  // tracker_box_id
+                    None,  // change_address
+                    Some(recipient_secret),
+                    None, // fee_secret
+                )
+                .await?;
 
-            let response = client.initiate_redemption(redeem_request).await?;
-            println!("✅ Redemption initiated");
-            println!("  Redemption ID: {}", response.redemption_id);
-            println!("  Amount: {} nanoERG", response.amount);
-            println!("  Proof available: {}", response.proof_available);
-
-            // Complete redemption
-            let complete_request = CompleteRedemptionRequest {
-                issuer_pubkey: issuer,
-                recipient_pubkey,
-                redeemed_amount: amount,
-            };
-
-            client.complete_redemption(complete_request).await?;
-            println!("✅ Redemption completed");
+                println!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
+            }
         }
     }
 

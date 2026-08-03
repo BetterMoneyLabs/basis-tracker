@@ -89,9 +89,13 @@ pub struct RedeemResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompleteRedemptionRequest {
+    pub redemption_id: String,
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub redeemed_amount: u64,
+    /// Cumulative reserve-tree already_redeemed after this redemption.
+    #[serde(default)]
+    pub new_already_redeemed: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -481,24 +481,25 @@ async fn build_redemption_inner(
         }
     };
 
-    // Tracker box id (data input).
+    // Tracker box id (data input). Prefer the live shared state over the static
+    // tracker storage, which can contain spent boxes.
     let tracker_box_id = match &payload.tracker_box_id {
         Some(id) => id.clone(),
-        None => match state.tracker_storage.get_latest_tracker_box_id() {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                return api_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "no tracker box in storage",
-                )
+        None => {
+            let shared = state.shared_tracker_state.lock().await;
+            match shared
+                .get_tracker_box_id()
+                .or_else(|| shared.get_confirmed().box_id)
+            {
+                Some(id) => id,
+                None => {
+                    return api_err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "no tracker box in live state",
+                    )
+                }
             }
-            Err(e) => {
-                return api_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("tracker box id: {e:?}"),
-                )
-            }
-        },
+        }
     };
 
     let tracker_nft_id = match &state.config.ergo.tracker_nft_id {
@@ -946,9 +947,7 @@ async fn build_redemption_inner(
     let _state_context = ErgoStateContext::new(
         pre_header.clone(),
         headers_array.clone(),
-        Parameters {
-            parameters_table: HashMap::new(),
-        },
+        Parameters::default(),
     );
 
     // Sign the fee input(s) locally with the tracker secret.

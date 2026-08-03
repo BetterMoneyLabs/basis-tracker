@@ -196,7 +196,7 @@ The tracker NFT token is preserved in the new tracker box output using the `asse
 
 ```json
 {
-  "tokenId": "000b0695159e5f5c32c606385bd5f276d80133149c84c8b1325366381bf6f17f",
+  "tokenId": "b159ad5c9062ec4c3f83cc478f1580f8312fd13439868551cc5905bc3c0ef42f",
   "amount": 1
 }
 ```

@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.dependencies]
-serde_json = "1.0.108"
+serde_json = { version = "1.0.108", features = ["preserve_order"] }
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1.37"
@@ -16,3 +16,12 @@ blake2 = "0.10"
 ergo-lib = "0.28.0"
 thiserror = "1.0"
 reqwest = "0.11"
+
+[patch.crates-io]
+ergo-lib = { path = "/home/kushti/ergo/sigma-rust/ergo-lib" }
+ergotree-ir = { path = "/home/kushti/ergo/sigma-rust/ergotree-ir" }
+ergotree-interpreter = { path = "/home/kushti/ergo/sigma-rust/ergotree-interpreter" }
+# Vendored with JVM-compatible insert semantics (treats Operation::Insert as
+# insert-or-update) so the Basis reserve contract can be reduced locally for
+# sequential redemptions.
+ergo_avltree_rust = { path = "temp/vendors/ergo_avltree_rust" }

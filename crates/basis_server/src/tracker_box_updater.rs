@@ -227,7 +227,7 @@ pub struct ErgoBoxApi {
 }
 
 /// Asset in an Ergo box
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetApi {
     pub token_id: String,
@@ -416,6 +416,7 @@ impl TrackerBoxUpdater {
             }
 
             match Self::submit_tracker_update(
+                &tracker_nft_id,
                 &config,
                 &tracker_box,
                 &tracker_pubkey,
@@ -598,25 +599,55 @@ impl TrackerBoxUpdater {
     }
 
     /// Select wallet boxes covering the required fee, excluding the tracker box itself.
+    /// Prefers boxes without tokens; falls back to token-bearing boxes and preserves their tokens
+    /// in the change output.
     fn select_fee_inputs(
         wallet_boxes: &[ErgoBoxApi],
         required: u64,
         tracker_box_id: &str,
     ) -> (Vec<String>, u64) {
-        let mut candidates: Vec<&ErgoBoxApi> = wallet_boxes
+        let candidates: Vec<&ErgoBoxApi> = wallet_boxes
             .iter()
-            .filter(|b| b.box_id != tracker_box_id && b.assets.is_empty())
+            .filter(|b| b.box_id != tracker_box_id)
             .collect();
 
-        candidates.sort_by_key(|b| b.value);
+        // Try token-free boxes first.
+        let mut token_free: Vec<&ErgoBoxApi> = candidates
+            .iter()
+            .filter(|b| b.assets.is_empty())
+            .copied()
+            .collect();
+        token_free.sort_by_key(|b| b.value);
 
-        if let Some(box_) = candidates.iter().find(|b| b.value >= required) {
+        if let Some(box_) = token_free.iter().find(|b| b.value >= required) {
             return (vec![box_.box_id.clone()], box_.value);
         }
 
         let mut selected = Vec::new();
         let mut total = 0u64;
-        for box_ in candidates {
+        for box_ in token_free {
+            total += box_.value;
+            selected.push(box_.box_id.clone());
+            if total >= required {
+                return (selected, total);
+            }
+        }
+
+        // Fall back to token-bearing boxes if necessary.
+        let mut token_boxes: Vec<&ErgoBoxApi> = candidates
+            .iter()
+            .filter(|b| !b.assets.is_empty())
+            .copied()
+            .collect();
+        token_boxes.sort_by_key(|b| b.value);
+
+        if let Some(box_) = token_boxes.iter().find(|b| b.value >= required) {
+            return (vec![box_.box_id.clone()], box_.value);
+        }
+
+        let mut selected = Vec::new();
+        let mut total = 0u64;
+        for box_ in token_boxes {
             total += box_.value;
             selected.push(box_.box_id.clone());
             if total >= required {
@@ -708,6 +739,8 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         unsigned_tx: serde_json::Value,
     ) -> Result<serde_json::Value, TrackerBoxUpdaterError> {
+        info!("Signing unsigned transaction: {}", unsigned_tx);
+
         let client = reqwest::Client::new();
         let url = format!(
             "{}/wallet/transaction/sign",
@@ -724,18 +757,21 @@ impl TrackerBoxUpdater {
             .await
             .map_err(|e| TrackerBoxUpdaterError::SigningFailed(e.to_string()))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        info!(
+            "/wallet/transaction/sign response: status={}, body={}",
+            status, body_text
+        );
+
+        if !status.is_success() {
             return Err(TrackerBoxUpdaterError::SigningFailed(format!(
                 "HTTP {}: {}",
-                status, body
+                status, body_text
             )));
         }
 
-        response
-            .json()
-            .await
+        serde_json::from_str(&body_text)
             .map_err(|e| TrackerBoxUpdaterError::SigningFailed(format!("JSON parse error: {}", e)))
     }
 
@@ -744,6 +780,8 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         signed_tx: &serde_json::Value,
     ) -> Result<String, TrackerBoxUpdaterError> {
+        info!("Broadcasting signed transaction: {}", signed_tx);
+
         let client = reqwest::Client::new();
         let url = format!("{}/transactions", config.node_url.trim_end_matches('/'));
 
@@ -757,16 +795,21 @@ impl TrackerBoxUpdater {
             .await
             .map_err(|e| TrackerBoxUpdaterError::BroadcastFailed(e.to_string()))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        info!(
+            "/transactions broadcast response: status={}, body={}",
+            status, body_text
+        );
+
+        if !status.is_success() {
             return Err(TrackerBoxUpdaterError::BroadcastFailed(format!(
                 "HTTP {}: {}",
-                status, body
+                status, body_text
             )));
         }
 
-        let body: serde_json::Value = response.json().await.map_err(|e| {
+        let body: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
             TrackerBoxUpdaterError::BroadcastFailed(format!("JSON parse error: {}", e))
         })?;
 
@@ -786,6 +829,7 @@ impl TrackerBoxUpdater {
 
     /// Submit a tracker box update transaction via /wallet/transaction/sign
     async fn submit_tracker_update(
+        tracker_nft_id: &str,
         config: &TrackerBoxUpdateConfig,
         tracker_box: &ErgoBoxApi,
         tracker_pubkey: &[u8; 33],
@@ -843,12 +887,46 @@ impl TrackerBoxUpdater {
         }
 
         let change_amount = fee_input_total.saturating_sub(config.fee);
+
+        // Preserve any tokens from the fee inputs in the change output so they are not burned.
+        let change_assets: Vec<serde_json::Value> = fee_input_ids
+            .iter()
+            .flat_map(|id| {
+                wallet_boxes
+                    .iter()
+                    .find(|b| &b.box_id == id)
+                    .map(|b| {
+                        b.assets.iter().map(|a| {
+                            serde_json::json!({
+                                "tokenId": a.token_id,
+                                "amount": a.amount
+                            })
+                        })
+                    })
+                    .into_iter()
+                    .flatten()
+            })
+            .collect();
+
+        // Ensure the tracker NFT is always the first token in the output tracker box,
+        // followed by any other tokens preserved from the input tracker box.
+        let mut output_assets = Vec::new();
+        let mut other_assets = Vec::new();
+        for asset in &tracker_box.assets {
+            if asset.token_id == tracker_nft_id {
+                output_assets.push(asset.clone());
+            } else {
+                other_assets.push(asset.clone());
+            }
+        }
+        output_assets.extend(other_assets);
+
         let mut outputs = vec![
             serde_json::json!({
                 "value": tracker_box.value,
                 "ergoTree": tracker_box.ergo_tree,
                 "creationHeight": current_height,
-                "assets": tracker_box.assets,
+                "assets": output_assets,
                 "additionalRegisters": output_registers
             }),
             serde_json::json!({
@@ -865,7 +943,7 @@ impl TrackerBoxUpdater {
                 "value": change_amount,
                 "ergoTree": change_address_to_ergo_tree(&change_address)?,
                 "creationHeight": current_height,
-                "assets": [],
+                "assets": change_assets,
                 "additionalRegisters": {}
             }));
         }

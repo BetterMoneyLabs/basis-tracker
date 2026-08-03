@@ -15,10 +15,11 @@ use thiserror::Error;
 use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
 use ergo_lib::chain::transaction::{Input, Transaction};
 use ergo_lib::ergo_chain_types::{Header, PreHeader};
-use ergo_lib::ergotree_interpreter::eval::context::{Context, TxIoVec};
 use ergo_lib::ergotree_interpreter::sigma_protocol::private_input::PrivateInput;
 use ergo_lib::ergotree_interpreter::sigma_protocol::prover::hint::HintsBag;
 use ergo_lib::ergotree_interpreter::sigma_protocol::prover::{ProofBytes, Prover, ProverResult};
+use ergo_lib::ergotree_ir::chain::context::{Context, ContextExtensionProvider, TxIoVec};
+use ergo_lib::ergotree_ir::chain::context_extension::ContextExtension;
 use ergo_lib::ergotree_ir::chain::ergo_box::ErgoBox;
 use ergo_lib::wallet::secret_key::SecretKey;
 
@@ -199,6 +200,18 @@ fn build_inputs(
     Ok(inputs)
 }
 
+/// No-op `ContextExtensionProvider`: the Basis reserve contract never reads other inputs'
+/// context extensions (`getVarFromInput`), so returning `None` for every index is safe.
+struct NoopExtensionProvider;
+
+impl ContextExtensionProvider for NoopExtensionProvider {
+    fn context_extension(&self, _input_index: usize) -> Option<&ContextExtension> {
+        None
+    }
+}
+
+static NOOP_EXTENSION_PROVIDER: NoopExtensionProvider = NoopExtensionProvider;
+
 #[allow(clippy::too_many_arguments)]
 fn build_context<'ctx>(
     _input_idx: usize,
@@ -208,7 +221,7 @@ fn build_context<'ctx>(
     data_boxes: &'ctx [ErgoBox],
     pre_header: &PreHeader,
     headers: &[Header; 10],
-    extension: &ergo_lib::ergotree_interpreter::sigma_protocol::prover::ContextExtension,
+    extension: &'ctx ContextExtension,
 ) -> Result<Context<'ctx>, SigningError> {
     let inputs: TxIoVec<&'ctx ErgoBox> = TxIoVec::try_from(input_boxes.iter().collect::<Vec<_>>())
         .map_err(|e| SigningError::BoundedVec(format!("{:?}", e)))?;
@@ -228,7 +241,9 @@ fn build_context<'ctx>(
         inputs,
         pre_header: pre_header.clone(),
         headers: headers.clone(),
-        extension: extension.clone(),
+        extension,
+        tree_version: Default::default(),
+        extension_provider: &NOOP_EXTENSION_PROVIDER,
     })
 }
 

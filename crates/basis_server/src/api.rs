@@ -1673,7 +1673,6 @@ pub async fn initiate_redemption(
     // Fetch blockchain data from Ergo node
     let (tracker_box_id, tracker_nft_id, current_height) = {
         // Get tracker_storage reference first (before any awaits)
-        let tracker_storage_ref = state.tracker_storage.clone();
         let tracker_nft_id_config = state.config.ergo.tracker_nft_id.clone();
         let ergo_scanner_ref = state.ergo_scanner.clone();
 
@@ -1694,29 +1693,27 @@ pub async fn initiate_redemption(
         };
         drop(scanner_guard); // Release lock early
 
-        // Get tracker box ID from tracker_storage (required for redemption)
-        let tracker_box_id = match tracker_storage_ref.get_latest_tracker_box_id() {
-            Ok(Some(box_id)) => {
+        // Get tracker box ID from the live shared tracker state.  The background
+        // updater refreshes this from the node every cycle, so it is always
+        // current; fall back to the confirmed snapshot if the primary id is empty.
+        let tracker_box_id = {
+            let shared = state.shared_tracker_state.lock().await;
+            shared
+                .get_tracker_box_id()
+                .or_else(|| shared.get_confirmed().box_id)
+        };
+        let tracker_box_id = match tracker_box_id {
+            Some(box_id) => {
                 tracing::debug!("Found latest tracker box: {}", box_id);
                 box_id
             }
-            Ok(None) => {
-                tracing::error!("No tracker boxes found in storage - cannot initiate redemption");
+            None => {
+                tracing::error!("No tracker box found in live state - cannot initiate redemption");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(crate::models::error_response(
-                        "No tracker boxes found in storage".to_string(),
+                        "No tracker boxes found".to_string(),
                     )),
-                );
-            }
-            Err(e) => {
-                tracing::error!("Failed to get tracker box ID from storage: {:?}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(format!(
-                        "Failed to get tracker box ID: {:?}",
-                        e
-                    ))),
                 );
             }
         };
@@ -3326,59 +3323,50 @@ pub async fn get_latest_tracker_box_id(
 ) {
     tracing::debug!("Getting latest tracker box ID");
 
-    // Get all tracker boxes from the tracker storage
-    let tracker_boxes = match state.tracker_storage.get_all_tracker_boxes() {
-        Ok(boxes) => boxes,
-        Err(e) => {
-            tracing::error!("Failed to retrieve tracker boxes: {:?}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Failed to retrieve tracker boxes".to_string(),
-                )),
+    // Use the live shared tracker state maintained by the background updater.
+    // The updater queries the node every cycle and records the confirmed
+    // on-chain tracker box, so this is always current.  Falling back to the
+    // confirmed snapshot handles the brief window before the first updater run.
+    let shared = state.shared_tracker_state.lock().await;
+    let tracker_box_id = shared
+        .get_tracker_box_id()
+        .or_else(|| shared.get_confirmed().box_id);
+    drop(shared);
+
+    match tracker_box_id {
+        Some(tracker_box_id) => {
+            let current_height = state
+                .ergo_scanner
+                .lock()
+                .await
+                .get_current_height()
+                .await
+                .unwrap_or(0);
+            let response = crate::models::TrackerBoxIdResponse {
+                tracker_box_id,
+                timestamp: current_height,
+                height: current_height,
+            };
+
+            tracing::info!(
+                "Successfully retrieved latest tracker box ID: {}",
+                &response.tracker_box_id[..16] // Log first 16 chars for privacy
             );
+
+            (
+                StatusCode::OK,
+                Json(crate::models::success_response(response)),
+            )
         }
-    };
-
-    if tracker_boxes.is_empty() {
-        tracing::info!("No tracker boxes found");
-        return (
-            StatusCode::NOT_FOUND,
-            Json(crate::models::error_response(
-                "No tracker boxes found".to_string(),
-            )),
-        );
-    }
-
-    // Find the tracker box with the highest creation height (most recent)
-    let latest_tracker_box = tracker_boxes
-        .into_iter()
-        .max_by_key(|box_info| box_info.creation_height);
-
-    if let Some(tracker_box) = latest_tracker_box {
-        let response = crate::models::TrackerBoxIdResponse {
-            tracker_box_id: tracker_box.box_id,
-            timestamp: tracker_box.last_verified_height, // Using last_verified_height as timestamp
-            height: tracker_box.last_verified_height,
-        };
-
-        tracing::info!(
-            "Successfully retrieved latest tracker box ID: {}",
-            &response.tracker_box_id[..16] // Log first 16 chars for privacy
-        );
-
-        (
-            StatusCode::OK,
-            Json(crate::models::success_response(response)),
-        )
-    } else {
-        tracing::info!("No tracker boxes found");
-        (
-            StatusCode::NOT_FOUND,
-            Json(crate::models::error_response(
-                "No tracker boxes found".to_string(),
-            )),
-        )
+        None => {
+            tracing::info!("No tracker box found in live state");
+            (
+                StatusCode::NOT_FOUND,
+                Json(crate::models::error_response(
+                    "No tracker boxes found".to_string(),
+                )),
+            )
+        }
     }
 }
 

@@ -206,6 +206,43 @@ mod tests {
             "Verification should fail with tampered message"
         );
     }
+
+    #[test]
+    fn verify_current_redemption_signatures() {
+        let issuer: [u8; 33] =
+            hex::decode("0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let recipient: [u8; 33] =
+            hex::decode("03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let total_debt: u64 = 200_000_000;
+        let timestamp: u64 = 1785019966273;
+        let message = crate::types::signing_message(&issuer, &recipient, total_debt, timestamp);
+
+        let issuer_sig_hex = "03891ffb055e3acc60dbb3307708eac61024a759b6e0f2b13ada817d587d14db651414b4d138a227fdff961b27ae19e729075a27d8793e01b7c56d266d0d164eec";
+        let tracker_sig_hex = "022d33ce9fb101646a4acf50d3ae4b493cc4fde22dd304ad1584094ae7fd7c4ca67873708c0403315a3e488cfe2ec55b0bc2d9e4b03f6431919dfc839967ab8417";
+
+        let issuer_sig: [u8; 65] = hex::decode(issuer_sig_hex).unwrap().try_into().unwrap();
+        let tracker_sig: [u8; 65] = hex::decode(tracker_sig_hex).unwrap().try_into().unwrap();
+
+        let tracker: [u8; 33] =
+            hex::decode("024e564477ff457c601c01ad1cc31903f8b27b7d5e515bd03138891d8152d787b2")
+                .unwrap()
+                .try_into()
+                .unwrap();
+
+        let verifier = SchnorrVerifier;
+        verifier
+            .verify_signature(&issuer_sig, &message, &issuer)
+            .expect("issuer signature should verify");
+        verifier
+            .verify_signature(&tracker_sig, &message, &tracker)
+            .expect("tracker signature should verify");
+    }
 }
 
 /// Generate a new keypair for testing and development

@@ -44,6 +44,8 @@ export PATH="$PATH:/home/kushti/chaincash/basis-tracker/target/debug"
 | Recipient | Bob | `9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73` | N/A (receives only) |
 | Tracker | tracker | `9f7ZXamnfaDZL7EWLKLuBZgWMuHCusQYK6yow2d7p2eES9oRRRe` | From `participants.csv` |
 
+> **Production tracker update:** the current deployment in `config/basis.toml` has switched the tracker to a wallet-owned address at `9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73` with tracker NFT `b159ad5c9062ec4c3f83cc478f1580f8312fd13439868551cc5905bc3c0ef42f`. The table above reflects the historical demo `participants.csv` layout; update addresses and the tracker NFT in your own `config/basis.toml` to match your deployment.
+
 **Bob does NOT need a secret key** for this tutorial because redemption generates an unsigned transaction that Bob's Ergo wallet signs.
 
 ---

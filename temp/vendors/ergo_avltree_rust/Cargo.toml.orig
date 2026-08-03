@@ -1,0 +1,24 @@
+[package]
+name = "ergo_avltree_rust"
+version = "0.1.1"
+authors = ["Konstantin Knizhnik <knizhnik@garret.ru>", "Ross Weir"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Implementation of cryptographically authenticated dictionary based on AVL tree"
+documentation = "https://eprint.iacr.org/2016/994"
+repository = "https://github.com/ergoplatform/ergo_avltree_rust.git"
+readme = "README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bytes = { version = "1.0.1", default-features = false }
+rand = { version = "0.8.3", default-features = false }
+blake2 = { version = "0.10.6", default-features = false }
+anyhow = { version = "1.0", default-features = false }
+byteorder = { version = "1.4.3", default-features = false }
+base16 = { version = "0.2.1", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.9.8", default-features = false }
+
+[dev-dependencies]
+rand = { version = "0.8.3", features = ["std"] }

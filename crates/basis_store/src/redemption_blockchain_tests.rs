@@ -196,6 +196,7 @@ fn deterministic_keypair(seed: &str) -> ([u8; 32], PubKey) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transaction_builder::TxContext;
 
     /// Test 1: First redemption with valid signatures succeeds
     ///
@@ -902,5 +903,277 @@ mod tests {
         );
 
         println!("✅ Both parties sign same message test passed\n");
+    }
+
+    /// Test 11: Two sequential 0.1 ERG redemptions against a 0.3 ERG reserve with NFT.
+    ///
+    /// Scenario: Alice (issuer) creates a 0.2 ERG IOU note to Bob. A reserve is funded
+    /// with 0.3 ERG collateral and issued a reserve NFT. Bob redeems 0.1 ERG locally
+    /// (first redemption), then redeems another 0.1 ERG (second redemption). After both
+    /// redemptions the note is fully redeemed and the reserve ends with 0.1 ERG.
+    #[test]
+    fn test_two_sequential_redemptions_0_3_erg_reserve_with_nft() {
+        println!("=== Test 11: Two Sequential 0.1 ERG Redemptions Against 0.3 ERG Reserve ===");
+
+        let (alice_secret, alice_pubkey) = deterministic_keypair("alice_seed");
+        let (_, bob_pubkey) = deterministic_keypair("bob_seed");
+        let (tracker_secret, tracker_pubkey) = deterministic_keypair("tracker_seed");
+
+        let tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        let total_debt = 200_000_000u64; // 0.2 ERG
+        let payment_timestamp = 1_000_000_000u64;
+
+        let note =
+            IouNote::create_and_sign(bob_pubkey, total_debt, payment_timestamp, &alice_secret)
+                .expect("Failed to create note");
+        redemption_manager
+            .tracker
+            .add_note(&alice_pubkey, &note)
+            .expect("Failed to add note");
+
+        // Reserve NFT ID (32 bytes = 64 hex chars) simulating an issued reserve NFT.
+        let reserve_nft_id = "018d29f4da1ea43f9d752b927200c54d9230637cc677c8a66d477f1684bd3098";
+
+        let reserve_box_value = 300_000_000u64; // 0.3 ERG
+        let redeem_amount = 100_000_000u64; // 0.1 ERG
+
+        // -------------------------------------------------------------------------
+        // First redemption: 0.3 ERG reserve -> 0.2 ERG reserve + 0.1 ERG payout.
+        // -------------------------------------------------------------------------
+        let first_message =
+            signing_message(&alice_pubkey, &bob_pubkey, total_debt, payment_timestamp);
+        let first_issuer_sig =
+            generate_redemption_signature(&alice_secret, &alice_pubkey, &first_message);
+        let first_tracker_sig =
+            generate_redemption_signature(&tracker_secret, &tracker_pubkey, &first_message);
+
+        let blockchain = MockBlockchain::new(1000, 1000);
+        assert_eq!(
+            MockContractValidator::validate_redemption(
+                &alice_pubkey,
+                &bob_pubkey,
+                total_debt,
+                payment_timestamp,
+                &first_issuer_sig,
+                &first_tracker_sig,
+                &tracker_pubkey,
+                redeem_amount,
+                0, // First redemption: already_redeemed = 0
+                &blockchain,
+            ),
+            ContractValidationResult::Valid,
+            "First redemption contract validation should pass"
+        );
+
+        let first_request = RedemptionRequest {
+            issuer_pubkey: hex::encode(alice_pubkey),
+            recipient_pubkey: hex::encode(bob_pubkey),
+            amount: redeem_amount,
+            timestamp: payment_timestamp,
+            reserve_box_id: "test_reserve_0_3_erg".to_string(),
+            tracker_box_id: "test_tracker_box_1".to_string(),
+            tracker_nft_id: reserve_nft_id.to_string(),
+            current_height: 1000,
+            recipient_address: "9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73".to_string(),
+            change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
+            issuer_signature: hex::encode(&first_issuer_sig),
+            emergency: false,
+            tracker_signature: Some(hex::encode(&first_tracker_sig)),
+            reserve_box_value,
+            fee_input_box_ids: Vec::new(),
+            fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
+        };
+
+        let first_data = redemption_manager
+            .initiate_redemption(&first_request)
+            .expect("First redemption should initiate");
+        let first_tx_bytes = hex::decode(&first_data.transaction_bytes)
+            .expect("First transaction bytes should be valid hex");
+        let first_tx_json: serde_json::Value = serde_json::from_slice(&first_tx_bytes)
+            .expect("First transaction should be valid JSON");
+
+        let first_outputs = first_tx_json["tx"]["outputs"]
+            .as_array()
+            .expect("First transaction should have outputs");
+        assert_eq!(
+            first_outputs[0]["value"], 200_000_000,
+            "Reserve after first redemption should be 0.2 ERG"
+        );
+        assert_eq!(
+            first_outputs[1]["value"], 100_000_000,
+            "Recipient should receive 0.1 ERG"
+        );
+        let first_assets = first_outputs[0]["assets"]
+            .as_array()
+            .expect("Reserve output should have assets");
+        assert_eq!(
+            first_assets.len(),
+            1,
+            "Reserve output should preserve exactly the NFT"
+        );
+        assert_eq!(first_assets[0]["tokenId"], reserve_nft_id);
+        assert_eq!(first_assets[0]["amount"], 1);
+
+        let first_ext = first_tx_json["tx"]["inputs"][0]["extension"]
+            .as_object()
+            .expect("First reserve input should have extension");
+        assert!(
+            first_ext.contains_key("5"),
+            "First redemption should have insert proof (#5)"
+        );
+        assert!(
+            !first_ext.contains_key("7"),
+            "First redemption should NOT have reserve lookup proof (#7)"
+        );
+
+        redemption_manager
+            .complete_redemption(
+                &alice_pubkey,
+                &bob_pubkey,
+                redeem_amount,
+                Some(redeem_amount),
+            )
+            .expect("First redemption should complete");
+
+        // -------------------------------------------------------------------------
+        // Second redemption: 0.2 ERG reserve -> 0.1 ERG reserve + 0.1 ERG payout.
+        // We use RedemptionManager::build_unsigned_redemption_transaction directly here
+        // because the note's timestamp was refreshed by complete_redemption, which would
+        // invalidate the original note signature if we went through initiate_redemption
+        // again. The tracker already trusts the note after the first redemption.
+        // -------------------------------------------------------------------------
+        let updated_note = redemption_manager
+            .tracker
+            .lookup_note(&alice_pubkey, &bob_pubkey)
+            .expect("Note should exist after first redemption");
+        let second_timestamp = updated_note.timestamp;
+
+        let second_message =
+            signing_message(&alice_pubkey, &bob_pubkey, total_debt, second_timestamp);
+        let second_issuer_sig =
+            generate_redemption_signature(&alice_secret, &alice_pubkey, &second_message);
+        let second_tracker_sig =
+            generate_redemption_signature(&tracker_secret, &tracker_pubkey, &second_message);
+
+        assert_eq!(
+            MockContractValidator::validate_redemption(
+                &alice_pubkey,
+                &bob_pubkey,
+                total_debt,
+                second_timestamp,
+                &second_issuer_sig,
+                &second_tracker_sig,
+                &tracker_pubkey,
+                redeem_amount,
+                redeem_amount, // Already redeemed 0.1 ERG
+                &blockchain,
+            ),
+            ContractValidationResult::Valid,
+            "Second redemption contract validation should pass"
+        );
+
+        let second_request = RedemptionRequest {
+            issuer_pubkey: hex::encode(alice_pubkey),
+            recipient_pubkey: hex::encode(bob_pubkey),
+            amount: redeem_amount,
+            timestamp: second_timestamp,
+            reserve_box_id: "test_reserve_0_2_erg".to_string(),
+            tracker_box_id: "test_tracker_box_1".to_string(),
+            tracker_nft_id: reserve_nft_id.to_string(),
+            current_height: 1000,
+            recipient_address: "9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73".to_string(),
+            change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
+            issuer_signature: hex::encode(&second_issuer_sig),
+            emergency: false,
+            tracker_signature: Some(hex::encode(&second_tracker_sig)),
+            reserve_box_value: reserve_box_value - redeem_amount,
+            fee_input_box_ids: vec!["test_fee_input".to_string()],
+            fee_input_total_value: 1_000_000,
+            reserve_refund_initiation_height: 0,
+        };
+
+        let second_proof = crate::NoteProof {
+            note: updated_note.clone(),
+            avl_proof: vec![],
+            operations: vec![],
+        };
+        let second_data = redemption_manager
+            .build_unsigned_redemption_transaction(
+                &updated_note,
+                &second_proof,
+                &second_request,
+                "test_reserve_0_2_erg",
+                "test_tracker_box_1",
+                reserve_nft_id,
+                &second_issuer_sig,
+                &second_tracker_sig,
+                &TxContext {
+                    current_height: 1000,
+                    fee: 1_000_000,
+                    change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ"
+                        .to_string(),
+                    network_prefix: 0,
+                },
+                reserve_box_value - redeem_amount,
+            )
+            .expect("Second redemption should build");
+        let second_tx_bytes = hex::decode(&second_data.transaction_bytes)
+            .expect("Second transaction bytes should be valid hex");
+        let second_tx_json: serde_json::Value = serde_json::from_slice(&second_tx_bytes)
+            .expect("Second transaction should be valid JSON");
+
+        let second_outputs = second_tx_json["tx"]["outputs"]
+            .as_array()
+            .expect("Second transaction should have outputs");
+        assert_eq!(
+            second_outputs[0]["value"], 100_000_000,
+            "Reserve after second redemption should be 0.1 ERG"
+        );
+        assert_eq!(
+            second_outputs[1]["value"], 100_000_000,
+            "Recipient should receive another 0.1 ERG"
+        );
+        let second_assets = second_outputs[0]["assets"]
+            .as_array()
+            .expect("Reserve output should have assets");
+        assert_eq!(second_assets.len(), 1);
+        assert_eq!(second_assets[0]["tokenId"], reserve_nft_id);
+        assert_eq!(second_assets[0]["amount"], 1);
+
+        let second_ext = second_tx_json["tx"]["inputs"][0]["extension"]
+            .as_object()
+            .expect("Second reserve input should have extension");
+        assert!(
+            second_ext.contains_key("5"),
+            "Second redemption should have insert proof (#5)"
+        );
+        assert!(
+            second_ext.contains_key("7"),
+            "Second redemption should have reserve lookup proof (#7)"
+        );
+
+        redemption_manager
+            .complete_redemption(
+                &alice_pubkey,
+                &bob_pubkey,
+                redeem_amount,
+                Some(2 * redeem_amount),
+            )
+            .expect("Second redemption should complete");
+
+        let final_note = redemption_manager
+            .tracker
+            .lookup_note(&alice_pubkey, &bob_pubkey)
+            .expect("Final note should exist");
+        assert_eq!(
+            final_note.amount_redeemed, total_debt,
+            "Note should be fully redeemed"
+        );
+        assert!(final_note.is_fully_redeemed());
+
+        println!("✅ Two sequential 0.1 ERG redemptions against 0.3 ERG reserve with NFT passed\n");
     }
 }

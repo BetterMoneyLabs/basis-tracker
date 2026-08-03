@@ -229,6 +229,7 @@ The `/transactions` endpoint returns the transaction ID as a plain JSON string.
 | `/transactions` returns a string, not an object | The response is a plain JSON string like `"<txid>"`. Parse it as a string. |
 | Reserve scanner fails to parse R6 | R6 is a `Coll[Byte]` constant (`0e20` + 64 hex chars), not a `u64`. |
 | Tracker update never submits | The updater only runs every 10 minutes and only when the AVL digest changes. Ensure a plain fee box exists. |
+| Tracker box accidentally spent as a fee input | The tracker box now holds the tracker NFT in a wallet-owned address. Exclude it from fee-input selection; it must be preserved as a data input for redemptions. |
 | Redemption fails before confirmation | Notes must be `Confirmed` (tracker R5 digest matches local digest). Check `/tracker/state` and `/notes/state`. |
 
 ## 10. Summary Checklist
