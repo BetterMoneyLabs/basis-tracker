@@ -160,7 +160,45 @@ pub struct ReserveInfo {
     pub has_pending_refund: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct WalletStats {
+    pub total_assets: u64,
+    pub total_liabilities: u64,
+    pub net_position: i64,
+    pub coverage_ratio: Option<f64>,
+    pub asset_note_count: usize,
+    pub liability_note_count: usize,
+}
+
+pub fn compute_wallet_stats(
+    issued_notes: &[NoteInfo],
+    received_notes: &[NoteInfo],
+    reserve_status: Option<&ReserveInfo>,
+) -> WalletStats {
+    let total_assets: u64 = received_notes.iter().map(|n| n.amount).sum();
+    let total_liabilities: u64 = issued_notes.iter().map(|n| n.amount).sum();
+    let net_position = total_assets as i64 - total_liabilities as i64;
+    let coverage_ratio = reserve_status.map(|r| r.ratio);
+
+    WalletStats {
+        total_assets,
+        total_liabilities,
+        net_position,
+        coverage_ratio,
+        asset_note_count: received_notes.len(),
+        liability_note_count: issued_notes.len(),
+    }
+}
+
 impl App {
+    pub fn compute_stats(&self) -> WalletStats {
+        compute_wallet_stats(
+            &self.issued_notes,
+            &self.received_notes,
+            self.reserve_status.as_ref(),
+        )
+    }
+
     pub async fn new() -> Result<Self> {
         let config_manager = ConfigManager::new(None)?;
         let mut account_manager = AccountManager::new(config_manager.clone())?;
@@ -289,5 +327,79 @@ impl App {
 
     pub fn quit(&mut self) {
         self.running = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note(amount: u64) -> NoteInfo {
+        NoteInfo {
+            issuer: "issuer".to_string(),
+            recipient: "recipient".to_string(),
+            amount,
+            redeemed: 0,
+            _timestamp: 0,
+        }
+    }
+
+    fn reserve(ratio: f64) -> ReserveInfo {
+        ReserveInfo {
+            issuer: "issuer".to_string(),
+            total_debt: 0,
+            collateral: 0,
+            ratio,
+            note_count: 0,
+            _last_updated: 0,
+            has_pending_refund: false,
+        }
+    }
+
+    #[test]
+    fn stats_empty() {
+        let stats = compute_wallet_stats(&[], &[], None);
+        assert_eq!(stats.total_assets, 0);
+        assert_eq!(stats.total_liabilities, 0);
+        assert_eq!(stats.net_position, 0);
+        assert_eq!(stats.coverage_ratio, None);
+        assert_eq!(stats.asset_note_count, 0);
+        assert_eq!(stats.liability_note_count, 0);
+    }
+
+    #[test]
+    fn stats_assets_greater_than_liabilities() {
+        let issued = vec![note(1_000_000_000), note(2_000_000_000)];
+        let received = vec![note(5_000_000_000)];
+        let stats = compute_wallet_stats(&issued, &received, None);
+        assert_eq!(stats.total_assets, 5_000_000_000);
+        assert_eq!(stats.total_liabilities, 3_000_000_000);
+        assert_eq!(stats.net_position, 2_000_000_000);
+        assert_eq!(stats.asset_note_count, 1);
+        assert_eq!(stats.liability_note_count, 2);
+    }
+
+    #[test]
+    fn stats_liabilities_greater_than_assets() {
+        let issued = vec![note(5_000_000_000)];
+        let received = vec![note(1_000_000_000)];
+        let stats = compute_wallet_stats(&issued, &received, None);
+        assert_eq!(stats.net_position, -4_000_000_000);
+    }
+
+    #[test]
+    fn stats_coverage_ratio_passed_through() {
+        let issued = vec![note(1_000_000_000)];
+        let r = reserve(0.95);
+        let stats = compute_wallet_stats(&issued, &[], Some(&r));
+        assert!((stats.coverage_ratio.unwrap() - 0.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stats_zero_liabilities_with_reserve() {
+        let r = reserve(1.5);
+        let stats = compute_wallet_stats(&[], &[], Some(&r));
+        assert_eq!(stats.total_liabilities, 0);
+        assert!((stats.coverage_ratio.unwrap() - 1.5).abs() < 1e-6);
     }
 }

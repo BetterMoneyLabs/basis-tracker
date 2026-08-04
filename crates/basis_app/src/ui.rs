@@ -2,7 +2,7 @@ use crate::acceptance_policy::{
     create_policy, get_blacklist_entries, get_policy_summary, get_whitelist_entries,
     remove_from_blacklist, remove_from_whitelist,
 };
-use crate::app::{App, NoteInfo, Screen};
+use crate::app::{App, NoteInfo, Screen, WalletStats};
 use anyhow::Result;
 use basis_offchain::signing::{add_input_proof, redemption_signing_message};
 use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
@@ -140,16 +140,105 @@ fn draw_notification(app: &App) {
     }
 }
 
+fn draw_wallet_stats(stats: &WalletStats) {
+    println!("{}  WALLET STATS{}", BOLD, RESET);
+    println!("{}  ────────────{}", CYAN, RESET);
+
+    println!(
+        "  {}Assets:{}        {:.6} ERG ({} notes)",
+        BOLD,
+        RESET,
+        stats.total_assets as f64 / 1_000_000_000.0,
+        stats.asset_note_count
+    );
+    println!(
+        "  {}Liabilities:{}   {:.6} ERG ({} notes)",
+        BOLD,
+        RESET,
+        stats.total_liabilities as f64 / 1_000_000_000.0,
+        stats.liability_note_count
+    );
+
+    let net_erg = stats.net_position as f64 / 1_000_000_000.0;
+    let net_color = if stats.net_position >= 0 { GREEN } else { RED };
+    let net_sign = if stats.net_position >= 0 { "+" } else { "" };
+    println!(
+        "  {}Net position:{}  {}{}{:.6} ERG{}",
+        BOLD, RESET, net_color, net_sign, net_erg, RESET
+    );
+
+    match stats.coverage_ratio {
+        None => {
+            println!(
+                "  {}Coverage:{}      {}N/A{} (no reserve)",
+                BOLD, RESET, GRAY, RESET
+            );
+        }
+        Some(_ratio) if stats.total_liabilities == 0 => {
+            println!(
+                "  {}Coverage:{}      {}N/A{} (no liabilities)",
+                BOLD, RESET, GRAY, RESET
+            );
+        }
+        Some(ratio) => {
+            let percent = ratio * 100.0;
+            let color = if ratio < 1.0 {
+                RED
+            } else if ratio < 1.2 {
+                YELLOW
+            } else if ratio < 1.5 {
+                WHITE
+            } else {
+                GREEN
+            };
+            println!(
+                "  {}Coverage:{}      {}{:.2}%{}",
+                BOLD, RESET, color, percent, RESET
+            );
+
+            let warning = if ratio < 1.0 {
+                Some((RED, "CRITICAL: liabilities covered below 100%"))
+            } else if ratio < 1.2 {
+                Some((YELLOW, "WARNING: liabilities covered below 120%"))
+            } else if ratio < 1.5 {
+                Some((CYAN, "CAUTION: liabilities covered below 150%"))
+            } else {
+                None
+            };
+
+            if let Some((color, msg)) = warning {
+                println!("  {}⚠ {}{}", color, msg, RESET);
+            }
+        }
+    }
+
+    println!();
+}
+
+fn draw_wallet_stats_disconnected() {
+    println!("{}  WALLET STATS{}", BOLD, RESET);
+    println!("{}  ────────────{}", CYAN, RESET);
+    println!(
+        "  {}⚠ Server disconnected — stats unavailable{}\n",
+        YELLOW, RESET
+    );
+}
+
 async fn draw_main_menu(app: &mut App) -> Result<()> {
     println!("{}  MAIN MENU{}", BOLD, RESET);
     println!("{}  ─────────{}\n", CYAN, RESET);
 
-    println!("  {}[1]{} Notes (IOU Debt)", CYAN, RESET);
-    println!("  {}[2]{} Reserves", CYAN, RESET);
-    println!("  {}[3]{} Redemption", CYAN, RESET);
-    println!("  {}[4]{} My Acceptance Policy", CYAN, RESET);
-    println!("  {}[5]{} Address Book", CYAN, RESET);
-    println!("  {}[6]{} Settings", CYAN, RESET);
+    if app.server_connected {
+        draw_wallet_stats(&app.compute_stats());
+    } else {
+        draw_wallet_stats_disconnected();
+    }
+
+    println!("  {}[1]{} Notes (IOU Assets & Liabilities)", CYAN, RESET);
+    println!("  {}[2]{} My Reserves", CYAN, RESET);
+    println!("  {}[3]{} My Acceptance Policy", CYAN, RESET);
+    println!("  {}[4]{} Address Book", CYAN, RESET);
+    println!("  {}[5]{} Settings", CYAN, RESET);
     println!();
     println!("  {}[r]{} Refresh Data", YELLOW, RESET);
     println!("  {}[q]{} Quit\n", RED, RESET);
@@ -157,10 +246,9 @@ async fn draw_main_menu(app: &mut App) -> Result<()> {
     match read_choice("Select option: ").as_str() {
         "1" => app.navigate_to(Screen::Notes),
         "2" => app.navigate_to(Screen::Reserves),
-        "3" => app.navigate_to(Screen::Transactions),
-        "4" => app.navigate_to(Screen::AcceptancePolicy),
-        "5" => app.navigate_to(Screen::AddressBook),
-        "6" => app.navigate_to(Screen::Settings),
+        "3" => app.navigate_to(Screen::AcceptancePolicy),
+        "4" => app.navigate_to(Screen::AddressBook),
+        "5" => app.navigate_to(Screen::Settings),
         "r" | "R" => {
             app.refresh_data().await?;
             if app.server_connected {
@@ -454,20 +542,27 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
 }
 
 async fn draw_notes(app: &mut App) -> Result<()> {
-    println!("{}  NOTES (IOU Debt){}", BOLD, RESET);
-    println!("{}  ─────────────────{}\n", CYAN, RESET);
+    println!("{}  NOTES (IOU Assets & Liabilities){}", BOLD, RESET);
+    println!("{}  ─────────────────────────────{}\n", CYAN, RESET);
+
+    let issued_total_erg: f64 =
+        app.issued_notes.iter().map(|n| n.amount).sum::<u64>() as f64 / 1_000_000_000.0;
+    let received_total_erg: f64 =
+        app.received_notes.iter().map(|n| n.amount).sum::<u64>() as f64 / 1_000_000_000.0;
 
     println!(
-        "  {}[1]{} Notes Issued ({})",
+        "  {}[1]{} Notes Issued ({} notes, {:.6} ERG total liabilities)",
         CYAN,
         RESET,
-        app.issued_notes.len()
+        app.issued_notes.len(),
+        issued_total_erg
     );
     println!(
-        "  {}[2]{} Notes Received ({})\n",
+        "  {}[2]{} Notes Received ({} notes, {:.6} ERG total assets)\n",
         CYAN,
         RESET,
-        app.received_notes.len()
+        app.received_notes.len(),
+        received_total_erg
     );
 
     println!("  {}[c]{} Create Note", CYAN, RESET);
@@ -541,7 +636,7 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
         );
 
         println!(
-            "  {}Total Debt:{}     {} nanoERG ({:.6} ERG)",
+            "  {}Total Liabilities:{}     {} nanoERG ({:.6} ERG)",
             BOLD,
             RESET,
             reserve.total_debt,
@@ -869,7 +964,7 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
             Ok(a) if a <= outstanding => a,
             Ok(_) => {
                 app.set_notification(
-                    format!("Amount exceeds outstanding debt: {}", outstanding),
+                    format!("Amount exceeds outstanding liability: {}", outstanding),
                     true,
                 );
                 app.navigate_to(Screen::Notes);
@@ -1167,7 +1262,10 @@ async fn draw_generate_transaction(app: &mut App) -> Result<()> {
             match app.client.get_note(&issuer, &recipient).await {
                 Ok(Some(note)) => {
                     if note.outstanding_debt() < amount {
-                        app.set_notification("Insufficient outstanding debt".to_string(), true);
+                        app.set_notification(
+                            "Insufficient outstanding liability".to_string(),
+                            true,
+                        );
                         app.navigate_to(Screen::Transactions);
                         return Ok(());
                     }
