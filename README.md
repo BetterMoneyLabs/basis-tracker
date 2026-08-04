@@ -22,8 +22,7 @@ purely on trust, and so creating credit (unbacked IOU money). Its use cases are 
 
 * agentic economic networks
 
-Such use cases would definitely win from simple but secure design, no on-chain fees, and no need to work with blockchain
-at all before need to back issued cash or redeem cash for blockchain asssets.
+Such use cases would definitely win from simple but secure design, no on-chain fees, and no need to work with blockchain at all before need to back issued cash or redeem cash for blockchain asssets.
 
 But there can be more use cases discovered with time!
 
@@ -68,53 +67,12 @@ As a simple but pretty secure solution, the following design is proposed, which 
 
 A basic contract corresponding to the design outlined in the previous section, is available @ [basis.es](contract/basis.es).
 
-## Offchain Logic
 
-### Tracker
+## Basis Server
 
-**⚠️ Production Requirement: Tracker Box Setup**
+## TUI Wallet
 
-Before running the tracker in production, you **must** create and initialize the tracker box on-chain. The tracker box contains the AVL tree root digest that commits to all debt relationships.
-
-**Without a tracker box:**
-- Redemptions will fail (system uses placeholder values)
-- No on-chain state commitment
-- System cannot verify tracker signatures
-
-📖 **See [docs/TRACKER_BOX_SETUP.md](docs/TRACKER_BOX_SETUP.md) for complete setup instructions.**
-
-Tracker is publishing following events via NOSTR protocol as relay:
-
-* note - new or updated note, along with proof of tracker state transformation and digest after operation
-* redemption - redemption done from a reserve
-* reserve top-up
-* commitment - posting data for on-chain tracker state commitment update (header, proof of UTXO against header, UTXO with commitment)
-* 80% alert - tracker is posting it when debt level of some pubkey reaching 80% of collateral
-* 100% alert - tracker is posting it when debt level of some pubkey reaching 100% of collateral
-
-Then it also supports following API requests which can be run separately from relay potentially:
-
-* getNotesForKey - returns all the notes sssociated with a pubkey
-* getProof - get proof for a note against latest digest published by the tracker (not necessarily committed on-chain)
-* getKeyStatus - returns current collateralization of a pubkey along with other important information. Useful for light
-  wallets and clients which are ready
-* POST noteUpdate - create or update a note
-
-## Security Assumptions
-
-We assume that tracker is honestly collecting and announcing notes it has. However, malicious trackers may deviate from
-honest behaviour.
-
-Tracker can simply go offline, but then the latest state committed on-chain is still redeemable,
-
-Tracker may remove debt notes of protocol participants. This problem can be tackled with the anti-censorship protection
-from "Future Extensions" section.
-
-Tracker may collude with a reserve holder to inject a note with fake timestamp in the past to redeem immediately.
-Tracker would be caught in this case. For making this case impossible with contract, technique similar to anti-censorship
-protection can be used.
-
-## Wallet
+## MCP Server
 
 ## Future Extensions
 
@@ -125,8 +83,7 @@ in Rosen bridge.
 
 * Tracking sidechains
 
-As a continuation of federation tracker idea, we may have tracking sidechains, for example, merged-mined sidechains, to
-reduce multisig security to majority-of-Ergo-hashrate-following-sidechain security.
+As a continuation of federation tracker idea, we may have tracking sidechains, for example, merged-mined sidechains, to reduce multisig security to majority-of-Ergo-hashrate-following-sidechain security.
 
 * Programmable cash
 
@@ -135,17 +92,15 @@ other redeeming conditions in onchain redemption action.
 
 * Multi-tracker reserve
 
-Possible to have reserve contract with support for multiple reserves, put under AVL+ tree or just in collection if there
-are few of them.
+Possible to have reserve contract with support for multiple reserves, put under AVL+ tree or just in collection if there are few of them.
 
 For most reserves that does not make sense probably, but multi-tracker reserves can be used as gateways between
 different trackers, to rebalance liquidity etc.
 
 * On-chain Privacy
 
-Not hard to do redemptions to stealth addresses.
+Not hard to do mandatory redemptions to stealth addresses.
 
-## Economy
 
 ## Continuous Integration
 
@@ -165,9 +120,7 @@ See [.github/workflows/test.yml](.github/workflows/test.yml) for the complete wo
 The following implementation plan is targeting catching micropayments in P2P networks, agentic networks, etc ASAP and then
 develop tools for community trading:
 
-* Do a wallet for community trading (in progress)
-* Do Celaut payment module, where peers can set credit limits and pay each other. Add support for agentic layer, so AI agents can buy computations
-  over Celaut, then requests to other APIs as well.
+* Do Celaut payment module, where peers can set credit limits and pay each other. Add support for agentic layer, so AI agents can buy computations over Celaut, then requests to other APIs as well.
 * Do showcase for agent-to-agent payments
 
 and so on
