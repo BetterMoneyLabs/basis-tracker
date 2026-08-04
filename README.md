@@ -70,9 +70,28 @@ A basic contract corresponding to the design outlined in the previous section, i
 
 ## Basis Server
 
+The Basis Server (tracker) is the offchain service that maintains the global ledger of IOU notes.
+It stores `hash(issuer || recipient) -> totalDebt` mappings in an AVL+ tree, periodically commits
+the tree root digest to the Ergo blockchain in a tracker box, and exposes an HTTP API (documented
+in `openapi.yaml`) for wallets and agents to create notes, query balances, request redemption
+proofs, and monitor reserve status. Anyone can run a tracker; honest behavior is incentivized by
+user trust and verifiable on-chain commitments.
+
 ## TUI Wallet
 
+`basis-ui` is a terminal wallet built on top of `basis_cli_lib`. It provides a keyboard-driven
+interface for managing accounts, issuing and receiving IOU notes, creating and monitoring
+Ergo-backed reserves, redeeming notes, and configuring an acceptance policy. The main menu shows
+at-a-glance wallet stats (assets, liabilities, net position, and reserve coverage) with
+warnings when liability coverage drops below 150%, 120%, or 100%.
+
 ## MCP Server
+
+`basis-mcp` is a Model Context Protocol server that exposes the wallet over stdio, allowing
+MCP clients (such as Kimi CLI or Claude Desktop) to create accounts, issue and redeem notes,
+check reserve status, and manage acceptance policy without shelling out. It wraps the same
+typed command cores as `basis-cli --json`; private keys stay in-process and are never echoed
+back to the client.
 
 ## Future Extensions
 
