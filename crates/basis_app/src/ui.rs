@@ -1,6 +1,6 @@
 use crate::acceptance_policy::{
     create_policy, get_blacklist_entries, get_policy_summary, get_whitelist_entries,
-    remove_from_blacklist, remove_from_whitelist,
+    get_whitelist_entries_with_limit, remove_from_blacklist, remove_from_whitelist,
 };
 use crate::app::{App, NoteInfo, Screen, WalletStats};
 use anyhow::Result;
@@ -1694,7 +1694,7 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                 } else {
                     let debt_limit =
                         read_input("Add debt limit? (nanoERG, Press Enter for none): ");
-                    let _max_debt = if debt_limit.is_empty() {
+                    let max_debt = if debt_limit.is_empty() {
                         None
                     } else {
                         debt_limit.parse::<u64>().ok()
@@ -1705,7 +1705,7 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                     holders.insert(pubkey.clone());
 
                     app.acceptance_config =
-                        create_policy(&app.acceptance_config, Some(holders), None, None);
+                        create_policy(&app.acceptance_config, Some(holders), None, None, max_debt);
 
                     // Save to disk and upload to server
                     if let Err(e) = save_and_upload_policy(app).await {
@@ -1714,32 +1714,49 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                             true,
                         );
                     } else {
-                        app.set_notification(
-                            "✅ Added to whitelist and uploaded".to_string(),
-                            false,
-                        );
+                        let limit_msg = match max_debt {
+                            Some(limit) => format!(
+                                "✅ Added to whitelist (limit: {:.6} ERG) and uploaded",
+                                limit as f64 / 1_000_000_000.0
+                            ),
+                            None => "✅ Added to whitelist (no limit) and uploaded".to_string(),
+                        };
+                        app.set_notification(limit_msg, false);
                     }
                 }
             }
         }
         "3" => {
             // Remove from whitelist
-            let whitelist = get_whitelist_entries(&app.acceptance_config);
+            let whitelist = get_whitelist_entries_with_limit(&app.acceptance_config);
             if whitelist.is_empty() {
                 app.set_notification("Whitelist is empty".to_string(), true);
             } else {
                 println!("\n  Select issuer to remove:");
-                for (i, (name, pubkey)) in whitelist.iter().enumerate() {
+                for (i, (name, pubkey, max_debt)) in whitelist.iter().enumerate() {
+                    let limit_text = match max_debt {
+                        Some(limit) => {
+                            format!(", limit: {:.6} ERG", *limit as f64 / 1_000_000_000.0)
+                        }
+                        None => ", no limit".to_string(),
+                    };
                     if pubkey.len() >= 66 {
                         println!(
-                            "  [{}] {}: {}...{}",
+                            "  [{}] {}: {}...{}{}",
                             i + 1,
                             name,
                             &pubkey[..16],
-                            &pubkey[56..66]
+                            &pubkey[56..66],
+                            limit_text
                         );
                     } else {
-                        println!("  [{}] {}: {} (invalid length)", i + 1, name, pubkey);
+                        println!(
+                            "  [{}] {}: {} (invalid length){}",
+                            i + 1,
+                            name,
+                            pubkey,
+                            limit_text
+                        );
                     }
                 }
                 let idx = read_choice("Select: ");
@@ -1797,7 +1814,7 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                     holders.insert(pubkey);
 
                     app.acceptance_config =
-                        create_policy(&app.acceptance_config, None, Some(holders), None);
+                        create_policy(&app.acceptance_config, None, Some(holders), None, None);
 
                     // Save to disk and upload to server
                     if let Err(e) = save_and_upload_policy(app).await {
@@ -1873,20 +1890,33 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
             println!("  Default: Reject");
             println!("  Collateral: {}%", collateral_pct);
 
-            let whitelist = get_whitelist_entries(&app.acceptance_config);
+            let whitelist = get_whitelist_entries_with_limit(&app.acceptance_config);
             if !whitelist.is_empty() {
                 println!("\n  Whitelist ({}):", whitelist.len());
-                for (i, (name, pubkey)) in whitelist.iter().enumerate() {
+                for (i, (name, pubkey, max_debt)) in whitelist.iter().enumerate() {
+                    let limit_text = match max_debt {
+                        Some(limit) => {
+                            format!(", limit: {:.6} ERG", *limit as f64 / 1_000_000_000.0)
+                        }
+                        None => ", no limit".to_string(),
+                    };
                     if pubkey.len() >= 66 {
                         println!(
-                            "  [{}] {}: {}...{}",
+                            "  [{}] {}: {}...{}{}",
                             i + 1,
                             name,
                             &pubkey[..16],
-                            &pubkey[56..66]
+                            &pubkey[56..66],
+                            limit_text
                         );
                     } else {
-                        println!("  [{}] {}: {} (invalid length)", i + 1, name, pubkey);
+                        println!(
+                            "  [{}] {}: {} (invalid length){}",
+                            i + 1,
+                            name,
+                            pubkey,
+                            limit_text
+                        );
                     }
                 }
             }

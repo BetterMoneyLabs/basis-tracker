@@ -25,6 +25,24 @@ pub fn get_policy_summary(config: &AcceptanceConfig) -> (u16, usize, usize) {
     (collateral_pct, whitelist_count, blacklist_count)
 }
 
+/// Get all whitelist entries as (name, pubkey, max_debt) tuples
+pub fn get_whitelist_entries_with_limit(
+    config: &AcceptanceConfig,
+) -> Vec<(String, String, Option<u64>)> {
+    let mut entries = Vec::new();
+    for predicate in &config.predicates {
+        if let PredicateConfig::Whitelist {
+            holders, max_debt, ..
+        } = predicate
+        {
+            for pubkey in holders {
+                entries.push(("Unknown".to_string(), pubkey.clone(), *max_debt));
+            }
+        }
+    }
+    entries
+}
+
 /// Get all whitelist entries as (name, pubkey) tuples
 /// Note: Names are "Unknown" since config only stores pubkeys
 pub fn get_whitelist_entries(config: &AcceptanceConfig) -> Vec<(String, String)> {
@@ -74,12 +92,16 @@ pub fn remove_from_blacklist(config: &AcceptanceConfig, pubkey: &str) -> Accepta
     new_config
 }
 
-/// Create or update a policy by adding whitelist/blacklist entries or updating collateral
+/// Create or update a policy by adding whitelist/blacklist entries or updating collateral.
+/// `whitelist_max_debt` applies to the whitelist predicate being created or updated:
+/// - `Some(limit)` sets/overwrites the predicate's limit.
+/// - `None` keeps an existing predicate's limit, or leaves a new predicate unlimited.
 pub fn create_policy(
     existing: &AcceptanceConfig,
     whitelist_add: Option<HashSet<String>>,
     blacklist_add: Option<HashSet<String>>,
     collateral_pct: Option<u16>,
+    whitelist_max_debt: Option<u64>,
 ) -> AcceptanceConfig {
     let mut config = existing.clone();
 
@@ -87,8 +109,14 @@ pub fn create_policy(
     if let Some(new_holders) = whitelist_add {
         let mut found = false;
         for predicate in &mut config.predicates {
-            if let PredicateConfig::Whitelist { holders, .. } = predicate {
+            if let PredicateConfig::Whitelist {
+                holders, max_debt, ..
+            } = predicate
+            {
                 holders.extend(new_holders.iter().cloned());
+                if whitelist_max_debt.is_some() {
+                    *max_debt = whitelist_max_debt;
+                }
                 found = true;
                 break;
             }
@@ -98,7 +126,7 @@ pub fn create_policy(
             config.predicates.push(PredicateConfig::Whitelist {
                 name: "whitelist".to_string(),
                 holders,
-                max_debt: None,
+                max_debt: whitelist_max_debt,
             });
         }
     }
@@ -433,7 +461,7 @@ mod tests {
         let mut holders = HashSet::new();
         holders.insert(test_pubkey_1());
 
-        let new_config = create_policy(&config, Some(holders), None, None);
+        let new_config = create_policy(&config, Some(holders), None, None, None);
         let entries = get_whitelist_entries(&new_config);
 
         assert_eq!(entries.len(), 1);
@@ -452,7 +480,7 @@ mod tests {
         let mut holders = HashSet::new();
         holders.insert(test_pubkey_2());
 
-        let new_config = create_policy(&config, Some(holders), None, None);
+        let new_config = create_policy(&config, Some(holders), None, None, None);
         let entries = get_whitelist_entries(&new_config);
 
         assert_eq!(entries.len(), 2);
@@ -464,7 +492,7 @@ mod tests {
         let mut holders = HashSet::new();
         holders.insert(test_pubkey_1());
 
-        let new_config = create_policy(&config, None, Some(holders), None);
+        let new_config = create_policy(&config, None, Some(holders), None, None);
         let entries = get_blacklist_entries(&new_config);
 
         assert_eq!(entries.len(), 1);
@@ -475,7 +503,7 @@ mod tests {
     fn test_create_policy_update_collateral() {
         let config = AcceptanceConfig::default_collateral();
 
-        let new_config = create_policy(&config, None, None, Some(250));
+        let new_config = create_policy(&config, None, None, Some(250), None);
         let (collateral, _, _) = get_policy_summary(&new_config);
 
         assert_eq!(collateral, 250);
@@ -489,7 +517,7 @@ mod tests {
             min_ratio: 1.0,
         });
 
-        let new_config = create_policy(&config, None, None, Some(150));
+        let new_config = create_policy(&config, None, None, Some(150), None);
         let (collateral, _, _) = get_policy_summary(&new_config);
 
         assert_eq!(collateral, 150);
@@ -503,7 +531,7 @@ mod tests {
         let mut blacklist = HashSet::new();
         blacklist.insert(test_pubkey_2());
 
-        let new_config = create_policy(&config, Some(whitelist), Some(blacklist), Some(200));
+        let new_config = create_policy(&config, Some(whitelist), Some(blacklist), Some(200), None);
         let (collateral, wl_count, bl_count) = get_policy_summary(&new_config);
 
         assert_eq!(collateral, 200);
@@ -515,7 +543,7 @@ mod tests {
     fn test_create_policy_no_changes() {
         let config = AcceptanceConfig::default_collateral();
 
-        let new_config = create_policy(&config, None, None, None);
+        let new_config = create_policy(&config, None, None, None, None);
         let (collateral, whitelist, blacklist) = get_policy_summary(&new_config);
 
         assert_eq!(collateral, 100);
@@ -536,7 +564,7 @@ mod tests {
         let mut holders = HashSet::new();
         holders.insert(test_pubkey_1());
 
-        let new_config = create_policy(&config, Some(holders), None, None);
+        let new_config = create_policy(&config, Some(holders), None, None, None);
         let entries = get_whitelist_entries(&new_config);
 
         // Note: Vec::extend doesn't deduplicate, so we get 2 entries
@@ -603,7 +631,7 @@ mod tests {
     #[test]
     fn test_collateral_zero_percent() {
         let config = AcceptanceConfig::default_collateral();
-        let new_config = create_policy(&config, None, None, Some(0));
+        let new_config = create_policy(&config, None, None, Some(0), None);
         let (collateral, _, _) = get_policy_summary(&new_config);
 
         assert_eq!(collateral, 0);
@@ -612,7 +640,7 @@ mod tests {
     #[test]
     fn test_collateral_high_percent() {
         let config = AcceptanceConfig::default_collateral();
-        let new_config = create_policy(&config, None, None, Some(1000));
+        let new_config = create_policy(&config, None, None, Some(1000), None);
         let (collateral, _, _) = get_policy_summary(&new_config);
 
         assert_eq!(collateral, 1000);
@@ -626,15 +654,15 @@ mod tests {
         // Add whitelist
         let mut holders = HashSet::new();
         holders.insert(test_pubkey_1());
-        let config = create_policy(&config, Some(holders), None, None);
+        let config = create_policy(&config, Some(holders), None, None, None);
 
         // Add blacklist
         let mut holders = HashSet::new();
         holders.insert(test_pubkey_2());
-        let config = create_policy(&config, None, Some(holders), None);
+        let config = create_policy(&config, None, Some(holders), None, None);
 
         // Update collateral
-        let config = create_policy(&config, None, None, Some(150));
+        let config = create_policy(&config, None, None, Some(150), None);
 
         // Verify
         let (collateral, whitelist, blacklist) = get_policy_summary(&config);
@@ -666,5 +694,101 @@ mod tests {
         assert_eq!(entries.len(), 1);
         // max_debt is preserved in the config but not exposed in entries
         // This is expected behavior - entries only return (name, pubkey)
+    }
+
+    fn find_whitelist_predicate(config: &AcceptanceConfig) -> Option<&PredicateConfig> {
+        config
+            .predicates
+            .iter()
+            .find(|p| matches!(p, PredicateConfig::Whitelist { .. }))
+    }
+
+    #[test]
+    fn test_create_policy_whitelist_with_max_debt() {
+        let config = AcceptanceConfig::default_collateral();
+        let mut holders = HashSet::new();
+        holders.insert(test_pubkey_1());
+
+        let new_config = create_policy(&config, Some(holders), None, None, Some(5000));
+
+        let predicate = find_whitelist_predicate(&new_config).expect("whitelist predicate");
+        if let PredicateConfig::Whitelist {
+            holders, max_debt, ..
+        } = predicate
+        {
+            assert_eq!(holders.len(), 1);
+            assert!(holders.contains(&test_pubkey_1()));
+            assert_eq!(*max_debt, Some(5000));
+        } else {
+            panic!("expected whitelist predicate");
+        }
+    }
+
+    #[test]
+    fn test_create_policy_whitelist_without_max_debt_is_unlimited() {
+        let config = AcceptanceConfig::default_collateral();
+        let mut holders = HashSet::new();
+        holders.insert(test_pubkey_1());
+
+        let new_config = create_policy(&config, Some(holders), None, None, None);
+
+        let predicate = find_whitelist_predicate(&new_config).expect("whitelist predicate");
+        if let PredicateConfig::Whitelist { max_debt, .. } = predicate {
+            assert_eq!(*max_debt, None);
+        } else {
+            panic!("expected whitelist predicate");
+        }
+    }
+
+    #[test]
+    fn test_create_policy_preserves_existing_max_debt() {
+        let mut config = AcceptanceConfig::default_collateral();
+        config.predicates.push(PredicateConfig::Whitelist {
+            name: "whitelist".to_string(),
+            holders: vec![test_pubkey_1()],
+            max_debt: Some(3000),
+        });
+
+        let mut holders = HashSet::new();
+        holders.insert(test_pubkey_2());
+
+        let new_config = create_policy(&config, Some(holders), None, None, None);
+
+        let predicate = find_whitelist_predicate(&new_config).expect("whitelist predicate");
+        if let PredicateConfig::Whitelist {
+            holders, max_debt, ..
+        } = predicate
+        {
+            assert_eq!(holders.len(), 2);
+            assert_eq!(*max_debt, Some(3000));
+        } else {
+            panic!("expected whitelist predicate");
+        }
+    }
+
+    #[test]
+    fn test_create_policy_overwrites_existing_max_debt() {
+        let mut config = AcceptanceConfig::default_collateral();
+        config.predicates.push(PredicateConfig::Whitelist {
+            name: "whitelist".to_string(),
+            holders: vec![test_pubkey_1()],
+            max_debt: Some(3000),
+        });
+
+        let mut holders = HashSet::new();
+        holders.insert(test_pubkey_2());
+
+        let new_config = create_policy(&config, Some(holders), None, None, Some(7000));
+
+        let predicate = find_whitelist_predicate(&new_config).expect("whitelist predicate");
+        if let PredicateConfig::Whitelist {
+            holders, max_debt, ..
+        } = predicate
+        {
+            assert_eq!(holders.len(), 2);
+            assert_eq!(*max_debt, Some(7000));
+        } else {
+            panic!("expected whitelist predicate");
+        }
     }
 }

@@ -4,6 +4,21 @@
 
 This specification defines how the TUI wallet (`basis-ui`) manages acceptance policies for IOU notes. The TUI wallet provides an interactive interface for users to configure their trust preferences, which are then signed and uploaded to the Basis server for enforcement.
 
+## `max_debt` Whitelist Limit Support
+
+The TUI wallet honors per-issuer `max_debt` limits on whitelist predicates:
+
+- When adding an issuer to the whitelist, the user may enter a debt limit in nanoERG (or press Enter for unlimited).
+- The limit is stored in the whitelist predicate's `max_debt` field and included when the policy is saved locally and uploaded to the server.
+- The **View Current Policy** and **Remove from Whitelist** screens display each whitelist entry as:
+  - `limit: X.XXXXXX ERG` when a cap is set, or
+  - `no limit` when none is set.
+- Passing `None` for the limit when updating an existing whitelist predicate preserves the existing `max_debt`; passing `Some(limit)` overwrites it. Creating a new whitelist predicate without a limit leaves it unlimited (`None`).
+
+This behavior is implemented in:
+- `crates/basis_app/src/acceptance_policy.rs` — `create_policy()` with the `whitelist_max_debt` parameter and `get_whitelist_entries_with_limit()`.
+- `crates/basis_app/src/ui.rs` — whitelist add/view/remove flows.
+
 ## Core Design Principles
 
 1. **Separate Configs**: TUI uses its own config file (`~/.basis/ui.toml`), independent from CLI config
@@ -168,8 +183,8 @@ Add debt limit? (nanoERG, Press Enter for none): 5000000000
 **Implementation**:
 - Lookup pubkey from address book or parse manual input
 - Validate 66 hex chars
-- Optional: parse debt limit (u64 nanoERG)
-- Update `whitelist` predicate holders
+- Optional: parse debt limit (u64 nanoERG); `None` leaves the issuer unlimited, `Some(limit)` sets/overwrites the predicate's `max_debt`
+- Update `whitelist` predicate holders and `max_debt`
 - Regenerate composite policy
 - Save to `ui.toml`
 - Sign and upload to server
@@ -536,10 +551,15 @@ Charlie (fully collateralized) tries to pay Alice:
   → 200% >= 150% required
   → Accepts ✓
 
-Dave (whitelisted by Alice) tries to pay Alice:
+Dave (whitelisted by Alice, no debt limit) tries to pay Alice:
   → Server looks up Alice's policy
   → Dave is in whitelist
   → Accepts ✓ (no collateral check needed)
+
+Frank (whitelisted by Alice with a 5 ERG debt limit) tries to pay 10 ERG:
+  → Server looks up Alice's policy
+  → Frank's cumulative debt would exceed 5 ERG limit
+  → Rejects ❌ (debt limit exceeded)
 
 Eve (blacklisted by Alice) tries to pay Alice:
   → Server looks up Alice's policy
