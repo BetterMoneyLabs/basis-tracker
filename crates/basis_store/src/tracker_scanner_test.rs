@@ -75,7 +75,8 @@ mod tests {
             api_key: None,
         };
 
-        let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
+        let server_state =
+            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
 
         // Verify the server state was created
         assert_eq!(server_state.config.node_url, "http://localhost:9053");
@@ -134,7 +135,8 @@ mod tests {
             api_key: None,
         };
 
-        let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
+        let server_state =
+            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
 
         // Create a mock ScanBox
         let mut registers = HashMap::new();
@@ -210,7 +212,8 @@ mod tests {
             api_key: None,
         };
 
-        let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
+        let server_state =
+            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
 
         // Create a mock ScanBox without the tracker NFT
         let mut registers = HashMap::new();
@@ -269,7 +272,8 @@ mod tests {
             api_key: None,
         };
 
-        let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
+        let server_state =
+            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
 
         // Create a mock ScanBox missing R5 register (required)
         let mut registers = HashMap::new();

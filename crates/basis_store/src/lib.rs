@@ -44,6 +44,7 @@ use basis_core;
 use basis_core::impls::SchnorrVerifier;
 use basis_core::traits::SignatureVerifier;
 use secp256k1;
+use std::path::Path;
 
 /// Public key type (Secp256k1)
 pub type PubKey = [u8; 33];
@@ -304,15 +305,13 @@ pub struct TrackerStateManager {
 }
 
 impl TrackerStateManager {
-    /// Create a new tracker state manager with default storage location
-    pub fn new() -> Self {
+    /// Create a new tracker state manager with the configured storage location.
+    pub fn new(data_dir: impl AsRef<Path>) -> Self {
         tracing::debug!("Creating TrackerStateManager...");
 
-        // Use the standard storage location for production
+        // Use the configured storage location
         tracing::debug!("Opening note storage...");
-        let storage_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join("crates/basis_server/data/notes");
+        let storage_path = data_dir.as_ref().join("notes");
         let storage = match persistence::NoteStorage::open(&storage_path) {
             Ok(storage) => {
                 tracing::debug!("Note storage opened successfully at: {:?}", storage_path);

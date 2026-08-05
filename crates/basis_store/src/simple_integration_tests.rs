@@ -12,7 +12,14 @@ pub struct SimpleIntegrationTestSuite {
 impl SimpleIntegrationTestSuite {
     /// Create a new simple integration test suite
     pub fn new() -> Result<Self, ScannerError> {
-        let scanner = create_default_scanner()?;
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_simple_integration_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let scanner = create_default_scanner(data_dir)?;
         Ok(Self { scanner })
     }
 

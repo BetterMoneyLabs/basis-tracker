@@ -20,8 +20,11 @@ The main configuration file is `config/basis.toml`. The server will look for thi
 [server]
 host = "0.0.0.0"        # Host address to bind to
 port = 3048             # Port to listen on
-database_url = "sqlite:data/basis.db"  # Database path (optional)
+data_dir = "data"       # Base directory for all on-disk storage (databases, indices, scanner metadata)
+database_url = "sqlite:data/basis.db"  # Legacy field, kept for compatibility (currently unused)
 ```
+
+`data_dir` controls where the server writes all persistent state. It defaults to a `data/` directory relative to the working directory from which the server is launched. You can override it with the `BASIS_SERVER_DATA_DIR` environment variable.
 
 ### Ergo Blockchain Configuration
 
@@ -134,6 +137,7 @@ If no configuration file is found, the server uses these defaults:
 [server]
 host = "127.0.0.1"
 port = 3048
+data_dir = "data"
 database_url = "sqlite:data/basis.db"
 
 [ergo]

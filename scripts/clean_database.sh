@@ -136,12 +136,11 @@ create_backup() {
 clean_database() {
     print_info "Starting database cleanup..."
     
-    # Define all database directories to clean
+    # Define all database directories to clean. With the default server.data_dir
+    # value of "data", databases live directly under $SCRIPT_DIR/data. If you
+    # customize server.data_dir, clean that directory manually.
     local db_dirs=(
         "$DATA_DIR"
-        "$SCRIPT_DIR/crates/basis_server/data"
-        "$SCRIPT_DIR/crates/basis_server/crates/basis_server/data"
-        "$SCRIPT_DIR/crates/basis_store/crates/basis_server/data"
     )
     
     # Remove all database directories
@@ -184,10 +183,7 @@ confirm_action() {
     echo
     print_warning "This will permanently delete all database files and server logs!"
     print_warning "Files to be removed:"
-    echo "  - $DATA_DIR/ (root database)"
-    echo "  - $SCRIPT_DIR/crates/basis_server/data/ (server database)"
-    echo "  - $SCRIPT_DIR/crates/basis_server/crates/basis_server/data/ (nested server database)"
-    echo "  - $SCRIPT_DIR/crates/basis_store/crates/basis_server/data/ (store database)"
+    echo "  - $DATA_DIR/ (root database; matches default server.data_dir)"
     echo "  - $SERVER_LOG (server logs)"
     echo "  - $SERVER_PID (server process ID)"
     echo

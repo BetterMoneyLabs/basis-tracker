@@ -37,13 +37,21 @@ mod create_reserve_tests {
 
         // Create a scanner state that doesn't try to access files by using a memory-only implementation
         // For testing purposes, we'll create a minimal state that doesn't require file access
-        let scanner = ServerState::new(config).unwrap_or_else(|_| {
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_create_reserve_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let scanner = ServerState::new(config, &data_dir).unwrap_or_else(|_| {
             // Fallback to a scanner with minimal initialization that doesn't access storage
             let config = NodeConfig {
                 node_url: "http://example.com".to_string(), // Invalid URL to avoid file access
                 ..Default::default()
             };
-            ServerState::new(config).expect("Fallback scanner creation should succeed")
+            ServerState::new(config, &data_dir).expect("Fallback scanner creation should succeed")
         });
 
         // Create a minimal config for testing
@@ -51,6 +59,7 @@ mod create_reserve_tests {
             server: crate::config::ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 3048,
+                data_dir: Some(data_dir.to_string_lossy().to_string()),
                 database_url: Some("sqlite::memory:".to_string()),
             },
             ergo: crate::config::ErgoConfig {

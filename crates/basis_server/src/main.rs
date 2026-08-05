@@ -32,6 +32,7 @@ async fn main() {
                     server: ServerConfig {
                         host: "0.0.0.0".to_string(),
                         port: 3048,
+                        data_dir: Some("data".to_string()),
                         database_url: Some("sqlite:data/basis.db".to_string()),
                     },
                     ergo: ErgoConfig {
@@ -64,6 +65,11 @@ async fn main() {
     }
 
     tracing::info!("Configuration loaded successfully");
+
+    // Resolve the configured data directory once.
+    let data_dir = config.server.data_dir();
+    tracing::info!("Using data directory: {:?}", data_dir);
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
@@ -82,7 +88,7 @@ async fn main() {
     scanner_config.reserve_contract_p2s = Some(config.ergo.basis_reserve_contract_p2s.clone());
 
     // Create real scanner state with configured node URL and contract template
-    let ergo_scanner = match ServerState::new(scanner_config) {
+    let ergo_scanner = match ServerState::new(scanner_config, &data_dir) {
         Ok(scanner) => scanner,
         Err(e) => {
             tracing::warn!("Failed to create Ergo scanner: {}", e);
@@ -92,7 +98,7 @@ async fn main() {
                 node_url: "http://127.0.0.1:9053".to_string(), // Dummy URL that won't be used
                 ..Default::default()
             };
-            ServerState::new(minimal_config)
+            ServerState::new(minimal_config, &data_dir)
                 .unwrap_or_else(|_| panic!("Failed to create minimal scanner"))
         }
     };
@@ -147,18 +153,14 @@ async fn main() {
         };
 
         // Create tracker scanner state with persistent storage paths (similar to reserve scanner)
-        let metadata_storage_path = std::path::Path::new("data").join("tracker_scanner_metadata");
-        let tracker_storage_path = std::path::Path::new("data").join("tracker_boxes");
+        let metadata_storage_path = data_dir.join("tracker_scanner_metadata");
+        let tracker_storage_path = data_dir.join("tracker_boxes");
 
         // Ensure data directory exists
-        std::fs::create_dir_all(
-            &metadata_storage_path
-                .parent()
-                .unwrap_or(std::path::Path::new("data")),
-        )
-        .unwrap_or_else(|e| {
-            tracing::warn!("Failed to create data directory: {}", e);
-        });
+        std::fs::create_dir_all(&metadata_storage_path.parent().unwrap_or(&data_dir))
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to create data directory: {}", e);
+            });
 
         match basis_store::persistence::ScannerMetadataStorage::open(metadata_storage_path.clone())
         {
@@ -169,6 +171,7 @@ async fn main() {
                             tracker_scanner_config,
                             metadata_storage,
                             tracker_storage,
+                            &data_dir,
                         );
 
                         // Process tracker boxes directly, no scan registration required
@@ -243,7 +246,10 @@ async fn main() {
     // Initialize tracker manager outside of the blocking task so it can be shared
     use basis_store::TrackerStateManager;
     let shared_tracker_state =
-        std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new()));
+        std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new(&data_dir)));
+
+    // Clone the data directory for the tracker thread before the async move.
+    let data_dir_for_tracker_thread = data_dir.clone();
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
     let _shared_tracker_state_clone = shared_tracker_state.clone();
@@ -252,7 +258,7 @@ async fn main() {
         use basis_store::RedemptionManager;
 
         tracing::debug!("Tracker thread started");
-        let tracker = TrackerStateManager::new();
+        let tracker = TrackerStateManager::new(&data_dir_for_tracker_thread);
 
         // Update shared state with the rebuilt AVL root digest after initialization
         let initial_root = tracker.get_state().avl_root_digest;
@@ -666,7 +672,7 @@ async fn main() {
     let scanner_reserve_tracker = ergo_scanner.reserve_tracker.clone();
 
     // Initialize tracker storage for the new API endpoint
-    let tracker_storage_path = std::path::Path::new("data").join("tracker_boxes");
+    let tracker_storage_path = data_dir.join("tracker_boxes");
     let tracker_storage = match basis_store::persistence::TrackerStorage::open(tracker_storage_path)
     {
         Ok(storage) => storage,
@@ -694,7 +700,7 @@ async fn main() {
         };
 
     // Initialize policy storage for per-recipient acceptance policies
-    let policy_storage_path = std::path::Path::new("data").join("acceptance_policies");
+    let policy_storage_path = data_dir.join("acceptance_policies");
     let policy_storage =
         match basis_store::persistence::AcceptancePolicyStorage::open(policy_storage_path) {
             Ok(storage) => {

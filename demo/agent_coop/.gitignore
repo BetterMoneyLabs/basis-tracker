@@ -1,0 +1,4 @@
+# Generated runtime state. Re-created by run.sh on every demo run.
+config/
+data/
+crates/

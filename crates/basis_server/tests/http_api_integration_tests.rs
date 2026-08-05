@@ -28,13 +28,17 @@ mod http_api_tests {
         let (tx, mut rx) = mpsc::channel(100);
         let event_store = Arc::new(EventStore::new().await.unwrap());
 
+        // Unique temporary directory for this test invocation.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
         // Create a default NodeConfig for the scanner
         let config = basis_store::ergo_scanner::NodeConfig {
             node_url: "http://localhost:9053".to_string(),
             ..Default::default()
         };
         let ergo_scanner = Arc::new(tokio::sync::Mutex::new(
-            basis_store::ergo_scanner::ServerState::new(config).unwrap(),
+            basis_store::ergo_scanner::ServerState::new(config, data_dir).unwrap(),
         ));
         let reserve_tracker = Arc::new(tokio::sync::Mutex::new(basis_store::ReserveTracker::new()));
 
@@ -232,6 +236,7 @@ mod http_api_tests {
             server: config::ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 3048,
+                data_dir: Some(data_dir.to_string_lossy().to_string()),
                 database_url: Some("sqlite::memory:".to_string()),
             },
             ergo: config::ErgoConfig {

@@ -681,10 +681,13 @@ async fn create_test_app(
     let (tx, _rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
     let event_store = Arc::new(store::EventStore::new_in_memory());
 
+    let server_temp_dir = tempfile::tempdir().unwrap();
+
     let config = Arc::new(config::AppConfig {
         server: config::ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 3048,
+            data_dir: Some(server_temp_dir.path().to_string_lossy().to_string()),
             database_url: Some("sqlite::memory:".to_string()),
         },
         ergo: config::ErgoConfig {
@@ -704,10 +707,15 @@ async fn create_test_app(
         acceptance: acceptance::config::AcceptanceConfig::empty(),
     });
 
-    let scanner = basis_store::ergo_scanner::ServerState::new(NodeConfig {
-        node_url: "http://example.com".to_string(),
-        ..Default::default()
-    })
+    let scanner_temp_dir = tempfile::tempdir().unwrap();
+    let scanner_data_dir = scanner_temp_dir.path();
+    let scanner = basis_store::ergo_scanner::ServerState::new(
+        NodeConfig {
+            node_url: "http://example.com".to_string(),
+            ..Default::default()
+        },
+        scanner_data_dir,
+    )
     .unwrap();
 
     let tracker_storage_path = unique_test_storage_path("basis_test_tracker_storage_acceptance");
@@ -760,10 +768,13 @@ async fn create_test_app_with_policy_routes(
     let (tx, _rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
     let event_store = Arc::new(store::EventStore::new_in_memory());
 
+    let server_temp_dir = tempfile::tempdir().unwrap();
+
     let config = Arc::new(config::AppConfig {
         server: config::ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 3048,
+            data_dir: Some(server_temp_dir.path().to_string_lossy().to_string()),
             database_url: Some("sqlite::memory:".to_string()),
         },
         ergo: config::ErgoConfig {
@@ -783,10 +794,15 @@ async fn create_test_app_with_policy_routes(
         acceptance: acceptance::config::AcceptanceConfig::empty(),
     });
 
-    let scanner = basis_store::ergo_scanner::ServerState::new(NodeConfig {
-        node_url: "http://example.com".to_string(),
-        ..Default::default()
-    })
+    let scanner_temp_dir = tempfile::tempdir().unwrap();
+    let scanner_data_dir = scanner_temp_dir.path();
+    let scanner = basis_store::ergo_scanner::ServerState::new(
+        NodeConfig {
+            node_url: "http://example.com".to_string(),
+            ..Default::default()
+        },
+        scanner_data_dir,
+    )
     .unwrap();
 
     let tracker_storage_path =
@@ -845,10 +861,13 @@ async fn create_test_app_with_all_routes(
     let (tx, _rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
     let event_store = Arc::new(store::EventStore::new_in_memory());
 
+    let server_temp_dir = tempfile::tempdir().unwrap();
+
     let config = Arc::new(config::AppConfig {
         server: config::ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 3048,
+            data_dir: Some(server_temp_dir.path().to_string_lossy().to_string()),
             database_url: Some("sqlite::memory:".to_string()),
         },
         ergo: config::ErgoConfig {
@@ -868,10 +887,15 @@ async fn create_test_app_with_all_routes(
         acceptance: acceptance::config::AcceptanceConfig::empty(),
     });
 
-    let scanner = basis_store::ergo_scanner::ServerState::new(NodeConfig {
-        node_url: "http://example.com".to_string(),
-        ..Default::default()
-    })
+    let scanner_temp_dir = tempfile::tempdir().unwrap();
+    let scanner_data_dir = scanner_temp_dir.path();
+    let scanner = basis_store::ergo_scanner::ServerState::new(
+        NodeConfig {
+            node_url: "http://example.com".to_string(),
+            ..Default::default()
+        },
+        scanner_data_dir,
+    )
     .unwrap();
 
     let tracker_storage_path =

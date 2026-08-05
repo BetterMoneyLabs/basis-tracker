@@ -2,6 +2,7 @@
 //! This module provides blockchain integration using /blockchain endpoints (no node scans).
 
 use std::{
+    path::Path,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -161,9 +162,10 @@ impl ServerState {
     }
 
     /// Create a server state that uses real Ergo scanner
-    pub fn new(config: NodeConfig) -> Result<Self, ScannerError> {
+    pub fn new(config: NodeConfig, data_dir: impl AsRef<Path>) -> Result<Self, ScannerError> {
         let start_height = config.start_height.unwrap_or(0);
         let client = Client::new();
+        let data_dir = data_dir.as_ref();
 
         // Log which Ergo node is being used (INFO level)
         info!("Initializing Ergo scanner with node: {}", config.node_url);
@@ -174,9 +176,7 @@ impl ServerState {
         }
 
         // Open scanner metadata storage - create directory if it doesn't exist
-        let storage_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join("crates/basis_server/data/scanner_metadata");
+        let storage_path = data_dir.join("scanner_metadata");
 
         // Create directory if it doesn't exist
         if let Some(parent) = storage_path.parent() {
@@ -193,9 +193,7 @@ impl ServerState {
         })?;
 
         // Open reserve storage - create directory if it doesn't exist
-        let reserve_storage_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join("crates/basis_server/data/reserves");
+        let reserve_storage_path = data_dir.join("reserves");
 
         // Create directory if it doesn't exist
         if let Some(parent) = reserve_storage_path.parent() {
@@ -626,9 +624,9 @@ pub async fn start_scanner(state: ServerState) -> Result<(), ScannerError> {
 }
 
 /// Create a scanner with default configuration
-pub fn create_default_scanner() -> Result<ServerState, ScannerError> {
+pub fn create_default_scanner(data_dir: impl AsRef<Path>) -> Result<ServerState, ScannerError> {
     let config = NodeConfig::default();
-    ServerState::new(config)
+    ServerState::new(config, data_dir)
 }
 
 /// Ergo box representation
@@ -859,7 +857,17 @@ mod tests {
 
         // Create a dummy server state for testing
         let config = NodeConfig::default();
-        let server_state = ServerState::new(config).expect("Failed to create server state");
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let server_state =
+            ServerState::new(config, &data_dir).expect("Failed to create server state");
 
         // Test the parse_reserve_box function
         let result = server_state.parse_reserve_box(&scan_box);
@@ -908,7 +916,17 @@ mod tests {
 
         // Create a dummy server state for testing
         let config = NodeConfig::default();
-        let server_state = ServerState::new(config).expect("Failed to create server state");
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let server_state =
+            ServerState::new(config, &data_dir).expect("Failed to create server state");
 
         // Test the parse_reserve_box function - should return an error
         let result = server_state.parse_reserve_box(&scan_box);
@@ -951,7 +969,17 @@ mod tests {
 
         // Create a dummy server state for testing
         let config = NodeConfig::default();
-        let server_state = ServerState::new(config).expect("Failed to create server state");
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let server_state =
+            ServerState::new(config, &data_dir).expect("Failed to create server state");
 
         // Test the parse_reserve_box function - should return an error
         let result = server_state.parse_reserve_box(&scan_box);

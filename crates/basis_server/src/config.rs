@@ -3,7 +3,7 @@
 use crate::acceptance::config::AcceptanceConfig;
 use basis_store::ergo_scanner::NodeConfig;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // Import Ergo address handling for P2PK address support
 use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
@@ -29,8 +29,22 @@ pub struct ServerConfig {
     pub host: String,
     /// Port to listen on
     pub port: u16,
-    /// Database path (if using persistent storage)
+    /// Base directory for all on-disk storage (databases, indices, scanner metadata).
+    /// Defaults to "data" relative to the server's working directory.
+    pub data_dir: Option<String>,
+    /// Database path (legacy field, kept for config compatibility; currently unused).
     pub database_url: Option<String>,
+}
+
+impl ServerConfig {
+    /// Resolve the configured data directory, falling back to "data".
+    pub fn data_dir(&self) -> PathBuf {
+        self.data_dir
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("data"))
+    }
 }
 
 /// Ergo blockchain configuration
@@ -75,6 +89,7 @@ impl AppConfig {
             // Default configuration
             .set_default("server.host", "0.0.0.0")?
             .set_default("server.port", 3048)?
+            .set_default("server.data_dir", "data")?
             .set_default("server.database_url", "sqlite:data/basis.db")?
             // Node configuration defaults
             .set_default("ergo.node.start_height", "")?
@@ -319,6 +334,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 3000,
+                data_dir: Some("test_data".to_string()),
                 database_url: Some("sqlite:test.db".to_string()),
             },
             ergo: ErgoConfig {

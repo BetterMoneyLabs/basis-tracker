@@ -15,7 +15,16 @@ impl RealScannerIntegrationTestSuite {
             node_url: node_url.to_string(),
             ..Default::default()
         };
-        let scanner = ServerState::new(config)?;
+        let scanner = ServerState::new(
+            config,
+            std::env::temp_dir().join(format!(
+                "basis_real_scanner_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        )?;
 
         Ok(Self {
             scanner,

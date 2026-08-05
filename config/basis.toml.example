@@ -1,6 +1,10 @@
 [server]
 host = "0.0.0.0"
 port = 3048
+# Base directory for all on-disk storage (databases, indices, scanner metadata).
+# Defaults to "data" relative to the server's working directory.
+data_dir = "data"
+# Legacy database URL field, kept for compatibility. Currently unused.
 database_url = "sqlite:data/basis.db"
 
 [ergo]

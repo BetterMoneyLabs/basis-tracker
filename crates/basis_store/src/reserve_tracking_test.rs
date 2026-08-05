@@ -34,7 +34,8 @@ mod tests {
             ReserveStorage::open(&reserve_storage_path).expect("Failed to create reserve storage");
 
         // Create server state
-        let state = ServerState::new(config).expect("Failed to create server state");
+        let state =
+            ServerState::new(config, temp_dir.path()).expect("Failed to create server state");
 
         // Create test scan boxes that simulate reserve boxes from the blockchain
         let test_scan_boxes = vec![
@@ -284,7 +285,8 @@ mod tests {
         let reserve_storage =
             ReserveStorage::open(&reserve_storage_path).expect("Failed to create reserve storage");
 
-        let state = ServerState::new(config).expect("Failed to create server state");
+        let state =
+            ServerState::new(config, temp_dir.path()).expect("Failed to create server state");
 
         // Test multiple reserve operations
         let reserves = vec![
