@@ -151,6 +151,8 @@ $ basis-cli reserve status --json
 
 ### Other commands
 
+- `acceptance upload --policy-file policy.toml --json` → `{"uploaded": true, "policy_hash": "..."}`.
+- `acceptance check --issuer PUBKEY --recipient PUBKEY --total-debt N --json` → `{"acceptable": true, "reason": null}`.
 - `generate-keypair --json` → `{"public_key_hex": "...", "private_key_hex": "..."}`
 - `account create/import` → the created account object; `account export` →
   `{"name": ..., "private_key": ...}` or `null`.

@@ -5,13 +5,15 @@ use basis_store::ExtendedReserveInfo;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// TUI-specific configuration including acceptance policy
+/// TUI-specific configuration including acceptance policy and address book
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TuiConfig {
     pub server_url: String,
     pub current_account: Option<String>,
     #[serde(default = "AcceptanceConfig::default_collateral")]
     pub acceptance: AcceptanceConfig,
+    #[serde(default)]
+    pub address_book: HashMap<String, String>,
 }
 
 impl Default for TuiConfig {
@@ -20,6 +22,7 @@ impl Default for TuiConfig {
             server_url: "http://127.0.0.1:3048".to_string(),
             current_account: None,
             acceptance: AcceptanceConfig::default_collateral(),
+            address_book: HashMap::new(),
         }
     }
 }
@@ -64,6 +67,11 @@ impl TuiConfigManager {
 
     pub fn update_acceptance(&mut self, config: AcceptanceConfig) -> Result<()> {
         self.config.acceptance = config;
+        self.save()
+    }
+
+    pub fn update_address_book(&mut self, address_book: HashMap<String, String>) -> Result<()> {
+        self.config.address_book = address_book;
         self.save()
     }
 }
@@ -233,9 +241,11 @@ impl App {
             address_book.insert(account.name.clone(), account.get_pubkey_hex());
         }
 
-        // Load TUI config (acceptance policy)
+        // Load TUI config (acceptance policy and address book)
         let tui_config_manager = TuiConfigManager::new()?;
         let acceptance_config = tui_config_manager.get_config().acceptance.clone();
+        let saved_address_book = tui_config_manager.get_config().address_book.clone();
+        address_book.extend(saved_address_book);
 
         let mut app = Self {
             screen: Screen::MainMenu,

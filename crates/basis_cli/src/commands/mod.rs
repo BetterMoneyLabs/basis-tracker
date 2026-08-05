@@ -1,3 +1,4 @@
+pub mod acceptance;
 pub mod account;
 pub mod keypair;
 pub mod note;

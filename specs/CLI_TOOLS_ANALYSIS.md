@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This repository contains **4 compiled CLI binaries** and **7 shell scripts** that provide command-line interfaces for the Basis Tracker system. The primary CLI tool is `basis_cli` (Rust-based), the secondary is `basis_server` (Rust-based daemon), the third is `basis_app` (TUI wallet, also Rust-based), and the fourth is `basis_mcp` (MCP server for AI agents). Supporting shell scripts handle server lifecycle management, database cleanup, deployment, and TUI wallet launch. Integration testing is covered by Rust test suite (`cargo test`).
+This repository contains **4 compiled CLI binaries** and **6 shell scripts** that provide command-line interfaces for the Basis Tracker system. The primary CLI tool is `basis_cli` (Rust-based), the secondary is `basis_server` (Rust-based daemon), the third is `basis_app` (TUI wallet, also Rust-based), and the fourth is `basis_mcp` (MCP server for AI agents). Supporting shell scripts handle server lifecycle management, database cleanup, deployment, and TUI wallet launch. Integration testing is covered by Rust test suite (`cargo test`).
 
 ---
 
@@ -33,6 +33,7 @@ src/
 ├── output.rs           (JSON-mode flag + progress! macro routing diagnostics to stderr)
 └── commands/
     ├── mod.rs          (Module declarations)
+    ├── acceptance.rs   (Acceptance policy upload and check)
     ├── account.rs      (Account management: create, list, switch, info, export, import)
     ├── keypair.rs      (Keypair generation)
     ├── note.rs         (Note operations: create, list, get, redeem)
@@ -51,6 +52,7 @@ src/
 | `note` | `create --recipient <pubkey> --amount <amount> [--demo]`, `list --issuer\|--recipient`, `get --issuer <pubkey> --recipient <pubkey>`, `redeem --issuer <pubkey> --amount <amount>` | IOU note lifecycle management |
 | `reserve` | `create --nft-id <id> [--owner <pubkey>] --amount <amount>`, `status [--issuer <pubkey>]`, `collateralization [--issuer <pubkey>]` | Reserve creation and monitoring |
 | `transaction` | `generate-redemption --issuer-pubkey <hex> --recipient-pubkey <hex> --amount <nanoERG> [--output-file <path>] [--emergency]` | Generate unsigned redemption transactions with Ergo node integration |
+| `acceptance` | `upload --policy-file <path>`, `check --issuer <hex> --recipient <hex> --total-debt <nanoERG>` | Acceptance policy upload and note-acceptance testing |
 | `test` | `test-redemption [--output-file <path>] [--amount <nanoERG>] [--poll-interval <secs>]` | Polling-based redemption test utility |
 | `interactive` | - | REPL mode with account-aware prompt |
 | `status` | - | Check server health and display recent events |
@@ -62,6 +64,7 @@ src/
 - **Interactive Mode**: REPL with command history and contextual help
 - **Demo Mode**: Pre-configured Alice/Bob/Tracker keys for testing (loaded from `secrets/participants.csv`)
 - **Redemption Transaction Generation**: Full unsigned transaction generation with AVL proofs, signatures, and Ergo node box retrieval
+- **Acceptance Policy CLI**: `acceptance upload` and `acceptance check` for scriptable policy management
 - **Polling Test Utility**: Automated polling for redeemable notes with sufficient collateral
 
 #### Agent-Friendly JSON Mode
@@ -211,12 +214,15 @@ This is a minimal utility that runs `basis_store::tests::run_all_tests()` and ex
 **Purpose**: Safely remove all database files and server runtime files
 **Features**:
 - Stops running server before cleanup
-- Removes multiple database directories (`data/`, server data dirs)
+- Removes the default database directory (`data/`)
 - Removes log and PID files
 - Optional backup creation (`-b` flag)
 - Auto-confirm mode (`-y` flag)
 - Interactive confirmation prompt
 - Recreates directory structure after cleanup
+
+**Note**: If `server.data_dir` is customized in `config/basis.toml`, clean that
+directory manually or set it via `DATA_DIR` when running the script.
 
 **Usage**: `./clean_database.sh [-y|--yes] [-b|--backup] [-h|--help]`
 

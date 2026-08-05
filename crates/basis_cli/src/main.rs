@@ -37,6 +37,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::account::AccountCommands,
     },
+    /// Acceptance policy operations
+    Acceptance {
+        #[command(subcommand)]
+        cmd: commands::acceptance::AcceptanceCommands,
+    },
     /// Generate a new secp256k1 keypair
     GenerateKeypair(commands::keypair::GenerateKeypairArgs),
     /// Note operations
@@ -96,6 +101,10 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Account { cmd } => {
             commands::account::handle_account_command(cmd, &mut account_manager, json).await
+        }
+        Commands::Acceptance { cmd } => {
+            commands::acceptance::handle_acceptance_command(cmd, &account_manager, &client, json)
+                .await
         }
         Commands::GenerateKeypair(args) => {
             commands::keypair::handle_generate_keypair_command(args, json).await

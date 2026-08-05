@@ -60,7 +60,7 @@ predicates = ["not_blacklisted", "whitelist_or_collateral"]
 
 ### Community Config
 
-**Location**: `community.toml` (in working directory, manually created)
+**Location**: `demo/lets_tutorial/config/community.toml` (example template)
 
 ```toml
 [acceptance]
@@ -81,7 +81,13 @@ type = "any_of"
 predicates = ["community_members"]
 ```
 
-**Usage**: User manually copies `community.toml` content to replace their `ui.toml` acceptance section, or uses TUI command `[6] Load community.toml`.
+**Usage**: Copy the `[[acceptance.predicates]]` blocks into `~/.basis/ui.toml` under the `[acceptance]` section, or use the CLI to upload a raw policy file:
+
+```bash
+basis-cli acceptance upload --policy-file community.toml
+```
+
+The TUI itself does not have a dedicated "load community.toml" command; policies are edited interactively or uploaded from a file via the CLI.
 
 ## Default Policy
 
@@ -113,10 +119,9 @@ min_ratio = 1.0  # 100%
   [3] Remove from Whitelist
   [4] Add to Blacklist (block issuer)
   [5] Remove from Blacklist
-  [6] Load community.toml
-  [7] Reset to Default (100% Collateral)
-  [8] View Current Policy
-  [9] Test Policy Against Issuer
+  [6] Reset to Default (100% Collateral)
+  [7] View Current Policy
+  [8] Test Policy Against Issuer
 
   [B] Back to Menu
 ```
@@ -211,34 +216,7 @@ Select issuer to remove from blacklist:
 → Shows: "✅ Removed from blacklist"
 ```
 
-### [6] Load community.toml
-
-```
-Read community.toml from working directory?
-  [Y] Yes
-  [N] Cancel
-> Y
-
-Found 6 community members:
-  alice, bob, charlie, dave, eve, frank
-
-Replace current policy with community trust?
-  [Y] Yes
-  [N] Cancel
-> Y
-
-→ Replaces acceptance section in ui.toml
-→ Auto-uploads to server
-→ Shows: "✅ Switched to Community Trust mode"
-```
-
-**Implementation**:
-- Read `community.toml` from current working directory
-- Parse `AcceptanceConfig`
-- Replace acceptance section in `~/.basis/ui.toml`
-- Sign and upload to server
-
-### [7] Reset to Default
+### [6] Reset to Default
 
 ```
 Reset to 100% collateral required?
@@ -251,7 +229,7 @@ Reset to 100% collateral required?
 → Shows: "✅ Reset to 100% Collateral Required"
 ```
 
-### [8] View Current Policy
+### [7] View Current Policy
 
 ```
 Current Policy:
@@ -272,7 +250,7 @@ Current Policy:
   Press Enter to continue...
 ```
 
-### [9] Test Policy
+### [8] Test Policy
 
 ```
 Test issuer acceptance:
@@ -304,27 +282,15 @@ Result: ❌ REJECTED
 
 ## Reserve Data Caching for Policy Testing
 
-For the `[9] Test Policy` command, reserve data is cached to avoid server round-trips:
+For the `[8] Test Policy` command, the TUI currently performs a local whitelist/blacklist check only:
 
-```rust
-pub struct ReserveCache {
-    pub reserves: HashMap<String, ExtendedReserveInfo>,  // pubkey -> reserve
-    pub last_updated: Instant,
-    pub ttl: Duration,  // 30 minutes
-}
-```
+- Looks up the issuer in the configured whitelist and blacklist predicates.
+- Reports whether the issuer would be accepted based on those lists.
+- Full server-side evaluation (including collateralization) is done by the tracker's
+  `POST /acceptance/check` endpoint; the TUI test is a quick local sanity check.
 
-**Cache Behavior**:
-- On first test: fetch all reserves from server, cache for 30 minutes
-- On subsequent tests: use cached data
-- Show cache age: "Using reserve data from 5 minutes ago"
-- Option to refresh: "[R] Refresh reserve data"
-
-If cache is stale or missing:
-```
-Fetching reserve data from server...
-✅ Cache updated (6 reserves)
-```
+A future enhancement may add reserve-data caching so the TUI can also estimate
+ collateralization locally without a server round-trip on every test.
 
 ## Policy Evaluation Logic
 
@@ -476,13 +442,7 @@ Check if a note would be accepted by the recipient's policy.
 pub struct App {
     // ... existing fields ...
     pub acceptance_config: AcceptanceConfig,
-    pub reserve_cache: Option<ReserveCache>,
     pub policy_uploaded: bool,
-}
-
-pub struct ReserveCache {
-    pub reserves: HashMap<String, ExtendedReserveInfo>,
-    pub last_updated: Instant,
 }
 
 // Add new screen
@@ -494,23 +454,32 @@ pub enum Screen {
 
 ### basis_app/src/ui.rs
 
-Add `draw_acceptance_policy()` function with all 9 commands.
+Add `draw_acceptance_policy()` function with the 8 interactive commands.
 
 ### basis_cli/src/api.rs
 
 ```rust
-pub async fn upload_policy(&self, request: UploadPolicyRequest) -> Result<()> {
+pub async fn upload_policy(&self, request: UploadPolicyRequest) -> Result<UploadPolicyResponse> {
     let url = format!("{}/acceptance/policy", self.base_url);
     let response = ureq::post(&url)
         .send_json(serde_json::to_value(request)?)?;
     
     if response.status() == 200 {
-        Ok(())
+        let api_response: ApiResponse<UploadPolicyResponse> = response.into_json()?;
+        if api_response.success {
+            Ok(api_response.data.unwrap())
+        } else {
+            Err(anyhow::anyhow!("Failed to upload policy: {:?}", api_response.error))
+        }
     } else {
         Err(anyhow::anyhow!("Failed to upload policy: {}", response.status()))
     }
 }
 ```
+
+### basis_cli/src/commands/acceptance.rs
+
+Add `acceptance upload` and `acceptance check` subcommands for scriptable policy management.
 
 ## Files to Modify
 
@@ -518,9 +487,10 @@ pub async fn upload_policy(&self, request: UploadPolicyRequest) -> Result<()> {
 |------|--------|
 | `basis_core/src/lib.rs` | Add shared `AcceptanceConfig`, `PredicateConfig`, `DefaultPolicy` |
 | `basis_server/src/acceptance/config.rs` | Re-export from `basis_core` |
-| `basis_app/src/app.rs` | Add `AcceptanceConfig`, `ReserveCache`, `Screen::AcceptancePolicy` |
-| `basis_app/src/ui.rs` | Add `draw_acceptance_policy()` with all 9 commands |
-| `basis_cli/src/api.rs` | Add `upload_policy()`, `get_policy()` |
+| `basis_app/src/app.rs` | Add `AcceptanceConfig`, `Screen::AcceptancePolicy` |
+| `basis_app/src/ui.rs` | Add `draw_acceptance_policy()` with 8 interactive commands |
+| `basis_cli/src/api.rs` | Add `upload_policy()`, `get_policy()`, `check_acceptance()` |
+| `basis_cli/src/commands/acceptance.rs` | Add `acceptance upload` / `acceptance check` CLI commands |
 | `basis_server/src/api.rs` | Add `POST /acceptance/policy`, `GET /acceptance/policy/{pubkey}` |
 | `basis_server/src/models.rs` | Add `UploadPolicyRequest`, `UploadPolicyResponse` |
 | `basis_store/src/` | Add `acceptance_policies` table |
@@ -531,11 +501,12 @@ pub async fn upload_policy(&self, request: UploadPolicyRequest) -> Result<()> {
 2. **Add server storage** for `acceptance_policies`
 3. **Add server API** endpoints (`POST /acceptance/policy`, `GET /acceptance/policy/{pubkey}`)
 4. **Update `POST /acceptance/check`** to look up per-recipient policies
-5. **Add TUI data model** (`AcceptanceConfig`, `ReserveCache`)
+5. **Add TUI data model** (`AcceptanceConfig`)
 6. **Add TUI API client** (`upload_policy()`)
-7. **Add TUI policy screen** with all 9 commands
-8. **Add MainMenu** option `[7] Acceptance Policy`
-9. **Test end-to-end** flow
+7. **Add TUI policy screen** with 8 interactive commands
+8. **Add CLI acceptance commands** (`acceptance upload`, `acceptance check`)
+9. **Add MainMenu** option for Acceptance Policy
+10. **Test end-to-end** flow
 
 ## Example Data Flow
 
@@ -579,6 +550,8 @@ Eve (blacklisted by Alice) tries to pay Alice:
 ## References
 
 - `specs/acceptance_predicates.md` — Server-side acceptance predicate specification
+- `specs/tui_wallet_lets.md` — LETS/community-currency demo using acceptance policies
 - `crates/basis_server/src/acceptance/` — Server implementation
 - `crates/basis_app/src/ui.rs` — TUI wallet UI
+- `crates/basis_cli/src/commands/acceptance.rs` — CLI acceptance commands
 - `crates/basis_cli/src/api.rs` — API client

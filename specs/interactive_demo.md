@@ -574,19 +574,12 @@ Alice (Issuer)                    Tracker Server                    Bob (Recipie
 
 ---
 
-## Automation Script
+## Automation Note
 
-For convenience, use the provided automation script:
-
-```bash
-# Run the complete tutorial
-./demo/run_full_tutorial.sh
-
-# Or step-by-step:
-./demo/run_full_tutorial.sh --step reserve    # Deploy reserve
-./demo/run_full_tutorial.sh --step note       # Create note
-./demo/run_full_tutorial.sh --step redeem     # Generate redemption tx
-```
+The `demo/run_full_tutorial.sh` automation script has been removed; the demo
+directory now contains only the pure-credit `agent_coop` and `lets_tutorial`
+demos. The command-by-command instructions above remain accurate for anyone who
+wants to run the reserve/note/redemption flow manually.
 
 ---
 

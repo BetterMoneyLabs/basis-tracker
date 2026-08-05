@@ -1,175 +1,81 @@
 # Basis Protocol Demo
 
-This directory contains demonstrations and tutorials for the Basis protocol.
+This directory contains runnable demonstrations of the Basis protocol.
 
-## Available Tutorials
+Both demos are **pure-credit**: they need only a local tracker server and the
+Basis binaries — no Ergo node, no reserves, no collateral, and no on-chain
+redemption.
 
-### 1. Full Interactive Tutorial (Recommended)
+## 1. Agent Service Co-op Demo
 
-**File:** `run_full_tutorial.sh`
-**Documentation:** [specs/interactive_demo.md](../specs/interactive_demo.md)
+**Directory:** `agent_coop/`
+**Launcher:** `run.sh`
+**Documentation:** [demo/agent_coop/README.md](agent_coop/README.md)
 
-A comprehensive hands-on tutorial demonstrating the complete Basis protocol flow:
-- **Reserve Deployment** - Create on-chain reserve with collateral
-- **IOU Note Issuance** - Alice pays Bob via tracker-signed note
-- **Redemption** - Bob generates unsigned transaction and redeems on-chain
+A multi-agent economy where three scripted agents (Alice, Bob, Charlie) exchange
+services and settle with cumulative IOU notes through the
+[`basis-mcp`](../specs/agent_integration.md) MCP server. It demonstrates the
+simplest possible credit-based payment flow and serves as a starting point for
+LLM-driven agent economies.
 
-**Features:**
-- Uses real keys from `secrets/participants.csv`
-- Connects to live tracker server
-- Generates real unsigned Ergo transactions
-- Step-by-step with troubleshooting guide
+**Scenario:**
+- Alice pays Bob for storage.
+- Bob pays Charlie for API routing.
+- Charlie pays Alice for compute.
+- Alice pays Bob again for more storage (cumulative debt).
+
+The orchestrator prints a balance sheet and credit-utilization report.
 
 **Quick Start:**
 ```bash
-# Run the complete tutorial
-./demo/run_full_tutorial.sh
-
-# Or step-by-step
-./demo/run_full_tutorial.sh --step reserve    # Deploy reserve
-./demo/run_full_tutorial.sh --step note       # Create IOU note
-./demo/run_full_tutorial.sh --step redeem     # Generate redemption tx
+./demo/agent_coop/run.sh
 ```
 
-### 2. Simple Note Creation Demo
+This builds `basis_server`, `basis_mcp`, and `basis_cli`, starts a tracker on
+`http://127.0.0.1:3048`, and runs the three agents via MCP stdio. State is written
+to `demo/agent_coop/data/`.
 
-**File:** `run_demo.sh`
+**Prerequisites:** Rust toolchain, Python 3, `curl`.
 
-A minimal demo for creating IOU notes only (no redemption):
+## 2. LETS Tutorial — Mutual Credit with TUI Wallet
+
+**Directory:** `lets_tutorial/`
+**Launcher:** `run_lets_tutorial.sh`
+**Documentation:** [demo/lets_tutorial/README.md](lets_tutorial/README.md)
+
+A human-driven Local Exchange Trading System (LETS) demo where each community
+member runs their own `basis-ui` TUI wallet. Members whitelist each other, set a
+common credit limit, and issue cumulative IOU notes. The TUI stats screen shows
+assets, liabilities, and net position in real time.
+
+**Scenario:**
+- Alice pays Bob 2 ERG for bread.
+- Bob pays Carol 1 ERG for a ride.
+- Carol pays Alice 1.5 ERG for tutoring.
+
+**Quick Start:**
 ```bash
-./demo/run_demo.sh
+./demo/lets_tutorial/run_lets_tutorial.sh --tmux
 ```
 
-This creates a demo note (Alice → Bob) with hardcoded test keys and saves it to `demo/output/note.json`.
+This builds `basis_server`, `basis_cli`, and `basis-ui`, starts a tracker, creates
+isolated home directories for each member, uploads their LETS acceptance policies,
+and launches all three wallets in a tmux session.
 
-## Configuration
-
-Edit `demo/config.toml` to customize demo parameters:
-
-```toml
-[demo]
-# Default debt amount: 0.05 ERG (50M nanoERG)
-default_debt_amount = 50000000
-
-# Fee configuration
-fee_box_value = 250000
-fee_box_count = 4
-
-# Reserve initial collateral: 0.1 ERG (100M nanoERG)
-reserve_initial_collateral = 100000000
-```
-
-## Key Participants
-
-| Role | Address | Description |
-|------|---------|-------------|
-| **Alice** (Issuer) | `9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ` | Creates reserves and IOU notes |
-| **Bob** (Recipient) | `9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73` | Receives and redeems notes |
-| **Tracker** | `9f7ZXamnfaDZL7EWLKLuBZgWMuHCusQYK6yow2d7p2eES9oRRRe` | Off-chain state tracking |
-
-**Note:** Bob does NOT need a secret key for redemption because the unsigned transaction is signed by Bob's Ergo wallet.
-
-## Prerequisites
-
-### For Full Tutorial
-
-1. **Build the CLI:**
-   ```bash
-   cargo build -p basis_cli
-   ```
-
-2. **Start Tracker Server:**
-   ```bash
-   cargo run -p basis_server
-   ```
-
-3. **Ergo Node Access:**
-   - Public testnet: `http://159.89.116.15:11088`
-   - Or local node: `http://localhost:9053`
-
-4. **Alice needs ERG** for reserve collateral and transaction fees
-
-### For Simple Demo
-
-Just the CLI:
-```bash
-cargo build -p basis_cli
-./demo/run_demo.sh
-```
-
-## Tutorial Steps
-
-### Step 1: Deploy Reserve
-
-Alice creates an on-chain reserve with 0.1 ERG collateral:
-
-```bash
-# IMPORTANT: --nft-id is the RESERVE NFT (not tracker NFT)
-# Create one first using Ergo node, then provide it here
-./target/debug/basis_cli reserve create \
-  --owner 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
-  --amount 100000000 \
-  --nft-id <YOUR_RESERVE_NFT_ID>
-```
-
-### Step 2: Create IOU Note
-
-Alice issues a note to Bob for 0.05 ERG:
-
-```bash
-./target/debug/basis_cli note create \
-  --demo \
-  --amount 50000000 \
-  --output alice_to_bob_note.json
-```
-
-### Step 3: Generate Redemption Transaction
-
-Bob creates an unsigned transaction to redeem 0.025 ERG:
-
-```bash
-./target/debug/basis_cli transaction generate-redemption \
-  --issuer-pubkey 0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83 \
-  --recipient-pubkey 03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea \
-  --amount 25000000 \
-  --output-file redemption_tx.json
-```
-
-### Step 4: Sign and Broadcast
-
-Bob signs the transaction with his Ergo wallet:
-
-```bash
-curl -X POST http://localhost:9053/wallet/transaction/sign \
-  -H "Content-Type: application/json" \
-  -H "api_key: bob-api-key" \
-  -d @redemption_tx.json
-```
-
-Then broadcasts:
-
-```bash
-curl -X POST http://localhost:9053/wallet/transaction/send \
-  -H "Content-Type: application/json" \
-  -H "api_key: bob-api-key" \
-  -d @signed_tx.json
-```
-
-## Troubleshooting
-
-See [specs/interactive_demo.md](../specs/interactive_demo.md) for detailed troubleshooting guide.
+**Prerequisites:** Rust toolchain, `bash`, `curl`, `python3`, optional `tmux`.
 
 ## References
 
+- [Agent Integration Spec](../specs/agent_integration.md)
+- [TUI Wallet LETS Spec](../specs/tui_wallet_lets.md)
+- [Acceptance Predicate Spec](../specs/acceptance_predicates.md)
 - [Protocol Specification](../specs/spec.md)
-- [Redemption CLI Specification](../specs/redemption_cli_spec.md)
-- [Tracker Box Setup Guide](../docs/TRACKER_BOX_SETUP.md)
-- [Scala Reference Demo](../scala/demo/README.md)
 
 ## Security Warning
 
-Demo keys in `secrets/participants.csv` are for testing only. Never use them in production. In production:
+Demo keys are generated locally for each run and are for testing only. Never use
+them in production. In production:
 - Generate secure keypairs
 - Use hardware wallets or HSMs
 - Protect private keys
-- Monitor reserve collateralization
+- Monitor reserve collateralization if you later move to backed notes

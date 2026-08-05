@@ -503,6 +503,9 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
                     let pubkey = read_input("Public key (66 hex chars): ");
                     if pubkey.len() == 66 {
                         app.address_book.insert(name.clone(), pubkey);
+                        let _ = app
+                            .tui_config_manager
+                            .update_address_book(app.address_book.clone());
                         app.set_notification(format!("Added contact '{}'", name), false);
                     } else {
                         app.set_notification(
@@ -526,6 +529,9 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
                         true,
                     );
                 } else if app.address_book.remove(&name).is_some() {
+                    let _ = app
+                        .tui_config_manager
+                        .update_address_book(app.address_book.clone());
                     app.set_notification(format!("Deleted contact '{}'", name), false);
                 } else {
                     app.set_notification(format!("Contact '{}' not found", name), true);

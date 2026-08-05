@@ -108,7 +108,9 @@ The main tracker scanner state includes:
 The tracker scanner is initialized during server startup with the following steps:
 
 1. **Configuration Loading**: Reads the tracker NFT ID from server configuration (`ergo.tracker_nft_id`)
-2. **Storage Initialization**: Creates persistent storage in `data/tracker_scanner_metadata` and `data/tracker_boxes` directories
+2. **Storage Initialization**: Creates persistent storage under the configured
+   `server.data_dir` (default `data/`), in the `tracker_scanner_metadata` and
+   `tracker_boxes` subdirectories
 3. **Scan Registration**: Automatically registers the tracker scan with the Ergo node if not already registered
 4. **Verification**: Verifies the scan is active and re-registers if necessary
 5. **Background Operation**: Continues monitoring for tracker state commitment boxes

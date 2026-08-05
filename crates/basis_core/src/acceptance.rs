@@ -60,10 +60,11 @@ impl AcceptanceConfig {
 }
 
 /// Default policy when no predicate matches
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DefaultPolicy {
     Accept,
+    #[default]
     Reject,
 }
 
@@ -74,12 +75,6 @@ impl DefaultPolicy {
             DefaultPolicy::Accept => true,
             DefaultPolicy::Reject => false,
         }
-    }
-}
-
-impl Default for DefaultPolicy {
-    fn default() -> Self {
-        DefaultPolicy::Reject
     }
 }
 

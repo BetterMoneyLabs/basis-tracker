@@ -118,6 +118,8 @@ basis_cli --json note list --recipient
 basis_cli --json note create --recipient <66-hex> --amount 1000000000
 basis_cli --json note redeem --issuer <66-hex> --amount 1000000000
 basis_cli --json reserve status
+basis_cli --json acceptance upload --policy-file policy.toml
+basis_cli --json acceptance check --issuer <66-hex> --recipient <66-hex> --total-debt 1000000000
 ```
 
 ## Standard workflows
@@ -150,6 +152,35 @@ basis_cli --json reserve status
 2. Apply the requested change → `policy_set {policy}` with the full new config.
 3. On the partial-failure message, inform the user the policy is local-only until the
    tracker is reachable.
+
+## Example: multi-agent service co-op
+
+A runnable pure-credit example is provided in `demo/agent_coop/`. It spawns three
+isolated `basis-mcp` processes (Alice, Bob, Charlie), has each publish a whitelist
+acceptance policy, then executes a round of service payments via `note_create`.
+The orchestrator prints a balance sheet and credit-utilization bars.
+
+```bash
+./demo/agent_coop/run.sh
+```
+
+No reserves, collateral, or redemption are used — it is the simplest end-to-end
+MCP workflow and a starting point for LLM-driven agents. See
+`demo/agent_coop/README.md` for the full story and expected output.
+
+## Example: LETS with the TUI wallet
+
+A human-driven LETS demo using the `basis-ui` TUI wallet is provided in
+`demo/lets_tutorial/`. Each member runs their own isolated wallet, whitelists the
+other members, and issues cumulative IOU notes. The TUI stats screen shows assets,
+liabilities, and net position in real time.
+
+```bash
+./demo/lets_tutorial/run_lets_tutorial.sh --tmux
+```
+
+See `demo/lets_tutorial/README.md` for the trading scenario and expected balances,
+and `specs/tui_wallet_lets.md` for the design specification.
 
 ## Security & safety rules for agents
 
