@@ -74,6 +74,16 @@ impl TuiConfigManager {
         self.config.address_book = address_book;
         self.save()
     }
+
+    pub fn set_server_url(&mut self, server_url: String) -> Result<()> {
+        self.config.server_url = server_url;
+        self.save()
+    }
+
+    pub fn set_current_account(&mut self, current_account: Option<String>) -> Result<()> {
+        self.config.current_account = current_account;
+        self.save()
+    }
 }
 
 pub enum Screen {

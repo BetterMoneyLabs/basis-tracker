@@ -3527,6 +3527,126 @@ pub async fn create_reserve_payload(
     )
 }
 
+// Request format expected by Ergo node's /wallet/payment/send endpoint
+#[derive(Debug, Serialize)]
+struct ErgoPaymentRequest {
+    address: String,
+    value: u64,
+    assets: Vec<ErgoAsset>,
+    registers: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ErgoAsset {
+    #[serde(rename = "tokenId")]
+    token_id: String,
+    amount: u64,
+}
+
+// Submit a reserve creation payload to the tracker's configured Ergo node via
+// /wallet/payment/send. This requires the node's wallet to hold the reserve NFT
+// and sufficient ERG for the reserve value and fee.
+#[axum::debug_handler]
+pub async fn submit_reserve_transaction(
+    State(state): State<AppState>,
+    Json(payload): Json<ReserveCreationResponse>,
+) -> (
+    StatusCode,
+    Json<ApiResponse<crate::models::ReserveSubmissionResponse>>,
+) {
+    let node_config = &state.config.ergo.node;
+    if node_config.node_url.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::models::error_response(
+                "No Ergo node configured on the tracker".to_string(),
+            )),
+        );
+    }
+
+    let payment_requests: Vec<ErgoPaymentRequest> = payload
+        .requests
+        .into_iter()
+        .map(|req| ErgoPaymentRequest {
+            address: req.address,
+            value: req.value,
+            assets: req
+                .assets
+                .into_iter()
+                .map(|a| ErgoAsset {
+                    token_id: a.token_id,
+                    amount: a.amount,
+                })
+                .collect(),
+            registers: req.registers,
+        })
+        .collect();
+
+    let url = format!(
+        "{}/wallet/payment/send",
+        node_config.node_url.trim_end_matches('/')
+    );
+    let client = reqwest::Client::new();
+    let mut request = client.post(&url).json(&payment_requests);
+    if let Some(ref api_key) = node_config.api_key {
+        request = request.header("api_key", api_key);
+    }
+
+    match request.send().await {
+        Ok(response) => {
+            let status = response.status();
+            match response.text().await {
+                Ok(body) => {
+                    if status.is_success() {
+                        // The Ergo node returns the transaction id as a quoted string.
+                        let tx_id = body.trim().trim_matches('"').to_string();
+                        tracing::info!("Reserve creation transaction submitted: {}", tx_id);
+                        (
+                            StatusCode::OK,
+                            Json(crate::models::success_response(
+                                crate::models::ReserveSubmissionResponse { tx_id },
+                            )),
+                        )
+                    } else {
+                        tracing::error!(
+                            "Ergo node /wallet/payment/send returned {}: {}",
+                            status,
+                            body
+                        );
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            Json(crate::models::error_response(format!(
+                                "Ergo node returned {}: {}",
+                                status, body
+                            ))),
+                        )
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to read Ergo node response: {}", e);
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(crate::models::error_response(format!(
+                            "Failed to read Ergo node response: {}",
+                            e
+                        ))),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to contact Ergo node at {}: {}", url, e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(crate::models::error_response(format!(
+                    "Failed to contact Ergo node: {}",
+                    e
+                ))),
+            )
+        }
+    }
+}
+
 // Get the Basis reserve contract P2S address from server configuration
 #[axum::debug_handler]
 pub async fn get_basis_reserve_contract_p2s(

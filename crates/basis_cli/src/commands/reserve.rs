@@ -20,6 +20,10 @@ pub enum ReserveCommands {
         /// Amount of ERG to put into the reserve (in nanoERG)
         #[arg(long)]
         amount: u64,
+
+        /// Submit the generated payload to the tracker's Ergo node for broadcast
+        #[arg(long)]
+        submit: bool,
     },
     /// Get reserve status for an issuer
     Status {
@@ -43,6 +47,9 @@ pub struct ReserveCreateResult {
     pub amount: u64,
     /// Payload to submit to an Ergo wallet to create the reserve on-chain.
     pub payload: ReserveCreationResponse,
+    /// Transaction id if the payload was submitted via the tracker node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_id: Option<String>,
 }
 
 /// Collateralization ratio and classification for an issuer.
@@ -75,6 +82,7 @@ pub async fn create_reserve(
     nft_id: String,
     owner: Option<String>,
     amount: u64,
+    submit: bool,
 ) -> Result<ReserveCreateResult> {
     // Get the owner public key from either the command line argument or current account
     let owner_pubkey = resolve_pubkey(account_manager, owner, "owner")?;
@@ -102,11 +110,18 @@ pub async fn create_reserve(
     // Call the API to create the reserve payload
     let payload = client.create_reserve(request).await?;
 
+    let tx_id = if submit {
+        Some(client.submit_reserve(payload.clone()).await?.tx_id)
+    } else {
+        None
+    };
+
     Ok(ReserveCreateResult {
         nft_id,
         owner_pubkey,
         amount,
         payload,
+        tx_id,
     })
 }
 
@@ -145,13 +160,18 @@ pub async fn handle_reserve_command(
             nft_id,
             owner,
             amount,
+            submit,
         } => {
-            let result = create_reserve(account_manager, client, nft_id, owner, amount).await?;
+            let result =
+                create_reserve(account_manager, client, nft_id, owner, amount, submit).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 let response = &result.payload;
                 println!("\n✅ Reserve creation payload created successfully!");
+                if let Some(ref tx_id) = result.tx_id {
+                    println!("Transaction submitted: {}", tx_id);
+                }
                 println!("The following payload can be used with the Ergo wallet API:");
                 println!();
 
@@ -180,14 +200,18 @@ pub async fn handle_reserve_command(
                 println!("Fee: {} nanoERG", response.fee);
                 println!("Change address: {}", response.change_address);
 
-                println!();
-                println!(
-                    "💡 To create the reserve, submit this payload to your Ergo wallet using:"
-                );
-                println!("   curl -X POST http://your-ergo-node:9053/wallet/payment/send \\");
-                println!("        -H \"Content-Type: application/json\" \\");
-                println!("        -H \"api_key: your-api-key\" \\");
-                println!("        -d '...' # (replace with the full payload above)");
+                if result.tx_id.is_none() {
+                    println!();
+                    println!(
+                        "💡 To create the reserve, submit this payload to your Ergo wallet using:"
+                    );
+                    println!("   curl -X POST http://your-ergo-node:9053/wallet/payment/send \\");
+                    println!("        -H \"Content-Type: application/json\" \\");
+                    println!("        -H \"api_key: your-api-key\" \\");
+                    println!("        -d '...' # (replace with the full payload above)");
+                    println!();
+                    println!("   Or re-run with --submit to broadcast via the tracker node.");
+                }
             }
         }
         ReserveCommands::Status { issuer } => {

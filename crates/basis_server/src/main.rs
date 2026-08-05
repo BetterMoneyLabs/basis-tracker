@@ -778,6 +778,10 @@ async fn main() {
             "/reserves/create",
             post(create_reserve_payload).options(handle_options),
         )
+        .route(
+            "/reserves/submit",
+            post(submit_reserve_transaction).options(handle_options),
+        )
         // Most specific parameterized routes first
         .route(
             "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",

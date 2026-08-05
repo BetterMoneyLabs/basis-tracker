@@ -56,6 +56,7 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `GET /reserves/issuer/{pubkey}` - Get reserves for a specific issuer
 - `GET /key-status/{pubkey}` - Get status information for a public key
 - `POST /reserves/create` - Create a reserve creation payload for Ergo node's `/wallet/payment/send` API
+- `POST /reserves/submit` - Submit a reserve creation payload to the tracker's configured Ergo node for broadcast
 
 ### Event Tracking
 
@@ -205,7 +206,7 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
     - `address`: Reserve contract P2S address (hardcoded in configuration)
     - `value`: ERG amount from request
     - `assets`: Array containing the NFT asset
-      - `tokenId`: NFT ID from request (camelCase as required by Ergo node API)
+      - `token_id`: NFT ID from request (snake_case in the response; converted to `tokenId` by the submission endpoint)
       - `amount`: Always 1 for NFTs
     - `registers`: Map of register values
       - `R4`: Owner public key from request (GroupElement)
@@ -213,6 +214,16 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
       - `R6`: Tracker NFT ID (bytes) - identifies which tracker server this reserve is linked to
   - `fee`: Transaction fee amount from configuration
   - `change_address`: Change address derived from tracker public key configuration (fallback to owner pubkey if unavailable)
+
+- `POST /reserves/submit` - Submit a previously generated reserve creation payload to the tracker's configured Ergo node for on-chain broadcast.
+  - Accepts the same `ReserveCreationResponse` JSON returned by `/reserves/create`.
+  - Converts `token_id` to the camelCase `tokenId` required by the Ergo node.
+  - Forwards the `requests` array to `POST {ergo_node}/wallet/payment/send` using the configured `api_key`.
+  - Returns:
+    - `tx_id`: String - the transaction id returned by the Ergo node.
+  - Errors:
+    - `503 Service Unavailable` if no Ergo node is configured.
+    - `502 Bad Gateway` if the Ergo node returns an error or is unreachable.
 
 ### Debt Transfer Support
 

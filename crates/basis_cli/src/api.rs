@@ -126,6 +126,12 @@ pub struct Asset {
     pub amount: u64,
 }
 
+/// Response from submitting a reserve creation payload to the tracker's Ergo node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveSubmissionResponse {
+    pub tx_id: String,
+}
+
 // Tracker signature request/response for redemption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerSignatureRequest {
@@ -773,6 +779,27 @@ impl TrackerClient {
         } else {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to create reserve: {}", error_text))
+        }
+    }
+
+    /// Submit a reserve creation payload to the tracker's configured Ergo node for broadcast.
+    pub async fn submit_reserve(
+        &self,
+        payload: ReserveCreationResponse,
+    ) -> Result<ReserveSubmissionResponse> {
+        let url = format!("{}/reserves/submit", self.base_url);
+        let response = ureq::post(&url).send_json(serde_json::to_value(payload)?)?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<ReserveSubmissionResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!("Failed to submit reserve: {}", error_text))
         }
     }
 

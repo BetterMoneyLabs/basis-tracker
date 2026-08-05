@@ -32,6 +32,11 @@ pub enum AccountCommands {
         /// Private key in hex format
         private_key: String,
     },
+    /// Delete an account
+    Delete {
+        /// Account name
+        name: String,
+    },
 }
 
 /// Result of creating a new account.
@@ -78,6 +83,12 @@ pub struct AccountExportedResult {
 pub struct AccountImportedResult {
     pub name: String,
     pub pubkey_hex: String,
+}
+
+/// Result of deleting an account.
+#[derive(Debug, Serialize)]
+pub struct AccountDeletedResult {
+    pub deleted: String,
 }
 
 /// Create a new account and persist it to the config.
@@ -178,6 +189,17 @@ pub fn import_account(
     Ok(AccountImportedResult {
         name: name.to_string(),
         pubkey_hex,
+    })
+}
+
+/// Delete an account from config and the current session.
+pub fn delete_account(
+    account_manager: &mut AccountManager,
+    name: &str,
+) -> Result<AccountDeletedResult> {
+    account_manager.delete_account(name)?;
+    Ok(AccountDeletedResult {
+        deleted: name.to_string(),
     })
 }
 
@@ -287,6 +309,14 @@ pub async fn handle_account_command(
             } else {
                 println!("✅ Successfully imported account '{}'", result.name);
                 println!("Public Key: {}", result.pubkey_hex);
+            }
+        }
+        AccountCommands::Delete { name } => {
+            let result = delete_account(account_manager, &name)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("✅ Deleted account '{}'", result.deleted);
             }
         }
     }

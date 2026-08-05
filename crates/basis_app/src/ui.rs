@@ -329,12 +329,18 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
                         let pubkey = account.get_pubkey_hex();
                         // Sync to address book
                         app.address_book.insert(name.clone(), pubkey.clone());
+                        let _ = app
+                            .tui_config_manager
+                            .update_address_book(app.address_book.clone());
                         app.set_notification(format!("Created account '{}'", account.name), false);
                         app.current_account = Some(crate::app::AccountInfo {
                             name: account.name.clone(),
                             pubkey,
                             _created_at: account.created_at,
                         });
+                        let _ = app
+                            .tui_config_manager
+                            .set_current_account(Some(account.name));
                     }
                     Err(e) => {
                         app.set_notification(format!("Error: {}", e), true);
@@ -355,6 +361,9 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
                                     pubkey: accounts[idx - 1].get_pubkey_hex(),
                                     _created_at: accounts[idx - 1].created_at,
                                 });
+                                let _ = app
+                                    .tui_config_manager
+                                    .set_current_account(Some(name.clone()));
                                 app.set_notification(
                                     format!("Switched to account '{}'", name),
                                     false,
@@ -410,12 +419,41 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
                     if idx > 0 && idx <= accounts.len() {
                         let confirm = read_input("Are you sure? (yes/no): ");
                         if confirm == "yes" {
-                            app.set_notification(
-                                "Account deletion not yet implemented".to_string(),
-                                true,
-                            );
+                            let name = accounts[idx - 1].name.clone();
+                            match app.account_manager.delete_account(&name) {
+                                Ok(()) => {
+                                    // Remove from address book and persist
+                                    app.address_book.remove(&name);
+                                    let _ = app
+                                        .tui_config_manager
+                                        .update_address_book(app.address_book.clone());
+
+                                    // Clear current account if it was deleted
+                                    if app
+                                        .current_account
+                                        .as_ref()
+                                        .map(|a| a.name == name)
+                                        .unwrap_or(false)
+                                    {
+                                        app.current_account = None;
+                                        let _ = app.tui_config_manager.set_current_account(None);
+                                    }
+
+                                    app.set_notification(
+                                        format!("Deleted account '{}'", name),
+                                        false,
+                                    );
+                                }
+                                Err(e) => {
+                                    app.set_notification(format!("Error: {}", e), true);
+                                }
+                            }
                         }
+                    } else {
+                        app.set_notification("Invalid account number".to_string(), true);
                     }
+                } else {
+                    app.set_notification("Invalid account number".to_string(), true);
                 }
             }
         }
@@ -748,6 +786,7 @@ async fn draw_settings(app: &mut App) -> Result<()> {
                     .get_config_mut()
                     .server_url = new_url.clone();
                 app.account_manager.config_manager.save()?;
+                let _ = app.tui_config_manager.set_server_url(new_url.clone());
                 app.set_notification(format!("Tracker URL updated to: {}", new_url), false);
             }
         }
@@ -1199,8 +1238,32 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                         println!("    Value: {}", req.value);
                     }
                     println!();
-                    wait_for_enter("Press Enter to continue...");
-                    app.set_notification("Reserve payload generated".to_string(), false);
+
+                    let submit = read_input("Submit to tracker node for broadcast? (y/n): ");
+                    if submit == "y" || submit == "Y" {
+                        match app.client.submit_reserve(response).await {
+                            Ok(submission) => {
+                                app.set_notification(
+                                    format!(
+                                        "Reserve submitted, tx {}",
+                                        &submission.tx_id[..16.min(submission.tx_id.len())]
+                                    ),
+                                    false,
+                                );
+                            }
+                            Err(e) => {
+                                app.set_notification(
+                                    format!("Failed to submit reserve: {}", e),
+                                    true,
+                                );
+                            }
+                        }
+                    } else {
+                        app.set_notification(
+                            "Reserve payload generated (not submitted)".to_string(),
+                            false,
+                        );
+                    }
                 }
                 Err(e) => {
                     app.set_notification(format!("Failed to create reserve: {}", e), true);

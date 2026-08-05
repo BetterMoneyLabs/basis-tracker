@@ -121,4 +121,22 @@ If you want the exact JSON array format that the wallet/payment/send API expects
 
 This JSON array is ready to be submitted directly to the `wallet/payment/send` API endpoint of your Ergo node.
 
+## Alternative: Submit via the Tracker
+
+If the tracker server is configured with an Ergo node, you can ask it to broadcast the reserve payload for you. The TUI wallet prompts for this after generating the payload, and the CLI supports a `--submit` flag:
+
+```bash
+basis-cli reserve create --nft-id <your_nft_id> --amount 1000000000 --submit
+```
+
+Or submit the full `ReserveCreationResponse` JSON manually:
+
+```bash
+curl -X POST http://127.0.0.1:3048/reserves/submit \
+  -H "Content-Type: application/json" \
+  -d '<ReserveCreationResponse JSON>'
+```
+
+The tracker converts the payload to the camelCase `tokenId` format expected by the Ergo node and returns the broadcast transaction id.
+
 Note: Make sure your Ergo node is running and you have the correct API key. Also, ensure that your wallet has sufficient ERG and the specified NFT to create the reserve.

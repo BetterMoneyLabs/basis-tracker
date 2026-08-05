@@ -369,14 +369,14 @@ pub struct CreateReserveRequest {
 }
 
 // Response for reserve creation - formatted for Ergo node's /wallet/payment/send API
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReserveCreationResponse {
     pub requests: Vec<ReservePaymentRequest>,
     pub fee: u64,
     pub change_address: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReservePaymentRequest {
     pub address: String,
     pub value: u64,
@@ -384,13 +384,17 @@ pub struct ReservePaymentRequest {
     pub registers: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     pub token_id: String,
     pub amount: u64,
 }
 
-// Response for tracker box ID
+// Response for reserve submission via the tracker's Ergo node.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReserveSubmissionResponse {
+    pub tx_id: String,
+}
 #[derive(Debug, Serialize)]
 pub struct TrackerBoxIdResponse {
     pub tracker_box_id: String,

@@ -102,6 +102,14 @@ impl ConfigManager {
         self.config.accounts.get(name)
     }
 
+    pub fn delete_account(&mut self, name: &str) -> Result<()> {
+        self.config.accounts.remove(name);
+        if self.config.current_account.as_deref() == Some(name) {
+            self.config.current_account = None;
+        }
+        self.save()
+    }
+
     pub fn list_accounts(&self) -> Vec<&AccountConfig> {
         self.config.accounts.values().collect()
     }
@@ -112,5 +120,100 @@ impl ConfigManager {
             .current_account
             .as_ref()
             .and_then(|name| self.config.accounts.get(name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_config_path() -> PathBuf {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "basis_cli_config_test_{}_{}.toml",
+            std::process::id(),
+            id
+        ));
+        // ensure a fresh start
+        let _ = fs::remove_file(&path);
+        path
+    }
+
+    fn make_manager(path: PathBuf) -> ConfigManager {
+        let config = CliConfig {
+            current_account: Some("alice".to_string()),
+            accounts: {
+                let mut map = HashMap::new();
+                map.insert(
+                    "alice".to_string(),
+                    AccountConfig {
+                        name: "alice".to_string(),
+                        pubkey_hex: "02alice".to_string(),
+                        private_key_hex: "00alice".to_string(),
+                        created_at: 1,
+                    },
+                );
+                map.insert(
+                    "bob".to_string(),
+                    AccountConfig {
+                        name: "bob".to_string(),
+                        pubkey_hex: "02bob".to_string(),
+                        private_key_hex: "00bob".to_string(),
+                        created_at: 2,
+                    },
+                );
+                map
+            },
+            server_url: "http://127.0.0.1:3048".to_string(),
+        };
+        fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+        ConfigManager::new(Some(path)).unwrap()
+    }
+
+    #[test]
+    fn test_delete_existing_account_keeps_current() {
+        let path = temp_config_path();
+        let mut manager = make_manager(path.clone());
+
+        manager.delete_account("bob").unwrap();
+
+        assert!(manager.get_account("bob").is_none());
+        assert!(manager.get_account("alice").is_some());
+        assert_eq!(
+            manager.get_config().current_account.as_deref(),
+            Some("alice")
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_delete_current_account_clears_current() {
+        let path = temp_config_path();
+        let mut manager = make_manager(path.clone());
+
+        manager.delete_account("alice").unwrap();
+
+        assert!(manager.get_account("alice").is_none());
+        assert!(manager.get_config().current_account.is_none());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_delete_nonexistent_account_is_noop() {
+        let path = temp_config_path();
+        let mut manager = make_manager(path.clone());
+
+        manager.delete_account("charlie").unwrap();
+
+        assert_eq!(manager.list_accounts().len(), 2);
+
+        let _ = fs::remove_file(&path);
     }
 }
