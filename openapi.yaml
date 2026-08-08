@@ -280,8 +280,11 @@ paths:
 
   /redeem:
     post:
-      summary: Initiate redemption process
-      description: Initiate the redemption of an IOU note from a reserve
+      summary: Retired server-sign redemption route
+      description: |
+        Compatibility tombstone. Server-side redemption is retired because a
+        node-accepted transaction is not confirmed settlement evidence. Use a
+        locally reviewed signing flow and confirmed-chain reconciliation.
       operationId: initiateRedemption
       tags:
         - Redemption
@@ -292,20 +295,8 @@ paths:
             schema:
               $ref: '#/components/schemas/RedeemRequest'
       responses:
-        '200':
-          description: Redemption initiated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseRedeem'
-        '400':
-          description: Bad request - invalid input parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
+        '410':
+          description: Legacy server-sign redemption is retired
           content:
             application/json:
               schema:

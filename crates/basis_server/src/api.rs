@@ -1590,12 +1590,26 @@ pub async fn get_key_status(
     )
 }
 
+fn legacy_settlement_disabled() -> bool {
+    true
+}
+
 // Initiate redemption process
 #[axum::debug_handler]
 pub async fn initiate_redemption(
     State(state): State<AppState>,
     Json(payload): Json<RedeemRequest>,
 ) -> (StatusCode, Json<ApiResponse<RedeemResponse>>) {
+    if legacy_settlement_disabled() {
+        return (
+            StatusCode::GONE,
+            Json(crate::models::error_response(
+                "Legacy server-sign redemption is retired; use a locally reviewed signing flow and confirmed-chain reconciliation"
+                    .to_string(),
+            )),
+        );
+    }
+
     tracing::debug!("Initiating redemption: {:?}", payload);
 
     // Convert recipient public key to P2PK address
@@ -1998,118 +2012,24 @@ pub async fn initiate_redemption(
     }
 }
 
-// Complete redemption process by removing the note from tracker state
+/// Legacy direct-completion endpoint.
+///
+/// A caller-provided transaction id and accounting tuple are not evidence that
+/// the expected reserve successor is confirmed on the active chain.  Keep the
+/// route as an explicit tombstone so older clients fail closed instead of
+/// silently mutating tracker state.
 #[axum::debug_handler]
 pub async fn complete_redemption(
     State(_state): State<AppState>,
-    Json(payload): Json<CompleteRedemptionRequest>,
+    Json(_payload): Json<CompleteRedemptionRequest>,
 ) -> (StatusCode, Json<ApiResponse<()>>) {
-    tracing::debug!("Completing redemption: {:?}", payload);
-
-    // Parse public keys
-    let issuer_pubkey = match hex::decode(&payload.issuer_pubkey) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "Invalid issuer_pubkey hex encoding".to_string(),
-                )),
-            )
-        }
-    };
-
-    let recipient_pubkey = match hex::decode(&payload.recipient_pubkey) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "Invalid recipient_pubkey hex encoding".to_string(),
-                )),
-            )
-        }
-    };
-
-    let issuer_pubkey: PubKey = match issuer_pubkey.try_into() {
-        Ok(arr) => arr,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "issuer_pubkey must be 33 bytes".to_string(),
-                )),
-            )
-        }
-    };
-
-    let recipient_pubkey: PubKey = match recipient_pubkey.try_into() {
-        Ok(arr) => arr,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "recipient_pubkey must be 33 bytes".to_string(),
-                )),
-            )
-        }
-    };
-
-    // Send command to tracker thread to complete redemption
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    let cmd = TrackerCommand::CompleteRedemption {
-        issuer_pubkey,
-        recipient_pubkey,
-        redeemed_amount: payload.redeemed_amount,
-        new_already_redeemed: payload.new_already_redeemed,
-        response_tx,
-    };
-
-    if let Err(e) = _state.tx.send(cmd).await {
-        tracing::error!(
-            "Failed to send complete redemption command to tracker: {}",
-            e
-        );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response(
-                "Failed to complete redemption".to_string(),
-            )),
-        );
-    }
-
-    // Wait for response from tracker thread
-    match response_rx.await {
-        Ok(Ok(())) => {
-            tracing::info!(
-                "Redemption completed successfully for {} -> {}",
-                payload.issuer_pubkey,
-                payload.recipient_pubkey
-            );
-
-            (StatusCode::OK, Json(crate::models::success_response(())))
-        }
-        Ok(Err(e)) => {
-            tracing::error!("Redemption completion failed: {}", e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(format!(
-                    "Redemption completion failed: {}",
-                    e
-                ))),
-            )
-        }
-        Err(_) => {
-            tracing::error!("Failed to receive redemption completion response from tracker");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Failed to complete redemption".to_string(),
-                )),
-            )
-        }
-    }
+    (
+        StatusCode::GONE,
+        Json(crate::models::error_response(
+            "Direct redemption completion is retired; settlement state is advanced only by the confirmed-chain reconciler"
+                .to_string(),
+        )),
+    )
 }
 
 // Get tracker lookup proof for context var #8
@@ -3504,21 +3424,18 @@ pub async fn create_reserve_payload(
         );
     }
 
-    // Get the hardcoded reserve contract P2S address from configuration
-    let config = match crate::config::AppConfig::load() {
-        Ok(config) => config,
-        Err(e) => {
-            tracing::error!("Failed to load configuration: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Failed to load server configuration".to_string(),
-                )),
-            );
-        }
-    };
+    // Use the exact configuration installed in this running server. Reloading a
+    // second file/env view here could validate one P2S and build against another.
+    let config = state.config.clone();
 
-    let reserve_contract_address = config.ergo.basis_reserve_contract_p2s;
+    if let Err(e) = config.reject_known_legacy_reserve_contract() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::models::error_response(e)),
+        );
+    }
+
+    let reserve_contract_address = config.ergo.basis_reserve_contract_p2s.clone();
 
     // Build properly serialized register values following Ergo constant format
     // R4: GroupElement (owner pubkey) - prefix 07 + 33-byte compressed pubkey
@@ -3611,146 +3528,39 @@ pub async fn create_reserve_payload(
     )
 }
 
-// Request format expected by Ergo node's /wallet/payment/send endpoint
-#[derive(Debug, Serialize)]
-struct ErgoPaymentRequest {
-    address: String,
-    value: u64,
-    assets: Vec<ErgoAsset>,
-    registers: std::collections::HashMap<String, String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ErgoAsset {
-    #[serde(rename = "tokenId")]
-    token_id: String,
-    amount: u64,
-}
-
-// Submit a reserve creation payload to the tracker's configured Ergo node via
-// /wallet/payment/send. This requires the node's wallet to hold the reserve NFT
-// and sufficient ERG for the reserve value and fee.
+/// Retired node-wallet proxy.
+///
+/// Reserve creation payloads are returned by `/reserves/create` for review and
+/// signing by the reserve owner's wallet.  The tracker must never convert an
+/// unauthenticated HTTP request into authority over its configured node wallet.
 #[axum::debug_handler]
 pub async fn submit_reserve_transaction(
-    State(state): State<AppState>,
-    Json(payload): Json<ReserveCreationResponse>,
-) -> (
-    StatusCode,
-    Json<ApiResponse<crate::models::ReserveSubmissionResponse>>,
-) {
-    let node_config = &state.config.ergo.node;
-    if node_config.node_url.is_empty() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(crate::models::error_response(
-                "No Ergo node configured on the tracker".to_string(),
-            )),
-        );
-    }
-
-    let payment_requests: Vec<ErgoPaymentRequest> = payload
-        .requests
-        .into_iter()
-        .map(|req| ErgoPaymentRequest {
-            address: req.address,
-            value: req.value,
-            assets: req
-                .assets
-                .into_iter()
-                .map(|a| ErgoAsset {
-                    token_id: a.token_id,
-                    amount: a.amount,
-                })
-                .collect(),
-            registers: req.registers,
-        })
-        .collect();
-
-    let url = format!(
-        "{}/wallet/payment/send",
-        node_config.node_url.trim_end_matches('/')
-    );
-    let client = reqwest::Client::new();
-    let mut request = client.post(&url).json(&payment_requests);
-    if let Some(ref api_key) = node_config.api_key {
-        request = request.header("api_key", api_key);
-    }
-
-    match request.send().await {
-        Ok(response) => {
-            let status = response.status();
-            match response.text().await {
-                Ok(body) => {
-                    if status.is_success() {
-                        // The Ergo node returns the transaction id as a quoted string.
-                        let tx_id = body.trim().trim_matches('"').to_string();
-                        tracing::info!("Reserve creation transaction submitted: {}", tx_id);
-                        (
-                            StatusCode::OK,
-                            Json(crate::models::success_response(
-                                crate::models::ReserveSubmissionResponse { tx_id },
-                            )),
-                        )
-                    } else {
-                        tracing::error!(
-                            "Ergo node /wallet/payment/send returned {}: {}",
-                            status,
-                            body
-                        );
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(crate::models::error_response(format!(
-                                "Ergo node returned {}: {}",
-                                status, body
-                            ))),
-                        )
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to read Ergo node response: {}", e);
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(crate::models::error_response(format!(
-                            "Failed to read Ergo node response: {}",
-                            e
-                        ))),
-                    )
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to contact Ergo node at {}: {}", url, e);
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(crate::models::error_response(format!(
-                    "Failed to contact Ergo node: {}",
-                    e
-                ))),
-            )
-        }
-    }
+    Json(_payload): Json<ReserveCreationResponse>,
+) -> (StatusCode, Json<ApiResponse<()>>) {
+    (
+        StatusCode::GONE,
+        Json(crate::models::error_response(
+            "Tracker-side reserve submission is retired; sign and submit the generated payload with the reserve owner's wallet"
+                .to_string(),
+        )),
+    )
 }
 
 // Get the Basis reserve contract P2S address from server configuration
 #[axum::debug_handler]
 pub async fn get_basis_reserve_contract_p2s(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> (StatusCode, Json<ApiResponse<String>>) {
     tracing::debug!("Getting Basis reserve contract P2S address from configuration");
 
-    // Get the reserve contract address from the server configuration
-    let config = match crate::config::AppConfig::load() {
-        Ok(config) => config,
-        Err(e) => {
-            tracing::error!("Failed to load configuration: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Failed to load server configuration".to_string(),
-                )),
-            );
-        }
-    };
+    let config = state.config.clone();
+
+    if let Err(e) = config.reject_known_legacy_reserve_contract() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::models::error_response(e)),
+        );
+    }
 
     let reserve_contract_address = config.basis_reserve_contract_p2s();
 
@@ -3765,6 +3575,28 @@ pub async fn get_basis_reserve_contract_p2s(
             reserve_contract_address.to_string(),
         )),
     )
+}
+
+#[cfg(test)]
+mod security_boundary_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reserve_wallet_proxy_is_a_gone_tombstone() {
+        let payload = ReserveCreationResponse {
+            requests: Vec::new(),
+            fee: 1_000_000,
+            change_address: "not-forwarded".to_string(),
+        };
+
+        let (status, _) = submit_reserve_transaction(Json(payload)).await;
+        assert_eq!(status, StatusCode::GONE);
+    }
+
+    #[test]
+    fn legacy_settlement_stays_disabled() {
+        assert!(legacy_settlement_disabled());
+    }
 }
 
 /// Get the current tracker state: local digest, confirmed on-chain digest, and

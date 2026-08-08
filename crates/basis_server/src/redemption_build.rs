@@ -49,6 +49,7 @@ const FEE_CONTRACT_TREE: &str = "1005040004000e36100204a00b08cd0279be667ef9dcbba
 // ----- request / response models -----
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedemptionBuildRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
@@ -63,9 +64,6 @@ pub struct RedemptionBuildRequest {
     /// Optional tracker box id; fetched from storage if omitted.
     #[serde(default)]
     pub tracker_box_id: Option<String>,
-    /// Optional change address; derived from the selected fee box if omitted.
-    #[serde(default)]
-    pub change_address: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,16 +98,9 @@ pub struct RedemptionBuildResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedemptionSubmitRequest {
     pub signed_tx: Value,
-    /// Issuer (reserve owner) compressed public key, hex.
-    pub issuer_pubkey: String,
-    /// Recipient (creditor) compressed public key, hex.
-    pub recipient_pubkey: String,
-    /// Amount redeemed by this transaction (nanoERG).
-    pub redeemed_amount: u64,
-    /// Cumulative reserve-tree `already_redeemed` from the build response.
-    pub new_already_redeemed: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -287,6 +278,22 @@ fn select_fee_inputs(
     None
 }
 
+/// Derive fee-input change from the exact script whose inputs the tracker signs.
+/// Mixed-script funding is rejected because one shared change output would have
+/// ambiguous ownership even if global value conservation still held.
+fn fee_change_address(fee_boxes: &[NodeBox]) -> Result<String, String> {
+    let first = fee_boxes
+        .first()
+        .ok_or_else(|| "no selected fee inputs".to_string())?;
+    if fee_boxes
+        .iter()
+        .any(|fee_box| fee_box.ergo_tree != first.ergo_tree)
+    {
+        return Err("selected fee inputs do not share one owner script".to_string());
+    }
+    ergo_tree_to_p2pk_address(&first.ergo_tree)
+}
+
 type ApiResult<T> = Result<T, (StatusCode, Json<ApiResponse<RedemptionBuildResponse>>)>;
 
 fn api_err<T>(status: StatusCode, msg: impl Into<String>) -> ApiResult<T> {
@@ -311,6 +318,10 @@ async fn build_redemption_inner(
     state: &AppState,
     payload: &RedemptionBuildRequest,
 ) -> ApiResult<RedemptionBuildResponse> {
+    if let Err(e) = state.config.reject_known_legacy_reserve_contract() {
+        return api_err(StatusCode::SERVICE_UNAVAILABLE, e);
+    }
+
     // Validate public keys.
     let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
         Ok(b) if b.len() == 33 => b,
@@ -736,12 +747,15 @@ async fn build_redemption_inner(
         }
     };
 
-    // Change address: the owner of the first selected fee box (which we sign), else config/recipient.
-    let change_address = match &payload.change_address {
-        Some(a) => a.clone(),
-        None => ergo_tree_to_p2pk_address(&fee_boxes[0].ergo_tree)
-            .or_else(|_| state.config.get_change_address().map_err(|e| e.to_string()))
-            .unwrap_or_else(|_| recipient_address.clone()),
+    // Change belongs to the authenticated owner of every selected fee input.
+    let change_address = match fee_change_address(&fee_boxes) {
+        Ok(address) => address,
+        Err(e) => {
+            return api_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("fee change: {e}"),
+            )
+        }
     };
 
     // Build the reserve R5 register (updated reserve state as SAvlTree constant).
@@ -1023,39 +1037,14 @@ async fn build_redemption_inner(
 
 /// Broadcast a fully-signed redemption transaction to the Ergo node.
 ///
-/// After a successful broadcast the tracker's local state is synced: the note's
-/// `amount_redeemed` is incremented by `redeemed_amount` and the reserve AVL tree entry
-/// is set to `new_already_redeemed` (the cumulative value proven on-chain by the build).
+/// Node acceptance is not active-chain confirmation.  This endpoint deliberately
+/// accepts no accounting metadata and performs no local settlement mutation;
+/// the confirmed-chain reconciler owns that transition.
 #[axum::debug_handler]
 pub async fn submit_redemption(
     State(state): State<AppState>,
     Json(payload): Json<RedemptionSubmitRequest>,
 ) -> (StatusCode, Json<ApiResponse<RedemptionSubmitResponse>>) {
-    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
-        Ok(b) if b.len() == 33 => b,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(error_response(
-                    "issuer_pubkey must be 33-byte hex".to_string(),
-                )),
-            )
-        }
-    };
-    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
-        Ok(b) if b.len() == 33 => b,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(error_response(
-                    "recipient_pubkey must be 33-byte hex".to_string(),
-                )),
-            )
-        }
-    };
-    let issuer_pubkey: basis_store::PubKey = issuer_pubkey_bytes.try_into().unwrap();
-    let recipient_pubkey: basis_store::PubKey = recipient_pubkey_bytes.try_into().unwrap();
-
     let node = NodeClient::from_state(&state);
     let tx_id = match node.broadcast(&payload.signed_tx).await {
         Ok(tx_id) => tx_id,
@@ -1067,34 +1056,8 @@ pub async fn submit_redemption(
         }
     };
 
-    // Sync local note + reserve tree state with the broadcast transaction. The reserve
-    // tree value must be the cumulative amount proven on-chain (from the build), which
-    // can differ from the note's cumulative redeemed amount when reserves were created
-    // fresh or state was repaired.
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    if state
-        .tx
-        .send(TrackerCommand::CompleteRedemption {
-            issuer_pubkey,
-            recipient_pubkey,
-            redeemed_amount: payload.redeemed_amount,
-            new_already_redeemed: Some(payload.new_already_redeemed),
-            response_tx: tx,
-        })
-        .await
-        .is_err()
-    {
-        tracing::error!(tx_id, "tracker thread unavailable; local state not synced");
-    } else {
-        match rx.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::error!(tx_id, ?e, "local redemption state sync failed"),
-            Err(_) => tracing::error!(tx_id, "tracker dropped state sync response"),
-        }
-    }
-
     (
-        StatusCode::OK,
+        StatusCode::ACCEPTED,
         Json(success_response(RedemptionSubmitResponse { tx_id })),
     )
 }
@@ -1180,6 +1143,50 @@ mod tests {
         let boxes = vec![wallet_box("a", 100_000, false)];
         assert!(select_fee_inputs(&boxes, 1_000_000, "zz").is_none());
         assert!(select_fee_inputs(&[], 1_000_000, "zz").is_none());
+    }
+
+    #[test]
+    fn build_request_rejects_caller_selected_change() {
+        let payload = serde_json::json!({
+            "issuer_pubkey": "02".repeat(33),
+            "recipient_pubkey": "03".repeat(33),
+            "amount": 1,
+            "timestamp": 1,
+            "issuer_signature": "00".repeat(65),
+            "change_address": "attacker-selected"
+        });
+
+        assert!(serde_json::from_value::<RedemptionBuildRequest>(payload).is_err());
+    }
+
+    #[test]
+    fn fee_change_is_bound_to_one_input_owner_script() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let mut first = wallet_box("a", 600_000, false);
+        first.ergo_tree = format!("0008cd{pubkey}");
+        let mut second = wallet_box("b", 600_000, false);
+        second.ergo_tree = first.ergo_tree.clone();
+
+        assert_eq!(
+            fee_change_address(&[first.clone(), second.clone()]).unwrap(),
+            pubkey_to_address(pubkey).unwrap()
+        );
+
+        second.ergo_tree = format!("0008cd{}", "02".repeat(33));
+        assert!(fee_change_address(&[first, second]).is_err());
+    }
+
+    #[test]
+    fn submit_request_rejects_unverified_accounting_metadata() {
+        let payload = serde_json::json!({
+            "signed_tx": {"inputs": [], "dataInputs": [], "outputs": []},
+            "issuer_pubkey": "02".repeat(33),
+            "recipient_pubkey": "03".repeat(33),
+            "redeemed_amount": 1,
+            "new_already_redeemed": 1
+        });
+
+        assert!(serde_json::from_value::<RedemptionSubmitRequest>(payload).is_err());
     }
 
     fn r5_box(r5: Option<&str>) -> NodeBox {

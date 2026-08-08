@@ -107,7 +107,7 @@ impl ScanType {
 }
 
 /// Configuration for scanner
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// Starting block height for scanning
     pub start_height: Option<u64>,
@@ -119,6 +119,18 @@ pub struct NodeConfig {
     pub scan_name: Option<String>,
     /// API key for Ergo node authentication
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("start_height", &self.start_height)
+            .field("reserve_contract_p2s", &self.reserve_contract_p2s)
+            .field("node_url", &self.node_url)
+            .field("scan_name", &self.scan_name)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Inner state for scanner that requires synchronization
@@ -150,8 +162,7 @@ impl ServerState {
 
         // Add API key header if configured
         if let Some(api_key) = &self.config.api_key {
-            debug!("Using API key '{}' for request to: {}", api_key, url);
-            info!("Adding HTTP header: api_key: {}", api_key);
+            debug!("Using configured API key for request to: {}", url);
             request = request.header("api_key", api_key);
         } else {
             debug!("No API key configured for request to: {}", url);
@@ -169,8 +180,8 @@ impl ServerState {
 
         // Log which Ergo node is being used (INFO level)
         info!("Initializing Ergo scanner with node: {}", config.node_url);
-        if let Some(api_key) = &config.api_key {
-            info!("Using API key: {}", api_key);
+        if config.api_key.is_some() {
+            info!("Ergo node API key is configured");
         } else {
             warn!("No API key configured for Ergo node");
         }
@@ -831,6 +842,19 @@ fn decode_vlq_long(bytes: &[u8]) -> Result<i64, String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn node_config_debug_redacts_api_key() {
+        let sentinel = "sentinel-node-api-key-do-not-log";
+        let config = NodeConfig {
+            api_key: Some(sentinel.to_string()),
+            ..NodeConfig::default()
+        };
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains(sentinel));
+        assert!(rendered.contains("<redacted>"));
+    }
 
     #[test]
     fn test_parse_reserve_box_with_r6_register() {

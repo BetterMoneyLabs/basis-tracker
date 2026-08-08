@@ -4,7 +4,7 @@
 
 ```bash
 # Navigate to the project root
-cd /home/kushti/chaincash/basis-tracker
+cd basis-tracker
 
 # Build the entire workspace (this will build basis-cli)
 cargo build --release
@@ -28,6 +28,10 @@ The built binary will be available at:
 ```
 
 ## Step 3: Create the Reserve for Alice
+
+The server refuses to build against the known historical strict-insert P2S.
+Configure an insert-or-update contract identity promoted from reviewed source
+and parity evidence before following this step.
 
 ```bash
 # Create a reserve using the specified NFT ID
@@ -121,22 +125,11 @@ If you want the exact JSON array format that the wallet/payment/send API expects
 
 This JSON array is ready to be submitted directly to the `wallet/payment/send` API endpoint of your Ergo node.
 
-## Alternative: Submit via the Tracker
+## Submit with the reserve owner's wallet
 
-If the tracker server is configured with an Ergo node, you can ask it to broadcast the reserve payload for you. The TUI wallet prompts for this after generating the payload, and the CLI supports a `--submit` flag:
-
-```bash
-basis-cli reserve create --nft-id <your_nft_id> --amount 1000000000 --submit
-```
-
-Or submit the full `ReserveCreationResponse` JSON manually:
-
-```bash
-curl -X POST http://127.0.0.1:3048/reserves/submit \
-  -H "Content-Type: application/json" \
-  -d '<ReserveCreationResponse JSON>'
-```
-
-The tracker converts the payload to the camelCase `tokenId` format expected by the Ergo node and returns the broadcast transaction id.
+The tracker does not submit this payload or proxy its configured node wallet.
+Review the returned outputs, map the payload into the owner wallet's API format,
+and sign and submit the resulting transaction through that wallet's normal flow.
+The legacy CLI `--submit` flag and `POST /reserves/submit` route fail closed.
 
 Note: Make sure your Ergo node is running and you have the correct API key. Also, ensure that your wallet has sufficient ERG and the specified NFT to create the reserve.

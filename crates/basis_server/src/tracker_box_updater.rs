@@ -168,7 +168,7 @@ impl SharedTrackerState {
 }
 
 /// Configuration for the tracker box updater
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TrackerBoxUpdateConfig {
     pub node_url: String,
     pub api_key: Option<String>,
@@ -176,6 +176,22 @@ pub struct TrackerBoxUpdateConfig {
     pub fee: u64,
     pub change_address: Option<String>,
     pub tracker_secret_key: Option<[u8; 32]>,
+}
+
+impl std::fmt::Debug for TrackerBoxUpdateConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrackerBoxUpdateConfig")
+            .field("node_url", &self.node_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("update_interval_seconds", &self.update_interval_seconds)
+            .field("fee", &self.fee)
+            .field("change_address", &self.change_address)
+            .field(
+                "tracker_secret_key",
+                &self.tracker_secret_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for TrackerBoxUpdateConfig {
@@ -188,6 +204,152 @@ impl Default for TrackerBoxUpdateConfig {
             change_address: None,
             tracker_secret_key: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod secret_redaction_tests {
+    use super::{TrackerBoxUpdateConfig, TrackerBoxUpdater};
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
+        type Writer = BufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            BufferWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn one_error_response(body: &'static str) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let count = stream.read(&mut buffer).await.expect("read request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            request
+        });
+        (format!("http://{address}"), task)
+    }
+
+    #[test]
+    fn updater_config_debug_redacts_all_secrets() {
+        let api_sentinel = "sentinel-updater-api-key-do-not-log";
+        let config = TrackerBoxUpdateConfig {
+            api_key: Some(api_sentinel.to_string()),
+            tracker_secret_key: Some([0xab; 32]),
+            ..TrackerBoxUpdateConfig::default()
+        };
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains(api_sentinel));
+        assert!(!rendered.contains("171, 171"));
+        assert!(rendered.matches("<redacted>").count() >= 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn node_signing_error_and_logs_do_not_echo_secret_bearing_bodies() {
+        let tracker_sentinel = "sentinel-tracker-private-key-do-not-log";
+        let api_sentinel = "sentinel-updater-api-key-do-not-log";
+        let response_sentinel = "sentinel-node-response-do-not-log";
+        let (node_url, server) = one_error_response(response_sentinel).await;
+        let config = TrackerBoxUpdateConfig {
+            node_url,
+            api_key: Some(api_sentinel.to_string()),
+            ..TrackerBoxUpdateConfig::default()
+        };
+        let unsigned_tx = serde_json::json!({
+            "tx": {"inputs": [], "dataInputs": [], "outputs": []},
+            "secrets": {"dlog": [tracker_sentinel]}
+        });
+
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        let error = TrackerBoxUpdater::sign_transaction(&config, unsigned_tx)
+            .await
+            .expect_err("loopback node must reject signing")
+            .to_string();
+        drop(guard);
+
+        let request = server.await.expect("loopback server task");
+        assert!(request
+            .windows(tracker_sentinel.len())
+            .any(|window| window == tracker_sentinel.as_bytes()));
+        assert!(request
+            .windows(api_sentinel.len())
+            .any(|window| window == api_sentinel.as_bytes()));
+
+        let logs = String::from_utf8(writer.0.lock().expect("log buffer lock").clone())
+            .expect("UTF-8 logs");
+        for sentinel in [tracker_sentinel, api_sentinel, response_sentinel] {
+            assert!(!error.contains(sentinel));
+            assert!(!logs.contains(sentinel));
+        }
+        assert!(logs.contains("Node signing request completed"));
     }
 }
 
@@ -739,7 +901,7 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         unsigned_tx: serde_json::Value,
     ) -> Result<serde_json::Value, TrackerBoxUpdaterError> {
-        info!("Signing unsigned transaction: {}", unsigned_tx);
+        info!("Requesting node signature for tracker-box update");
 
         let client = reqwest::Client::new();
         let url = format!(
@@ -759,15 +921,12 @@ impl TrackerBoxUpdater {
 
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
-        info!(
-            "/wallet/transaction/sign response: status={}, body={}",
-            status, body_text
-        );
+        info!(status = %status, "Node signing request completed");
 
         if !status.is_success() {
             return Err(TrackerBoxUpdaterError::SigningFailed(format!(
-                "HTTP {}: {}",
-                status, body_text
+                "HTTP {}",
+                status
             )));
         }
 
@@ -780,7 +939,7 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         signed_tx: &serde_json::Value,
     ) -> Result<String, TrackerBoxUpdaterError> {
-        info!("Broadcasting signed transaction: {}", signed_tx);
+        info!("Broadcasting signed tracker-box update transaction");
 
         let client = reqwest::Client::new();
         let url = format!("{}/transactions", config.node_url.trim_end_matches('/'));
@@ -797,15 +956,12 @@ impl TrackerBoxUpdater {
 
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
-        info!(
-            "/transactions broadcast response: status={}, body={}",
-            status, body_text
-        );
+        info!(status = %status, "Transaction broadcast request completed");
 
         if !status.is_success() {
             return Err(TrackerBoxUpdaterError::BroadcastFailed(format!(
-                "HTTP {}: {}",
-                status, body_text
+                "HTTP {}",
+                status
             )));
         }
 

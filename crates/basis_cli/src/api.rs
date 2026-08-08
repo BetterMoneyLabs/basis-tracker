@@ -126,12 +126,6 @@ pub struct Asset {
     pub amount: u64,
 }
 
-/// Response from submitting a reserve creation payload to the tracker's Ergo node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReserveSubmissionResponse {
-    pub tx_id: String,
-}
-
 // Tracker signature request/response for redemption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerSignatureRequest {
@@ -452,6 +446,7 @@ pub struct RedemptionPreparationResponse {
 
 // Tracker-assisted 2-phase redemption build/submit (POST /redemption/build, /redemption/submit).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedemptionBuildRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
@@ -463,8 +458,6 @@ pub struct RedemptionBuildRequest {
     pub emergency: bool,
     #[serde(default)]
     pub tracker_box_id: Option<String>,
-    #[serde(default)]
-    pub change_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,12 +483,9 @@ pub struct RedemptionBuildResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedemptionSubmitRequest {
     pub signed_tx: serde_json::Value,
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub redeemed_amount: u64,
-    pub new_already_redeemed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -672,26 +662,11 @@ impl TrackerClient {
     }
 
     /// Broadcast a fully-signed redemption transaction via the tracker. POST /redemption/submit.
-    /// Returns the node-accepted transaction id.
-    ///
-    /// `redeemed_amount` and `new_already_redeemed` let the tracker sync its local note and
-    /// reserve-tree state after a successful broadcast.
-    pub async fn redemption_submit(
-        &self,
-        signed_tx: serde_json::Value,
-        issuer_pubkey: &str,
-        recipient_pubkey: &str,
-        redeemed_amount: u64,
-        new_already_redeemed: u64,
-    ) -> Result<String> {
+    /// Returns the node-accepted transaction id. Settlement state is reconciled separately from
+    /// confirmed active-chain evidence; this request carries no caller-asserted accounting data.
+    pub async fn redemption_submit(&self, signed_tx: serde_json::Value) -> Result<String> {
         let url = format!("{}/redemption/submit", self.base_url);
-        let request = RedemptionSubmitRequest {
-            signed_tx,
-            issuer_pubkey: issuer_pubkey.to_string(),
-            recipient_pubkey: recipient_pubkey.to_string(),
-            redeemed_amount,
-            new_already_redeemed,
-        };
+        let request = RedemptionSubmitRequest { signed_tx };
         let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
             Ok(resp) => resp,
             Err(ureq::Error::Status(code, resp)) => {
@@ -703,7 +678,7 @@ impl TrackerClient {
             Err(e) => return Err(anyhow::anyhow!("redemption submit request failed: {}", e)),
         };
 
-        if response.status() == 200 {
+        if response.status() == 200 || response.status() == 202 {
             let api_response: ApiResponse<RedemptionSubmitResponse> = response.into_json()?;
             if api_response.success {
                 Ok(api_response.data.unwrap().tx_id)
@@ -779,27 +754,6 @@ impl TrackerClient {
         } else {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to create reserve: {}", error_text))
-        }
-    }
-
-    /// Submit a reserve creation payload to the tracker's configured Ergo node for broadcast.
-    pub async fn submit_reserve(
-        &self,
-        payload: ReserveCreationResponse,
-    ) -> Result<ReserveSubmissionResponse> {
-        let url = format!("{}/reserves/submit", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(payload)?)?;
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<ReserveSubmissionResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!("Failed to submit reserve: {}", error_text))
         }
     }
 
@@ -1161,44 +1115,6 @@ impl TrackerClient {
             Err(anyhow::anyhow!(
                 "Failed to get node height: status {}",
                 response.status()
-            ))
-        }
-    }
-
-    /// Get the private key for a wallet address from the Ergo node.
-    /// This is used to satisfy `proveDlog(receiver)` conditions in the Basis reserve contract.
-    pub async fn get_private_key(
-        &self,
-        node_url: &str,
-        api_key: Option<&str>,
-        address: &str,
-    ) -> Result<String> {
-        let url = format!("{}/wallet/getPrivateKey", node_url.trim_end_matches('/'));
-        let mut request = ureq::post(&url);
-
-        if let Some(key) = api_key {
-            request = request.set("api_key", key);
-        }
-
-        let request_body = serde_json::json!({ "address": address });
-        let response = request.send_json(request_body)?;
-
-        if response.status() == 200 {
-            let secret: String = response.into_json()?;
-            Ok(secret)
-        } else if response.status() == 404 {
-            let error_text = response.into_string().unwrap_or_default();
-            Err(anyhow::anyhow!(
-                "Address {} not found in node wallet: {}",
-                address,
-                error_text
-            ))
-        } else {
-            let error_text = response.into_string().unwrap_or_default();
-            Err(anyhow::anyhow!(
-                "Failed to get private key for {}: {}",
-                address,
-                error_text
             ))
         }
     }

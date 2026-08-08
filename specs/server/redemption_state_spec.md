@@ -451,60 +451,49 @@ tree entry; the on-chain contract only sees the spent reserve's tree.
 
 ### POST /redemption/submit
 
-Broadcasts the fully-signed transaction via the node and then **syncs local state**.
+Broadcasts the fully-signed transaction via the node. Node acceptance is not
+active-chain confirmation, so this endpoint performs no local settlement
+mutation and returns `202 Accepted` with the node-accepted transaction id.
 
 **Request Body:**
 ```json
 {
-  "signed_tx": { "...": "fully-signed transaction JSON" },
-  "issuer_pubkey": "hex_encoded_33_byte_key",
-  "recipient_pubkey": "hex_encoded_33_byte_key",
-  "redeemed_amount": 100000000,
-  "new_already_redeemed": 100000000
+  "signed_tx": { "...": "fully-signed transaction JSON" }
 }
 ```
 
-**State-sync contract (required):** after a successful broadcast the tracker MUST:
+Unknown request fields are rejected. In particular, a submitter cannot attach
+issuer, recipient, amount, or cumulative-redemption assertions to a transaction.
+After active-chain confirmation, a separate reconciler must derive the exact
+settlement transition from the authenticated reserve successor and must own reorg
+rollback. That reconciler is the only authority for local note and reserve-tree
+state.
 
-1. Increment the note's `amount_redeemed` by `redeemed_amount` (note accounting;
-   cumulative redeemed against total debt), refreshing the note timestamp.
-2. Sync the reserve AVL tree entry to `new_already_redeemed` keyed with the note's
-   **pre-refresh** payment timestamp (the on-chain reserve tree value is
-   `payment_timestamp || already_redeemed`). This value comes from the build response,
-   not from the note record — the two diverge for fresh reserves or repaired state.
+### POST /redeem/complete (retired)
 
-If the sync fails, the tx is already on-chain: the error is logged and the response
-still returns the tx id; state must then be repaired manually (see below). A submit
-that skips this sync leaves the reserve tree stale, and the next `/redemption/build`
-will find no reserve whose on-chain R5 matches the local digest.
-
-### POST /redeem/complete (manual completion / repair)
-
-The legacy completion endpoint accepts an optional `new_already_redeemed` field; when
-provided it is used as the reserve-tree value instead of the note's cumulative amount.
-This is the supported way to repair local state after an out-of-band redemption:
-
-```json
-{
-  "redemption_id": "repair-<txid>",
-  "issuer_pubkey": "...",
-  "recipient_pubkey": "...",
-  "redeemed_amount": 100000000,
-  "new_already_redeemed": 100000000
-}
-```
+This caller-asserted completion route is retained only as a compatibility
+tombstone and returns `410 Gone`. A transaction id plus caller-provided accounting
+fields is not confirmation evidence and cannot be used for state repair.
 
 ### Known contract limitation / upgrade
 
 The legacy reserve contract (`contract/basis.es:345`) used strict `insert` into the reserve AVL tree. With that contract a redemption only verifies against a reserve whose tree does not yet contain the note key — in practice a freshly created empty-tree reserve. Repeated redemptions against one reserve fail local/node evaluation with `AvlTree: Incorrect insert`.
 
-The current compiled reserve contract uses `insertOrUpdate` for the reserve AVL tree, which removes this limitation: a note can be redeemed multiple times against the same reserve as long as the cumulative redeemed amount is increased correctly and the R7 refund initiation height is preserved. The tracker code reflects this:
+The tracker transaction builder uses `insertOrUpdate` for the reserve AVL tree,
+which can support repeated redemption only when paired with a contract compiled
+from the matching source. The tracker code reflects this intended successor
+semantics:
 
 - `basis_trees/src/avl_tree.rs::generate_insert_proof` uses `Operation::InsertOrUpdate` so proofs are valid for both new and existing reserve-tree keys.
 - `RedemptionRequest` carries `reserve_refund_initiation_height` and the transaction builder preserves the value in the updated reserve output's `R7` register.
 - Acceptance policies can include a `no_pending_refund` predicate to reject notes backed by a reserve with a non-zero R7 refund height.
 
-Deploying systems should ensure the configured reserve contract P2S matches the contract they intend to use; the tracker will emit the correct transaction format for either, but the strict-insert contract cannot support consecutive redemptions. The legacy P2S begins with `4ZhBzJfN...`; the current default P2S begins with `3PQnJ92K...`. Both constants are maintained in `crates/basis_store/src/contract_compiler.rs`.
+The configured `3PQnJ92K...` P2S is the historical strict-insert generation,
+while the builder emits insert-or-update state. Reserve creation and redemption
+building therefore fail closed for that known legacy identity. A replacement P2S
+must be compiled from the reviewed insert-or-update source and promoted together
+with its exact source/build identity and parity fixtures; compatibility must not be
+inferred from an address prefix.
 
 ## Integration with Blockchain Scanner
 
@@ -521,7 +510,7 @@ The redemption process integrates with the blockchain scanner to:
 The redemption process integrates with the Ergo node API to:
 
 1. **Tracker Schnorr Signatures**: The tracker server either signs redemption messages locally using a configured `tracker_secret_key`, or delegates to the Ergo node's `/utils/schnorrSign` endpoint. Redeemers request the tracker signature through the tracker server's `/tracker/signature` API, not directly from the Ergo node.
-2. **Transaction Signing**: Redemption transactions are built in the format expected by `/wallet/transaction/sign`, with `inputsRaw`, `dataInputsRaw`, and `secrets.dlog`, so the node can satisfy the recipient's `proveDlog` spend condition.
+2. **Transaction Signing**: Private keys stay inside the local or assisted signing boundary. Transaction artifacts contain public transaction and context material, never `secrets.dlog` or another private-key field.
 3. **Transaction Broadcast**: Signed redemption transactions are broadcast to the network via `/transactions`.
 4. **State Verification**: Access current blockchain state for redemption validation, including reserve boxes, tracker boxes, and current height.
 5. **Tracker Box Lookup**: Query tracker box information including creation height and registers.

@@ -112,18 +112,10 @@ curl -s -X POST http://127.0.0.1:3048/reserves/create \
 ```
 
 2. The server returns a `ReserveCreationResponse` with `requests`, `fee`, and
-   `change_address`. You now have two options:
+   `change_address`. The tracker does not proxy reserve submission. Review the
+   payload, then sign and submit it with the reserve owner's wallet.
 
-   **Option A — Submit via the tracker (recommended for testing):**
-   ```bash
-   curl -s -X POST http://127.0.0.1:3048/reserves/submit \
-     -H "Content-Type: application/json" \
-     -d '<ReserveCreationResponse JSON>'
-   ```
-   The tracker converts `token_id` to `tokenId` and forwards the payload to its
-   configured Ergo node's `/wallet/payment/send`.
-
-   **Option B — Submit manually to your own Ergo node:**
+   **Submit through your own Ergo node wallet:**
    - Replace `token_id` with **`tokenId`** (camelCase).
    - Pass only the `requests` array to `/wallet/payment/send`.
 

@@ -26,6 +26,10 @@ mod create_reserve_tests {
 
     // Helper function to create a test AppState that doesn't require file system access
     fn create_test_app_state() -> AppState {
+        create_test_app_state_with_p2s("test".to_string())
+    }
+
+    fn create_test_app_state_with_p2s(basis_reserve_contract_p2s: String) -> AppState {
         let (tx, _rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
         let event_store = std::sync::Arc::new(crate::store::EventStore::new_in_memory());
 
@@ -67,7 +71,7 @@ mod create_reserve_tests {
                     node_url: "http://example.com".to_string(),
                     ..Default::default()
                 },
-                basis_reserve_contract_p2s: "test".to_string(),
+                basis_reserve_contract_p2s,
                 tracker_nft_id: Some(
                     "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
                 ),
@@ -142,36 +146,45 @@ mod create_reserve_tests {
 
         let (status, response_json) = result;
 
-        // Check if the error is due to config loading failure (which is expected in the test environment)
-        if status == StatusCode::INTERNAL_SERVER_ERROR {
-            // If config loading fails, the test is not testing the right functionality
-            // We should handle this differently in a test environment
-            eprintln!("Error response: {:?}", response_json);
-            assert!(response_json.error.is_some());
-        } else {
-            assert_eq!(status, StatusCode::OK);
-            assert!(response_json.success);
-            assert!(response_json.data.is_some());
+        assert_eq!(status, StatusCode::OK);
+        assert!(response_json.success);
+        assert!(response_json.data.is_some());
 
-            let response_data = response_json.data.clone().unwrap();
-            let reserve_response: ReserveCreationResponse = response_data;
+        let response_data = response_json.data.clone().unwrap();
+        let reserve_response: ReserveCreationResponse = response_data;
 
-            // Verify the response structure
-            assert!(!reserve_response.requests.is_empty());
-            // Verify other fields after making sure the requests array is not empty
-            if !reserve_response.requests.is_empty() {
-                assert_eq!(reserve_response.requests[0].value, 1000000000);
-                assert_eq!(
-                    reserve_response.requests[0].assets[0].token_id,
-                    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-                );
-                assert_eq!(
-                    reserve_response.requests[0].registers.get("R4").unwrap(),
-                    "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
-                );
-                assert!(reserve_response.fee > 0); // Should be the configured fee amount
-            }
-        }
+        assert!(!reserve_response.requests.is_empty());
+        assert_eq!(reserve_response.requests[0].value, 1000000000);
+        assert_eq!(
+            reserve_response.requests[0].assets[0].token_id,
+            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        );
+        assert_eq!(
+            reserve_response.requests[0].registers.get("R4").unwrap(),
+            "0703e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+        );
+        assert!(reserve_response.fee > 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_reserve_payload_rejects_known_strict_insert_contract() {
+        let legacy = basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap();
+        let state = create_test_app_state_with_p2s(legacy);
+        let request_payload = CreateReserveRequest {
+            nft_id: "12".repeat(32),
+            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                .to_string(),
+            erg_amount: 1_000_000_000,
+        };
+
+        let (status, response) = create_reserve_payload(State(state), Json(request_payload)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response.success);
+        assert!(response
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("retired strict-insert"));
     }
 
     #[tokio::test]

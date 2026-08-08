@@ -477,6 +477,15 @@ pub async fn get_note(
 }
 
 /// Redeem a note, either via server-side signing or (default) local signing.
+fn reject_legacy_server_sign(server_sign: bool) -> Result<()> {
+    if server_sign {
+        anyhow::bail!(
+            "Legacy server-sign redemption is retired because node acceptance did not prove settlement; use the local signing flow"
+        );
+    }
+    Ok(())
+}
+
 pub async fn redeem_note(
     account_manager: &AccountManager,
     client: &TrackerClient,
@@ -484,6 +493,8 @@ pub async fn redeem_note(
     amount: u64,
     server_sign: bool,
 ) -> Result<NoteRedeemResult> {
+    reject_legacy_server_sign(server_sign)?;
+
     let current_account = account_manager
         .get_current()
         .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
@@ -562,8 +573,8 @@ pub async fn redeem_note(
     } else {
         // Local signing path (default): the CLI wallet signs the reserve and fee inputs
         // and broadcasts directly to the Ergo node; the server only provides the tracker
-        // Schnorr signature. `execute_local_redemption` also syncs tracker state after
-        // broadcast so the reserve tree is ready for the next redemption.
+        // Schnorr signature. Confirmed-chain reconciliation, not this broadcast path,
+        // owns the later settlement-state transition.
         let tx_id = execute_local_redemption(
             client,
             account_manager,
@@ -628,4 +639,16 @@ fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
     result[..32]
         .try_into()
         .expect("Blake2b should produce at least 32 bytes")
+}
+
+#[cfg(test)]
+mod security_boundary_tests {
+    use super::reject_legacy_server_sign;
+
+    #[test]
+    fn legacy_server_sign_fails_before_network_or_state_changes() {
+        let error = reject_legacy_server_sign(true).unwrap_err().to_string();
+        assert!(error.contains("retired"));
+        assert!(reject_legacy_server_sign(false).is_ok());
+    }
 }

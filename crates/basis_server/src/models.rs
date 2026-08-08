@@ -390,11 +390,6 @@ pub struct Asset {
     pub amount: u64,
 }
 
-// Response for reserve submission via the tracker's Ergo node.
-#[derive(Debug, Clone, Serialize)]
-pub struct ReserveSubmissionResponse {
-    pub tx_id: String,
-}
 #[derive(Debug, Serialize)]
 pub struct TrackerBoxIdResponse {
     pub tracker_box_id: String,

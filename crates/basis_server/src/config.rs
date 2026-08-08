@@ -48,7 +48,7 @@ impl ServerConfig {
 }
 
 /// Ergo blockchain configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ErgoConfig {
     /// Ergo node configuration
     pub node: NodeConfig,
@@ -61,6 +61,24 @@ pub struct ErgoConfig {
     /// Tracker server's secret key for local signing (hex-encoded, 32 bytes)
     /// If provided, the server will sign redemption transactions locally instead of using the Ergo node API
     pub tracker_secret_key: Option<String>,
+}
+
+impl std::fmt::Debug for ErgoConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ErgoConfig")
+            .field("node", &self.node)
+            .field(
+                "basis_reserve_contract_p2s",
+                &self.basis_reserve_contract_p2s,
+            )
+            .field("tracker_nft_id", &self.tracker_nft_id)
+            .field("tracker_public_key", &self.tracker_public_key)
+            .field(
+                "tracker_secret_key",
+                &self.tracker_secret_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Transaction configuration
@@ -130,6 +148,20 @@ impl AppConfig {
     /// Get the Basis reserve contract P2S address
     pub fn basis_reserve_contract_p2s(&self) -> &str {
         &self.ergo.basis_reserve_contract_p2s
+    }
+
+    /// Reject the known historical strict-insert contract when a caller is
+    /// about to construct insert-or-update reserve state.
+    pub fn reject_known_legacy_reserve_contract(&self) -> Result<(), String> {
+        let legacy = basis_store::contract_compiler::get_basis_reserve_contract_p2s()
+            .map_err(|e| format!("cannot resolve historical reserve contract identity: {e}"))?;
+        if self.basis_reserve_contract_p2s() == legacy {
+            return Err(
+                "configured reserve contract is the retired strict-insert generation; configure an explicitly reviewed insert-or-update P2S before building reserve transactions"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     /// Get the tracker NFT ID bytes (required - server will fail if not configured)
@@ -327,6 +359,71 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_config_debug_redacts_node_and_tracker_secrets() {
+        let node_sentinel = "sentinel-node-api-key-do-not-log";
+        let tracker_sentinel = "11".repeat(32);
+        let config = AppConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 3048,
+                data_dir: None,
+                database_url: None,
+            },
+            ergo: ErgoConfig {
+                node: NodeConfig {
+                    api_key: Some(node_sentinel.to_string()),
+                    ..NodeConfig::default()
+                },
+                basis_reserve_contract_p2s: "configured-explicitly".to_string(),
+                tracker_nft_id: None,
+                tracker_public_key: None,
+                tracker_secret_key: Some(tracker_sentinel.clone()),
+            },
+            transaction: TransactionConfig {
+                fee: 1_000_000,
+                change_address: None,
+            },
+            acceptance: AcceptanceConfig::empty(),
+        };
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains(node_sentinel));
+        assert!(!rendered.contains(&tracker_sentinel));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn known_strict_insert_contract_fails_closed() {
+        let mut config = AppConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 3048,
+                data_dir: None,
+                database_url: None,
+            },
+            ergo: ErgoConfig {
+                node: NodeConfig::default(),
+                basis_reserve_contract_p2s:
+                    basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+                tracker_nft_id: None,
+                tracker_public_key: None,
+                tracker_secret_key: None,
+            },
+            transaction: TransactionConfig {
+                fee: 1_000_000,
+                change_address: None,
+            },
+            acceptance: AcceptanceConfig::empty(),
+        };
+
+        let error = config.reject_known_legacy_reserve_contract().unwrap_err();
+        assert!(error.contains("retired strict-insert"));
+
+        config.ergo.basis_reserve_contract_p2s = "explicitly-reviewed-new-generation".to_string();
+        assert!(config.reject_known_legacy_reserve_contract().is_ok());
+    }
 
     #[test]
     fn test_tracker_public_key_hex_format() {

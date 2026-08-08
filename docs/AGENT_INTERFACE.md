@@ -159,10 +159,11 @@ $ basis-cli reserve status --json
 - `reserve create --json` → the reserve-creation payload
   (`{nft_id, owner_pubkey, amount, payload: {requests, fee, change_address}}`).
 - `reserve collateralization --json` → `{issuer_pubkey, ratio, status}`.
-- `note redeem --json` → `{amount, server_sign, redemption_id?, proof_available?, tx_id?}`.
-- `transaction generate-redemption --json` → `{tx_id}` with `--local-sign`,
-  otherwise `{transaction, issuer_pubkey, ..., output_file?}` (the unsigned
-  transaction plus build metadata).
+- `note redeem --json` → `{amount, server_sign: false, tx_id}`; `--server-sign`
+  is retired and fails before network or persistence effects.
+- `transaction generate-redemption --json` → `{tx_id}` with `--local-sign`.
+  The historical non-local artifact mode is retired because transaction
+  artifacts must never contain exported private keys.
 - `transaction redeem-assisted --json` → `{tx_id}`.
 - `test test-redemption --json` → `{issuer_pubkey, recipient_pubkey, redemption_amount, output_file, transaction}`.
 

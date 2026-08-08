@@ -1125,7 +1125,6 @@ async fn tracker_assisted_redeem(
             issuer_signature: hex::encode(issuer_sig),
             emergency: false,
             tracker_box_id: None,
-            change_address: None,
         })
         .await
         .map_err(|e| format!("tracker build failed: {}", e))?;
@@ -1174,13 +1173,7 @@ async fn tracker_assisted_redeem(
 
     let tx_json = serde_json::to_value(&signed).map_err(|e| format!("serialize tx: {}", e))?;
     app.client
-        .redemption_submit(
-            tx_json,
-            issuer,
-            recipient,
-            amount,
-            build.new_already_redeemed,
-        )
+        .redemption_submit(tx_json)
         .await
         .map_err(|e| format!("submit failed: {}", e))
 }
@@ -1239,31 +1232,12 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                     }
                     println!();
 
-                    let submit = read_input("Submit to tracker node for broadcast? (y/n): ");
-                    if submit == "y" || submit == "Y" {
-                        match app.client.submit_reserve(response).await {
-                            Ok(submission) => {
-                                app.set_notification(
-                                    format!(
-                                        "Reserve submitted, tx {}",
-                                        &submission.tx_id[..16.min(submission.tx_id.len())]
-                                    ),
-                                    false,
-                                );
-                            }
-                            Err(e) => {
-                                app.set_notification(
-                                    format!("Failed to submit reserve: {}", e),
-                                    true,
-                                );
-                            }
-                        }
-                    } else {
-                        app.set_notification(
-                            "Reserve payload generated (not submitted)".to_string(),
-                            false,
-                        );
-                    }
+                    // The tracker is not a wallet proxy. Reserve owners review and sign the
+                    // generated payload with their own wallet.
+                    app.set_notification(
+                        "Reserve payload generated for owner-wallet review and signing".to_string(),
+                        false,
+                    );
                 }
                 Err(e) => {
                     app.set_notification(format!("Failed to create reserve: {}", e), true);

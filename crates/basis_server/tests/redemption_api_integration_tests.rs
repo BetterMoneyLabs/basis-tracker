@@ -2,7 +2,7 @@
 //!
 //! This module tests the redemption-related HTTP endpoints:
 //! - POST /redeem: Initiate redemption
-//! - POST /redeem/complete: Complete redemption
+//! - POST /redeem/complete: Retired completion tombstone
 //! - GET /proof/redemption: Get redemption proof
 //! - POST /redemption/prepare: Prepare redemption data
 //! - POST /tracker/signature: Request tracker signature
@@ -356,8 +356,7 @@ mod redemption_api_tests {
     // ============================================================================
 
     #[tokio::test]
-    async fn test_redeem_invalid_hex_pubkey() {
-        // Test that invalid hex encoding for recipient pubkey returns 400
+    async fn test_redeem_legacy_route_is_gone_for_invalid_hex_payload() {
         let state = create_mock_app_state().await;
 
         let request = RedeemRequest {
@@ -375,7 +374,7 @@ mod redemption_api_tests {
         let response =
             initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.0, StatusCode::GONE);
         let body = &response.1;
         assert!(!body.success);
         assert!(body.error.is_some());
@@ -383,8 +382,7 @@ mod redemption_api_tests {
     }
 
     #[tokio::test]
-    async fn test_redeem_invalid_pubkey_length() {
-        // Test that wrong-length public key returns 400
+    async fn test_redeem_legacy_route_is_gone_for_wrong_length_payload() {
         let state = create_mock_app_state().await;
 
         // 32 bytes instead of 33
@@ -405,19 +403,14 @@ mod redemption_api_tests {
         let response =
             initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        // The handler will try to find a reserve and fail, or the tracker thread will fail
-        // Either way, it should not succeed
         let body = &response.1;
-        assert!(
-            !body.success || body.data.is_none(),
-            "Expected failure or no data, got: {:?}",
-            body
-        );
+        assert_eq!(response.0, StatusCode::GONE);
+        assert!(!body.success);
+        assert!(body.data.is_none());
     }
 
     #[tokio::test]
-    async fn test_redeem_note_not_found() {
-        // Test redemption for a note that doesn't exist in the tracker
+    async fn test_redeem_legacy_route_is_gone_without_state_lookup() {
         let state = create_mock_app_state().await;
 
         let request = RedeemRequest {
@@ -436,16 +429,14 @@ mod redemption_api_tests {
         let response =
             initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        // Should fail because no reserve exists for this issuer
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.0, StatusCode::GONE);
         let body = &response.1;
         assert!(!body.success);
         assert!(body.error.is_some());
     }
 
     #[tokio::test]
-    async fn test_redeem_emergency_flag_structure() {
-        // Test that emergency redemption flag is accepted in request structure
+    async fn test_redeem_legacy_route_is_gone_for_emergency_payload() {
         let state = create_mock_app_state().await;
 
         let request = RedeemRequest {
@@ -461,24 +452,17 @@ mod redemption_api_tests {
             emergency: true, // Emergency flag set
         };
 
-        // This will fail at the reserve lookup stage (no reserve in DB),
-        // but the request structure with emergency=true should be accepted
         let response =
             initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        // Should fail at reserve lookup, not at request parsing
+        assert_eq!(response.0, StatusCode::GONE);
         let body = &response.1;
-        if !body.success {
-            let default_msg = "unknown".to_string();
-            let error_msg = body.error.as_ref().unwrap_or(&default_msg);
-            assert!(
-                error_msg.contains("reserve")
-                    || error_msg.contains("Reserve")
-                    || error_msg.contains("No matching reserve"),
-                "Expected reserve-related error, got: {}",
-                error_msg
-            );
-        }
+        assert!(!body.success);
+        assert!(body
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("retired"));
     }
 
     // ============================================================================
@@ -486,8 +470,7 @@ mod redemption_api_tests {
     // ============================================================================
 
     #[tokio::test]
-    async fn test_complete_redemption_invalid_hex() {
-        // Test that invalid hex encoding returns 400
+    async fn test_complete_redemption_is_gone_for_invalid_hex_payload() {
         let state = create_mock_app_state().await;
 
         let request = CompleteRedemptionRequest {
@@ -502,15 +485,14 @@ mod redemption_api_tests {
         let response =
             complete_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.0, StatusCode::GONE);
         let body = &response.1;
         assert!(!body.success);
         assert!(body.error.is_some());
     }
 
     #[tokio::test]
-    async fn test_complete_redemption_wrong_length_pubkey() {
-        // Test that wrong-length pubkey returns 400
+    async fn test_complete_redemption_is_gone_for_wrong_length_payload() {
         let state = create_mock_app_state().await;
 
         // 32 bytes instead of 33
@@ -528,15 +510,14 @@ mod redemption_api_tests {
         let response =
             complete_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.0, StatusCode::GONE);
         let body = &response.1;
         assert!(!body.success);
         assert!(body.error.is_some());
     }
 
     #[tokio::test]
-    async fn test_complete_redemption_note_not_found() {
-        // Test completing redemption for a non-existent note
+    async fn test_complete_redemption_is_gone_without_state_lookup() {
         let state = create_mock_app_state().await;
 
         let request = CompleteRedemptionRequest {
@@ -552,8 +533,7 @@ mod redemption_api_tests {
         let response =
             complete_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        // Should fail because note doesn't exist
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.0, StatusCode::GONE);
         let body = &response.1;
         assert!(!body.success);
         assert!(body.error.is_some());

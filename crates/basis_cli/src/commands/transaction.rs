@@ -1,4 +1,4 @@
-use crate::api::{CompleteRedemptionRequest, TrackerClient};
+use crate::api::TrackerClient;
 use crate::output::progress;
 use anyhow::Result;
 use clap::Subcommand;
@@ -251,13 +251,40 @@ struct RedemptionBuildResult {
     fee_input_count: usize,
     fee_input_total: u64,
     change_address: String,
-    recipient_address: String,
     issuer_signature_len: usize,
     tracker_signature_len: usize,
     insert_proof_len: usize,
     reserve_lookup_proof_len: Option<usize>,
     tracker_lookup_proof_len: usize,
-    already_redeemed: u64,
+}
+
+fn require_local_signing(local_sign: bool) -> Result<()> {
+    if !local_sign {
+        anyhow::bail!(
+            "Unsigned node-wallet artifacts are retired because they exported a private dlog key; use --local-sign or the assisted signer"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_secret_free_artifact(value: &serde_json::Value) -> Result<()> {
+    fn contains_forbidden_field(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => fields.iter().any(|(name, child)| {
+                matches!(
+                    name.as_str(),
+                    "secrets" | "private_key" | "privateKey" | "mnemonic" | "seed"
+                ) || contains_forbidden_field(child)
+            }),
+            serde_json::Value::Array(values) => values.iter().any(contains_forbidden_field),
+            _ => false,
+        }
+    }
+
+    if contains_forbidden_field(value) {
+        anyhow::bail!("transaction artifact contains a forbidden secret-bearing field");
+    }
+    Ok(())
 }
 
 /// Build the unsigned redemption transaction JSON and collect all metadata needed to either
@@ -395,13 +422,8 @@ async fn build_redemption_tx(
     progress!("🔗 Converting public keys to addresses...");
     let recipient_address = pubkey_to_address(recipient_pubkey)?;
 
-    // Fetch the recipient's private key for the node-wallet JSON path.
-    progress!("🔍 Resolving recipient private key...");
-    let recipient_private_key = client
-        .get_private_key(NODE_URL, Some(API_KEY), &recipient_address)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to fetch recipient private key from node wallet. Ensure the recipient address {} is in the wallet: {}", recipient_address, e))?;
-    progress!("✅ Fetched recipient private key");
+    // Private keys are never requested while building a transaction artifact.
+    // The local signer resolves its witness only inside the in-memory signing boundary.
 
     // Get tracker lookup proof for context var #8 from server
     progress!("🔍 Retrieving tracker lookup proof from server...");
@@ -687,11 +709,9 @@ async fn build_redemption_tx(
         "inputsRaw": inputs_raw,
         "dataInputsRaw": [
             tracker_box_binary
-        ],
-        "secrets": {
-            "dlog": [recipient_private_key]
-        }
+        ]
     });
+    ensure_secret_free_artifact(&transaction_json)?;
 
     Ok(RedemptionBuildResult {
         transaction_json,
@@ -709,13 +729,11 @@ async fn build_redemption_tx(
         fee_input_count: fee_inputs.len(),
         fee_input_total,
         change_address,
-        recipient_address,
         issuer_signature_len: issuer_signature.len(),
         tracker_signature_len: tracker_signature.len(),
         insert_proof_len: insert_proof.len(),
         reserve_lookup_proof_len: reserve_lookup_proof.as_ref().map(|p| p.len()),
         tracker_lookup_proof_len: tracker_lookup_proof.len(),
-        already_redeemed: reserve_proof.already_redeemed,
     })
 }
 
@@ -793,7 +811,6 @@ pub async fn execute_local_redemption(
     .await?;
 
     let tx_id = sign_and_broadcast_local(SignLocalParams {
-        client,
         issuer_pubkey,
         recipient_pubkey,
         amount,
@@ -818,32 +835,13 @@ pub async fn execute_local_redemption(
         fee_input_count: build.fee_input_count,
         fee_input_total: build.fee_input_total,
         change_address: &build.change_address,
-        recipient_address: &build.recipient_address,
         recipient_secret,
         fee_secret,
     })
     .await?;
 
-    // Sync the tracker's local state so subsequent redemptions can generate a reserve lookup
-    // proof against the updated reserve tree.
-    let new_already_redeemed = build.already_redeemed.saturating_add(amount);
-    if let Err(e) = client
-        .complete_redemption(CompleteRedemptionRequest {
-            redemption_id: tx_id.clone(),
-            issuer_pubkey: issuer_pubkey.to_string(),
-            recipient_pubkey: recipient_pubkey.to_string(),
-            redeemed_amount: amount,
-            new_already_redeemed: Some(new_already_redeemed),
-        })
-        .await
-    {
-        eprintln!(
-            "⚠️ Redemption broadcast succeeded, but tracker state sync failed: {}. Subsequent redemptions may fail until the tracker state is repaired.",
-            e
-        );
-    } else {
-        progress!("✅ Tracker state synced for next redemption.");
-    }
+    // A node-accepted transaction is intentionally not promoted to settled here.
+    // The confirmed-chain reconciler owns the local settlement transition.
 
     progress!("✅ Redemption broadcast with LOCAL proveDlog signatures.");
     progress!("📋 Transaction ID: {}", tx_id);
@@ -865,6 +863,8 @@ pub async fn generate_redemption_transaction(
     recipient_secret: Option<String>,
     fee_secret: Option<String>,
 ) -> Result<GenerateRedemptionResult> {
+    require_local_signing(local_sign)?;
+
     if local_sign {
         let tx_id = execute_local_redemption(
             client,
@@ -1093,7 +1093,6 @@ pub async fn redeem_tracker_assisted(
             issuer_signature: hex::encode(issuer_sig),
             emergency: false,
             tracker_box_id: None,
-            change_address: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!("tracker build failed: {}", e))?;
@@ -1136,9 +1135,7 @@ pub async fn redeem_tracker_assisted(
         .map_err(|_| anyhow::anyhow!("headers array"))?;
 
     // Recipient (receiver) secret for the reserve input's proveDlog(recipient).
-    let recipient_address = pubkey_to_address(recipient_pubkey)?;
-    let receiver_secret =
-        resolve_dlog_secret(&recipient_secret, client, &recipient_address, "recipient").await?;
+    let receiver_secret = resolve_dlog_secret(&recipient_secret, "recipient")?;
     let receiver_sk = SecretKey::dlog_from_bytes(&receiver_secret)
         .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
 
@@ -1166,13 +1163,7 @@ pub async fn redeem_tracker_assisted(
 
     progress!("📡 Submitting via tracker (POST /redemption/submit)...");
     let tx_id = client
-        .redemption_submit(
-            tx_json,
-            issuer_pubkey,
-            recipient_pubkey,
-            amount,
-            build.new_already_redeemed,
-        )
+        .redemption_submit(tx_json)
         .await
         .map_err(|e| anyhow::anyhow!("submit failed: {}", e))?;
     progress!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
@@ -1348,7 +1339,6 @@ fn ergo_tree_to_p2pk_address(ergo_tree_hex: &str) -> Result<String> {
 
 /// Parameters for the local (client-side) redemption signing path.
 struct SignLocalParams<'a> {
-    client: &'a TrackerClient,
     issuer_pubkey: &'a str,
     recipient_pubkey: &'a str,
     amount: u64,
@@ -1375,39 +1365,17 @@ struct SignLocalParams<'a> {
     fee_input_count: usize,
     fee_input_total: u64,
     change_address: &'a str,
-    recipient_address: &'a str,
     recipient_secret: Option<String>,
     fee_secret: Option<String>,
 }
 
-async fn resolve_dlog_secret(
-    provided: &Option<String>,
-    client: &TrackerClient,
-    address: &str,
-    label: &str,
-) -> Result<[u8; 32]> {
-    let hexstr = match provided {
-        Some(h) => h.clone(),
-        None => {
-            progress!(
-                "🔑 Fetching {} private key from node wallet ({})...",
-                label,
-                address
-            );
-            client
-                .get_private_key(NODE_URL, Some(API_KEY), address)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to fetch {} private key for {} (provide --{}-secret to override): {}",
-                        label,
-                        address,
-                        label.replace(' ', "-"),
-                        e
-                    )
-                })?
-        }
-    };
+fn resolve_dlog_secret(provided: &Option<String>, label: &str) -> Result<[u8; 32]> {
+    let hexstr = provided.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} signing witness is required locally; private keys are never exported from a node wallet",
+            label
+        )
+    })?;
     let bytes = hex::decode(hexstr.trim())
         .map_err(|e| anyhow::anyhow!("{} secret is not valid hex: {}", label, e))?;
     if bytes.len() != 32 {
@@ -1585,15 +1553,8 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
     let data_boxes = vec![tracker_box];
 
     // Resolve the two dlog secrets (receiver + fee payer) and sign locally.
-    let recipient_secret = resolve_dlog_secret(
-        &p.recipient_secret,
-        p.client,
-        p.recipient_address,
-        "recipient",
-    )
-    .await?;
-    let fee_secret =
-        resolve_dlog_secret(&p.fee_secret, p.client, p.change_address, "fee-payer").await?;
+    let recipient_secret = resolve_dlog_secret(&p.recipient_secret, "recipient")?;
+    let fee_secret = resolve_dlog_secret(&p.fee_secret, "fee-payer")?;
     let recipient_sk = SecretKey::dlog_from_bytes(&recipient_secret)
         .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
     let fee_sk = SecretKey::dlog_from_bytes(&fee_secret)
@@ -1642,10 +1603,6 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
         .unwrap_or("<unknown>")
         .to_string();
     progress!("✅ Signed locally. tx id: {}", local_id);
-    let _ = fs::write(
-        "/tmp/last_signed_tx.json",
-        serde_json::to_string_pretty(&signed_json)?,
-    );
     let url = format!("{}/transactions", NODE_URL);
     let result = ureq::post(&url)
         .set("api_key", API_KEY)
@@ -1900,5 +1857,38 @@ mod tests {
         let address = pubkey_to_address(pubkey).unwrap();
         let tree = address_to_ergo_tree(&address).unwrap();
         assert_eq!(tree, format!("0008cd{}", pubkey));
+    }
+
+    #[test]
+    fn non_local_generation_is_rejected_before_secret_export() {
+        let error = require_local_signing(false).unwrap_err().to_string();
+        assert!(error.contains("retired"));
+        assert!(require_local_signing(true).is_ok());
+    }
+
+    #[test]
+    fn transaction_artifact_rejects_secret_bearing_fields() {
+        let sentinel = "sentinel-private-key-do-not-export";
+        let artifact = serde_json::json!({
+            "tx": {"inputs": [], "dataInputs": [], "outputs": []},
+            "secrets": {"dlog": [sentinel]}
+        });
+        assert!(ensure_secret_free_artifact(&artifact).is_err());
+
+        let safe = serde_json::json!({
+            "tx": {"inputs": [], "dataInputs": [], "outputs": []},
+            "inputsRaw": [],
+            "dataInputsRaw": []
+        });
+        assert!(ensure_secret_free_artifact(&safe).is_ok());
+        assert!(!safe.to_string().contains(sentinel));
+    }
+
+    #[test]
+    fn missing_witness_never_falls_back_to_node_wallet_export() {
+        let error = resolve_dlog_secret(&None, "fee-payer")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("never exported"));
     }
 }

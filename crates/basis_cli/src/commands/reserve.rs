@@ -21,7 +21,7 @@ pub enum ReserveCommands {
         #[arg(long)]
         amount: u64,
 
-        /// Submit the generated payload to the tracker's Ergo node for broadcast
+        /// Retired compatibility flag; tracker-side wallet submission is rejected
         #[arg(long)]
         submit: bool,
     },
@@ -84,6 +84,12 @@ pub async fn create_reserve(
     amount: u64,
     submit: bool,
 ) -> Result<ReserveCreateResult> {
+    if submit {
+        anyhow::bail!(
+            "Tracker-side reserve submission is retired; generate the payload and sign it with the reserve owner's wallet"
+        );
+    }
+
     // Get the owner public key from either the command line argument or current account
     let owner_pubkey = resolve_pubkey(account_manager, owner, "owner")?;
 
@@ -110,11 +116,7 @@ pub async fn create_reserve(
     // Call the API to create the reserve payload
     let payload = client.create_reserve(request).await?;
 
-    let tx_id = if submit {
-        Some(client.submit_reserve(payload.clone()).await?.tx_id)
-    } else {
-        None
-    };
+    let tx_id = None;
 
     Ok(ReserveCreateResult {
         nft_id,
