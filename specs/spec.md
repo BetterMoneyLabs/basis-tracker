@@ -299,7 +299,7 @@ An MCP (Model Context Protocol) server over stdio exposing wallet operations as 
 
 **Key capabilities:**
 - Read-only tools: `server_status`, `account_list`, `account_current`, `note_list`, `note_get`, `reserve_status`, `policy_get`
-- Write tools: `account_create`, `account_switch`, `account_import`, `note_create`, `note_redeem`, `reserve_create`, `policy_set`
+- Write tools: `account_create`, `account_switch`, `account_import`, `note_create`, `reserve_create`, `policy_set`; `note_redeem` is a retired compatibility tombstone.
 - Signing happens in-process; private keys are never exposed through any tool
 
 ## Possible Extensions

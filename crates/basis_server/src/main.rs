@@ -371,36 +371,6 @@ async fn main() {
                         .map(Some);
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::InitiateRedemption {
-                    request,
-                    response_tx,
-                } => {
-                    let result = redemption_manager.initiate_redemption(&request);
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::CompleteRedemption {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    redeemed_amount,
-                    new_already_redeemed,
-                    response_tx,
-                } => {
-                    let result = redemption_manager.complete_redemption(
-                        &issuer_pubkey,
-                        &recipient_pubkey,
-                        redeemed_amount,
-                        new_already_redeemed,
-                    );
-
-                    // Update shared state for tracker box updater if successful
-                    if result.is_ok() {
-                        // Update the shared AVL root digest to match the current tracker state
-                        let current_root = redemption_manager.tracker.get_state().avl_root_digest;
-                        shared_state_for_tracker.set_avl_root_digest(current_root);
-                    }
-
-                    let _ = response_tx.send(result);
-                }
                 TrackerCommand::GetNotes { response_tx } => {
                     let result = redemption_manager.tracker.get_all_notes_with_issuer();
                     let _ = response_tx.send(result);

@@ -1,9 +1,5 @@
 use crate::account::AccountManager;
-use crate::api::{
-    CompleteRedemptionRequest, CreateNoteRequest, KeyStatusResponse, RedeemRequest,
-    SerializableIouNote, TrackerClient,
-};
-use crate::commands::transaction::execute_local_redemption;
+use crate::api::{CreateNoteRequest, KeyStatusResponse, SerializableIouNote, TrackerClient};
 use crate::demo_keys;
 use crate::output::progress;
 use anyhow::Result;
@@ -72,19 +68,6 @@ pub struct NoteListResult {
     pub notes: Vec<NoteListEntry>,
 }
 
-/// Result of `note redeem` (either the server-signed or the locally-signed path).
-#[derive(Debug, Serialize)]
-pub struct NoteRedeemResult {
-    pub amount: u64,
-    pub server_sign: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub redemption_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proof_available: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tx_id: Option<String>,
-}
-
 #[derive(Subcommand)]
 pub enum NoteCommands {
     /// Create a new debt note
@@ -120,7 +103,7 @@ pub enum NoteCommands {
         #[arg(long)]
         recipient: String,
     },
-    /// Redeem a note
+    /// Retired: redemption requires the reviewed transaction flow
     Redeem {
         /// Issuer public key (hex)
         #[arg(long)]
@@ -128,9 +111,6 @@ pub enum NoteCommands {
         /// Amount to redeem in nanoERG
         #[arg(long)]
         amount: u64,
-        /// Use server-side signing and broadcasting instead of local signing (default is local).
-        #[arg(long, default_value = "false")]
-        server_sign: bool,
     },
 }
 
@@ -236,17 +216,9 @@ pub async fn handle_note_command(
                 println!("Note not found");
             }
         }
-        NoteCommands::Redeem {
-            issuer,
-            amount,
-            server_sign,
-        } => {
-            let result = redeem_note(account_manager, client, &issuer, amount, server_sign).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else if let Some(tx_id) = result.tx_id {
-                println!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
-            }
+        NoteCommands::Redeem { issuer, amount } => {
+            let _ = (issuer, amount);
+            redeem_note()?;
         }
     }
 
@@ -476,127 +448,19 @@ pub async fn get_note(
     client.get_note(issuer, recipient).await
 }
 
-/// Redeem a note, either via server-side signing or (default) local signing.
-fn reject_legacy_server_sign(server_sign: bool) -> Result<()> {
-    if server_sign {
-        anyhow::bail!(
-            "Legacy server-sign redemption is retired because node acceptance did not prove settlement; use the local signing flow"
-        );
-    }
-    Ok(())
+const NOTE_REDEMPTION_RETIRED: &str =
+    "note redeem is retired; use the reviewed transaction redemption flow with explicit local witnesses and confirmed-chain reconciliation";
+
+fn reject_retired_note_redemption() -> Result<()> {
+    anyhow::bail!(NOTE_REDEMPTION_RETIRED)
 }
 
-pub async fn redeem_note(
-    account_manager: &AccountManager,
-    client: &TrackerClient,
-    issuer: &str,
-    amount: u64,
-    server_sign: bool,
-) -> Result<NoteRedeemResult> {
-    reject_legacy_server_sign(server_sign)?;
-
-    let current_account = account_manager
-        .get_current()
-        .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
-
-    let recipient_pubkey = current_account.get_pubkey_hex();
-    let recipient_secret = current_account.get_private_key_hex();
-
-    // First, get the note to retrieve its original timestamp and validate debt
-    let note = client
-        .get_note(issuer, &recipient_pubkey)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Note not found for issuer {} and recipient {}",
-                issuer,
-                recipient_pubkey
-            )
-        })?;
-
-    // Verify that the note has sufficient outstanding debt
-    if note.outstanding_debt() < amount {
-        return Err(anyhow::anyhow!(
-            "Insufficient outstanding debt: {} nanoERG available, {} nanoERG requested",
-            note.outstanding_debt(),
-            amount
-        ));
-    }
-
-    let new_already_redeemed = note.amount_redeemed.saturating_add(amount);
-
-    if server_sign {
-        // Server-side signing path (legacy).
-        let timestamp = note.timestamp;
-
-        let redeem_request = RedeemRequest {
-            issuer_pubkey: issuer.to_string(),
-            recipient_pubkey: recipient_pubkey.clone(),
-            amount,
-            timestamp,
-            reserve_box_id: String::new(), // Will be looked up by server
-            tracker_box_id: String::new(), // Will be fetched by server
-            tracker_nft_id: String::new(), // Will be fetched by server
-            current_height: 0,             // Will be fetched by server
-            recipient_address: String::new(), // Will be derived from recipient_pubkey by server
-            change_address: String::new(), // Will be derived from tracker pubkey by server
-            issuer_signature: note.signature.clone(),
-            emergency: false,
-            tracker_signature: None, // Server will generate tracker signature
-        };
-
-        let response = client.initiate_redemption(redeem_request).await?;
-        progress!("✅ Redemption initiated");
-        progress!("  Redemption ID: {}", response.redemption_id);
-        progress!("  Amount: {} nanoERG", response.amount);
-        progress!("  Proof available: {}", response.proof_available);
-
-        // Complete redemption with the proper payload including redemption_id.
-        let complete_request = CompleteRedemptionRequest {
-            redemption_id: response.redemption_id.clone(),
-            issuer_pubkey: issuer.to_string(),
-            recipient_pubkey,
-            redeemed_amount: amount,
-            new_already_redeemed: Some(new_already_redeemed),
-        };
-
-        client.complete_redemption(complete_request).await?;
-        progress!("✅ Redemption completed");
-
-        Ok(NoteRedeemResult {
-            amount,
-            server_sign: true,
-            redemption_id: Some(response.redemption_id),
-            proof_available: Some(response.proof_available),
-            tx_id: None,
-        })
-    } else {
-        // Local signing path (default): the CLI wallet signs the reserve and fee inputs
-        // and broadcasts directly to the Ergo node; the server only provides the tracker
-        // Schnorr signature. Confirmed-chain reconciliation, not this broadcast path,
-        // owns the later settlement-state transition.
-        let tx_id = execute_local_redemption(
-            client,
-            account_manager,
-            issuer,
-            &recipient_pubkey,
-            amount,
-            false, // emergency
-            None,  // tracker_box_id
-            None,  // change_address
-            Some(recipient_secret),
-            None, // fee_secret
-        )
-        .await?;
-
-        Ok(NoteRedeemResult {
-            amount,
-            server_sign: false,
-            redemption_id: None,
-            proof_available: None,
-            tx_id: Some(tx_id),
-        })
-    }
+/// Compatibility tombstone for CLI and MCP callers.
+///
+/// This function deliberately rejects before account lookup, network access,
+/// transaction construction, signing, or broadcast.
+pub fn redeem_note() -> Result<()> {
+    reject_retired_note_redemption()
 }
 
 fn print_reserve_status(status: &KeyStatusResponse) {
@@ -643,12 +507,11 @@ fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod security_boundary_tests {
-    use super::reject_legacy_server_sign;
+    use super::reject_retired_note_redemption;
 
     #[test]
-    fn legacy_server_sign_fails_before_network_or_state_changes() {
-        let error = reject_legacy_server_sign(true).unwrap_err().to_string();
+    fn note_redemption_is_an_unconditional_pre_effect_tombstone() {
+        let error = reject_retired_note_redemption().unwrap_err().to_string();
         assert!(error.contains("retired"));
-        assert!(reject_legacy_server_sign(false).is_ok());
     }
 }

@@ -102,12 +102,12 @@ pub enum TransactionCommands {
         /// and broadcast it, instead of emitting an unsigned transaction for the node wallet.
         #[arg(long, default_value = "false")]
         local_sign: bool,
-        /// Recipient (receiver) dlog secret as 32-byte hex. Required for local signing of the
-        /// reserve input's proveDlog(receiver). If omitted, fetched from the node wallet.
+        /// Recipient (receiver) dlog secret as 32-byte hex. Required for local signing; if
+        /// omitted, the command fails before network access or transaction construction.
         #[arg(long)]
         recipient_secret: Option<String>,
-        /// Fee-payer dlog secret as 32-byte hex. Used to sign the fee input locally. If omitted,
-        /// fetched from the node wallet for the change/fee address.
+        /// Fee-payer dlog secret as 32-byte hex. Required for local signing; if omitted, the
+        /// command fails before network access or transaction construction.
         #[arg(long)]
         fee_secret: Option<String>,
     },
@@ -126,7 +126,7 @@ pub enum TransactionCommands {
         #[arg(long)]
         amount: u64,
         /// Recipient (receiver) dlog secret as 32-byte hex for the reserve input's
-        /// proveDlog(receiver). If omitted, fetched from the node wallet.
+        /// proveDlog(receiver). If omitted, the command fails before network access.
         #[arg(long)]
         recipient_secret: Option<String>,
     },
@@ -538,7 +538,7 @@ async fn build_redemption_tx(
         None
     };
 
-    let (fee_inputs, fee_input_total) = select_fee_inputs(
+    let (fee_input_claims, _) = select_fee_inputs(
         &wallet_boxes,
         TRANSACTION_FEE,
         &reserve_box_id,
@@ -550,6 +550,33 @@ async fn build_redemption_tx(
         TRANSACTION_FEE, TRANSACTION_FEE
     ))?;
 
+    // The wallet-list JSON is selection metadata only. Bind ID, value, script,
+    // and assets to the exact Sigma bytes later supplied to the prover.
+    let mut fee_inputs = Vec::with_capacity(fee_input_claims.len());
+    for claim in &fee_input_claims {
+        let binary = client
+            .get_box_binary(&claim.box_id, NODE_URL, Some(API_KEY))
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to get binary for fee input {}: {}", claim.box_id, e)
+            })?;
+        fee_inputs.push(verify_fee_input_claim(claim, binary)?);
+    }
+    let fee_input_total = authoritative_fee_input_total(&fee_inputs)?;
+    if fee_input_total < TRANSACTION_FEE {
+        anyhow::bail!(
+            "Exact fee inputs provide {} nanoERG, below required {} nanoERG",
+            fee_input_total,
+            TRANSACTION_FEE
+        );
+    }
+    let common_fee_tree = common_fee_input_tree(&fee_inputs)?;
+    if let Some(expected_tree) = target_tree.as_deref() {
+        if !decoded_hex_eq(expected_tree, common_fee_tree) {
+            anyhow::bail!("Exact fee-input owner script does not match the requested change owner");
+        }
+    }
+
     progress!(
         "✅ Selected {} fee input box(es) totaling {} nanoERG",
         fee_inputs.len(),
@@ -558,10 +585,8 @@ async fn build_redemption_tx(
 
     let change_address = if let Some(addr) = change_address {
         addr
-    } else if let Ok(addr) = ergo_tree_to_p2pk_address(&fee_inputs[0].ergo_tree) {
-        addr
     } else {
-        recipient_address.clone()
+        ergo_tree_to_p2pk_address(common_fee_tree)?
     };
 
     progress!("📦 Preparing box IDs for transaction...");
@@ -618,17 +643,7 @@ async fn build_redemption_tx(
             "boxId": fee_box.box_id,
             "extension": serde_json::json!({})
         }));
-        let binary = client
-            .get_box_binary(&fee_box.box_id, NODE_URL, Some(API_KEY))
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to get binary for fee input {}: {}",
-                    fee_box.box_id,
-                    e
-                )
-            })?;
-        fee_input_binaries.push(binary);
+        fee_input_binaries.push(fee_box.binary.clone());
     }
 
     let mut inputs = vec![json!({
@@ -753,6 +768,15 @@ pub async fn execute_local_redemption(
     recipient_secret: Option<String>,
     fee_secret: Option<String>,
 ) -> Result<String> {
+    // Resolve both witnesses before any network request, proof request, build, or
+    // broadcast. There is no node-wallet key-export fallback.
+    let recipient_secret = resolve_dlog_secret(&recipient_secret, "recipient")?;
+    let fee_secret = resolve_dlog_secret(&fee_secret, "fee-payer")?;
+    let recipient_witness = SecretKey::dlog_from_bytes(&recipient_secret)
+        .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
+    let fee_witness = SecretKey::dlog_from_bytes(&fee_secret)
+        .ok_or_else(|| anyhow::anyhow!("invalid fee-payer dlog secret"))?;
+
     progress!("🔍 Retrieving note information...");
     let note = client
         .get_note(issuer_pubkey, recipient_pubkey)
@@ -835,8 +859,8 @@ pub async fn execute_local_redemption(
         fee_input_count: build.fee_input_count,
         fee_input_total: build.fee_input_total,
         change_address: &build.change_address,
-        recipient_secret,
-        fee_secret,
+        recipient_witness,
+        fee_witness,
     })
     .await?;
 
@@ -1046,6 +1070,12 @@ pub async fn redeem_tracker_assisted(
     use ergo_lib::chain::transaction::Transaction;
     use ergo_lib::ergo_chain_types::{Header, PreHeader};
 
+    // The local reserve-input witness is mandatory and is resolved before any
+    // tracker request or transaction construction.
+    let receiver_secret = resolve_dlog_secret(&recipient_secret, "recipient")?;
+    let receiver_sk = SecretKey::dlog_from_bytes(&receiver_secret)
+        .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
+
     let issuer_pk: [u8; 33] = hex::decode(issuer_pubkey)
         .map_err(|e| anyhow::anyhow!("issuer hex: {}", e))?
         .try_into()
@@ -1133,11 +1163,6 @@ pub async fn redeem_tracker_assisted(
         .to_vec()
         .try_into()
         .map_err(|_| anyhow::anyhow!("headers array"))?;
-
-    // Recipient (receiver) secret for the reserve input's proveDlog(recipient).
-    let receiver_secret = resolve_dlog_secret(&recipient_secret, "recipient")?;
-    let receiver_sk = SecretKey::dlog_from_bytes(&receiver_secret)
-        .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
 
     // Add the reserve input (index 0) proof over the same bytes_to_sign.
     progress!("🖊️  Adding reserve proveDlog(recipient) proof...");
@@ -1243,6 +1268,117 @@ fn select_fee_inputs(
     }
 
     None
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedFeeInput {
+    box_id: String,
+    value: u64,
+    ergo_tree: String,
+    assets: Vec<crate::api::Token>,
+    binary: String,
+}
+
+fn decoded_hex_eq(left: &str, right: &str) -> bool {
+    match (hex::decode(left), hex::decode(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn fee_assets_match(claimed: &[crate::api::Token], canonical: &[crate::api::Token]) -> bool {
+    claimed.len() == canonical.len()
+        && claimed.iter().zip(canonical).all(|(left, right)| {
+            decoded_hex_eq(&left.token_id, &right.token_id) && left.amount == right.amount
+        })
+}
+
+/// Parse the exact Sigma bytes used by the signer and reject any disagreement
+/// with the wallet-list JSON that was used only to select candidates.
+fn verify_fee_input_claim(
+    claimed: &crate::api::ErgoBoxDetails,
+    binary: String,
+) -> Result<VerifiedFeeInput> {
+    let bytes = hex::decode(&binary)
+        .map_err(|e| anyhow::anyhow!("fee box {} binary hex: {}", claimed.box_id, e))?;
+    let ergo_box = ErgoBox::sigma_parse_bytes(&bytes)
+        .map_err(|e| anyhow::anyhow!("fee box {} Sigma parse: {:?}", claimed.box_id, e))?;
+    let box_id = ergo_box.box_id().to_string();
+    let value = *ergo_box.value.as_u64();
+    let ergo_tree =
+        hex::encode(ergo_box.ergo_tree.sigma_serialize_bytes().map_err(|e| {
+            anyhow::anyhow!("fee box {} script serialize: {:?}", claimed.box_id, e)
+        })?);
+    let assets: Vec<crate::api::Token> = ergo_box
+        .tokens
+        .as_ref()
+        .map(|tokens| {
+            tokens
+                .iter()
+                .map(|token| crate::api::Token {
+                    token_id: hex::encode(token.token_id.as_ref()),
+                    amount: *token.amount.as_u64(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !decoded_hex_eq(&claimed.box_id, &box_id) {
+        anyhow::bail!(
+            "fee box id mismatch: wallet list claimed {}, exact Sigma box is {}",
+            claimed.box_id,
+            box_id
+        );
+    }
+    if claimed.value != value {
+        anyhow::bail!(
+            "fee box {} value mismatch: wallet list claimed {}, exact Sigma box is {}",
+            box_id,
+            claimed.value,
+            value
+        );
+    }
+    if !decoded_hex_eq(&claimed.ergo_tree, &ergo_tree) {
+        anyhow::bail!(
+            "fee box {} script mismatch between wallet list and exact Sigma box",
+            box_id
+        );
+    }
+    if !fee_assets_match(&claimed.assets, &assets) {
+        anyhow::bail!(
+            "fee box {} assets mismatch between wallet list and exact Sigma box",
+            box_id
+        );
+    }
+
+    Ok(VerifiedFeeInput {
+        box_id,
+        value,
+        ergo_tree,
+        assets,
+        binary,
+    })
+}
+
+fn authoritative_fee_input_total(fee_inputs: &[VerifiedFeeInput]) -> Result<u64> {
+    fee_inputs.iter().try_fold(0u64, |total, box_| {
+        total
+            .checked_add(box_.value)
+            .ok_or_else(|| anyhow::anyhow!("fee input value overflow"))
+    })
+}
+
+fn common_fee_input_tree(fee_inputs: &[VerifiedFeeInput]) -> Result<&str> {
+    let first = fee_inputs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no verified fee inputs"))?;
+    if fee_inputs
+        .iter()
+        .any(|fee_input| !decoded_hex_eq(&fee_input.ergo_tree, &first.ergo_tree))
+    {
+        anyhow::bail!("exact fee inputs do not share one owner script");
+    }
+    Ok(&first.ergo_tree)
 }
 
 /// Build serialized SAvlTree constant matching Scala's
@@ -1365,8 +1501,8 @@ struct SignLocalParams<'a> {
     fee_input_count: usize,
     fee_input_total: u64,
     change_address: &'a str,
-    recipient_secret: Option<String>,
-    fee_secret: Option<String>,
+    recipient_witness: SecretKey,
+    fee_witness: SecretKey,
 }
 
 fn resolve_dlog_secret(provided: &Option<String>, label: &str) -> Result<[u8; 32]> {
@@ -1552,14 +1688,6 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
     boxes_to_spend.extend(fee_boxes);
     let data_boxes = vec![tracker_box];
 
-    // Resolve the two dlog secrets (receiver + fee payer) and sign locally.
-    let recipient_secret = resolve_dlog_secret(&p.recipient_secret, "recipient")?;
-    let fee_secret = resolve_dlog_secret(&p.fee_secret, "fee-payer")?;
-    let recipient_sk = SecretKey::dlog_from_bytes(&recipient_secret)
-        .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
-    let fee_sk = SecretKey::dlog_from_bytes(&fee_secret)
-        .ok_or_else(|| anyhow::anyhow!("invalid fee-payer dlog secret"))?;
-
     let (_state_context, pre_header, headers) = fetch_state_context().await?;
 
     // Two-phase single-input signing (tracker-assisted pattern): sign every fee input first
@@ -1578,7 +1706,7 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
                 &pre_header,
                 &headers,
                 fee_idx,
-                &fee_sk,
+                &p.fee_witness,
             )
             .map_err(|e| anyhow::anyhow!("fee input {} signing failed: {:?}", fee_idx, e))?,
         );
@@ -1591,7 +1719,7 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
         &pre_header,
         &headers,
         0,
-        &recipient_sk,
+        &p.recipient_witness,
     )
     .map_err(|e| anyhow::anyhow!("reserve input signing failed: {:?}", e))?;
 
@@ -1678,6 +1806,9 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_lib::ergotree_ir::chain::ergo_box::{box_value::BoxValue, NonMandatoryRegisters};
+    use ergo_lib::ergotree_ir::chain::tx_id::TxId;
+    use ergo_lib::ergotree_ir::ergo_tree::ErgoTree;
     use serde_json::{json, Map, Value};
 
     /// A valid P2PK (proveDlog) ergoTree as returned by the node for a wallet address.
@@ -1685,6 +1816,37 @@ mod tests {
         "0008cd02725e8878d5198ca7f5853dddf35560ddab05ab0a26adae7e664b84162c9962e5";
     const GENERATOR_GE: &str =
         "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    fn exact_fee_claim(
+        pubkey: &str,
+        value: u64,
+        index: u16,
+    ) -> (crate::api::ErgoBoxDetails, String) {
+        let tree_hex = format!("0008cd{pubkey}");
+        let tree = ErgoTree::sigma_parse_bytes(&hex::decode(&tree_hex).unwrap()).unwrap();
+        let ergo_box = ErgoBox::new(
+            BoxValue::try_from(value).unwrap(),
+            tree,
+            None,
+            NonMandatoryRegisters::empty(),
+            100,
+            TxId::zero(),
+            index,
+        )
+        .unwrap();
+        let binary = hex::encode(ergo_box.sigma_serialize_bytes().unwrap());
+        let claim = crate::api::ErgoBoxDetails {
+            box_id: ergo_box.box_id().to_string(),
+            value,
+            ergo_tree: tree_hex,
+            assets: Vec::new(),
+            additional_registers: Default::default(),
+            creation_height: 100,
+            transaction_id: TxId::zero().to_string(),
+            index,
+        };
+        (claim, binary)
+    }
 
     /// Expected Scala `ContextExtension` order for the first-redemption set `{0,1,2,3,4,5,6,8}`,
     /// confirmed on-chain. Kept as a hardcoded regression guard for `scala_context_extension_order`.
@@ -1890,5 +2052,59 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("never exported"));
+    }
+
+    #[test]
+    fn exact_fee_input_rejects_id_mismatch() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let (mut claim, binary) = exact_fee_claim(pubkey, 1_000_000, 0);
+        claim.box_id = "00".repeat(32);
+
+        let error = verify_fee_input_claim(&claim, binary)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("id mismatch"));
+    }
+
+    #[test]
+    fn exact_fee_input_rejects_script_mismatch() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let (mut claim, binary) = exact_fee_claim(pubkey, 1_000_000, 0);
+        claim.ergo_tree = format!(
+            "0008cd{}",
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        );
+
+        let error = verify_fee_input_claim(&claim, binary)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("script mismatch"));
+    }
+
+    #[test]
+    fn exact_fee_input_rejects_value_mismatch() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let (mut claim, binary) = exact_fee_claim(pubkey, 1_000_000, 0);
+        claim.value += 1;
+
+        let error = verify_fee_input_claim(&claim, binary)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("value mismatch"));
+    }
+
+    #[test]
+    fn exact_fee_input_rejects_asset_mismatch() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let (mut claim, binary) = exact_fee_claim(pubkey, 1_000_000, 0);
+        claim.assets.push(crate::api::Token {
+            token_id: "aa".repeat(32),
+            amount: 1,
+        });
+
+        let error = verify_fee_input_claim(&claim, binary)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("assets mismatch"));
     }
 }

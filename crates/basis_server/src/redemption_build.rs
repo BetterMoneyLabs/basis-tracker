@@ -114,7 +114,6 @@ pub struct RedemptionSubmitResponse {
 struct NodeAsset {
     #[serde(alias = "tokenId")]
     token_id: String,
-    #[allow(dead_code)]
     amount: u64,
 }
 
@@ -129,6 +128,16 @@ struct NodeBox {
     assets: Vec<NodeAsset>,
     #[serde(default, alias = "additionalRegisters")]
     additional_registers: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedFeeBox {
+    box_id: String,
+    value: u64,
+    ergo_tree: String,
+    assets: Vec<NodeAsset>,
+    binary: String,
+    ergo_box: ErgoBox,
 }
 
 impl NodeBox {
@@ -278,10 +287,97 @@ fn select_fee_inputs(
     None
 }
 
+fn decoded_hex_eq(left: &str, right: &str) -> bool {
+    match (hex::decode(left), hex::decode(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn assets_match(claimed: &[NodeAsset], canonical: &[NodeAsset]) -> bool {
+    claimed.len() == canonical.len()
+        && claimed.iter().zip(canonical).all(|(left, right)| {
+            decoded_hex_eq(&left.token_id, &right.token_id) && left.amount == right.amount
+        })
+}
+
+/// Parse the exact Sigma bytes later supplied to the prover and reject any
+/// disagreement with the wallet-list JSON that was used only for selection.
+fn verify_fee_box_claim(claimed: &NodeBox, binary: String) -> Result<VerifiedFeeBox, String> {
+    let bytes =
+        hex::decode(&binary).map_err(|e| format!("fee box {} binary hex: {e}", claimed.box_id))?;
+    let ergo_box = ErgoBox::sigma_parse_bytes(&bytes)
+        .map_err(|e| format!("fee box {} Sigma parse: {e:?}", claimed.box_id))?;
+
+    let box_id = ergo_box.box_id().to_string();
+    let value = *ergo_box.value.as_u64();
+    let ergo_tree = hex::encode(
+        ergo_box
+            .ergo_tree
+            .sigma_serialize_bytes()
+            .map_err(|e| format!("fee box {} script serialize: {e:?}", claimed.box_id))?,
+    );
+    let assets: Vec<NodeAsset> = ergo_box
+        .tokens
+        .as_ref()
+        .map(|tokens| {
+            tokens
+                .iter()
+                .map(|token| NodeAsset {
+                    token_id: hex::encode(token.token_id.as_ref()),
+                    amount: *token.amount.as_u64(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !decoded_hex_eq(&claimed.box_id, &box_id) {
+        return Err(format!(
+            "fee box id mismatch: wallet list claimed {}, exact Sigma box is {}",
+            claimed.box_id, box_id
+        ));
+    }
+    if claimed.value != value {
+        return Err(format!(
+            "fee box {} value mismatch: wallet list claimed {}, exact Sigma box is {}",
+            box_id, claimed.value, value
+        ));
+    }
+    if !decoded_hex_eq(&claimed.ergo_tree, &ergo_tree) {
+        return Err(format!(
+            "fee box {} script mismatch between wallet list and exact Sigma box",
+            box_id
+        ));
+    }
+    if !assets_match(&claimed.assets, &assets) {
+        return Err(format!(
+            "fee box {} assets mismatch between wallet list and exact Sigma box",
+            box_id
+        ));
+    }
+
+    Ok(VerifiedFeeBox {
+        box_id,
+        value,
+        ergo_tree,
+        assets,
+        binary,
+        ergo_box,
+    })
+}
+
+fn authoritative_fee_total(fee_boxes: &[VerifiedFeeBox]) -> Result<u64, String> {
+    fee_boxes.iter().try_fold(0u64, |total, box_| {
+        total
+            .checked_add(box_.value)
+            .ok_or_else(|| "fee input value overflow".to_string())
+    })
+}
+
 /// Derive fee-input change from the exact script whose inputs the tracker signs.
 /// Mixed-script funding is rejected because one shared change output would have
 /// ambiguous ownership even if global value conservation still held.
-fn fee_change_address(fee_boxes: &[NodeBox]) -> Result<String, String> {
+fn fee_change_address(fee_boxes: &[VerifiedFeeBox]) -> Result<String, String> {
     let first = fee_boxes
         .first()
         .ok_or_else(|| "no selected fee inputs".to_string())?;
@@ -737,7 +833,7 @@ async fn build_redemption_inner(
         }
     };
     let fee = state.config.transaction_fee();
-    let (fee_boxes, fee_total) = match select_fee_inputs(&wallet_boxes, fee, &reserve_box_id) {
+    let (fee_box_claims, _) = match select_fee_inputs(&wallet_boxes, fee, &reserve_box_id) {
         Some(v) => v,
         None => {
             return api_err(
@@ -746,6 +842,43 @@ async fn build_redemption_inner(
             )
         }
     };
+
+    // `/wallet/boxes/unspent` is selection metadata only. Fetch and parse the
+    // exact bytes that will be supplied to the prover, then bind every
+    // transaction-relevant field to those bytes.
+    let mut fee_boxes = Vec::with_capacity(fee_box_claims.len());
+    for claim in &fee_box_claims {
+        let binary = match node.box_binary(&claim.box_id).await {
+            Ok(binary) => binary,
+            Err(e) => {
+                return api_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("fee bin {}: {e}", claim.box_id),
+                )
+            }
+        };
+        let verified = match verify_fee_box_claim(claim, binary) {
+            Ok(verified) => verified,
+            Err(e) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+        fee_boxes.push(verified);
+    }
+    let fee_total = match authoritative_fee_total(&fee_boxes) {
+        Ok(total) if total >= fee => total,
+        Ok(total) => {
+            return api_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("exact fee inputs provide {total} nanoERG, below required {fee} nanoERG"),
+            )
+        }
+        Err(e) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    if fee_boxes.iter().any(|fee_box| !fee_box.assets.is_empty()) {
+        return api_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "exact fee inputs unexpectedly contain tokens",
+        );
+    }
 
     // Change belongs to the authenticated owner of every selected fee input.
     let change_address = match fee_change_address(&fee_boxes) {
@@ -892,19 +1025,6 @@ async fn build_redemption_inner(
             )
         }
     };
-    let mut fee_binaries = Vec::with_capacity(fee_boxes.len());
-    for fb in &fee_boxes {
-        match node.box_binary(&fb.box_id).await {
-            Ok(b) => fee_binaries.push(b),
-            Err(e) => {
-                return api_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("fee bin {}: {e}", fb.box_id),
-                )
-            }
-        }
-    }
-
     let unsigned: UnsignedTransaction = match serde_json::from_value(unsigned_tx.clone()) {
         Ok(u) => u,
         Err(e) => {
@@ -931,10 +1051,10 @@ async fn build_redemption_inner(
     };
     let reserve_ebox = parse_box(&reserve_box_binary, "reserve box")?;
     let tracker_ebox = parse_box(&tracker_box_binary, "tracker box")?;
-    let mut fee_eboxes = Vec::with_capacity(fee_binaries.len());
-    for (i, fb) in fee_binaries.iter().enumerate() {
-        fee_eboxes.push(parse_box(fb, &format!("fee box {i}"))?);
-    }
+    let fee_eboxes: Vec<ErgoBox> = fee_boxes
+        .iter()
+        .map(|fee_box| fee_box.ergo_box.clone())
+        .collect();
 
     let mut input_boxes = vec![reserve_ebox];
     input_boxes.extend(fee_eboxes);
@@ -1013,7 +1133,7 @@ async fn build_redemption_inner(
     };
 
     let mut input_box_binaries = vec![reserve_box_binary];
-    input_box_binaries.extend(fee_binaries);
+    input_box_binaries.extend(fee_boxes.iter().map(|fee_box| fee_box.binary.clone()));
 
     Ok(RedemptionBuildResponse {
         unsigned_tx,
@@ -1065,6 +1185,9 @@ pub async fn submit_redemption(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_lib::ergotree_ir::chain::ergo_box::{box_value::BoxValue, NonMandatoryRegisters};
+    use ergo_lib::ergotree_ir::chain::tx_id::TxId;
+    use ergo_lib::ergotree_ir::ergo_tree::ErgoTree;
 
     fn wallet_box(id: &str, value: u64, with_token: bool) -> NodeBox {
         let assets = if with_token {
@@ -1082,6 +1205,30 @@ mod tests {
             assets,
             additional_registers: Default::default(),
         }
+    }
+
+    fn exact_fee_claim(pubkey: &str, value: u64, index: u16) -> (NodeBox, String) {
+        let tree_hex = format!("0008cd{pubkey}");
+        let tree = ErgoTree::sigma_parse_bytes(&hex::decode(&tree_hex).unwrap()).unwrap();
+        let ergo_box = ErgoBox::new(
+            BoxValue::try_from(value).unwrap(),
+            tree,
+            None,
+            NonMandatoryRegisters::empty(),
+            100,
+            TxId::zero(),
+            index,
+        )
+        .unwrap();
+        let binary = hex::encode(ergo_box.sigma_serialize_bytes().unwrap());
+        let claim = NodeBox {
+            box_id: ergo_box.box_id().to_string(),
+            value,
+            ergo_tree: tree_hex,
+            assets: Vec::new(),
+            additional_registers: Default::default(),
+        };
+        (claim, binary)
     }
 
     #[test]
@@ -1162,18 +1309,66 @@ mod tests {
     #[test]
     fn fee_change_is_bound_to_one_input_owner_script() {
         let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
-        let mut first = wallet_box("a", 600_000, false);
-        first.ergo_tree = format!("0008cd{pubkey}");
-        let mut second = wallet_box("b", 600_000, false);
-        second.ergo_tree = first.ergo_tree.clone();
+        let other_pubkey = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let (first_claim, first_binary) = exact_fee_claim(pubkey, 600_000, 0);
+        let (second_claim, second_binary) = exact_fee_claim(pubkey, 600_000, 1);
+        let first = verify_fee_box_claim(&first_claim, first_binary).unwrap();
+        let second = verify_fee_box_claim(&second_claim, second_binary).unwrap();
 
         assert_eq!(
             fee_change_address(&[first.clone(), second.clone()]).unwrap(),
             pubkey_to_address(pubkey).unwrap()
         );
 
-        second.ergo_tree = format!("0008cd{}", "02".repeat(33));
-        assert!(fee_change_address(&[first, second]).is_err());
+        let (other_claim, other_binary) = exact_fee_claim(other_pubkey, 600_000, 2);
+        let other = verify_fee_box_claim(&other_claim, other_binary).unwrap();
+        assert!(fee_change_address(&[first, other]).is_err());
+    }
+
+    #[test]
+    fn exact_fee_box_rejects_id_mismatch() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let (mut claim, binary) = exact_fee_claim(pubkey, 1_000_000, 0);
+        claim.box_id = "00".repeat(32);
+
+        let error = verify_fee_box_claim(&claim, binary).unwrap_err();
+        assert!(error.contains("id mismatch"));
+    }
+
+    #[test]
+    fn exact_fee_box_rejects_script_mismatch() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let (mut claim, binary) = exact_fee_claim(pubkey, 1_000_000, 0);
+        claim.ergo_tree = format!(
+            "0008cd{}",
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        );
+
+        let error = verify_fee_box_claim(&claim, binary).unwrap_err();
+        assert!(error.contains("script mismatch"));
+    }
+
+    #[test]
+    fn exact_fee_box_rejects_value_mismatch() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let (mut claim, binary) = exact_fee_claim(pubkey, 1_000_000, 0);
+        claim.value += 1;
+
+        let error = verify_fee_box_claim(&claim, binary).unwrap_err();
+        assert!(error.contains("value mismatch"));
+    }
+
+    #[test]
+    fn exact_fee_box_rejects_asset_mismatch() {
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let (mut claim, binary) = exact_fee_claim(pubkey, 1_000_000, 0);
+        claim.assets.push(NodeAsset {
+            token_id: "aa".repeat(32),
+            amount: 1,
+        });
+
+        let error = verify_fee_box_claim(&claim, binary).unwrap_err();
+        assert!(error.contains("assets mismatch"));
     }
 
     #[test]

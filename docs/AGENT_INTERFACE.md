@@ -159,8 +159,8 @@ $ basis-cli reserve status --json
 - `reserve create --json` → the reserve-creation payload
   (`{nft_id, owner_pubkey, amount, payload: {requests, fee, change_address}}`).
 - `reserve collateralization --json` → `{issuer_pubkey, ratio, status}`.
-- `note redeem --json` → `{amount, server_sign: false, tx_id}`; `--server-sign`
-  is retired and fails before network or persistence effects.
+- `note redeem --json` is a compatibility tombstone and fails before account,
+  network, construction, signing, broadcast, or persistence effects.
 - `transaction generate-redemption --json` → `{tx_id}` with `--local-sign`.
   The historical non-local artifact mode is retired because transaction
   artifacts must never contain exported private keys.
@@ -213,7 +213,7 @@ Write tools:
 | `account_switch` | Switch current account (`name`) |
 | `account_import` | Import from `private_key_hex` (stored locally, never echoed back) |
 | `note_create` | Create note to `recipient` for `amount` nanoERG, signed with the current account |
-| `note_redeem` | Redeem `amount` nanoERG from `issuer` (local-signing path; `destructiveHint: true`) |
+| `note_redeem` | Retired compatibility tombstone; returns an error before effects |
 | `reserve_create` | Build reserve-creation payload (`nft_id`, `amount`; owner = current account) |
 | `policy_set` | Replace acceptance policy (`policy` object matching `AcceptanceConfig`); saves to `~/.basis/ui.toml` and uploads signed with the current account (`destructiveHint: true`) |
 
@@ -226,8 +226,9 @@ error message — the server never exits on a tool error.
 - **No private-key export**: there is deliberately no key-export tool, and no
   tool response contains key material. `account_import` takes a key as input
   but only returns the account name and public key.
-- **Signing stays in-process**: note creation, redemption, and policy upload
-  are signed locally by the wallet; keys never leave the `basis-mcp` process.
+- **Signing stays in-process**: note creation and policy upload are signed
+  locally by the wallet; keys never leave the `basis-mcp` process. Redemption
+  is not exposed through MCP while the reviewed transaction flow is separate.
 
 ### Client configuration
 

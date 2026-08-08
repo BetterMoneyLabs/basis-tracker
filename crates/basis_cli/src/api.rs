@@ -45,60 +45,6 @@ pub struct KeyStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedeemRequest {
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    /// Reserve box ID (optional - will be looked up if not provided)
-    #[serde(default)]
-    pub reserve_box_id: String,
-    /// Tracker box ID (optional - fetched by server)
-    #[serde(default)]
-    pub tracker_box_id: String,
-    /// Tracker NFT ID from reserve box R6 register (optional - fetched by server)
-    #[serde(default)]
-    pub tracker_nft_id: String,
-    /// Current blockchain height (optional - fetched by server)
-    #[serde(default)]
-    pub current_height: u64,
-    /// Recipient address for redemption output (optional - derived from recipient_pubkey if not provided)
-    #[serde(default)]
-    pub recipient_address: String,
-    /// Change address for transaction outputs (optional - server will derive from tracker pubkey if not provided)
-    #[serde(default)]
-    pub change_address: String,
-    /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    pub issuer_signature: String,
-    /// Whether this is an emergency redemption
-    #[serde(default)]
-    pub emergency: bool,
-    /// Tracker's Schnorr signature (optional - server will generate if not provided)
-    #[serde(default)]
-    pub tracker_signature: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedeemResponse {
-    pub redemption_id: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    pub proof_available: bool,
-    pub transaction_pending: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompleteRedemptionRequest {
-    pub redemption_id: String,
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub redeemed_amount: u64,
-    /// Cumulative reserve-tree already_redeemed after this redemption.
-    #[serde(default)]
-    pub new_already_redeemed: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateReserveRequest {
     pub nft_id: String,
     pub owner_pubkey: String,
@@ -317,70 +263,6 @@ impl TrackerClient {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!(
                 "Failed to get reserve status: {}",
-                error_text
-            ))
-        }
-    }
-
-    // Redemption
-    pub async fn initiate_redemption(&self, request: RedeemRequest) -> Result<RedeemResponse> {
-        let url = format!("{}/redeem", self.base_url);
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!(
-                    "Failed to initiate redemption: {}",
-                    error_text
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Request failed: {}", e));
-            }
-        };
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<RedeemResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to initiate redemption: {}",
-                error_text
-            ))
-        }
-    }
-
-    pub async fn complete_redemption(&self, request: CompleteRedemptionRequest) -> Result<()> {
-        let url = format!("{}/redeem/complete", self.base_url);
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!(
-                    "Failed to complete redemption: {}",
-                    error_text
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Request failed: {}", e));
-            }
-        };
-
-        if response.status() == 200 {
-            Ok(())
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to complete redemption: {}",
                 error_text
             ))
         }

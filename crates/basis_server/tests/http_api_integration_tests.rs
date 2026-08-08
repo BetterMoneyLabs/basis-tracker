@@ -101,28 +101,6 @@ mod http_api_tests {
                             .map(Some);
                         let _ = response_tx.send(result);
                     }
-                    TrackerCommand::InitiateRedemption {
-                        request,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.initiate_redemption(&request);
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::CompleteRedemption {
-                        issuer_pubkey,
-                        recipient_pubkey,
-                        redeemed_amount,
-                        new_already_redeemed,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.complete_redemption(
-                            &issuer_pubkey,
-                            &recipient_pubkey,
-                            redeemed_amount,
-                            new_already_redeemed,
-                        );
-                        let _ = response_tx.send(result);
-                    }
                     TrackerCommand::GetNotes { response_tx } => {
                         // For testing purposes, return an empty list
                         let result = Ok(Vec::new());

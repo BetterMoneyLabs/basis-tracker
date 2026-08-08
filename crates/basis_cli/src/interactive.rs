@@ -69,7 +69,7 @@ impl InteractiveMode {
         println!("  note list --issuer       - List notes where you are issuer");
         println!("  note list --recipient    - List notes where you are recipient");
         println!("  note get --issuer <pubkey> --recipient <pubkey>");
-        println!("  note redeem --issuer <pubkey> --amount <amount>");
+        println!("  note redeem             - Retired compatibility tombstone");
         println!("  reserve status [--issuer <pubkey>]");
         println!("  reserve collateralization [--issuer <pubkey>]");
         println!("  status                   - Show server status and recent events");

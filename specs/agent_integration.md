@@ -78,7 +78,7 @@ content is pretty-printed JSON.
 | `account_switch` | `name` | — | `{switched: name}` |
 | `account_import` | `name`, `private_key_hex` (64 hex chars) | — | `{name, pubkey_hex, ...}`; the key is persisted, never returned |
 | `note_create` | `recipient`, `amount` (nanoERG) | — | `{issuer_pubkey, recipient_pubkey, amount, timestamp, signature, reserve_status_before, reserve_status_after}`; signed with the **current** account |
-| `note_redeem` | `issuer`, `amount` (nanoERG) | `destructiveHint` | redemption result incl. `tx_id` on broadcast; local-signing path (current account = recipient) |
+| `note_redeem` | `issuer`, `amount` (nanoERG) | `destructiveHint` | retired compatibility tombstone; returns an error before effects |
 | `reserve_create` | `nft_id` (64 hex), `amount` (nanoERG) | — | reserve-creation payload (requests, fee, change address) to submit on-chain |
 | `policy_set` | `policy` (JSON object matching `AcceptanceConfig`) | `destructiveHint` | `{saved, uploaded, policy_hash, uploaded_at}` |
 
@@ -116,7 +116,6 @@ basis_cli --json account info
 basis_cli --json account create alice
 basis_cli --json note list --recipient
 basis_cli --json note create --recipient <66-hex> --amount 1000000000
-basis_cli --json note redeem --issuer <66-hex> --amount 1000000000
 basis_cli --json reserve status
 basis_cli --json acceptance upload --policy-file policy.toml
 basis_cli --json acceptance check --issuer <66-hex> --recipient <66-hex> --total-debt 1000000000
@@ -135,12 +134,12 @@ basis_cli --json acceptance check --issuer <66-hex> --recipient <66-hex> --total
 3. `note_create {recipient, amount}` — signed with the current account.
 4. Confirm with `note_get {issuer: <current pubkey>, recipient}`.
 
-### Check receipts and redeem
+### Check receipts
 1. `note_list {direction: "received"}` → pick notes with `outstanding > 0`.
 2. `note_get {issuer, recipient: <current pubkey>}` for details.
-3. Confirm the amount with the user, then `note_redeem {issuer, amount}` —
-   builds, signs, and broadcasts the on-chain redemption (`destructiveHint`).
-4. `reserve_status {pubkey: issuer}` or `note_get` again to confirm.
+3. Do not invoke `note_redeem`; it is retired. Use the separately reviewed
+   transaction flow with explicit local witnesses.
+4. Treat node acceptance as pending until confirmed-chain reconciliation.
 
 ### Create a reserve
 1. `reserve_create {nft_id, amount}` (owner = current account) — returns the unsigned
@@ -187,10 +186,11 @@ and `specs/tui_wallet_lets.md` for the design specification.
 - **Never request, store, or echo private keys.** Use `account_import` only when the
   user explicitly provides a key for import. There is deliberately no key-export MCP
   tool; do not work around this via `basis_cli account export`.
-- **Confirm before destructive/irreversible calls**: `note_redeem` (broadcasts an
-  on-chain transaction), `policy_set` (overwrites the published policy), and
-  `note_create` (creates real debt). State amount (in ERG and nanoERG) and
-  counterparty pubkey, and get the user's go-ahead.
+- **Confirm before destructive/irreversible calls**: the separately reviewed
+  transaction redemption flow (broadcasts an on-chain transaction), `policy_set`
+  (overwrites the published policy), and `note_create` (creates real debt). State
+  amount (in ERG and nanoERG) and counterparty pubkey, and get the user's go-ahead.
+  `note_redeem` itself is retired.
 - **Validate pubkeys** (66 hex chars) before passing them; a malformed key is a user
   error, not something to retry blindly.
 - **Amounts are nanoERG** — double-check unit conversion when the user says "ERG".

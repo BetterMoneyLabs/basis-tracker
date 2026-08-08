@@ -386,23 +386,14 @@ impl BasisMcp {
         )
     }
 
-    /// Redeem a note (local-signing path; the current account is the recipient).
+    /// Retired compatibility tombstone; returns before network or signing effects.
     #[tool(annotations(read_only_hint = false, destructive_hint = true))]
     async fn note_redeem(
         &self,
         Parameters(params): Parameters<NoteRedeemParams>,
     ) -> Result<CallToolResult, McpError> {
-        let state = self.state.lock().await;
-        json_result(
-            commands::note::redeem_note(
-                &state.account_manager,
-                &state.client,
-                &params.issuer,
-                params.amount,
-                false,
-            )
-            .await,
-        )
+        let _ = params;
+        json_result(commands::note::redeem_note())
     }
 
     /// Build a reserve-creation payload (owner = current account) via the tracker.

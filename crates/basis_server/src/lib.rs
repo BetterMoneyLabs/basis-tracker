@@ -86,21 +86,6 @@ pub enum TrackerCommand {
             Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>,
         >,
     },
-    InitiateRedemption {
-        request: basis_store::RedemptionRequest,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<basis_store::RedemptionData, basis_store::RedemptionError>,
-        >,
-    },
-    CompleteRedemption {
-        issuer_pubkey: basis_store::PubKey,
-        recipient_pubkey: basis_store::PubKey,
-        redeemed_amount: u64,
-        /// Explicit cumulative reserve-tree value to sync (from the on-chain build).
-        /// Falls back to the note's cumulative redeemed amount when `None`.
-        new_already_redeemed: Option<u64>,
-        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::RedemptionError>>,
-    },
     GenerateProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,

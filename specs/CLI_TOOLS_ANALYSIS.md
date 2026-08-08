@@ -149,7 +149,7 @@ An MCP (Model Context Protocol) server over stdio that exposes the Basis wallet 
 
 #### Tools
 - **Read-only** (`readOnlyHint`): `server_status`, `account_list`, `account_current`, `note_list`, `note_get`, `reserve_status`, `policy_get`
-- **Write**: `account_create`, `account_switch`, `account_import`, `note_create`, `note_redeem` (local signing), `reserve_create`, `policy_set` (`destructiveHint` where applicable)
+- **Write**: `account_create`, `account_switch`, `account_import`, `note_create`, `reserve_create`, `policy_set` (`destructiveHint` where applicable). `note_redeem` is a retired compatibility tombstone.
 
 Private-key export is deliberately not exposed through any tool; signing happens in-process. See `docs/AGENT_INTERFACE.md` for the full tool reference and client configuration snippets.
 

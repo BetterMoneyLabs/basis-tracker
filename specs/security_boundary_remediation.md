@@ -10,8 +10,9 @@ caller to exercise tracker-owned capabilities or to assert settlement state.
    node wallet. `/reserves/create` remains a payload builder; the reserve owner
    reviews, signs, and submits that payload with their own wallet.
 2. Change from tracker-signed fee inputs is paid only to the common P2PK script
-   of those inputs. A request cannot choose the change address, and mixed-owner
-   fee inputs are rejected.
+   derived from the exact Sigma-serialized boxes used by the prover. Wallet-list
+   JSON is selection metadata only; mismatched IDs, values, scripts, or assets
+   are rejected, as are mixed-owner fee inputs.
 3. Node API credentials and tracker signing material are redacted from `Debug`
    output. Signing and broadcast logs contain status and identifiers only, not
    request or response bodies.
@@ -22,8 +23,9 @@ caller to exercise tracker-owned capabilities or to assert settlement state.
 5. Node acceptance is not settlement confirmation. `/redemption/submit`
    accepts only the signed transaction and does not mutate note or reserve-tree
    accounting. `/redeem/complete` is a `410 Gone` tombstone.
-6. The legacy server-sign redemption path is disabled before any network,
-   signing, broadcast, or persistence effect.
+6. Legacy `POST /redeem`, CLI `note redeem`, and MCP `note_redeem` are
+   unconditional tombstones before account, network, construction, signing,
+   broadcast, or persistence effects.
 7. Builders reject the known historical strict-insert reserve P2S while they
    emit insert-or-update AVL state. A new contract identity must be promoted
    from reviewed source and parity evidence as a separate change.
@@ -37,7 +39,7 @@ caller to exercise tracker-owned capabilities or to assert settlement state.
 | Assisted build `change_address` | Removed and rejected as an unknown field. |
 | `POST /redemption/submit` | Accepts `{ "signed_tx": ... }`, returns `202 Accepted`, and performs no settlement mutation. |
 | `POST /redeem/complete` | Returns `410 Gone`. |
-| `note redeem --server-sign` | Returns an error before effects. |
+| `note redeem` / MCP `note_redeem` | Return an error before effects; no boolean reactivation path remains. |
 | Non-local `transaction generate-redemption` | Returns an error; use `--local-sign` or the assisted signer. |
 | Reserve P2S `3PQnJ92K...` | Reserve payload/redemption builders return `503 Service Unavailable`; no successor is constructed against the incompatible generation. |
 
