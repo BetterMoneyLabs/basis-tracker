@@ -19,6 +19,9 @@ pub struct PredicateContext {
     pub recipient_pubkey: PubKey,
     /// Total cumulative debt amount in the note
     pub total_debt: u64,
+    /// Conservative issuer-wide gross debt after applying this candidate note.
+    /// `None` means the tracker snapshot was unavailable; collateral checks reject.
+    pub projected_issuer_gross_debt: Option<u64>,
     /// Optional cloned reserve tracker for collateralization checks
     pub reserve_tracker: Option<basis_store::ReserveTracker>,
 }
@@ -29,15 +32,39 @@ impl std::fmt::Debug for PredicateContext {
             .field("issuer_pubkey", &hex::encode(&self.issuer_pubkey))
             .field("recipient_pubkey", &hex::encode(&self.recipient_pubkey))
             .field("total_debt", &self.total_debt)
+            .field(
+                "projected_issuer_gross_debt",
+                &self.projected_issuer_gross_debt,
+            )
             .field("reserve_tracker", &self.reserve_tracker.is_some())
             .finish()
     }
+}
+
+fn collateral_inputs_available(ctx: &PredicateContext) -> bool {
+    if ctx.projected_issuer_gross_debt.is_none() {
+        return false;
+    }
+
+    ctx.reserve_tracker
+        .as_ref()
+        .and_then(|tracker| {
+            tracker
+                .get_reserve_by_owner(&hex::encode(ctx.issuer_pubkey))
+                .ok()
+        })
+        .is_some()
 }
 
 /// Trait for note acceptance predicates
 pub trait NotePredicate: Send + Sync + std::fmt::Debug {
     /// Evaluate whether a note is acceptable given the context
     fn acceptable(&self, ctx: &PredicateContext) -> bool;
+
+    /// Whether this predicate tree needs the issuer-wide liability snapshot.
+    fn requires_liability_snapshot(&self) -> bool {
+        false
+    }
 
     /// Get the predicate name
     fn name(&self) -> &str;
@@ -152,7 +179,10 @@ impl NotePredicate for CollateralizationPredicate {
         };
 
         let assets = reserve.base_info.collateral_amount;
-        let liabilities = reserve.total_debt;
+        let liabilities = match ctx.projected_issuer_gross_debt {
+            Some(liabilities) => liabilities,
+            None => return false,
+        };
 
         if liabilities == 0 {
             // No debt means fully collateralized (or no reserve needed)
@@ -165,6 +195,10 @@ impl NotePredicate for CollateralizationPredicate {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn requires_liability_snapshot(&self) -> bool {
+        true
     }
 }
 
@@ -229,6 +263,12 @@ impl NotePredicate for AllOfPredicate {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn requires_liability_snapshot(&self) -> bool {
+        self.predicates
+            .iter()
+            .any(|predicate| predicate.requires_liability_snapshot())
+    }
 }
 
 /// Any-of (OR) composite predicate
@@ -259,6 +299,12 @@ impl NotePredicate for AnyOfPredicate {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn requires_liability_snapshot(&self) -> bool {
+        self.predicates
+            .iter()
+            .any(|predicate| predicate.requires_liability_snapshot())
+    }
 }
 
 /// Not (negation) predicate
@@ -280,11 +326,20 @@ impl NotPredicate {
 
 impl NotePredicate for NotPredicate {
     fn acceptable(&self, ctx: &PredicateContext) -> bool {
+        // Missing liability data is an evaluation failure, not a negative
+        // collateral result that negation may turn into acceptance.
+        if self.predicate.requires_liability_snapshot() && !collateral_inputs_available(ctx) {
+            return false;
+        }
         !self.predicate.acceptable(ctx)
     }
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn requires_liability_snapshot(&self) -> bool {
+        self.predicate.requires_liability_snapshot()
     }
 }
 
@@ -321,6 +376,7 @@ mod tests {
             issuer_pubkey: test_pubkey(issuer_n),
             recipient_pubkey: test_pubkey(255),
             total_debt,
+            projected_issuer_gross_debt: None,
             reserve_tracker: None,
         }
     }
@@ -444,6 +500,75 @@ mod tests {
     }
 
     #[test]
+    fn test_collateralization_rejects_candidate_debt_above_scanned_reserve() {
+        use basis_store::{ReserveInfo, ReserveTracker};
+
+        let issuer_pubkey = test_pubkey(1);
+        let tracker = ReserveTracker::new();
+        tracker
+            .update_reserve(basis_store::reserve_tracker::ExtendedReserveInfo {
+                base_info: ReserveInfo {
+                    collateral_amount: 100,
+                    last_updated_height: 0,
+                    contract_address: "test".to_string(),
+                    tracker_nft_id: "test".to_string(),
+                    refund_initiation_height: 0,
+                },
+                // This is the value assigned by ExtendedReserveInfo::new and the scanner.
+                total_debt: 0,
+                box_id: "box1".to_string(),
+                owner_pubkey: hex::encode(issuer_pubkey),
+                last_updated_timestamp: 0,
+            })
+            .unwrap();
+
+        let pred = CollateralizationPredicate::new("test", 1.0);
+        let ctx = PredicateContext {
+            issuer_pubkey,
+            recipient_pubkey: test_pubkey(2),
+            total_debt: 101,
+            projected_issuer_gross_debt: Some(101),
+            reserve_tracker: Some(tracker),
+        };
+
+        assert!(!pred.acceptable(&ctx));
+    }
+
+    #[test]
+    fn test_collateralization_rejects_unavailable_aggregate_snapshot() {
+        use basis_store::{ReserveInfo, ReserveTracker};
+
+        let issuer_pubkey = test_pubkey(1);
+        let tracker = ReserveTracker::new();
+        tracker
+            .update_reserve(basis_store::reserve_tracker::ExtendedReserveInfo {
+                base_info: ReserveInfo {
+                    collateral_amount: 100,
+                    last_updated_height: 0,
+                    contract_address: "test".to_string(),
+                    tracker_nft_id: "test".to_string(),
+                    refund_initiation_height: 0,
+                },
+                total_debt: 0,
+                box_id: "box1".to_string(),
+                owner_pubkey: hex::encode(issuer_pubkey),
+                last_updated_timestamp: 0,
+            })
+            .unwrap();
+
+        let pred = CollateralizationPredicate::new("test", 1.0);
+        let ctx = PredicateContext {
+            issuer_pubkey,
+            recipient_pubkey: test_pubkey(2),
+            total_debt: 50,
+            projected_issuer_gross_debt: None,
+            reserve_tracker: Some(tracker),
+        };
+
+        assert!(!pred.acceptable(&ctx));
+    }
+
+    #[test]
     fn test_allof_empty_returns_true() {
         let pred = AllOfPredicate::new("test", vec![]);
         let ctx = test_context(1, 100);
@@ -557,6 +682,63 @@ mod tests {
     }
 
     #[test]
+    fn test_not_does_not_turn_missing_collateral_state_into_acceptance() {
+        let pred = NotPredicate::new(
+            "test",
+            Box::new(CollateralizationPredicate::new("collateral", 1.0)),
+        );
+        let ctx = test_context(1, 100);
+
+        assert!(!pred.acceptable(&ctx));
+    }
+
+    #[test]
+    fn test_not_does_not_turn_missing_reserve_into_acceptance() {
+        let pred = NotPredicate::new(
+            "test",
+            Box::new(CollateralizationPredicate::new("collateral", 1.0)),
+        );
+        let mut ctx = test_context(1, 100);
+        ctx.projected_issuer_gross_debt = Some(100);
+        ctx.reserve_tracker = Some(basis_store::ReserveTracker::new());
+
+        assert!(!pred.acceptable(&ctx));
+    }
+
+    #[test]
+    fn test_liability_snapshot_requirement_propagates_through_composites() {
+        let whitelist = WhitelistPredicate::new("whitelist", HashSet::new());
+        assert!(!whitelist.requires_liability_snapshot());
+
+        let collateral = CollateralizationPredicate::new("collateral", 1.0);
+        assert!(collateral.requires_liability_snapshot());
+
+        let all = AllOfPredicate::new(
+            "all",
+            vec![
+                Box::new(WhitelistPredicate::new("whitelist", HashSet::new())),
+                Box::new(CollateralizationPredicate::new("collateral", 1.0)),
+            ],
+        );
+        assert!(all.requires_liability_snapshot());
+
+        let any = AnyOfPredicate::new(
+            "any",
+            vec![
+                Box::new(WhitelistPredicate::new("whitelist", HashSet::new())),
+                Box::new(CollateralizationPredicate::new("collateral", 1.0)),
+            ],
+        );
+        assert!(any.requires_liability_snapshot());
+
+        let not = NotPredicate::new(
+            "not",
+            Box::new(CollateralizationPredicate::new("collateral", 1.0)),
+        );
+        assert!(not.requires_liability_snapshot());
+    }
+
+    #[test]
     fn test_default_policy_accept() {
         assert!(DefaultPolicy::Accept.acceptable());
     }
@@ -618,6 +800,7 @@ mod tests {
             issuer_pubkey: test_pubkey(1),
             recipient_pubkey: test_pubkey(2),
             total_debt: 100,
+            projected_issuer_gross_debt: None,
             reserve_tracker: None,
         };
         let cloned = ctx.clone();
@@ -695,6 +878,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: None,
             reserve_tracker: Some(tracker),
         };
 
@@ -736,6 +920,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: None,
             reserve_tracker: Some(tracker),
         };
 
@@ -754,6 +939,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: None,
             reserve_tracker: None,
         };
 
@@ -775,6 +961,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: None,
             reserve_tracker: Some(tracker),
         };
 

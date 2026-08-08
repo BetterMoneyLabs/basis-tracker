@@ -689,4 +689,242 @@ mod confirmation_state_tests {
         assert!(!confirmation.is_redeemable(1500));
         assert_eq!(confirmation.redeemable_amount(1500), 0);
     }
+
+    #[test]
+    fn projected_issuer_gross_debt_aggregates_and_replaces_once() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 40, 1))
+            .unwrap();
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_c, 40, 1))
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient_b), 70)
+                .unwrap(),
+            110
+        );
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_counts_a_new_recipient() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+                .unwrap(),
+            110
+        );
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_never_drops_confirmed_value() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager.confirm_pending_notes("box123", 200).unwrap();
+
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient), 50)
+                .unwrap(),
+            100
+        );
+    }
+
+    #[test]
+    fn cumulative_debt_regression_is_rejected_after_confirmation() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager.confirm_pending_notes("box123", 200).unwrap();
+
+        assert!(matches!(
+            manager.add_note(&issuer, &create_note(&issuer_secret, &recipient, 40, 2)),
+            Err(crate::NoteError::DebtRegression)
+        ));
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient), 50)
+                .unwrap(),
+            100
+        );
+    }
+
+    #[test]
+    fn internal_note_update_rejects_cumulative_debt_regression() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+
+        assert!(matches!(
+            manager.update_note(&issuer, &create_note(&issuer_secret, &recipient, 40, 2)),
+            Err(crate::NoteError::DebtRegression)
+        ));
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_uses_primary_notes_when_index_is_missing() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+            .unwrap();
+        manager
+            .storage
+            .remove_issuer_index_for_test(&issuer)
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+                .unwrap(),
+            110
+        );
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_rejects_stale_index_entry() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+            .unwrap();
+        manager
+            .storage
+            .remove_primary_note_for_test(&issuer, &recipient_b)
+            .unwrap();
+
+        assert!(manager
+            .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+            .is_err());
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_rejects_corrupt_primary_note() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+            .unwrap();
+        manager
+            .storage
+            .corrupt_primary_note_for_test(&issuer, &recipient_b)
+            .unwrap();
+
+        assert!(manager
+            .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+            .is_err());
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_without_recipient_is_conservative() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 60, 1))
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, None, 50)
+                .unwrap(),
+            110
+        );
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_rejects_overflow() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient_b, u64::MAX, 1),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            manager.projected_issuer_gross_debt(&issuer, Some(&recipient_c), 1),
+            Err(crate::NoteError::AmountOverflow)
+        ));
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_survives_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        {
+            let mut manager = TrackerStateManager::new(temp_dir.path());
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+                .unwrap();
+        }
+
+        let manager = TrackerStateManager::new(temp_dir.path());
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+                .unwrap(),
+            110
+        );
+    }
 }

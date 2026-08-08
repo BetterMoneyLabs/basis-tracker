@@ -281,6 +281,7 @@ pub enum NoteError {
     AmountOverflow,
     FutureTimestamp,
     PastTimestamp,
+    DebtRegression,
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
@@ -551,11 +552,17 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
-        // Check if there is an existing note with the same issuer-recipient pair
-        // and ensure the new timestamp is greater than the existing one (ever increasing)
-        if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
+        // A note is a cumulative debt record. Both its timestamp and totalDebt
+        // must be monotone for a given issuer-recipient edge.
+        if let Some(existing_note) = self
+            .storage
+            .get_note(issuer_pubkey, &note.recipient_pubkey)?
+        {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
+            }
+            if note.amount_collected < existing_note.amount_collected {
+                return Err(NoteError::DebtRegression);
             }
         }
 
@@ -863,11 +870,17 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
-        // Check if there is an existing note with the same issuer-recipient pair
-        // and ensure the new timestamp is greater than the existing one (ever increasing)
-        if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
+        // Preserve the same cumulative-debt invariant as `add_note` for internal
+        // updates (for example, redemption completion).
+        if let Some(existing_note) = self
+            .storage
+            .get_note(issuer_pubkey, &note.recipient_pubkey)?
+        {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
+            }
+            if note.amount_collected < existing_note.amount_collected {
+                return Err(NoteError::DebtRegression);
             }
         }
 
@@ -1132,6 +1145,60 @@ impl TrackerStateManager {
     /// Get all notes for a specific issuer
     pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
         self.storage.get_issuer_notes(issuer_pubkey)
+    }
+
+    /// Calculate a conservative issuer-wide debt snapshot for an acceptance check.
+    ///
+    /// Every edge uses the greatest cumulative `totalDebt` known locally, pending,
+    /// or confirmed. The candidate replaces its recipient edge exactly once, but a
+    /// lower candidate cannot reduce an already observed cumulative value. When no
+    /// recipient is supplied, the candidate is treated as a new edge. Gross debt is
+    /// intentional here: local redemption state is not yet reconstructed on reorgs,
+    /// so subtracting it could make a collateral check fail open.
+    pub fn projected_issuer_gross_debt(
+        &self,
+        issuer_pubkey: &PubKey,
+        candidate_recipient: Option<&PubKey>,
+        candidate_total_debt: u64,
+    ) -> Result<u64, NoteError> {
+        // Secondary indices are query accelerators, not liability authority:
+        // store_note writes the primary record before its indices. Scan the
+        // primary partition strictly so an interrupted index update cannot hide
+        // debt from a collateralization decision.
+        let notes = self.storage.get_issuer_notes_strict(issuer_pubkey)?;
+        let mut total = 0u64;
+        let mut replaced_candidate_edge = false;
+
+        for note in notes {
+            let confirmation = self.get_confirmation(issuer_pubkey, &note.recipient_pubkey);
+            let mut edge_debt = note.amount_collected;
+
+            if let Some(confirmation) = confirmation {
+                if let Some(confirmed) = confirmation.confirmed_total_debt {
+                    edge_debt = edge_debt.max(confirmed);
+                }
+                if let Some(pending) = confirmation.pending_total_debt {
+                    edge_debt = edge_debt.max(pending);
+                }
+            }
+
+            if candidate_recipient == Some(&note.recipient_pubkey) {
+                edge_debt = edge_debt.max(candidate_total_debt);
+                replaced_candidate_edge = true;
+            }
+
+            total = total
+                .checked_add(edge_debt)
+                .ok_or(NoteError::AmountOverflow)?;
+        }
+
+        if candidate_recipient.is_none() || !replaced_candidate_edge {
+            total = total
+                .checked_add(candidate_total_debt)
+                .ok_or(NoteError::AmountOverflow)?;
+        }
+
+        Ok(total)
     }
 
     /// Get all notes for a specific recipient

@@ -68,6 +68,19 @@ mod cors_tests {
                         let result = redemption_manager.tracker.get_issuer_notes(&issuer_pubkey);
                         let _ = response_tx.send(result);
                     }
+                    TrackerCommand::GetProjectedIssuerGrossDebt {
+                        issuer_pubkey,
+                        candidate_recipient,
+                        candidate_total_debt,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.projected_issuer_gross_debt(
+                            &issuer_pubkey,
+                            candidate_recipient.as_ref(),
+                            candidate_total_debt,
+                        );
+                        let _ = response_tx.send(result);
+                    }
                     TrackerCommand::GetNotesByRecipient {
                         recipient_pubkey,
                         response_tx,
