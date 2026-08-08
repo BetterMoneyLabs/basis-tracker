@@ -306,6 +306,7 @@ pub async fn create_note(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -432,6 +433,7 @@ pub async fn get_notes_by_issuer(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -544,6 +546,7 @@ pub async fn get_notes_by_recipient(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -693,6 +696,7 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -786,6 +790,7 @@ pub async fn get_all_notes(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -804,6 +809,48 @@ pub async fn get_all_notes(
                     "Internal server error".to_string(),
                 )),
             )
+        }
+    }
+}
+
+/// Load a serialized, conservative debt snapshot from the tracker thread.
+///
+/// Returning `None` is deliberate fail-closed input for collateral predicates;
+/// predicates that do not inspect collateral remain unaffected.
+async fn load_projected_issuer_gross_debt(
+    state: &AppState,
+    issuer_pubkey: PubKey,
+    candidate_recipient: Option<PubKey>,
+    candidate_total_debt: u64,
+) -> Option<u64> {
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    if let Err(e) = state
+        .tx
+        .try_send(TrackerCommand::GetProjectedIssuerGrossDebt {
+            issuer_pubkey,
+            candidate_recipient,
+            candidate_total_debt,
+            response_tx,
+        })
+    {
+        tracing::error!("Failed to request projected issuer debt: {:?}", e);
+        return None;
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(2), response_rx).await {
+        Ok(Ok(Ok(total))) => Some(total),
+        Ok(Ok(Err(e))) => {
+            tracing::error!("Failed to calculate projected issuer debt: {:?}", e);
+            None
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Projected issuer debt response channel closed: {:?}", e);
+            None
+        }
+        Err(_) => {
+            tracing::error!("Timed out calculating projected issuer debt");
+            None
         }
     }
 }
@@ -891,12 +938,25 @@ pub async fn check_acceptance(
                         Ok(Some(predicate)) => {
                             // Clone reserve tracker from mutex
                             let reserve_tracker = state.reserve_tracker.lock().await.clone();
+                            let projected_issuer_gross_debt =
+                                if predicate.requires_liability_snapshot() {
+                                    load_projected_issuer_gross_debt(
+                                        &state,
+                                        issuer_pubkey,
+                                        payload.recipient_pubkey.as_ref().map(|_| recipient_pubkey),
+                                        payload.total_debt,
+                                    )
+                                    .await
+                                } else {
+                                    None
+                                };
 
                             // Build context
                             let ctx = crate::acceptance::PredicateContext {
                                 issuer_pubkey,
                                 recipient_pubkey,
                                 total_debt: payload.total_debt,
+                                projected_issuer_gross_debt,
                                 reserve_tracker: Some(reserve_tracker),
                             };
 
@@ -950,12 +1010,24 @@ pub async fn check_acceptance(
             if let Some(predicate) = &state.acceptance_predicate {
                 // Clone reserve tracker from mutex
                 let reserve_tracker = state.reserve_tracker.lock().await.clone();
+                let projected_issuer_gross_debt = if predicate.requires_liability_snapshot() {
+                    load_projected_issuer_gross_debt(
+                        &state,
+                        issuer_pubkey,
+                        payload.recipient_pubkey.as_ref().map(|_| recipient_pubkey),
+                        payload.total_debt,
+                    )
+                    .await
+                } else {
+                    None
+                };
 
                 // Build context
                 let ctx = crate::acceptance::PredicateContext {
                     issuer_pubkey,
                     recipient_pubkey,
                     total_debt: payload.total_debt,
+                    projected_issuer_gross_debt,
                     reserve_tracker: Some(reserve_tracker),
                 };
 
@@ -987,10 +1059,22 @@ pub async fn check_acceptance(
             // Fall back to global policy on error
             if let Some(predicate) = &state.acceptance_predicate {
                 let reserve_tracker = state.reserve_tracker.lock().await.clone();
+                let projected_issuer_gross_debt = if predicate.requires_liability_snapshot() {
+                    load_projected_issuer_gross_debt(
+                        &state,
+                        issuer_pubkey,
+                        payload.recipient_pubkey.as_ref().map(|_| recipient_pubkey),
+                        payload.total_debt,
+                    )
+                    .await
+                } else {
+                    None
+                };
                 let ctx = crate::acceptance::PredicateContext {
                     issuer_pubkey,
                     recipient_pubkey,
                     total_debt: payload.total_debt,
+                    projected_issuer_gross_debt,
                     reserve_tracker: Some(reserve_tracker),
                 };
                 let acceptable = predicate.acceptable(&ctx);

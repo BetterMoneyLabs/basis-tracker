@@ -190,6 +190,45 @@ impl NoteStorage {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn remove_issuer_index_for_test(
+        &self,
+        issuer_pubkey: &PubKey,
+    ) -> Result<(), NoteError> {
+        self.issuer_index.remove(issuer_pubkey).map_err(|e| {
+            NoteError::StorageError(format!("Failed to remove issuer index in test: {}", e))
+        })?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_primary_note_for_test(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<(), NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        self.notes_partition.remove(key.to_bytes()).map_err(|e| {
+            NoteError::StorageError(format!("Failed to remove note in test: {}", e))
+        })?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_primary_note_for_test(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<(), NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        self.notes_partition
+            .insert(key.to_bytes(), &[0u8])
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to corrupt note in test: {}", e))
+            })?;
+        Ok(())
+    }
+
     /// Serialize a list of note keys to bytes
     fn serialize_note_keys(keys: &[NoteKey]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -222,6 +261,64 @@ impl NoteStorage {
             offset += 32;
         }
         Ok(keys)
+    }
+
+    fn deserialize_note_keys_strict(bytes: &[u8]) -> Result<Vec<NoteKey>, NoteError> {
+        if bytes.len() < 4 {
+            return Err(NoteError::StorageError(
+                "Invalid note key list format".to_string(),
+            ));
+        }
+
+        let count = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let expected_len = 4usize
+            .checked_add(
+                count.checked_mul(32).ok_or_else(|| {
+                    NoteError::StorageError("Note key count overflow".to_string())
+                })?,
+            )
+            .ok_or_else(|| NoteError::StorageError("Note key list length overflow".to_string()))?;
+
+        if bytes.len() != expected_len {
+            return Err(NoteError::StorageError(
+                "Invalid note key list format".to_string(),
+            ));
+        }
+
+        let mut keys = Vec::with_capacity(count);
+        for chunk in bytes[4..].chunks_exact(32) {
+            let key_bytes: [u8; 32] = chunk.try_into().unwrap();
+            keys.push(NoteKey::from_bytes(&key_bytes));
+        }
+        Ok(keys)
+    }
+
+    fn deserialize_note_value(value_bytes: &[u8]) -> Result<(PubKey, IouNote), NoteError> {
+        const STORED_NOTE_LEN: usize = 33 + 8 + 8 + 8 + 65 + 33;
+
+        if value_bytes.len() != STORED_NOTE_LEN {
+            return Err(NoteError::StorageError(
+                "Invalid stored note format".to_string(),
+            ));
+        }
+
+        let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
+        let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+        let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+        let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
+        let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
+        let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+
+        Ok((
+            issuer_pubkey,
+            IouNote {
+                recipient_pubkey,
+                amount_collected,
+                amount_redeemed,
+                timestamp,
+                signature,
+            },
+        ))
     }
 
     /// Add a note key to an index partition
@@ -520,6 +617,61 @@ impl NoteStorage {
                 e
             ))),
         }
+    }
+
+    /// Read an issuer's liabilities from the primary note partition.
+    ///
+    /// This intentionally does not rely on the secondary issuer index for
+    /// completeness: the primary record is written before the index. Existing
+    /// index entries are still validated so stale or corrupt references fail
+    /// closed instead of being interpreted as zero debt.
+    pub fn get_issuer_notes_strict(
+        &self,
+        issuer_pubkey: &PubKey,
+    ) -> Result<Vec<IouNote>, NoteError> {
+        let mut notes = Vec::new();
+        let mut primary_keys = std::collections::HashSet::new();
+
+        for item in self.notes_partition.iter() {
+            let (stored_key, value_bytes) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate note partition: {}", e))
+            })?;
+            let (stored_issuer, note) = Self::deserialize_note_value(value_bytes.as_ref())?;
+            let expected_key =
+                NoteKey::from_keys(&stored_issuer, &note.recipient_pubkey).to_bytes();
+
+            if stored_key.as_ref() != expected_key.as_slice() {
+                return Err(NoteError::StorageError(
+                    "Stored note key does not match note contents".to_string(),
+                ));
+            }
+
+            if &stored_issuer == issuer_pubkey {
+                primary_keys.insert(expected_key);
+                notes.push(note);
+            }
+        }
+
+        match self.issuer_index.get(issuer_pubkey) {
+            Ok(Some(bytes)) => {
+                for indexed_key in Self::deserialize_note_keys_strict(bytes.as_ref())? {
+                    if !primary_keys.contains(&indexed_key.to_bytes()) {
+                        return Err(NoteError::StorageError(
+                            "Issuer index references a missing or mismatched note".to_string(),
+                        ));
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(NoteError::StorageError(format!(
+                    "Failed to read issuer index: {}",
+                    e
+                )))
+            }
+        }
+
+        Ok(notes)
     }
 
     /// Get all notes for a specific recipient (uses recipient index for O(1) lookup)

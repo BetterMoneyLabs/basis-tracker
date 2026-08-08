@@ -57,6 +57,12 @@ pub enum TrackerCommand {
         response_tx:
             tokio::sync::oneshot::Sender<Result<Vec<basis_store::IouNote>, basis_store::NoteError>>,
     },
+    GetProjectedIssuerGrossDebt {
+        issuer_pubkey: basis_store::PubKey,
+        candidate_recipient: Option<basis_store::PubKey>,
+        candidate_total_debt: u64,
+        response_tx: tokio::sync::oneshot::Sender<Result<u64, basis_store::NoteError>>,
+    },
     GetNotesByRecipient {
         recipient_pubkey: basis_store::PubKey,
         response_tx:
