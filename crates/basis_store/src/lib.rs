@@ -111,6 +111,8 @@ pub mod real_scanner_integration_tests;
 #[cfg(test)]
 pub mod reserve_tracking_test;
 #[cfg(test)]
+mod scanner_hardening_tests;
+#[cfg(test)]
 pub mod tracker_scanner_test;
 
 use basis_core;

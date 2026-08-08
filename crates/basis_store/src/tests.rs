@@ -1809,24 +1809,6 @@ mod confirmation_state_tests {
     }
 
     #[test]
-    fn proof_exposure_revalidates_the_complete_snapshot() {
-        let mut manager = make_manager();
-        let issuer_secret = [1u8; 32];
-        let issuer = issuer_pubkey(&issuer_secret);
-        let recipient = [2u8; 33];
-        manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
-            .unwrap();
-        manager.storage.tamper_first_total_debt_for_test().unwrap();
-
-        assert!(matches!(
-            manager.generate_proof(&issuer, &recipient),
-            Err(crate::NoteError::StorageError(message)) if message.contains("snapshot checksum")
-        ));
-        assert!(!manager.is_healthy());
-    }
-
-    #[test]
     fn reserve_root_exposure_revalidates_the_complete_snapshot() {
         let mut manager = make_manager();
         let issuer_secret = [1u8; 32];

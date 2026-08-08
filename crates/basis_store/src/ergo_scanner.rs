@@ -2,6 +2,7 @@
 //! This module provides blockchain integration using /blockchain endpoints (no node scans).
 
 use std::{
+    collections::HashSet,
     path::Path,
     sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,6 +15,14 @@ use tracing::{debug, error, info, warn};
 
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
+
+pub(crate) const SCAN_PAGE_SIZE: usize = 100;
+pub(crate) const MAX_SCAN_PAGES: usize = 1_024;
+pub(crate) const MAX_SCAN_BOXES: usize = 100_000;
+#[cfg(test)]
+pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = NODE_HTTP_MAX_BODY_BYTES;
+pub(crate) const MAX_CONCURRENT_SCANNER_REQUESTS: usize = 4;
+const MAX_ERROR_BODY_CHARS: usize = 1_024;
 
 /// Total deadline applied to every outbound Ergo node request in this process.
 pub const NODE_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -68,6 +77,10 @@ impl BoundedResponse {
 
     pub fn text_lossy(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.body)
+    }
+
+    pub(crate) fn into_parts(self) -> (StatusCode, Vec<u8>) {
+        (self.status, self.body)
     }
 }
 
@@ -186,6 +199,13 @@ pub fn node_http() -> Result<&'static BoundedHttpClient, BoundedHttpError> {
         .map_err(|error| BoundedHttpError::ClientInitialization(error.to_string()))
 }
 
+pub(crate) fn summarize_error_body(body: &[u8]) -> String {
+    String::from_utf8_lossy(body)
+        .chars()
+        .take(MAX_ERROR_BODY_CHARS)
+        .collect()
+}
+
 /// Response from `POST /blockchain/box/unspent/byAddress` is a JSON array of IndexedErgoBox.
 pub(crate) type ByAddressResponse = Vec<IndexedErgoBox>;
 
@@ -193,7 +213,7 @@ pub(crate) type ByAddressResponse = Vec<IndexedErgoBox>;
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct IndexedErgoBox {
     #[serde(rename = "boxId")]
-    box_id: String,
+    pub(crate) box_id: String,
     value: u64,
     #[serde(rename = "ergoTree")]
     ergo_tree: String,
@@ -215,6 +235,14 @@ pub(crate) struct IndexedBoxAsset {
     #[serde(rename = "tokenId")]
     token_id: String,
     amount: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub(crate) struct IndexedHeightResponse {
+    #[serde(rename = "indexedHeight")]
+    pub(crate) indexed_height: u64,
+    #[serde(rename = "fullHeight")]
+    pub(crate) full_height: u64,
 }
 
 impl From<IndexedErgoBox> for ScanBox {
@@ -263,6 +291,21 @@ pub enum ScannerError {
     HttpError(String),
     #[error("JSON parse error: {0}")]
     JsonError(String),
+    #[error("Scanner response exceeds {max_bytes} bytes")]
+    ResponseTooLarge { max_bytes: usize },
+    #[error("Scanner request concurrency gate is closed")]
+    RequestGateClosed,
+    #[error("Scanner request capacity is exhausted")]
+    RequestCapacityExceeded,
+    #[error("Indexed node is behind: indexed height {indexed_height}, full height {full_height}")]
+    IndexLag {
+        indexed_height: u64,
+        full_height: u64,
+    },
+    #[error("Incoherent scanner snapshot: {0}")]
+    IncoherentSnapshot(String),
+    #[error("Scanner resource limit exceeded: {0}")]
+    ScanLimitExceeded(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,12 +363,39 @@ pub struct ServerState {
     pub config: NodeConfig,
     pub inner: Arc<Mutex<ServerStateInner>>,
     pub client: Client,
+    pub(crate) request_permits: Arc<Semaphore>,
     pub reserve_tracker: ReserveTracker,
     pub metadata_storage: ScannerMetadataStorage,
     pub reserve_storage: ReserveStorage,
 }
 
 impl ServerState {
+    async fn request_bytes(
+        &self,
+        request: reqwest::RequestBuilder,
+        context: &str,
+    ) -> Result<(StatusCode, Vec<u8>), ScannerError> {
+        let _permit = self
+            .request_permits
+            .try_acquire()
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::Closed => ScannerError::RequestGateClosed,
+                tokio::sync::TryAcquireError::NoPermits => ScannerError::RequestCapacityExceeded,
+            })?;
+        let response = node_http()
+            .map_err(|error| ScannerError::HttpError(format!("{}: {}", context, error)))?
+            .execute(request)
+            .await
+            .map_err(|error| match error {
+                BoundedHttpError::BodyTooLarge { limit } => {
+                    ScannerError::ResponseTooLarge { max_bytes: limit }
+                }
+                BoundedHttpError::Overloaded => ScannerError::RequestCapacityExceeded,
+                other => ScannerError::HttpError(format!("{}: {}", context, other)),
+            })?;
+        Ok(response.into_parts())
+    }
+
     /// Create HTTP request builder with API key header if configured
     fn request_builder(
         &self,
@@ -347,17 +417,6 @@ impl ServerState {
         }
 
         Ok(request)
-    }
-
-    async fn execute_request(
-        &self,
-        request: reqwest::RequestBuilder,
-    ) -> Result<BoundedResponse, ScannerError> {
-        let client = node_http().map_err(|error| ScannerError::HttpError(error.to_string()))?;
-        client
-            .execute(request)
-            .await
-            .map_err(|error| ScannerError::HttpError(error.to_string()))
     }
 
     /// Create a server state that uses real Ergo scanner
@@ -447,6 +506,7 @@ impl ServerState {
             config,
             inner,
             client,
+            request_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_SCANNER_REQUESTS)),
             reserve_tracker,
             metadata_storage,
             reserve_storage,
@@ -460,21 +520,21 @@ impl ServerState {
         let url = format!("{}/info", self.config.node_url);
         info!("Fetching current blockchain height from: {}", url);
 
-        let request = self.request_builder(reqwest::Method::GET, &url)?;
-        let response = self
-            .execute_request(request)
-            .await
-            .map_err(|e| ScannerError::HttpError(format!("Failed to connect to node: {}", e)))?;
+        let (status, body) = self
+            .request_bytes(
+                self.request_builder(reqwest::Method::GET, &url)?,
+                "Failed to fetch node height",
+            )
+            .await?;
 
-        if !response.status().is_success() {
+        if !status.is_success() {
             return Err(ScannerError::NodeError(format!(
                 "Node returned status: {}",
-                response.status()
+                status
             )));
         }
 
-        let info: serde_json::Value = response
-            .json()
+        let info: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
 
         let height = info["fullHeight"].as_u64().ok_or_else(|| {
@@ -524,21 +584,21 @@ impl ServerState {
         // Fetch from node
         let url = format!("{}/info", self.config.node_url);
 
-        let request = self.request_builder(reqwest::Method::GET, &url)?;
-        let response = self
-            .execute_request(request)
-            .await
-            .map_err(|e| ScannerError::HttpError(format!("Failed to connect to node: {}", e)))?;
+        let (status, body) = self
+            .request_bytes(
+                self.request_builder(reqwest::Method::GET, &url)?,
+                "Failed to fetch node height",
+            )
+            .await?;
 
-        if !response.status().is_success() {
+        if !status.is_success() {
             return Err(ScannerError::NodeError(format!(
                 "Node returned status: {}",
-                response.status()
+                status
             )));
         }
 
-        let info: serde_json::Value = response
-            .json()
+        let info: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
 
         let height = info["fullHeight"].as_u64().ok_or_else(|| {
@@ -558,36 +618,145 @@ impl ServerState {
         Ok(height)
     }
 
-    /// Get unspent reserve boxes via `POST /blockchain/box/unspent/byAddress`.
+    async fn fetch_indexed_height(&self) -> Result<IndexedHeightResponse, ScannerError> {
+        let url = format!("{}/blockchain/indexedHeight", self.config.node_url);
+        let (status, body) = self
+            .request_bytes(
+                self.request_builder(reqwest::Method::GET, &url)?,
+                "Failed to fetch indexed height",
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(ScannerError::NodeError(format!(
+                "Failed to get indexed height with status {}: {}",
+                status,
+                summarize_error_body(&body)
+            )));
+        }
+        serde_json::from_slice(&body).map_err(|e| {
+            ScannerError::JsonError(format!("Failed to parse indexed height response: {}", e))
+        })
+    }
+
+    fn require_caught_up(height: IndexedHeightResponse) -> Result<(), ScannerError> {
+        if height.indexed_height < height.full_height {
+            return Err(ScannerError::IndexLag {
+                indexed_height: height.indexed_height,
+                full_height: height.full_height,
+            });
+        }
+        Ok(())
+    }
+
+    async fn fetch_unspent_reserve_page(
+        &self,
+        reserve_contract_p2s: &str,
+        offset: usize,
+    ) -> Result<Vec<IndexedErgoBox>, ScannerError> {
+        let url = format!("{}/blockchain/box/unspent/byAddress", self.config.node_url);
+        let request = self
+            .request_builder(reqwest::Method::POST, &url)?
+            .query(&[
+                ("offset", offset.to_string()),
+                ("limit", SCAN_PAGE_SIZE.to_string()),
+                ("sortDirection", "asc".to_string()),
+                ("includeUnconfirmed", "false".to_string()),
+                ("excludeMempoolSpent", "false".to_string()),
+            ])
+            .json(reserve_contract_p2s);
+        let (status, body) = self
+            .request_bytes(request, "Failed to fetch reserve boxes")
+            .await?;
+
+        if status == StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !status.is_success() {
+            return Err(ScannerError::NodeError(format!(
+                "Failed to get reserve boxes with status {}: {}",
+                status,
+                summarize_error_body(&body)
+            )));
+        }
+        serde_json::from_slice(&body).map_err(|e| {
+            ScannerError::JsonError(format!("Failed to parse reserve boxes response: {}", e))
+        })
+    }
+
+    /// Get a complete, height-coherent set of unspent reserve boxes via
+    /// `POST /blockchain/box/unspent/byAddress`.
     pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ScanBox>, ScannerError> {
         let reserve_contract_p2s = self.config.reserve_contract_p2s.as_ref().ok_or_else(|| {
             ScannerError::Generic("Reserve contract P2S not configured".to_string())
         })?;
 
-        let url = format!("{}/blockchain/box/unspent/byAddress", self.config.node_url);
-        info!("Fetching unspent reserve boxes from: {}", url);
+        let before = self.fetch_indexed_height().await?;
+        Self::require_caught_up(before)?;
 
-        let request = self
-            .request_builder(reqwest::Method::POST, &url)?
-            .json(reserve_contract_p2s);
-        let response = self.execute_request(request).await.map_err(|e| {
-            ScannerError::HttpError(format!("Failed to fetch reserve boxes: {}", e))
-        })?;
+        let mut parsed: ByAddressResponse = Vec::new();
+        let mut seen_box_ids = HashSet::new();
+        let mut exhausted = false;
 
-        let status = response.status();
-        if !status.is_success() {
-            error!("Failed to get reserve boxes with status {}", status);
-            return Err(ScannerError::NodeError(format!(
-                "Failed to get reserve boxes with status: {}",
-                status
+        for page_index in 0..MAX_SCAN_PAGES {
+            let offset = page_index.checked_mul(SCAN_PAGE_SIZE).ok_or_else(|| {
+                ScannerError::ScanLimitExceeded("page offset overflow".to_string())
+            })?;
+            let page = self
+                .fetch_unspent_reserve_page(reserve_contract_p2s, offset)
+                .await?;
+            if page.len() > SCAN_PAGE_SIZE {
+                return Err(ScannerError::IncoherentSnapshot(format!(
+                    "node returned {} boxes for requested page size {} at offset {}",
+                    page.len(),
+                    SCAN_PAGE_SIZE,
+                    offset
+                )));
+            }
+
+            let page_len = page.len();
+            for box_ in page {
+                if !seen_box_ids.insert(box_.box_id.clone()) {
+                    return Err(ScannerError::IncoherentSnapshot(format!(
+                        "duplicate box id {} across paginated response",
+                        box_.box_id
+                    )));
+                }
+                if parsed.len() >= MAX_SCAN_BOXES {
+                    return Err(ScannerError::ScanLimitExceeded(format!(
+                        "more than {} reserve boxes",
+                        MAX_SCAN_BOXES
+                    )));
+                }
+                parsed.push(box_);
+            }
+
+            if page_len < SCAN_PAGE_SIZE {
+                exhausted = true;
+                break;
+            }
+        }
+
+        if !exhausted {
+            return Err(ScannerError::ScanLimitExceeded(format!(
+                "scan did not exhaust within {} pages",
+                MAX_SCAN_PAGES
             )));
         }
 
-        let parsed: ByAddressResponse = response.json().map_err(|e| {
-            ScannerError::JsonError(format!("Failed to parse reserve boxes response: {}", e))
-        })?;
+        let after = self.fetch_indexed_height().await?;
+        Self::require_caught_up(after)?;
+        if before != after {
+            return Err(ScannerError::IncoherentSnapshot(format!(
+                "indexed/full height changed from {}/{} to {}/{} during pagination",
+                before.indexed_height, before.full_height, after.indexed_height, after.full_height
+            )));
+        }
 
-        info!("Found {} reserve boxes", parsed.len());
+        info!(
+            "Found {} reserve boxes in a complete snapshot at indexed height {}",
+            parsed.len(),
+            after.indexed_height
+        );
         Ok(parsed.into_iter().map(Into::into).collect())
     }
 
@@ -742,51 +911,29 @@ impl ServerState {
         let scan_boxes = self.get_scan_boxes().await?;
         info!("Retrieved {} scan boxes to process", scan_boxes.len());
 
-        let mut current_box_ids = Vec::new();
-
+        // Validate the entire coherent snapshot before the first mutation. A
+        // malformed candidate must not turn an incomplete observation into a
+        // destructive reconciliation.
+        let mut parsed_reserves = Vec::with_capacity(scan_boxes.len());
         for scan_box in &scan_boxes {
             debug!(
                 "Processing scan box: ID={}, value={}, registers={:?}",
                 scan_box.box_id, scan_box.value, scan_box.additional_registers
             );
-
-            match self.parse_reserve_box(scan_box) {
-                Ok(reserve_info) => {
-                    debug!(
-                        "Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
-                        reserve_info.box_id,
-                        reserve_info.owner_pubkey,
-                        reserve_info.base_info.collateral_amount
-                    );
-                    current_box_ids.push(reserve_info.box_id.clone());
-
-                    // Update in-memory tracker
-                    if let Err(e) = self.reserve_tracker.update_reserve(reserve_info.clone()) {
-                        warn!("Failed to update reserve {}: {}", scan_box.box_id, e);
-                    } else {
-                        // Persist to database
-                        if let Err(e) = self.reserve_storage.store_reserve(&reserve_info) {
-                            warn!(
-                                "Failed to persist reserve {} to database: {:?}",
-                                scan_box.box_id, e
-                            );
-                        } else {
-                            info!("Updated and persisted reserve: {}", scan_box.box_id);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to parse reserve box {}: {} - registers: {:?}",
-                        scan_box.box_id, e, scan_box.additional_registers
-                    );
-                }
-            }
+            let reserve_info = self.parse_reserve_box(scan_box)?;
+            debug!(
+                "Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
+                reserve_info.box_id,
+                reserve_info.owner_pubkey,
+                reserve_info.base_info.collateral_amount
+            );
+            parsed_reserves.push(reserve_info);
         }
 
-        // Remove reserves that are no longer in the scan
-        // NOTE: Disabled for testing to prevent manually-inserted reserves from being deleted
-        // when they don't exist on the local test node.
+        let current_box_ids: HashSet<String> = parsed_reserves
+            .iter()
+            .map(|reserve| reserve.box_id.clone())
+            .collect();
         let all_reserves = self.reserve_tracker.get_all_reserves();
         info!(
             "Current tracker has {} reserves, {} are still active in scan",
@@ -794,33 +941,54 @@ impl ServerState {
             current_box_ids.len()
         );
 
-        // Only remove reserves if we actually found VALID boxes in the scan.
-        // If no valid reserves were parsed (e.g., all failed validation), don't remove manually-inserted reserves.
-        if !current_box_ids.is_empty() {
-            for reserve in all_reserves {
-                if !current_box_ids.contains(&reserve.box_id) {
-                    info!(
-                        "Removing spent reserve: {} (not found in current scan)",
-                        reserve.box_id
-                    );
-                    // Remove from in-memory tracker
-                    if let Err(e) = self.reserve_tracker.remove_reserve(&reserve.box_id) {
-                        warn!("Failed to remove reserve {}: {}", reserve.box_id, e);
-                    } else {
-                        // Remove from database
-                        if let Err(e) = self.reserve_storage.remove_reserve(&reserve.box_id) {
-                            warn!(
-                                "Failed to remove reserve {} from database: {:?}",
-                                reserve.box_id, e
-                            );
-                        } else {
-                            info!("Removed spent reserve: {}", reserve.box_id);
-                        }
-                    }
-                }
+        // Apply upserts only after collection and validation completed. Persist
+        // before publishing the value to the in-memory reader.
+        for reserve_info in &parsed_reserves {
+            self.reserve_storage
+                .store_reserve(reserve_info)
+                .map_err(|e| {
+                    ScannerError::StoreError(format!(
+                        "Failed to persist reserve {}: {:?}",
+                        reserve_info.box_id, e
+                    ))
+                })?;
+            self.reserve_tracker
+                .update_reserve(reserve_info.clone())
+                .map_err(|e| {
+                    ScannerError::StoreError(format!(
+                        "Failed to update reserve {} in memory: {}",
+                        reserve_info.box_id, e
+                    ))
+                })?;
+        }
+
+        // A successfully exhausted empty set is meaningful and removes every
+        // stale reserve. Fetch, height, duplicate, bound, and parse failures
+        // returned above before this destructive phase.
+        for reserve in all_reserves {
+            if current_box_ids.contains(&reserve.box_id) {
+                continue;
             }
-        } else {
-            info!("Scan returned 0 boxes, skipping reserve removal to preserve manually-inserted reserves");
+            info!(
+                "Removing spent reserve: {} (not found in complete snapshot)",
+                reserve.box_id
+            );
+            self.reserve_storage
+                .remove_reserve(&reserve.box_id)
+                .map_err(|e| {
+                    ScannerError::StoreError(format!(
+                        "Failed to remove reserve {} from database: {:?}",
+                        reserve.box_id, e
+                    ))
+                })?;
+            self.reserve_tracker
+                .remove_reserve(&reserve.box_id)
+                .map_err(|e| {
+                    ScannerError::StoreError(format!(
+                        "Failed to remove reserve {} from memory: {}",
+                        reserve.box_id, e
+                    ))
+                })?;
         }
 
         debug!(

@@ -42,8 +42,7 @@ mod tests {
             scan_name: Some("bounded-http-test".to_string()),
             api_key: None,
         };
-        let state =
-            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
+        let state = create_tracker_server_state(config, metadata_storage, tracker_storage);
 
         let error = state.get_current_height().await.unwrap_err();
 
