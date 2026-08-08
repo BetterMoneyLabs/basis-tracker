@@ -488,12 +488,14 @@ semantics:
 - `RedemptionRequest` carries `reserve_refund_initiation_height` and the transaction builder preserves the value in the updated reserve output's `R7` register.
 - Acceptance policies can include a `no_pending_refund` predicate to reject notes backed by a reserve with a non-zero R7 refund height.
 
-The configured `3PQnJ92K...` P2S is the historical strict-insert generation,
-while the builder emits insert-or-update state. Reserve creation and redemption
-building therefore fail closed for that known legacy identity. A replacement P2S
-must be compiled from the reviewed insert-or-update source and promoted together
-with its exact source/build identity and parity fixtures; compatibility must not be
-inferred from an address prefix.
+The runtime now pins the full byte-exact Basis v2 ERG and token ErgoTrees from
+the reviewed ChainCash source receipt. Unknown identities and any one-byte
+mutation are rejected; the historical identity remains only as a temporary
+compatibility mode, and exact v2 activation remains startup-disabled. The old builder
+does not emit the reserve-bound claim domain, fixed 32/24 R5, mandatory
+prior-state proof, R8/R9 lineage, or exact payout. Contract identity therefore
+cannot be inferred from an address prefix and does not by itself activate
+scanning or construction.
 
 ## Integration with Blockchain Scanner
 

@@ -44,6 +44,7 @@ basis_core = { path = "../basis_core" }
 proptest = "1.0"
 criterion = "0.5"
 tempfile = "3.10.0"
+sha2 = "0.10.9"
 
 [features]
 default = ["ergo_scanner"]

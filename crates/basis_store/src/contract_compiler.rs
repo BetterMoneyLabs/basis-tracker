@@ -2,6 +2,23 @@
 
 use thiserror::Error;
 
+use ergo_lib::ergotree_ir::chain::address::{Address, AddressEncoder, NetworkPrefix};
+use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+/// Full ErgoTree bytes pinned by the ChainCash Basis v2 source receipt.
+pub const BASIS_V2_ERG_ERGO_TREE_HEX: &str = include_str!("../contracts/basis-v2.p2s");
+/// Full token-reserve ErgoTree bytes pinned by the ChainCash Basis v2 source receipt.
+pub const BASIS_V2_TOKEN_ERGO_TREE_HEX: &str = include_str!("../contracts/basis-token-v2.p2s");
+/// Machine-readable source-to-byte provenance copied from the reviewed
+/// ChainCash receipt. It is evidence metadata, not an activation flag.
+pub const BASIS_V2_PROVENANCE_JSON: &str = include_str!("../contracts/basis-v2-provenance.json");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BasisV2ContractKind {
+    Erg,
+    Token,
+}
+
 #[derive(Error, Debug)]
 pub enum CompilerError {
     #[error("File not found: {0}")]
@@ -10,6 +27,55 @@ pub enum CompilerError {
     CompilationFailed(String),
     #[error("Ergo-lib not available: {0}")]
     ErgoLibUnavailable(String),
+    #[error("invalid Basis contract address: {0}")]
+    InvalidAddress(String),
+    #[error("configured contract does not match the exact Basis v2 {0} ErgoTree")]
+    ContractIdentityMismatch(&'static str),
+}
+
+impl BasisV2ContractKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Erg => "ERG",
+            Self::Token => "token",
+        }
+    }
+
+    pub fn ergo_tree_hex(self) -> &'static str {
+        match self {
+            Self::Erg => BASIS_V2_ERG_ERGO_TREE_HEX.trim(),
+            Self::Token => BASIS_V2_TOKEN_ERGO_TREE_HEX.trim(),
+        }
+    }
+}
+
+/// Derive the mainnet P2S address from the exact committed v2 ErgoTree bytes.
+pub fn get_basis_v2_contract_p2s(kind: BasisV2ContractKind) -> Result<String, CompilerError> {
+    let tree_bytes = hex::decode(kind.ergo_tree_hex())
+        .map_err(|e| CompilerError::ErgoLibUnavailable(format!("invalid golden hex: {e}")))?;
+    Ok(AddressEncoder::new(NetworkPrefix::Mainnet).address_to_str(&Address::P2S(tree_bytes)))
+}
+
+/// Fail closed unless `configured_p2s` resolves to the exact v2 tree selected by `kind`.
+pub fn validate_basis_v2_contract_p2s(
+    configured_p2s: &str,
+    kind: BasisV2ContractKind,
+) -> Result<(), CompilerError> {
+    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
+    let address = encoder
+        .parse_address_from_str(configured_p2s)
+        .map_err(|e| CompilerError::InvalidAddress(e.to_string()))?;
+    let actual = address
+        .script()
+        .map_err(|e| CompilerError::InvalidAddress(e.to_string()))?
+        .sigma_serialize_bytes()
+        .map_err(|e| CompilerError::ErgoLibUnavailable(e.to_string()))?;
+    let expected = hex::decode(kind.ergo_tree_hex())
+        .map_err(|e| CompilerError::ErgoLibUnavailable(format!("invalid golden hex: {e}")))?;
+    if actual != expected {
+        return Err(CompilerError::ContractIdentityMismatch(kind.label()));
+    }
+    Ok(())
 }
 
 /// Get the historical strict-insert Basis reserve contract P2S address.
@@ -35,6 +101,65 @@ mod tests {
     use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
     use ergo_lib::ergotree_ir::chain::address::NetworkPrefix;
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn v2_golden_lengths_and_addresses_are_exact() {
+        let erg = hex::decode(BASIS_V2_ERG_ERGO_TREE_HEX.trim()).unwrap();
+        let token = hex::decode(BASIS_V2_TOKEN_ERGO_TREE_HEX.trim()).unwrap();
+        assert_eq!(erg.len(), 1682);
+        assert_eq!(token.len(), 1963);
+        assert_eq!(
+            hex::encode(Sha256::digest(&erg)),
+            "2690634924efb22359a776f89f5274d77e067bd8ad0619a6e358a2f96697a0c2"
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(&token)),
+            "ba1df64e7d95ecffc4f3d49fcada8baebe59a676eb617737cd010bdb52381cb3"
+        );
+
+        let receipt: serde_json::Value = serde_json::from_str(BASIS_V2_PROVENANCE_JSON).unwrap();
+        assert_eq!(receipt["abi_generation"], 2);
+        assert_eq!(
+            receipt["contract_source_commit"],
+            "9a274396d5f78f7be5ed76bacee5329c42570317"
+        );
+        assert_eq!(receipt["contracts"]["erg"]["ergo_tree_bytes"], 1682);
+        assert_eq!(receipt["contracts"]["token"]["ergo_tree_bytes"], 1963);
+        assert_eq!(
+            receipt["contracts"]["erg"]["ergo_tree_sha256"],
+            hex::encode(Sha256::digest(&erg))
+        );
+        assert_eq!(
+            receipt["contracts"]["token"]["ergo_tree_sha256"],
+            hex::encode(Sha256::digest(&token))
+        );
+
+        for kind in [BasisV2ContractKind::Erg, BasisV2ContractKind::Token] {
+            let p2s = get_basis_v2_contract_p2s(kind).unwrap();
+            validate_basis_v2_contract_p2s(&p2s, kind).unwrap();
+        }
+    }
+
+    #[test]
+    fn v2_identity_rejects_wrong_family_and_legacy_bytes() {
+        let erg = get_basis_v2_contract_p2s(BasisV2ContractKind::Erg).unwrap();
+        let token = get_basis_v2_contract_p2s(BasisV2ContractKind::Token).unwrap();
+        assert!(validate_basis_v2_contract_p2s(&erg, BasisV2ContractKind::Token).is_err());
+        assert!(validate_basis_v2_contract_p2s(&token, BasisV2ContractKind::Erg).is_err());
+        assert!(validate_basis_v2_contract_p2s(
+            &get_basis_reserve_contract_p2s().unwrap(),
+            BasisV2ContractKind::Erg
+        )
+        .is_err());
+
+        let mut mutated = hex::decode(BASIS_V2_ERG_ERGO_TREE_HEX.trim()).unwrap();
+        let last = mutated.len() - 1;
+        mutated[last] ^= 1;
+        let mutated_p2s =
+            AddressEncoder::new(NetworkPrefix::Mainnet).address_to_str(&Address::P2S(mutated));
+        assert!(validate_basis_v2_contract_p2s(&mutated_p2s, BasisV2ContractKind::Erg).is_err());
+    }
 
     #[test]
     fn historical_contract_identity_is_a_valid_p2s() {

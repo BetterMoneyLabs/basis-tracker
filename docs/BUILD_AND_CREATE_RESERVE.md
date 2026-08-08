@@ -29,9 +29,12 @@ The built binary will be available at:
 
 ## Step 3: Create the Reserve for Alice
 
-The server refuses to build against the known historical strict-insert P2S.
-Configure an insert-or-update contract identity promoted from reviewed source
-and parity evidence before following this step.
+> **Basis v2 activation gate:** the server now recognizes only the exact
+> committed Basis v2 ERG contract, but reserve creation remains disabled until
+> the v2 runtime builder emits the complete R4-R9 ABI and a genuine singleton.
+> The commands below are retained as historical operator examples; they must
+> return `503 Service Unavailable` on this intermediate runtime and must not be
+> used to create a reserve.
 
 ```bash
 # Create a reserve using the specified NFT ID

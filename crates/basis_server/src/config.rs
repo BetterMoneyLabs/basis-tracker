@@ -107,6 +107,8 @@ impl AppConfig {
 
     /// Load configuration from default locations
     pub fn load() -> Result<Self, config::ConfigError> {
+        let legacy_read_only_p2s = basis_store::contract_compiler::get_basis_reserve_contract_p2s()
+            .map_err(|e| config::ConfigError::Message(e.to_string()))?;
         let config = config::Config::builder()
             // Default configuration
             .set_default("server.host", "0.0.0.0")?
@@ -119,6 +121,7 @@ impl AppConfig {
             .set_default("ergo.node.node_url", "http://159.89.116.15:11088")?
             .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
             .set_default("ergo.node.api_key", "")? // Set via config file or BASIS_ERGO_NODE_API_KEY env var
+            .set_default("ergo.basis_reserve_contract_p2s", legacy_read_only_p2s)?
             // Transaction configuration defaults
             .set_default("transaction.fee", 1000000)? // 0.001 ERG
             // Tracker public key (optional)
@@ -155,18 +158,44 @@ impl AppConfig {
         &self.ergo.basis_reserve_contract_p2s
     }
 
-    /// Reject the known historical strict-insert contract when a caller is
-    /// about to construct insert-or-update reserve state.
-    pub fn reject_known_legacy_reserve_contract(&self) -> Result<(), String> {
+    /// Require the exact ChainCash-reviewed Basis v2 ERG contract identity.
+    pub fn validate_basis_v2_erg_contract(&self) -> Result<(), String> {
+        basis_store::contract_compiler::validate_basis_v2_contract_p2s(
+            self.basis_reserve_contract_p2s(),
+            basis_store::contract_compiler::BasisV2ContractKind::Erg,
+        )
+        .map_err(|e| format!("Basis v2 contract identity check failed: {e}"))
+    }
+
+    /// V2-A carries exact contract identity and message primitives only. The
+    /// current scanner and state store are still v1-shaped, so activating the
+    /// exact v2 tree here would be unsafe. The historical identity is retained
+    /// temporarily for compatibility; every construction route remains a
+    /// tombstone and this does not attest safety of legacy acceptance state.
+    pub fn validate_runtime_contract_mode(&self) -> Result<(), String> {
+        let configured = self.basis_reserve_contract_p2s();
         let legacy = basis_store::contract_compiler::get_basis_reserve_contract_p2s()
-            .map_err(|e| format!("cannot resolve historical reserve contract identity: {e}"))?;
-        if self.basis_reserve_contract_p2s() == legacy {
+            .map_err(|e| format!("cannot resolve historical contract identity: {e}"))?;
+        if configured == legacy {
+            return Ok(());
+        }
+        if self.validate_basis_v2_erg_contract().is_ok() {
             return Err(
-                "configured reserve contract is the retired strict-insert generation; configure an explicitly reviewed insert-or-update P2S before building reserve transactions"
+                "Basis v2 contract identity is recognized, but v2 scanner and BNS2/BRS2 state are not installed; runtime activation is disabled"
                     .to_string(),
             );
         }
-        Ok(())
+        Err("configured reserve contract is neither the supported read-only legacy identity nor the exact embedded Basis v2 ERG identity".to_string())
+    }
+
+    /// Existing construction code still emits the retired v1 ABI. It must not
+    /// be re-enabled merely because a non-legacy-looking P2S was configured.
+    pub fn reject_unsupported_reserve_builder(&self) -> Result<(), String> {
+        self.validate_basis_v2_erg_contract()?;
+        Err(
+            "the exact Basis v2 contract is configured, but reserve/redemption construction remains disabled until the v2 runtime builder is installed"
+                .to_string(),
+        )
     }
 
     /// Get the tracker NFT ID bytes (required - server will fail if not configured)
@@ -408,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn known_strict_insert_contract_fails_closed() {
+    fn validates_only_the_exact_basis_v2_contract() {
         let mut config = AppConfig {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
@@ -432,11 +461,27 @@ mod tests {
             acceptance: AcceptanceConfig::empty(),
         };
 
-        let error = config.reject_known_legacy_reserve_contract().unwrap_err();
-        assert!(error.contains("retired strict-insert"));
+        let error = config.validate_basis_v2_erg_contract().unwrap_err();
+        assert!(error.contains("identity check failed"));
+        config.validate_runtime_contract_mode().unwrap();
 
-        config.ergo.basis_reserve_contract_p2s = "explicitly-reviewed-new-generation".to_string();
-        assert!(config.reject_known_legacy_reserve_contract().is_ok());
+        config.ergo.basis_reserve_contract_p2s =
+            basis_store::contract_compiler::get_basis_v2_contract_p2s(
+                basis_store::contract_compiler::BasisV2ContractKind::Erg,
+            )
+            .unwrap();
+        config.validate_basis_v2_erg_contract().unwrap();
+        assert!(config.reject_unsupported_reserve_builder().is_err());
+        assert!(config
+            .validate_runtime_contract_mode()
+            .unwrap_err()
+            .contains("runtime activation is disabled"));
+
+        config.ergo.basis_reserve_contract_p2s = "unrecognized".to_string();
+        assert!(config
+            .validate_runtime_contract_mode()
+            .unwrap_err()
+            .contains("neither the supported read-only legacy identity"));
     }
 
     #[test]

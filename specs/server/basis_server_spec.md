@@ -196,16 +196,22 @@ The server now implements real cryptographic functionality using the Ergo node's
 
 The server provides an endpoint to generate reserve creation payloads for Ergo node's `/wallet/payment/send` API:
 
-The endpoint returns `503 Service Unavailable` when the configured P2S is the
-known historical strict-insert generation. A builder that emits insert-or-update
-AVL state must not construct a reserve against that incompatible contract.
+The endpoint currently returns `503 Service Unavailable` for every
+configuration. Startup retains the historical identity only for compatibility
+and rejects activation of the recognized, byte-exact v2 ERG tree
+until its scanner and BNS2/BRS2 stores exist. The payload code remains
+unreachable until a v2 builder supplies R4-R9, fixed 32/24 reserve state, a
+policy-derived emergency height, predecessor lineage, and a genuine singleton.
+See `specs/basis_v2_runtime.md`.
 
 - `POST /reserves/create` - accepts a request with:
   - `nft_id`: String - the NFT ID to be stored in the reserve box (hex-encoded)
   - `owner_pubkey`: String - the 33-byte compressed public key (hex-encoded) of the reserve owner
   - `erg_amount`: u64 - the amount of ERG to lock in the reserve (in nanoERG)
 
-- Returns a JSON response compatible with Ergo's `/wallet/payment/send` API:
+- Once the v2 builder is installed, it will return a reviewed owner-wallet
+  intent rather than exercising the node wallet. The historical response shape
+  below is not active:
   - `requests`: Array of payment requests
     - `address`: Reserve contract P2S address (hardcoded in configuration)
     - `value`: ERG amount from request

@@ -5,9 +5,7 @@ mod create_reserve_tests {
     use tokio::sync::Mutex;
 
     use crate::{
-        api::create_reserve_payload,
-        models::{CreateReserveRequest, ReserveCreationResponse},
-        AppState, TrackerCommand,
+        api::create_reserve_payload, models::CreateReserveRequest, AppState, TrackerCommand,
     };
     use basis_store::ergo_scanner::{NodeConfig, ServerState};
 
@@ -133,8 +131,12 @@ mod create_reserve_tests {
     }
 
     #[tokio::test]
-    async fn test_create_reserve_payload_success() {
-        let state = create_test_app_state();
+    async fn test_create_reserve_payload_stays_disabled_until_v2_builder_is_installed() {
+        let exact_v2 = basis_store::contract_compiler::get_basis_v2_contract_p2s(
+            basis_store::contract_compiler::BasisV2ContractKind::Erg,
+        )
+        .expect("embedded Basis v2 ERG contract should derive a P2S address");
+        let state = create_test_app_state_with_p2s(exact_v2);
 
         let request_payload = CreateReserveRequest {
             nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
@@ -147,24 +149,14 @@ mod create_reserve_tests {
 
         let (status, response_json) = result;
 
-        assert_eq!(status, StatusCode::OK);
-        assert!(response_json.success);
-        assert!(response_json.data.is_some());
-
-        let response_data = response_json.data.clone().unwrap();
-        let reserve_response: ReserveCreationResponse = response_data;
-
-        assert!(!reserve_response.requests.is_empty());
-        assert_eq!(reserve_response.requests[0].value, 1000000000);
-        assert_eq!(
-            reserve_response.requests[0].assets[0].token_id,
-            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-        );
-        assert_eq!(
-            reserve_response.requests[0].registers.get("R4").unwrap(),
-            "0703e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
-        );
-        assert!(reserve_response.fee > 0);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response_json.success);
+        assert!(response_json.data.is_none());
+        assert!(response_json
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("v2 runtime builder"));
     }
 
     #[tokio::test]
@@ -185,7 +177,7 @@ mod create_reserve_tests {
             .error
             .as_deref()
             .unwrap_or_default()
-            .contains("retired strict-insert"));
+            .contains("identity check failed"));
     }
 
     #[tokio::test]

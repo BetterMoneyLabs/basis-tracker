@@ -202,14 +202,16 @@ async fn main() {
                             scan_name: Some("Basis Reserve Scanner".to_string()),
                             api_key: None,
                         },
-                        basis_reserve_contract_p2s: "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT".to_string(),
+                        basis_reserve_contract_p2s:
+                            basis_store::contract_compiler::get_basis_reserve_contract_p2s()
+                                .expect("historical read-only contract identity must decode"),
                         tracker_nft_id: None,
                         allow_fresh_tracker_generation: false,
                         tracker_public_key: None,
                         tracker_secret_key: None,
                     },
                     transaction: TransactionConfig {
-                        fee: 1000000, // 0.001 ERG
+                        fee: 1000000,         // 0.001 ERG
                         change_address: None, // Will be derived from tracker public key
                     },
                     acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
@@ -217,6 +219,11 @@ async fn main() {
             })
         }
     };
+
+    if let Err(e) = config.validate_runtime_contract_mode() {
+        tracing::error!("{}", e);
+        std::process::exit(1);
+    }
 
     // Validate that tracker NFT ID is exactly the token id bound to persistent state.
     let tracker_nft_bytes: [u8; 32] = match config

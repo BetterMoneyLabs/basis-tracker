@@ -2950,7 +2950,7 @@ pub async fn create_reserve_payload(
     // second file/env view here could validate one P2S and build against another.
     let config = state.config.clone();
 
-    if let Err(e) = config.reject_known_legacy_reserve_contract() {
+    if let Err(e) = config.reject_unsupported_reserve_builder() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(crate::models::error_response(e)),
@@ -3077,7 +3077,7 @@ pub async fn get_basis_reserve_contract_p2s(
 
     let config = state.config.clone();
 
-    if let Err(e) = config.reject_known_legacy_reserve_contract() {
+    if let Err(e) = config.reject_unsupported_reserve_builder() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(crate::models::error_response(e)),

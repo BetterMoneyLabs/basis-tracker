@@ -1,0 +1,26 @@
+{
+  "abi_generation": 2,
+  "network": "ergo-mainnet",
+  "chaincash_base_commit": "78475e30362571acf56e4e38276a9d6c0a84ce0c",
+  "contract_source_commit": "9a274396d5f78f7be5ed76bacee5329c42570317",
+  "contracts": {
+    "erg": {
+      "source_path": "contracts/offchain/basis-v2.es",
+      "source_blob": "47b3e0647f90db2dd8e667641294d66e287d8f6a",
+      "normalized_source_sha256": "31ff4271b1c79302064df83a6bfa3d4f6f5f153747002c1c0206b2f3d88b507a",
+      "golden_path": "contracts/offchain/basis-v2.p2s",
+      "golden_blob": "f806b34edab4b18b89a395625db753d7acdf94db",
+      "ergo_tree_bytes": 1682,
+      "ergo_tree_sha256": "2690634924efb22359a776f89f5274d77e067bd8ad0619a6e358a2f96697a0c2"
+    },
+    "token": {
+      "source_path": "contracts/offchain/basis-token-v2.es",
+      "source_blob": "48a00b612fe6f4345b322d22408c48100f2cd442",
+      "normalized_source_sha256": "c7e5a0cf6a12aaedefba79ecd012ac7839a48f683931d1d4e10371d287c58573",
+      "golden_path": "contracts/offchain/basis-token-v2.p2s",
+      "golden_blob": "debc24531f0adc26292f897fff6b53ed06ff4374",
+      "ergo_tree_bytes": 1963,
+      "ergo_tree_sha256": "ba1df64e7d95ecffc4f3d49fcada8baebe59a676eb617737cd010bdb52381cb3"
+    }
+  }
+}

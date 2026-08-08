@@ -414,7 +414,7 @@ async fn build_redemption_inner(
     state: &AppState,
     payload: &RedemptionBuildRequest,
 ) -> ApiResult<RedemptionBuildResponse> {
-    if let Err(e) = state.config.reject_known_legacy_reserve_contract() {
+    if let Err(e) = state.config.reject_unsupported_reserve_builder() {
         return api_err(StatusCode::SERVICE_UNAVAILABLE, e);
     }
 

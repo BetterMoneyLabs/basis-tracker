@@ -26,9 +26,10 @@ caller to exercise tracker-owned capabilities or to assert settlement state.
 6. Legacy `POST /redeem`, CLI `note redeem`, and MCP `note_redeem` are
    unconditional tombstones before account, network, construction, signing,
    broadcast, or persistence effects.
-7. Builders reject the known historical strict-insert reserve P2S while they
-   emit insert-or-update AVL state. A new contract identity must be promoted
-   from reviewed source and parity evidence as a separate change.
+7. The exact committed Basis v2 ERG ErgoTree is recognized, but startup rejects
+   its activation until the v2 scanner and BNS2/BRS2 state are installed. The
+   historical identity remains only as a compatibility mode; reserve creation,
+   P2S distribution, and redemption builders remain disabled.
 
 ## Compatibility changes
 
@@ -41,7 +42,7 @@ caller to exercise tracker-owned capabilities or to assert settlement state.
 | `POST /redeem/complete` | Returns `410 Gone`. |
 | `note redeem` / MCP `note_redeem` | Return an error before effects; no boolean reactivation path remains. |
 | Non-local `transaction generate-redemption` | Returns an error; use `--local-sign` or the assisted signer. |
-| Reserve P2S `3PQnJ92K...` | Reserve payload/redemption builders return `503 Service Unavailable`; no successor is constructed against the incompatible generation. |
+| Reserve P2S / builders | Historical identity: temporary compatibility only, not a safety endorsement. Exact v2 identity: recognized but startup-disabled. Unknown identity: rejected. All construction/P2S distribution routes return `503 Service Unavailable`. |
 
 ## Settlement hand-off
 
