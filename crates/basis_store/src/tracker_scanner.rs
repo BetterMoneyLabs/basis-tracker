@@ -1,7 +1,6 @@
 //! Tracker box scanner for monitoring Basis tracker state commitment boxes
 //! This module provides blockchain integration using /blockchain endpoints (no node scans).
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -15,7 +14,7 @@ use reqwest::Client;
 use crate::{
     ergo_scanner::{IndexedErgoBox, ScanBox},
     persistence::{ScannerMetadataStorage, TrackerStorage},
-    TrackerBoxInfo, TrackerStateManager,
+    TrackerBoxInfo,
 };
 
 #[derive(Error, Debug)]
@@ -71,28 +70,13 @@ pub struct TrackerServerStateInner {
 
 /// Server state for tracker scanner
 /// Uses real blockchain integration with proper synchronization
+#[derive(Clone)]
 pub struct TrackerServerState {
     pub config: TrackerNodeConfig,
     pub inner: Arc<Mutex<TrackerServerStateInner>>,
     pub client: Client,
-    pub tracker_state: TrackerStateManager,
     pub metadata_storage: ScannerMetadataStorage,
     pub tracker_storage: TrackerStorage,
-    pub data_dir: PathBuf,
-}
-
-impl Clone for TrackerServerState {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            inner: Arc::clone(&self.inner),
-            client: self.client.clone(),
-            tracker_state: TrackerStateManager::new(&self.data_dir), // Create new instance since it doesn't implement Clone
-            metadata_storage: self.metadata_storage.clone(),
-            tracker_storage: self.tracker_storage.clone(),
-            data_dir: self.data_dir.clone(),
-        }
-    }
 }
 
 impl TrackerServerState {
@@ -476,7 +460,6 @@ pub fn create_tracker_server_state(
     config: TrackerNodeConfig,
     metadata_storage: ScannerMetadataStorage,
     tracker_storage: TrackerStorage,
-    data_dir: impl AsRef<Path>,
 ) -> TrackerServerState {
     let inner = TrackerServerStateInner {
         _current_height: 0,
@@ -488,9 +471,7 @@ pub fn create_tracker_server_state(
         config,
         inner: Arc::new(Mutex::new(inner)),
         client: Client::new(),
-        tracker_state: TrackerStateManager::new(&data_dir),
         metadata_storage,
         tracker_storage,
-        data_dir: data_dir.as_ref().to_path_buf(),
     }
 }

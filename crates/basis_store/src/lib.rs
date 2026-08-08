@@ -44,7 +44,10 @@ use basis_core;
 use basis_core::impls::SchnorrVerifier;
 use basis_core::traits::SignatureVerifier;
 use secp256k1;
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 /// Public key type (Secp256k1)
 pub type PubKey = [u8; 33];
@@ -284,7 +287,14 @@ pub enum NoteError {
     DebtRegression,
     RedemptionTooEarly,
     InsufficientCollateral,
+    /// Existing note data uses a persistence schema that this binary will not
+    /// rewrite implicitly. An explicit export/migration or approved reset is required.
+    MigrationRequired(String),
     StorageError(String),
+    /// The storage engine reported a durability failure after beginning a WAL
+    /// commit. The operation may become visible after restart, so the current
+    /// manager must be quarantined rather than treating this as a rollback.
+    StorageOutcomeUnknown(String),
     UnsupportedOperation,
 }
 
@@ -303,58 +313,63 @@ pub struct TrackerStateManager {
     reserve_avl_state: basis_trees::BasisAvlTree,
     /// Per-note confirmation records, keyed by note key (32 bytes).
     confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,
+    poisoned: AtomicBool,
 }
 
 impl TrackerStateManager {
+    fn ensure_healthy(&self) -> Result<(), NoteError> {
+        if self.poisoned.load(Ordering::SeqCst) {
+            Err(NoteError::StorageOutcomeUnknown(
+                "Tracker state manager is quarantined after an indeterminate durable write; restart and reconcile before reuse"
+                    .to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn quarantine_on_storage_failure<T>(
+        &self,
+        result: Result<T, NoteError>,
+    ) -> Result<T, NoteError> {
+        if matches!(
+            result,
+            Err(NoteError::InvalidSignature)
+                | Err(NoteError::StorageError(_))
+                | Err(NoteError::StorageOutcomeUnknown(_))
+                | Err(NoteError::MigrationRequired(_))
+        ) {
+            self.poisoned.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+
     /// Create a new tracker state manager with the configured storage location.
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
+        Self::try_new(data_dir)
+            .unwrap_or_else(|e| panic!("Failed to initialize tracker state manager: {:?}", e))
+    }
+
+    /// Try to create the sole writer for a tracker state directory.
+    ///
+    /// A second in-process or cross-process writer is rejected by the storage
+    /// lock, and any legacy/malformed persistence state is returned as a typed
+    /// error instead of being silently reordered or repaired.
+    pub fn try_new(data_dir: impl AsRef<Path>) -> Result<Self, NoteError> {
         tracing::debug!("Creating TrackerStateManager...");
 
-        // Use the configured storage location
         tracing::debug!("Opening note storage...");
         let storage_path = data_dir.as_ref().join("notes");
-        let storage = match persistence::NoteStorage::open(&storage_path) {
-            Ok(storage) => {
-                tracing::debug!("Note storage opened successfully at: {:?}", storage_path);
-                // Rebuild indices to ensure all existing notes are indexed
-                // (especially important after upgrading to indexed storage)
-                match storage.rebuild_indices() {
-                    Ok(count) => tracing::info!("Note indices rebuilt: {} notes indexed", count),
-                    Err(e) => tracing::warn!("Failed to rebuild note indices: {:?}", e),
-                }
-                storage
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize note storage: {:?}", e);
-                // Fallback to in-memory storage if file storage fails
-                // In production, this should handle errors properly
-                panic!("Failed to initialize note storage: {:?}", e);
-            }
-        };
+        let storage = persistence::NoteStorage::open(&storage_path)?;
+        tracing::debug!("Note storage opened successfully at: {:?}", storage_path);
 
-        // Create in-memory AVL tree
-        let avl_state = match basis_trees::BasisAvlTree::new() {
-            Ok(tree) => {
-                tracing::debug!("In-memory AVL tree created successfully");
-                tree
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize AVL tree: {:?}", e);
-                panic!("Failed to initialize AVL tree: {:?}", e);
-            }
-        };
+        let avl_state = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to initialize AVL tree: {:?}", e))
+        })?;
 
-        // Create reserve AVL tree for tracking already_redeemed
-        let reserve_avl_state = match basis_trees::BasisAvlTree::new() {
-            Ok(tree) => {
-                tracing::debug!("Reserve AVL tree created successfully");
-                tree
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize reserve AVL tree: {:?}", e);
-                panic!("Failed to initialize reserve AVL tree: {:?}", e);
-            }
-        };
+        let reserve_avl_state = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to initialize reserve AVL tree: {:?}", e))
+        })?;
 
         // Rebuild AVL tree from all stored notes to ensure consistency after restart
         let mut manager = Self {
@@ -367,57 +382,40 @@ impl TrackerStateManager {
             storage,
             reserve_avl_state,
             confirmations: std::collections::HashMap::new(),
+            poisoned: AtomicBool::new(false),
         };
 
-        if let Err(e) = manager.rebuild_avl_tree() {
-            tracing::warn!("Failed to rebuild AVL tree from storage: {:?}", e);
-        }
+        manager.rebuild_avl_tree()?;
 
         // Rebuild confirmation records from storage and mark every stored note as
         // LocalOnly until the updater confirms otherwise.
         manager.rebuild_confirmations();
 
         tracing::debug!("TrackerStateManager created successfully");
-        manager
+        Ok(manager)
     }
 
-    /// Rebuild the AVL tree from all notes stored in the database.
-    /// This is critical after server restart to ensure the AVL tree matches
-    /// the on-chain commitment. AVL trees are insertion-order sensitive,
-    /// so notes must be inserted in chronological order (by timestamp).
+    /// Rebuild the AVL tree from the authoritative first-insertion order.
+    ///
+    /// AVL tree roots are insertion-order sensitive. A final note snapshot or
+    /// business timestamp cannot reproduce the original key insertion order, so
+    /// a non-empty legacy store without that order is rejected rather than
+    /// synthesizing a potentially different root. Repeated value updates do not
+    /// append history: only the final snapshot and each key's first position are
+    /// required to rebuild the same bounded tree state.
     pub fn rebuild_avl_tree(&mut self) -> Result<(), NoteError> {
-        tracing::info!("Rebuilding AVL tree from stored notes...");
+        self.ensure_healthy()?;
+        tracing::info!("Rebuilding AVL tree from persistent note insertion order...");
 
-        let mut notes_with_issuer = self
-            .storage
-            .get_all_notes_with_issuer()
-            .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
+        let rebuilt_tree = match self.build_validated_avl_tree() {
+            Ok(tree) => tree,
+            Err(error) => {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(error);
+            }
+        };
 
-        if notes_with_issuer.is_empty() {
-            tracing::info!("No stored notes found, AVL tree remains empty");
-            return Ok(());
-        }
-
-        // Sort notes by timestamp ascending to ensure deterministic insertion order
-        // AVL tree structure depends on insertion order, so we must insert in the
-        // same order as when notes were originally created
-        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
-
-        tracing::info!(
-            "Inserting {} notes into AVL tree in chronological order...",
-            notes_with_issuer.len()
-        );
-
-        for (issuer_pubkey, note) in &notes_with_issuer {
-            let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
-            let key_bytes = key.to_bytes();
-            let value_bytes = note.amount_collected.to_be_bytes().to_vec();
-
-            self.avl_state.update(key_bytes, value_bytes).map_err(|e| {
-                NoteError::StorageError(format!("AVL tree update failed during rebuild: {:?}", e))
-            })?;
-        }
-
+        self.avl_state = rebuilt_tree;
         self.update_state();
         let root_digest = self.current_state.avl_root_digest;
         tracing::info!(
@@ -426,6 +424,54 @@ impl TrackerStateManager {
         );
 
         Ok(())
+    }
+
+    fn build_validated_avl_tree(&self) -> Result<basis_trees::BasisAvlTree, NoteError> {
+        // Build in isolation. The live tree and its published digest remain
+        // untouched if any storage, signature, ordering, or AVL validation fails.
+        let mut rebuilt_tree = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to initialize rebuilt AVL tree: {:?}", e))
+        })?;
+
+        let persisted_state = self.storage.read_state_strict()?;
+        let expected_root = persisted_state.avl_root_digest;
+        let ordered_notes = persisted_state.notes;
+
+        tracing::info!(
+            "Replaying {} ordered live note keys...",
+            ordered_notes.len()
+        );
+
+        for (issuer_pubkey, note) in ordered_notes {
+            note.verify_signature(&issuer_pubkey)
+                .map_err(|_| NoteError::InvalidSignature)?;
+            if note.amount_redeemed > note.amount_collected {
+                return Err(NoteError::StorageError(
+                    "Stored redeemed amount exceeds cumulative debt".to_string(),
+                ));
+            }
+
+            let key = NoteKey::from_keys(&issuer_pubkey, &note.recipient_pubkey);
+            let key_bytes = key.to_bytes();
+            let value_bytes = note.amount_collected.to_be_bytes().to_vec();
+
+            rebuilt_tree
+                .update(key_bytes.clone(), value_bytes)
+                .map_err(|e| {
+                    NoteError::StorageError(format!(
+                        "AVL tree update failed during rebuild: {:?}",
+                        e
+                    ))
+                })?;
+        }
+
+        if rebuilt_tree.root_digest() != expected_root {
+            return Err(NoteError::StorageError(
+                "Persisted note snapshot does not reproduce its committed AVL root".to_string(),
+            ));
+        }
+
+        Ok(rebuilt_tree)
     }
 
     /// Create a new tracker state manager with temporary storage (used in tests only)
@@ -528,11 +574,15 @@ impl TrackerStateManager {
             storage,
             reserve_avl_state,
             confirmations: std::collections::HashMap::new(),
+            poisoned: AtomicBool::new(false),
         };
 
         // Rebuild AVL tree and confirmations so test instances mirror production.
         if let Err(e) = manager.rebuild_avl_tree() {
-            tracing::warn!("Failed to rebuild AVL tree in test instance: {:?}", e);
+            panic!(
+                "Failed to rebuild AVL tree in test instance from authoritative snapshot: {:?}",
+                e
+            );
         }
         manager.rebuild_confirmations();
 
@@ -542,6 +592,8 @@ impl TrackerStateManager {
     /// Add a new note to the tracker state
     /// Updates the AVL tree with hash(issuer||receiver) -> totalDebt mapping
     pub fn add_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+        self.ensure_healthy()?;
+
         // Validate that timestamp is not in the future
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -554,10 +606,10 @@ impl TrackerStateManager {
 
         // A note is a cumulative debt record. Both its timestamp and totalDebt
         // must be monotone for a given issuer-recipient edge.
-        if let Some(existing_note) = self
-            .storage
-            .get_note(issuer_pubkey, &note.recipient_pubkey)?
-        {
+        let existing_note = self.quarantine_on_storage_failure(
+            self.storage.get_note(issuer_pubkey, &note.recipient_pubkey),
+        )?;
+        if let Some(existing_note) = &existing_note {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
             }
@@ -572,6 +624,14 @@ impl TrackerStateManager {
             NoteError::InvalidSignature
         })?;
 
+        // Settlement progress is tracker-derived local state and is not part of
+        // the issuer-signed cumulative-debt message. A newer signed successor
+        // must therefore preserve, rather than reset, existing redemptions.
+        let mut stored_note = note.clone();
+        stored_note.amount_redeemed = existing_note
+            .map(|existing| existing.amount_redeemed)
+            .unwrap_or(0);
+
         // Prepare AVL tree key: hash(issuer_pubkey || receiver_pubkey)
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let key_bytes = key.to_bytes();
@@ -580,28 +640,38 @@ impl TrackerStateManager {
         // This matches the contract spec: hash(A||B) -> totalDebt
         let value_bytes = note.amount_collected.to_be_bytes().to_vec();
 
-        // Update AVL tree state first to ensure consistency
-        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
-
-        // Only proceed with database storage if AVL tree update succeeded
-        match avl_result {
-            Ok(()) => {
-                // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
-                self.update_state();
-
-                // Recompute the confirmation status for this note based on the
-                // new local value versus the confirmed/pending values. The local
-                // value has just changed, so the note is only Confirmed/Pending
-                // if the new value matches what is already on-chain / in-flight.
-                let mut key32 = [0u8; 32];
-                key32.copy_from_slice(&key_bytes);
-                self.recompute_confirmation_status(&key32, note.amount_collected);
-
-                Ok(())
+        // Prepare a fully isolated tree candidate. Storage failure leaves the
+        // published in-memory root untouched; successful durable storage is
+        // followed only by an infallible ownership swap.
+        let mut candidate = match self.avl_state.try_clone() {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(NoteError::StorageError(error.to_string()));
             }
-            Err(e) => Err(NoteError::StorageError(e.to_string())),
+        };
+        if let Err(error) = candidate.update(key_bytes.clone(), value_bytes) {
+            self.poisoned.store(true, Ordering::SeqCst);
+            return Err(NoteError::StorageError(error.to_string()));
         }
+
+        let storage_result =
+            self.storage
+                .store_note(issuer_pubkey, &stored_note, candidate.root_digest());
+        self.quarantine_on_storage_failure(storage_result)?;
+
+        self.avl_state = candidate;
+        self.update_state();
+
+        // Recompute the confirmation status for this note based on the
+        // new local value versus the confirmed/pending values. The local
+        // value has just changed, so the note is only Confirmed/Pending
+        // if the new value matches what is already on-chain / in-flight.
+        let mut key32 = [0u8; 32];
+        key32.copy_from_slice(&key_bytes);
+        self.recompute_confirmation_status(&key32, note.amount_collected);
+
+        Ok(())
     }
 
     /// Convert an issuer/recipient pair into the fixed-size confirmation key.
@@ -642,6 +712,12 @@ impl TrackerStateManager {
     /// the current local value and clear any pending in-flight state (pending
     /// transactions do not survive a restart).
     pub fn rebuild_confirmations(&mut self) {
+        if let Err(e) = self.ensure_healthy() {
+            panic!(
+                "Cannot rebuild confirmations on quarantined tracker: {:?}",
+                e
+            );
+        }
         self.confirmations.clear();
 
         let notes = match self.storage.get_all_notes_with_issuer() {
@@ -686,12 +762,21 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Option<NoteConfirmation> {
+        if let Err(e) = self.ensure_healthy() {
+            panic!("Cannot read confirmation from quarantined tracker: {:?}", e);
+        }
         let key = Self::confirmation_key(issuer_pubkey, recipient_pubkey);
         self.confirmations.get(&key).cloned()
     }
 
     /// Get a snapshot of all confirmation records keyed by note key.
     pub fn all_confirmations(&self) -> std::collections::HashMap<NoteKeyBytes, NoteConfirmation> {
+        if let Err(e) = self.ensure_healthy() {
+            panic!(
+                "Cannot read confirmations from quarantined tracker: {:?}",
+                e
+            );
+        }
         self.confirmations.clone()
     }
 
@@ -704,6 +789,7 @@ impl TrackerStateManager {
         tx_id: &str,
         submitted_height: u64,
     ) -> Result<usize, NoteError> {
+        self.ensure_healthy()?;
         let _ = (digest, submitted_height);
         let notes = self.storage.get_all_notes_with_issuer()?;
         let mut count = 0usize;
@@ -738,6 +824,7 @@ impl TrackerStateManager {
     /// the confirmed value and recording the confirming box metadata. Returns the
     /// number of notes transitioned to `Confirmed`.
     pub fn confirm_pending_notes(&mut self, box_id: &str, height: u64) -> Result<usize, NoteError> {
+        self.ensure_healthy()?;
         let keys: Vec<NoteKeyBytes> = self.confirmations.keys().copied().collect();
         let mut count = 0usize;
 
@@ -776,6 +863,7 @@ impl TrackerStateManager {
     /// the status from the local value versus the confirmed value. Returns the
     /// number of notes reverted.
     pub fn revert_pending_notes(&mut self) -> Result<usize, NoteError> {
+        self.ensure_healthy()?;
         let notes = self.storage.get_all_notes_with_issuer()?;
         let mut count = 0usize;
 
@@ -817,6 +905,7 @@ impl TrackerStateManager {
         box_id: &str,
         height: u64,
     ) -> Result<usize, NoteError> {
+        self.ensure_healthy()?;
         if confirmed_digest != &self.current_state.avl_root_digest {
             return Ok(0);
         }
@@ -857,54 +946,60 @@ impl TrackerStateManager {
         Ok(count)
     }
 
-    /// Update an existing note in the tracker state
-    /// Updates the AVL tree with hash(issuer||receiver) -> totalDebt mapping
-    pub fn update_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
-        // Validate that timestamp is not in the future
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
-            .as_millis() as u64;
-
-        if note.timestamp > current_time {
-            return Err(NoteError::FutureTimestamp);
+    /// Persist tracker-derived settlement progress without accepting an arbitrary
+    /// replacement for the issuer-signed note.
+    ///
+    /// The signed cumulative debt, timestamp, recipient and signature are kept
+    /// byte-for-byte. Only the unsigned local `amount_redeemed` field may advance,
+    /// with checked arithmetic and a hard cap at `amount_collected`.
+    pub(crate) fn record_redemption_progress(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        redeemed_amount: u64,
+    ) -> Result<IouNote, NoteError> {
+        self.ensure_healthy()?;
+        let mut note = self
+            .quarantine_on_storage_failure(self.storage.get_note(issuer_pubkey, recipient_pubkey))?
+            .ok_or_else(|| NoteError::StorageError("Note not found".to_string()))?;
+        if note.verify_signature(issuer_pubkey).is_err() {
+            self.poisoned.store(true, Ordering::SeqCst);
+            return Err(NoteError::InvalidSignature);
         }
 
-        // Preserve the same cumulative-debt invariant as `add_note` for internal
-        // updates (for example, redemption completion).
-        if let Some(existing_note) = self
-            .storage
-            .get_note(issuer_pubkey, &note.recipient_pubkey)?
-        {
-            if note.timestamp <= existing_note.timestamp {
-                return Err(NoteError::PastTimestamp);
+        let committed_total = match self.get_total_debt(issuer_pubkey, recipient_pubkey) {
+            Ok(total) => total,
+            Err(error) => {
+                // A persisted note without the matching live AVL entry means the
+                // two authoritative views have diverged. Do not keep serving a
+                // root or accepting writes from this manager instance.
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(error);
             }
-            if note.amount_collected < existing_note.amount_collected {
-                return Err(NoteError::DebtRegression);
-            }
+        };
+        if committed_total != note.amount_collected {
+            self.poisoned.store(true, Ordering::SeqCst);
+            return Err(NoteError::StorageError(
+                "Stored note does not match the live AVL commitment".to_string(),
+            ));
         }
 
-        // Prepare AVL tree key: hash(issuer_pubkey || receiver_pubkey)
-        let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Value is just the totalDebt (amount_collected) as 8-byte big-endian
-        // This matches the contract spec: hash(A||B) -> totalDebt
-        let value_bytes = note.amount_collected.to_be_bytes().to_vec();
-
-        // Update AVL tree state first to ensure consistency
-        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
-
-        // Only proceed with database storage if AVL tree update succeeded
-        match avl_result {
-            Ok(()) => {
-                // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
-                self.update_state();
-                Ok(())
-            }
-            Err(e) => Err(NoteError::StorageError(e.to_string())),
+        let new_amount_redeemed = note
+            .amount_redeemed
+            .checked_add(redeemed_amount)
+            .ok_or(NoteError::AmountOverflow)?;
+        if new_amount_redeemed > note.amount_collected {
+            return Err(NoteError::StorageError(
+                "Redeemed amount exceeds cumulative debt".to_string(),
+            ));
         }
+
+        note.amount_redeemed = new_amount_redeemed;
+        let storage_result =
+            self.storage
+                .store_note(issuer_pubkey, &note, self.current_state.avl_root_digest);
+        self.quarantine_on_storage_failure(storage_result)?;
+        Ok(note)
     }
 
     /// Get the total debt for a specific (issuer, receiver) pair from the AVL tree
@@ -914,6 +1009,7 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Result<u64, NoteError> {
+        self.ensure_healthy()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -941,6 +1037,7 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Result<TrackerLookupProof, NoteError> {
+        self.ensure_healthy()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -964,6 +1061,7 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Result<u64, NoteError> {
+        self.ensure_healthy()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -994,6 +1092,7 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Result<ReserveLookupProof, NoteError> {
+        self.ensure_healthy()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -1058,6 +1157,7 @@ impl TrackerStateManager {
         timestamp: u64,
         new_already_redeemed: u64,
     ) -> Result<(Vec<u8>, Vec<u8>), NoteError> {
+        self.ensure_healthy()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
         // Value: timestamp (8 bytes BE) || already_redeemed (8 bytes BE)
@@ -1079,6 +1179,12 @@ impl TrackerStateManager {
     /// Current reserve AVL tree root digest (33 bytes). The on-chain reserve box being spent must
     /// have exactly this R5 digest for the insert proof to verify on-chain.
     pub fn reserve_state_digest(&self) -> Vec<u8> {
+        if let Err(e) = self.ensure_healthy() {
+            panic!(
+                "Cannot read reserve state from quarantined tracker: {:?}",
+                e
+            );
+        }
         self.reserve_avl_state.root_digest().to_vec()
     }
 
@@ -1092,6 +1198,7 @@ impl TrackerStateManager {
         timestamp: u64,
         already_redeemed: u64,
     ) -> Result<(), NoteError> {
+        self.ensure_healthy()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
         let mut value_bytes = Vec::with_capacity(16);
@@ -1114,6 +1221,7 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Result<NoteProof, NoteError> {
+        self.ensure_healthy()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -1137,14 +1245,15 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Result<IouNote, NoteError> {
-        self.storage
-            .get_note(issuer_pubkey, recipient_pubkey)?
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_note(issuer_pubkey, recipient_pubkey))?
             .ok_or_else(|| NoteError::StorageError("Note not found".to_string()))
     }
 
     /// Get all notes for a specific issuer
     pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
-        self.storage.get_issuer_notes(issuer_pubkey)
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_issuer_notes(issuer_pubkey))
     }
 
     /// Calculate a conservative issuer-wide debt snapshot for an acceptance check.
@@ -1161,11 +1270,11 @@ impl TrackerStateManager {
         candidate_recipient: Option<&PubKey>,
         candidate_total_debt: u64,
     ) -> Result<u64, NoteError> {
-        // Secondary indices are query accelerators, not liability authority:
-        // store_note writes the primary record before its indices. Scan the
-        // primary partition strictly so an interrupted index update cannot hide
-        // debt from a collateralization decision.
-        let notes = self.storage.get_issuer_notes_strict(issuer_pubkey)?;
+        self.ensure_healthy()?;
+        // The versioned primary snapshot is the sole liability authority. A
+        // malformed, missing or root-inconsistent snapshot fails this check.
+        let notes = self
+            .quarantine_on_storage_failure(self.storage.get_issuer_notes_strict(issuer_pubkey))?;
         let mut total = 0u64;
         let mut replaced_candidate_edge = false;
 
@@ -1206,7 +1315,8 @@ impl TrackerStateManager {
         &self,
         recipient_pubkey: &PubKey,
     ) -> Result<Vec<IouNote>, NoteError> {
-        self.storage.get_recipient_notes(recipient_pubkey)
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_recipient_notes(recipient_pubkey))
     }
 
     /// Get all notes for a specific recipient with issuer information
@@ -1214,18 +1324,23 @@ impl TrackerStateManager {
         &self,
         recipient_pubkey: &PubKey,
     ) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
-        self.storage
-            .get_recipient_notes_with_issuer(recipient_pubkey)
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(
+            self.storage
+                .get_recipient_notes_with_issuer(recipient_pubkey),
+        )
     }
 
     /// Get all notes in the tracker
     pub fn get_all_notes(&self) -> Result<Vec<IouNote>, NoteError> {
-        self.storage.get_all_notes()
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_all_notes())
     }
 
     /// Get all notes in the tracker with issuer information
     pub fn get_all_notes_with_issuer(&self) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
-        self.storage.get_all_notes_with_issuer()
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_all_notes_with_issuer())
     }
 
     /// Update the current state with latest AVL tree root
@@ -1240,6 +1355,9 @@ impl TrackerStateManager {
 
     /// Get the current tracker state
     pub fn get_state(&self) -> &TrackerState {
+        if let Err(e) = self.ensure_healthy() {
+            panic!("Cannot publish state from quarantined tracker: {:?}", e);
+        }
         &self.current_state
     }
 }
@@ -1251,6 +1369,7 @@ impl TrackerStateManager {
         issuer_pubkey_hex: &str,
         reserve_tracker: &ReserveTracker,
     ) -> Result<String, NoteError> {
+        self.ensure_healthy()?;
         // Get all reserves from the reserve tracker
         let all_reserves = reserve_tracker.get_all_reserves();
 

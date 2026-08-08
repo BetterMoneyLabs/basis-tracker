@@ -309,7 +309,11 @@ pub async fn create_note(
                 NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
+                NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::StorageOutcomeUnknown(_) => {
+                    "Storage outcome unknown; restart and reconcile".to_string()
+                }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -436,7 +440,11 @@ pub async fn get_notes_by_issuer(
                 NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
+                NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::StorageOutcomeUnknown(_) => {
+                    "Storage outcome unknown; restart and reconcile".to_string()
+                }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -549,7 +557,11 @@ pub async fn get_notes_by_recipient(
                 NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
+                NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::StorageOutcomeUnknown(_) => {
+                    "Storage outcome unknown; restart and reconcile".to_string()
+                }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -699,7 +711,11 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
+                NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::StorageOutcomeUnknown(_) => {
+                    "Storage outcome unknown; restart and reconcile".to_string()
+                }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -793,7 +809,11 @@ pub async fn get_all_notes(
                 NoteError::DebtRegression => "Cumulative debt cannot decrease".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
+                NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
+                NoteError::StorageOutcomeUnknown(_) => {
+                    "Storage outcome unknown; restart and reconcile".to_string()
+                }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (

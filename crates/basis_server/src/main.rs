@@ -171,7 +171,6 @@ async fn main() {
                             tracker_scanner_config,
                             metadata_storage,
                             tracker_storage,
-                            &data_dir,
                         );
 
                         // Process tracker boxes directly, no scan registration required
@@ -243,19 +242,13 @@ async fn main() {
     // Create channel for communicating with tracker thread
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
 
-    // Initialize tracker manager outside of the blocking task so it can be shared
-    use basis_store::TrackerStateManager;
-    let shared_tracker_state =
-        std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new(&data_dir)));
-
     // Clone the data directory for the tracker thread before the async move.
     let data_dir_for_tracker_thread = data_dir.clone();
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
-    let _shared_tracker_state_clone = shared_tracker_state.clone();
     let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
     tokio::task::spawn_blocking(move || {
-        use basis_store::RedemptionManager;
+        use basis_store::{RedemptionManager, TrackerStateManager};
 
         tracing::debug!("Tracker thread started");
         let tracker = TrackerStateManager::new(&data_dir_for_tracker_thread);

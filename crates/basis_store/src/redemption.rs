@@ -348,35 +348,25 @@ impl RedemptionManager {
         redeemed_amount: u64,
         new_already_redeemed: Option<u64>,
     ) -> Result<(), RedemptionError> {
-        // Get the current note
-        let mut note = self
+        // Read the signed payment timestamp before recording settlement progress.
+        // Settlement bookkeeping must never rewrite a signed field without a new
+        // issuer signature.
+        let note = self
             .tracker
             .lookup_note(issuer_pubkey, recipient_pubkey)
             .map_err(|_| RedemptionError::NoteNotFound)?;
-
-        // Capture the note's payment timestamp before it is refreshed; the reserve AVL tree value
-        // is `payment_timestamp || already_redeemed` and must match the on-chain reserve entry.
         let payment_timestamp = note.timestamp;
 
-        // Update the redeemed amount
-        note.amount_redeemed += redeemed_amount;
-
-        // Update the timestamp to ensure it's newer than the existing one
-        note.timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| RedemptionError::StorageError("Failed to get current time".to_string()))?
-            .as_millis() as u64;
-
-        // Update the note in tracker
-        self.tracker
-            .update_note(issuer_pubkey, &note)
+        let updated_note = self
+            .tracker
+            .record_redemption_progress(issuer_pubkey, recipient_pubkey, redeemed_amount)
             .map_err(RedemptionError::from)?;
 
         // Keep the reserve AVL tree in sync with the cumulative redeemed amount so subsequent
         // redemptions generate insert/lookup proofs that verify against the on-chain reserve R5.
         // When the on-chain build used an explicit cumulative value (e.g. a fresh reserve whose
         // tree did not yet contain earlier redemptions), that value takes precedence.
-        let tree_value = new_already_redeemed.unwrap_or(note.amount_redeemed);
+        let tree_value = new_already_redeemed.unwrap_or(updated_note.amount_redeemed);
         self.tracker
             .update_already_redeemed(
                 issuer_pubkey,
@@ -967,12 +957,10 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Regression test: `complete_redemption` must keep the reserve AVL tree in sync using the
-    /// note's PRE-refresh payment timestamp (the reserve tree value is
-    /// `payment_timestamp || cumulative_redeemed`, and the on-chain contract inserts exactly
-    /// that). Otherwise subsequent redemptions produce proofs that fail on-chain.
+    /// Regression test: settlement bookkeeping must preserve the issuer-signed
+    /// note timestamp while keeping the reserve AVL value in sync.
     #[test]
-    fn test_complete_redemption_syncs_reserve_tree_with_pre_refresh_timestamp() {
+    fn test_complete_redemption_preserves_signed_timestamp_and_syncs_reserve_tree() {
         let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
@@ -1021,10 +1009,11 @@ mod tests {
             .lookup_note(&issuer_pubkey, &recipient_pubkey)
             .expect("lookup note");
         assert_eq!(updated.amount_redeemed, redeemed);
-        assert!(
-            updated.timestamp > payment_timestamp,
-            "note timestamp must be refreshed"
-        );
+        assert_eq!(updated.timestamp, payment_timestamp);
+        assert_eq!(updated.signature, signature);
+        updated
+            .verify_signature(&issuer_pubkey)
+            .expect("settlement must preserve the issuer signature");
 
         // Reserve tree must contain (key, payment_timestamp || cumulative_redeemed) with the
         // PRE-refresh timestamp — compare against an independently built reference tree.
@@ -1043,9 +1032,7 @@ mod tests {
             "reserve tree must use pre-refresh timestamp and cumulative amount"
         );
 
-        // A second completion must accumulate (cumulative redeemed amount) and use the
-        // timestamp the note carried after the first completion (captured before the second).
-        let first_refresh_ts = updated.timestamp;
+        // A second local settlement update accumulates without rewriting signed fields.
         redemption_manager
             .complete_redemption(&issuer_pubkey, &recipient_pubkey, 50_000_000, None)
             .expect("second completion");
@@ -1054,14 +1041,14 @@ mod tests {
             .update_already_redeemed(
                 &issuer_pubkey,
                 &recipient_pubkey,
-                first_refresh_ts,
+                payment_timestamp,
                 redeemed + 50_000_000,
             )
             .expect("reference update 2");
         assert_eq!(
             redemption_manager.tracker.reserve_state_digest(),
             reference2.reserve_state_digest(),
-            "second redemption must accumulate with the note's pre-second-refresh timestamp"
+            "second settlement update must accumulate without rewriting signed fields"
         );
     }
 
@@ -1095,11 +1082,10 @@ mod tests {
             crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
                 .expect("sign note");
 
-        // Note already has 100M redeemed (from an earlier redemption against another reserve).
         let note = IouNote {
             recipient_pubkey,
             amount_collected: total_debt,
-            amount_redeemed: 100_000_000,
+            amount_redeemed: 0,
             timestamp: payment_timestamp,
             signature,
         };
@@ -1107,6 +1093,13 @@ mod tests {
             .tracker
             .add_note(&issuer_pubkey, &note)
             .expect("add note");
+
+        // Simulate 100M of tracker-derived settlement progress from an earlier
+        // reserve. Caller-supplied note creation is not allowed to inject it.
+        redemption_manager
+            .tracker
+            .record_redemption_progress(&issuer_pubkey, &recipient_pubkey, 100_000_000)
+            .expect("record prior settlement state");
 
         // On-chain build against a fresh (empty) reserve tree used cumulative 100M
         // (0 + 100M redeemed now), while the note accumulates to 200M.
