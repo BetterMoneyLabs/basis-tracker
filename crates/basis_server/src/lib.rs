@@ -35,6 +35,7 @@
 
 pub mod acceptance;
 pub mod api;
+mod bounded_http;
 pub mod config;
 pub mod models;
 pub mod redemption_build;
