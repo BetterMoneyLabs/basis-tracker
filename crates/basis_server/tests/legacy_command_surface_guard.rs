@@ -31,7 +31,7 @@ fn production_actor_has_no_legacy_proof_commands_or_repair_environment() {
 
 #[test]
 fn openapi_exposes_exactly_the_nine_retired_routes_as_gone() {
-    let openapi = include_str!("../../../openapi.yaml");
+    let openapi = include_str!("../../../openapi.yaml").replace("\r\n", "\n");
     assert!(!openapi.contains("  /proof:\n"));
 
     let routes = [

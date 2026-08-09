@@ -6,7 +6,7 @@ mod tests {
     use crate::{
         ergo_scanner::{BoxAsset, ScanBox, NODE_HTTP_MAX_BODY_BYTES},
         persistence::{ScannerMetadataStorage, TrackerStorage},
-        tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
+        tracker_scanner::{create_tracker_server_state, TrackerNodeConfig, TrackerScannerError},
     };
     use std::collections::HashMap;
     use std::path::Path;
@@ -62,9 +62,12 @@ mod tests {
 
         let error = state.get_current_height().await.unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("outbound node response body exceeds 2097152 bytes"));
+        assert!(matches!(
+            error,
+            TrackerScannerError::ResponseTooLarge {
+                max_bytes: NODE_HTTP_MAX_BODY_BYTES
+            }
+        ));
     }
 
     #[tokio::test]

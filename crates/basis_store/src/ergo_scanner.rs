@@ -1241,15 +1241,18 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = NodeConfig {
             node_url: oversized_declared_response_server().await,
-            ..NodeConfig::default()
+            ..historical_config()
         };
         let state = ServerState::new(config, temp_dir.path()).unwrap();
 
         let error = state.fetch_current_height().await.unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("outbound node response body exceeds 2097152 bytes"));
+        assert!(matches!(
+            error,
+            ScannerError::ResponseTooLarge {
+                max_bytes: NODE_HTTP_MAX_BODY_BYTES
+            }
+        ));
     }
 
     fn historical_tree() -> String {
