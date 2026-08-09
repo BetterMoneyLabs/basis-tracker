@@ -259,7 +259,7 @@ Key configuration includes:
 - Server host/port
 - **`server.data_dir`**: Base directory for all on-disk storage (databases, indices,
   scanner metadata). Defaults to `data` relative to the server's working directory.
-  Can be overridden with the `BASIS_SERVER_DATA_DIR` environment variable.
+  Can be overridden with the `BASIS_SERVER__DATA_DIR` environment variable.
   The legacy `server.database_url` field is kept for compatibility but is currently unused.
 - **Ergo node connection details** (required): The server will abort with exit code 1 if `ergo.node.node_url` is not provided in the configuration - no default localhost value is used
 - Reserve contract P2S address

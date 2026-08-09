@@ -6,11 +6,11 @@ This document describes the configuration options for the Basis Tracker server a
 
 ## Configuration File
 
-The main configuration file is `config/basis.toml`. The server will look for this file in the following locations:
+The main configuration file is `config/basis.toml`. Configuration precedence is:
 
-1. Current working directory: `config/basis.toml`
-2. Environment variables with `BASIS_` prefix
-3. Default values
+1. Environment variables with the `BASIS_` prefix
+2. `config/basis.toml` in the current working directory
+3. Built-in default values
 
 ## Configuration Sections
 
@@ -24,7 +24,7 @@ data_dir = "data"       # Base directory for all on-disk storage (databases, ind
 database_url = "sqlite:data/basis.db"  # Legacy field, kept for compatibility (currently unused)
 ```
 
-`data_dir` controls where the server writes all persistent state. It defaults to a `data/` directory relative to the working directory from which the server is launched. You can override it with the `BASIS_SERVER_DATA_DIR` environment variable.
+`data_dir` controls where the server writes all persistent state. It defaults to a `data/` directory relative to the working directory from which the server is launched. You can override it with the `BASIS_SERVER__DATA_DIR` environment variable.
 
 The note store is permanently bound by a checksummed generation manifest to
 the configured 32-byte tracker NFT. A new or unbound directory is rejected unless
@@ -104,16 +104,16 @@ When creating a reserve contract box, you must set these registers:
 
 ## Environment Variables
 
-All configuration options can also be set via environment variables with the `BASIS_` prefix:
+All configuration options can also be set via environment variables with the `BASIS_` prefix. Use two underscores (`__`) between nested TOML sections; underscores inside a field name remain literal:
 
 ```bash
-export BASIS_SERVER_HOST="0.0.0.0"
-export BASIS_SERVER_PORT=3048
-export BASIS_ERGO_BASIS_RESERVE_CONTRACT_P2S="your_reserve_contract_p2s"
-export BASIS_ERGO_TRACKER_NFT_ID="your_tracker_nft_id"
+export BASIS_SERVER__HOST="0.0.0.0"
+export BASIS_SERVER__PORT=3048
+export BASIS_ERGO__BASIS_RESERVE_CONTRACT_P2S="your_reserve_contract_p2s"
+export BASIS_ERGO__TRACKER_NFT_ID="your_tracker_nft_id"
 # Only for intentional first initialization of a new tracker NFT/data directory:
-export BASIS_ERGO_ALLOW_FRESH_TRACKER_GENERATION="true"
-export BASIS_ERGO_NODE_URL="http://your-node:9053"
+export BASIS_ERGO__ALLOW_FRESH_TRACKER_GENERATION="true"
+export BASIS_ERGO__NODE__NODE_URL="http://your-node:9053"
 ```
 
 ## Tracker Public Key Configuration

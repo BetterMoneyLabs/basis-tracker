@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 // Import Ergo address handling for P2PK address support
 use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
 
+type DefaultConfigBuilder = config::ConfigBuilder<config::builder::DefaultState>;
+
 /// Main application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -96,6 +98,49 @@ pub struct TransactionConfig {
 }
 
 impl AppConfig {
+    fn default_builder() -> Result<DefaultConfigBuilder, config::ConfigError> {
+        let legacy_read_only_p2s = basis_store::contract_compiler::get_basis_reserve_contract_p2s()
+            .map_err(|e| config::ConfigError::Message(e.to_string()))?;
+
+        config::Config::builder()
+            .set_default("server.host", "0.0.0.0")?
+            .set_default("server.port", 3048)?
+            .set_default("server.data_dir", "data")?
+            .set_default("server.database_url", "sqlite:data/basis.db")?
+            .set_default("ergo.node.node_url", "http://159.89.116.15:11088")?
+            .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
+            .set_default("ergo.node.api_key", "")?
+            .set_default("ergo.basis_reserve_contract_p2s", legacy_read_only_p2s)?
+            .set_default("transaction.fee", 1000000)?
+            .set_default("ergo.tracker_public_key", "")?
+            .set_default("ergo.tracker_secret_key", "")?
+            .set_default("acceptance.default", "reject")?
+            .set_default("acceptance.predicates", Vec::<String>::new())
+    }
+
+    fn environment() -> config::Environment {
+        config::Environment::with_prefix("BASIS")
+            .prefix_separator("_")
+            .separator("__")
+            .ignore_empty(true)
+    }
+
+    fn load_with_sources<F>(
+        file: F,
+        environment: config::Environment,
+    ) -> Result<Self, config::ConfigError>
+    where
+        F: config::Source + Send + Sync + 'static,
+    {
+        Self::default_builder()?
+            // Later sources have higher priority: explicit environment values
+            // override the optional configuration file.
+            .add_source(file)
+            .add_source(environment)
+            .build()?
+            .try_deserialize()
+    }
+
     /// Load configuration from file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, config::ConfigError> {
         let config = config::Config::builder()
@@ -107,38 +152,10 @@ impl AppConfig {
 
     /// Load configuration from default locations
     pub fn load() -> Result<Self, config::ConfigError> {
-        let legacy_read_only_p2s = basis_store::contract_compiler::get_basis_reserve_contract_p2s()
-            .map_err(|e| config::ConfigError::Message(e.to_string()))?;
-        let config = config::Config::builder()
-            // Default configuration
-            .set_default("server.host", "0.0.0.0")?
-            .set_default("server.port", 3048)?
-            .set_default("server.data_dir", "data")?
-            .set_default("server.database_url", "sqlite:data/basis.db")?
-            // Node configuration defaults
-            .set_default("ergo.node.start_height", "")?
-            .set_default("ergo.node.reserve_contract_p2s", "")?
-            .set_default("ergo.node.node_url", "http://159.89.116.15:11088")?
-            .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
-            .set_default("ergo.node.api_key", "")? // Set via config file or BASIS_ERGO_NODE_API_KEY env var
-            .set_default("ergo.basis_reserve_contract_p2s", legacy_read_only_p2s)?
-            // Transaction configuration defaults
-            .set_default("transaction.fee", 1000000)? // 0.001 ERG
-            // Tracker public key (optional)
-            .set_default("ergo.tracker_public_key", "")?
-            // Tracker secret key (optional - for local signing)
-            .set_default("ergo.tracker_secret_key", "")?
-            .set_default("ergo.allow_fresh_tracker_generation", false)?
-            // Acceptance predicate configuration (optional)
-            .set_default("acceptance.default", "reject")?
-            .set_default("acceptance.predicates", Vec::<String>::new())?
-            // Environment variables
-            .add_source(config::Environment::with_prefix("BASIS"))
-            // Configuration file
-            .add_source(config::File::with_name("config/basis").required(false))
-            .build()?;
-
-        config.try_deserialize()
+        Self::load_with_sources(
+            config::File::with_name("config/basis").required(false),
+            Self::environment(),
+        )
     }
 
     /// Load the process configuration without substituting a different
@@ -180,9 +197,10 @@ impl AppConfig {
     /// V2-A carries exact contract identity and message primitives only. The
     /// current scanner and state store are still v1-shaped, so activating the
     /// exact v2 tree here would be unsafe. The historical identity is retained
-    /// temporarily for compatibility; the server HTTP construction and P2S
-    /// distribution routes remain tombstones. This does not attest safety of
-    /// legacy library builders or acceptance state.
+    /// temporarily for compatibility; `/reserves/create`,
+    /// `/config/reserve-contract-p2s`, and `/redemption/build` remain
+    /// tombstones. This does not attest safety of legacy library builders or
+    /// acceptance state.
     pub fn validate_runtime_contract_mode(&self) -> Result<(), String> {
         let configured = self.basis_reserve_contract_p2s();
         let legacy = basis_store::contract_compiler::get_basis_reserve_contract_p2s()
@@ -411,6 +429,107 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn environment_from(entries: &[(&str, String)]) -> config::Environment {
+        AppConfig::environment().source(Some(
+            entries
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), value.clone()))
+                .collect(),
+        ))
+    }
+
+    fn write_config_file(contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("basis.toml");
+        std::fs::write(&path, contents).unwrap();
+        (directory, path)
+    }
+
+    #[test]
+    fn nested_environment_values_override_the_file_source() {
+        let legacy = basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap();
+        let v2 = basis_store::contract_compiler::get_basis_v2_contract_p2s(
+            basis_store::contract_compiler::BasisV2ContractKind::Erg,
+        )
+        .unwrap();
+        let (_directory, path) = write_config_file(&format!(
+            r#"
+[server]
+port = 3048
+data_dir = "from-file"
+
+[ergo]
+basis_reserve_contract_p2s = "{legacy}"
+
+[ergo.node]
+node_url = "http://file-node:9053"
+
+[transaction]
+fee = 1000000
+"#
+        ));
+        let environment = environment_from(&[
+            ("BASIS_SERVER__PORT", "4050".to_string()),
+            ("BASIS_SERVER__DATA_DIR", "from-environment".to_string()),
+            ("BASIS_ERGO__BASIS_RESERVE_CONTRACT_P2S", v2.clone()),
+            (
+                "BASIS_ERGO__NODE__NODE_URL",
+                "http://environment-node:9053".to_string(),
+            ),
+        ]);
+
+        let config = AppConfig::load_with_sources(config::File::from(path), environment).unwrap();
+
+        assert_eq!(config.server.port, 4050);
+        assert_eq!(config.server.data_dir.as_deref(), Some("from-environment"));
+        assert_eq!(config.ergo.node.node_url, "http://environment-node:9053");
+        assert_eq!(config.basis_reserve_contract_p2s(), v2);
+        assert!(config
+            .validate_runtime_contract_mode()
+            .unwrap_err()
+            .contains("runtime activation is disabled"));
+    }
+
+    #[test]
+    fn environment_contract_identity_is_validated_without_legacy_fallback() {
+        let legacy = basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap();
+        let v2 = basis_store::contract_compiler::get_basis_v2_contract_p2s(
+            basis_store::contract_compiler::BasisV2ContractKind::Erg,
+        )
+        .unwrap();
+        let (_directory, path) = write_config_file("");
+
+        let legacy_config = AppConfig::load_with_sources(
+            config::File::from(path.clone()),
+            environment_from(&[("BASIS_ERGO__BASIS_RESERVE_CONTRACT_P2S", legacy.clone())]),
+        )
+        .unwrap();
+        legacy_config.validate_runtime_contract_mode().unwrap();
+
+        let v2_config = AppConfig::load_with_sources(
+            config::File::from(path.clone()),
+            environment_from(&[("BASIS_ERGO__BASIS_RESERVE_CONTRACT_P2S", v2)]),
+        )
+        .unwrap();
+        assert!(v2_config
+            .validate_runtime_contract_mode()
+            .unwrap_err()
+            .contains("runtime activation is disabled"));
+
+        let unknown_config = AppConfig::load_with_sources(
+            config::File::from(path),
+            environment_from(&[(
+                "BASIS_ERGO__BASIS_RESERVE_CONTRACT_P2S",
+                "unknown-contract".to_string(),
+            )]),
+        )
+        .unwrap();
+        assert!(unknown_config
+            .validate_runtime_contract_mode()
+            .unwrap_err()
+            .contains("neither the supported read-only legacy identity"));
+    }
 
     #[test]
     fn app_config_debug_redacts_node_and_tracker_secrets() {

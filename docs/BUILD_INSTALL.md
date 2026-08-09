@@ -202,7 +202,7 @@ The client stores configuration in `~/.basis/cli.toml` and creates it automatica
 ./target/release/basis_server --config /path/to/config.toml
 
 # Run with custom port
-BASIS_SERVER_PORT=8080 ./target/release/basis_server
+BASIS_SERVER__PORT=8080 ./target/release/basis_server
 ```
 
 ### Using Run Scripts (Recommended)
