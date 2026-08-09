@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 use reqwest::Client;
 
 use crate::{
-    ergo_scanner::{IndexedErgoBox, ScanBox},
+    ergo_scanner::{node_http, BoundedResponse, IndexedErgoBox, ScanBox},
     persistence::{ScannerMetadataStorage, TrackerStorage},
     TrackerBoxInfo,
 };
@@ -81,15 +81,33 @@ pub struct TrackerServerState {
 
 impl TrackerServerState {
     /// Create HTTP request builder with API key header if configured
-    fn request_builder(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+    fn request_builder(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+    ) -> Result<reqwest::RequestBuilder, TrackerScannerError> {
         debug!("Tracker request method: {}, URL: {}", method, url);
-        let mut builder = self.client.request(method, url);
+        let client =
+            node_http().map_err(|error| TrackerScannerError::HttpError(error.to_string()))?;
+        let mut builder = client.request(method, url);
 
         if let Some(api_key) = &self.config.api_key {
             builder = builder.header("api_key", api_key);
         }
 
-        builder
+        Ok(builder)
+    }
+
+    async fn execute_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<BoundedResponse, TrackerScannerError> {
+        let client =
+            node_http().map_err(|error| TrackerScannerError::HttpError(error.to_string()))?;
+        client
+            .execute(request)
+            .await
+            .map_err(|error| TrackerScannerError::HttpError(error.to_string()))
     }
 
     /// Get unspent tracker boxes via `GET /blockchain/box/unspent/byTokenId/{trackerNftId}`.
@@ -107,27 +125,20 @@ impl TrackerServerState {
 
         debug!("Fetching unspent tracker boxes from: {}", url);
 
-        let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
-            .await
-            .map_err(|e| {
-                TrackerScannerError::HttpError(format!("Failed to fetch tracker boxes: {}", e))
-            })?;
+        let request = self.request_builder(reqwest::Method::GET, &url)?;
+        let response = self.execute_request(request).await.map_err(|e| {
+            TrackerScannerError::HttpError(format!("Failed to fetch tracker boxes: {}", e))
+        })?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(TrackerScannerError::NodeError(format!(
-                "Failed to get unspent tracker boxes with status {}: {}",
-                status, error_text
+                "Failed to get unspent tracker boxes with status {}",
+                status
             )));
         }
 
-        let indexed_boxes: Vec<IndexedErgoBox> = response.json().await.map_err(|e| {
+        let indexed_boxes: Vec<IndexedErgoBox> = response.json().map_err(|e| {
             error!("Failed to parse tracker boxes JSON: {}", e);
             TrackerScannerError::JsonError(format!("Failed to parse tracker boxes: {}", e))
         })?;
@@ -380,9 +391,9 @@ impl TrackerServerState {
         // Fetch from node
         let url = format!("{}/info", self.config.node_url);
 
+        let request = self.request_builder(reqwest::Method::GET, &url)?;
         let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
+            .execute_request(request)
             .await
             .map_err(|e| TrackerScannerError::HttpError(format!("Failed to get height: {}", e)))?;
 
@@ -393,7 +404,7 @@ impl TrackerServerState {
             )));
         }
 
-        let info: serde_json::Value = response.json().await.map_err(|e| {
+        let info: serde_json::Value = response.json().map_err(|e| {
             TrackerScannerError::JsonError(format!("Failed to parse height: {}", e))
         })?;
 

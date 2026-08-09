@@ -3,16 +3,188 @@
 
 use std::{
     path::Path,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder, StatusCode};
+use serde::de::DeserializeOwned;
+
+/// Total deadline applied to every outbound Ergo node request in this process.
+pub const NODE_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum response body accepted from the Ergo node.
+pub const NODE_HTTP_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum number of concurrent Ergo node requests across scanners and server.
+pub const NODE_HTTP_MAX_IN_FLIGHT: usize = 16;
+
+/// Failure returned by the process-wide bounded Ergo node HTTP client.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BoundedHttpError {
+    #[error("failed to initialize bounded HTTP client: {0}")]
+    ClientInitialization(String),
+    #[error("outbound node request limit reached")]
+    Overloaded,
+    #[error("outbound node request timed out")]
+    Timeout,
+    #[error("outbound node request failed: {0}")]
+    Request(String),
+    #[error("outbound node response body exceeds {limit} bytes")]
+    BodyTooLarge { limit: usize },
+    #[error("failed to read outbound node response: {0}")]
+    Body(String),
+    #[error("outbound node response is not valid JSON: {0}")]
+    Json(String),
+}
+
+fn map_reqwest_error(error: reqwest::Error) -> BoundedHttpError {
+    if error.is_timeout() {
+        BoundedHttpError::Timeout
+    } else {
+        BoundedHttpError::Request(error.to_string())
+    }
+}
+
+/// Fully buffered response whose body has already passed the configured cap.
+#[derive(Debug)]
+pub struct BoundedResponse {
+    pub status: StatusCode,
+    body: Vec<u8>,
+}
+
+impl BoundedResponse {
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub fn json<T: DeserializeOwned>(&self) -> Result<T, BoundedHttpError> {
+        serde_json::from_slice(&self.body)
+            .map_err(|error| BoundedHttpError::Json(error.to_string()))
+    }
+
+    pub fn text_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.body)
+    }
+}
+
+/// HTTP executor that applies one admission budget, total deadline, and body cap.
+#[derive(Clone)]
+pub struct BoundedHttpClient {
+    client: reqwest::Client,
+    permits: Arc<Semaphore>,
+    timeout: Duration,
+    max_body_bytes: usize,
+}
+
+impl BoundedHttpClient {
+    pub fn new(
+        timeout: Duration,
+        max_body_bytes: usize,
+        max_in_flight: usize,
+    ) -> Result<Self, BoundedHttpError> {
+        if timeout.is_zero() || max_body_bytes == 0 || max_in_flight == 0 {
+            return Err(BoundedHttpError::ClientInitialization(
+                "timeout, body cap, and concurrency limit must be non-zero".to_string(),
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(timeout.min(Duration::from_secs(3)))
+            .timeout(timeout)
+            .pool_max_idle_per_host(max_in_flight)
+            .build()
+            .map_err(|error| BoundedHttpError::ClientInitialization(error.to_string()))?;
+        Ok(Self {
+            client,
+            permits: Arc::new(Semaphore::new(max_in_flight)),
+            timeout,
+            max_body_bytes,
+        })
+    }
+
+    pub fn get(&self, url: &str) -> RequestBuilder {
+        self.request(reqwest::Method::GET, url)
+    }
+
+    pub fn post(&self, url: &str) -> RequestBuilder {
+        self.request(reqwest::Method::POST, url)
+    }
+
+    pub fn request(&self, method: reqwest::Method, url: &str) -> RequestBuilder {
+        self.client.request(method, url)
+    }
+
+    /// Execute a request through this client's shared policy.
+    pub async fn execute(
+        &self,
+        request: RequestBuilder,
+    ) -> Result<BoundedResponse, BoundedHttpError> {
+        let _permit = self
+            .permits
+            .try_acquire()
+            .map_err(|_| BoundedHttpError::Overloaded)?;
+        let max_body_bytes = self.max_body_bytes;
+
+        tokio::time::timeout(self.timeout, async move {
+            let mut response = request.send().await.map_err(map_reqwest_error)?;
+            if response
+                .content_length()
+                .is_some_and(|length| length > max_body_bytes as u64)
+            {
+                return Err(BoundedHttpError::BodyTooLarge {
+                    limit: max_body_bytes,
+                });
+            }
+
+            let status = response.status();
+            let mut body = Vec::with_capacity(
+                response
+                    .content_length()
+                    .unwrap_or(0)
+                    .min(max_body_bytes as u64) as usize,
+            );
+            while let Some(chunk) = response.chunk().await.map_err(|error| {
+                if error.is_timeout() {
+                    BoundedHttpError::Timeout
+                } else {
+                    BoundedHttpError::Body(error.to_string())
+                }
+            })? {
+                let new_len = body
+                    .len()
+                    .checked_add(chunk.len())
+                    .filter(|length| *length <= max_body_bytes)
+                    .ok_or(BoundedHttpError::BodyTooLarge {
+                        limit: max_body_bytes,
+                    })?;
+                body.reserve(new_len.saturating_sub(body.capacity()));
+                body.extend_from_slice(&chunk);
+            }
+            Ok(BoundedResponse { status, body })
+        })
+        .await
+        .map_err(|_| BoundedHttpError::Timeout)?
+    }
+}
+
+static NODE_HTTP_CLIENT: LazyLock<Result<BoundedHttpClient, BoundedHttpError>> =
+    LazyLock::new(|| {
+        BoundedHttpClient::new(
+            NODE_HTTP_TIMEOUT,
+            NODE_HTTP_MAX_BODY_BYTES,
+            NODE_HTTP_MAX_IN_FLIGHT,
+        )
+    });
+
+/// Return the one process-wide client used by server and scanner node calls.
+pub fn node_http() -> Result<&'static BoundedHttpClient, BoundedHttpError> {
+    NODE_HTTP_CLIENT
+        .as_ref()
+        .map_err(|error| BoundedHttpError::ClientInitialization(error.to_string()))
+}
 
 /// Response from `POST /blockchain/box/unspent/byAddress` is a JSON array of IndexedErgoBox.
 pub(crate) type ByAddressResponse = Vec<IndexedErgoBox>;
@@ -155,10 +327,15 @@ pub struct ServerState {
 
 impl ServerState {
     /// Create HTTP request builder with API key header if configured
-    fn request_builder(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+    fn request_builder(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+    ) -> Result<reqwest::RequestBuilder, ScannerError> {
         debug!("Request method: {}, URL: {}", method, url);
 
-        let mut request = self.client.request(method, url);
+        let client = node_http().map_err(|error| ScannerError::HttpError(error.to_string()))?;
+        let mut request = client.request(method, url);
 
         // Add API key header if configured
         if let Some(api_key) = &self.config.api_key {
@@ -169,7 +346,18 @@ impl ServerState {
             info!("No API key header added to HTTP request");
         }
 
-        request
+        Ok(request)
+    }
+
+    async fn execute_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<BoundedResponse, ScannerError> {
+        let client = node_http().map_err(|error| ScannerError::HttpError(error.to_string()))?;
+        client
+            .execute(request)
+            .await
+            .map_err(|error| ScannerError::HttpError(error.to_string()))
     }
 
     /// Create a server state that uses real Ergo scanner
@@ -272,9 +460,9 @@ impl ServerState {
         let url = format!("{}/info", self.config.node_url);
         info!("Fetching current blockchain height from: {}", url);
 
+        let request = self.request_builder(reqwest::Method::GET, &url)?;
         let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
+            .execute_request(request)
             .await
             .map_err(|e| ScannerError::HttpError(format!("Failed to connect to node: {}", e)))?;
 
@@ -287,7 +475,6 @@ impl ServerState {
 
         let info: serde_json::Value = response
             .json()
-            .await
             .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
 
         let height = info["fullHeight"].as_u64().ok_or_else(|| {
@@ -337,9 +524,9 @@ impl ServerState {
         // Fetch from node
         let url = format!("{}/info", self.config.node_url);
 
+        let request = self.request_builder(reqwest::Method::GET, &url)?;
         let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
+            .execute_request(request)
             .await
             .map_err(|e| ScannerError::HttpError(format!("Failed to connect to node: {}", e)))?;
 
@@ -352,7 +539,6 @@ impl ServerState {
 
         let info: serde_json::Value = response
             .json()
-            .await
             .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
 
         let height = info["fullHeight"].as_u64().ok_or_else(|| {
@@ -381,32 +567,23 @@ impl ServerState {
         let url = format!("{}/blockchain/box/unspent/byAddress", self.config.node_url);
         info!("Fetching unspent reserve boxes from: {}", url);
 
-        let response = self
-            .request_builder(reqwest::Method::POST, &url)
-            .json(reserve_contract_p2s)
-            .send()
-            .await
-            .map_err(|e| {
-                ScannerError::HttpError(format!("Failed to fetch reserve boxes: {}", e))
-            })?;
+        let request = self
+            .request_builder(reqwest::Method::POST, &url)?
+            .json(reserve_contract_p2s);
+        let response = self.execute_request(request).await.map_err(|e| {
+            ScannerError::HttpError(format!("Failed to fetch reserve boxes: {}", e))
+        })?;
 
         let status = response.status();
         if !status.is_success() {
-            let response_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unable to read response".to_string());
-            error!(
-                "Failed to get reserve boxes with status {}: {}",
-                status, response_text
-            );
+            error!("Failed to get reserve boxes with status {}", status);
             return Err(ScannerError::NodeError(format!(
                 "Failed to get reserve boxes with status: {}",
                 status
             )));
         }
 
-        let parsed: ByAddressResponse = response.json().await.map_err(|e| {
+        let parsed: ByAddressResponse = response.json().map_err(|e| {
             ScannerError::JsonError(format!("Failed to parse reserve boxes response: {}", e))
         })?;
 
@@ -871,6 +1048,39 @@ fn decode_vlq_long(bytes: &[u8]) -> Result<i64, String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn oversized_declared_response_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                NODE_HTTP_MAX_BODY_BYTES + 1
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn reserve_scanner_rejects_oversized_declared_node_body() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = NodeConfig {
+            node_url: oversized_declared_response_server().await,
+            ..NodeConfig::default()
+        };
+        let state = ServerState::new(config, temp_dir.path()).unwrap();
+
+        let error = state.fetch_current_height().await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("outbound node response body exceeds 2097152 bytes"));
+    }
 
     fn historical_tree() -> String {
         crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap()

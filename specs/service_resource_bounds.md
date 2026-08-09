@@ -26,17 +26,20 @@ make point-in-time policy decisions atomic with later issuance.
 
 ## Outbound node HTTP
 
-All node calls made by the API, redemption builder, and tracker-box updater use
-one process-wide bounded client:
+All node calls made by the API, redemption builder, tracker-box updater, reserve
+scanner, and tracker scanner use one process-wide bounded admission budget:
 
 - at most 16 concurrent requests, acquired without waiting;
 - a 15-second total request deadline and a three-second connection cap;
 - at most 2 MiB of response body, enforced while reading chunks even when the
   server omits `Content-Length`;
 - bounded error bodies and JSON parsing only after the body cap succeeds.
+- Schnorr-signing failures expose only the HTTP status. Node error bodies are
+  neither returned nor logged because they may echo sensitive request context.
 
 The negative matrix covers a stalled loopback server, a saturated permit set,
-and a chunked response that crosses the cap. No test contacts a live Ergo node.
+an oversized declared `Content-Length`, a chunked response that crosses the
+cap, and redaction of a signing error body. No test contacts a live Ergo node.
 
 ## Integration boundary
 

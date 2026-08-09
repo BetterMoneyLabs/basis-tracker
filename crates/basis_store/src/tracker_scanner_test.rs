@@ -4,12 +4,53 @@
 mod tests {
     use super::*;
     use crate::{
-        ergo_scanner::{BoxAsset, ScanBox},
+        ergo_scanner::{BoxAsset, ScanBox, NODE_HTTP_MAX_BODY_BYTES},
         persistence::{ScannerMetadataStorage, TrackerStorage},
         tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
     };
     use std::collections::HashMap;
     use std::path::Path;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn oversized_declared_response_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                NODE_HTTP_MAX_BODY_BYTES + 1
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn tracker_scanner_rejects_oversized_declared_node_body() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let metadata_storage = ScannerMetadataStorage::open(temp_dir.path().join("metadata"))
+            .expect("Failed to create metadata storage");
+        let tracker_storage = TrackerStorage::open(temp_dir.path().join("tracker"))
+            .expect("Failed to create tracker storage");
+        let config = TrackerNodeConfig {
+            start_height: Some(0),
+            tracker_nft_id: Some("11".repeat(32)),
+            node_url: oversized_declared_response_server().await,
+            scan_name: Some("bounded-http-test".to_string()),
+            api_key: None,
+        };
+        let state =
+            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
+
+        let error = state.get_current_height().await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("outbound node response body exceeds 2097152 bytes"));
+    }
 
     #[tokio::test]
     async fn test_tracker_scan_registration_payload() {
