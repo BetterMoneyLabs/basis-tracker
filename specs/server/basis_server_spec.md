@@ -196,8 +196,9 @@ The server now implements real cryptographic functionality using the Ergo node's
 
 The server provides an endpoint to generate reserve creation payloads for Ergo node's `/wallet/payment/send` API:
 
-The endpoint currently returns `503 Service Unavailable` for every
-configuration. Startup retains the historical identity only for compatibility
+An otherwise valid request currently returns `503 Service Unavailable` for
+every configured contract identity. Malformed payloads may be rejected earlier
+with `400 Bad Request`. Startup retains the historical identity only for compatibility
 and rejects activation of the recognized, byte-exact v2 ERG tree
 until its scanner and BNS2/BRS2 stores exist. The payload code remains
 unreachable until a v2 builder supplies R4-R9, fixed 32/24 reserve state, a

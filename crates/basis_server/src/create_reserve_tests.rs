@@ -5,7 +5,10 @@ mod create_reserve_tests {
     use tokio::sync::Mutex;
 
     use crate::{
-        api::create_reserve_payload, models::CreateReserveRequest, AppState, TrackerCommand,
+        api::{create_reserve_payload, get_basis_reserve_contract_p2s},
+        models::CreateReserveRequest,
+        redemption_build::{build_redemption, RedemptionBuildRequest},
+        AppState, TrackerCommand,
     };
     use basis_store::ergo_scanner::{NodeConfig, ServerState};
 
@@ -178,6 +181,48 @@ mod create_reserve_tests {
             .as_deref()
             .unwrap_or_default()
             .contains("identity check failed"));
+    }
+
+    #[tokio::test]
+    async fn all_server_construction_routes_reject_each_unactivated_generation() {
+        let exact_v2 = basis_store::contract_compiler::get_basis_v2_contract_p2s(
+            basis_store::contract_compiler::BasisV2ContractKind::Erg,
+        )
+        .unwrap();
+        let legacy = basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap();
+
+        for configured in [exact_v2, legacy, "unknown-generation".to_string()] {
+            let state = create_test_app_state_with_p2s(configured);
+            let (p2s_status, p2s_response) =
+                get_basis_reserve_contract_p2s(State(state.clone())).await;
+            assert_eq!(p2s_status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!p2s_response.success);
+
+            let build_request = RedemptionBuildRequest {
+                issuer_pubkey: "02".to_string(),
+                recipient_pubkey: "03".to_string(),
+                amount: 1,
+                timestamp: 1,
+                issuer_signature: String::new(),
+                emergency: false,
+                tracker_box_id: None,
+            };
+            let (build_status, build_response) =
+                build_redemption(State(state.clone()), Json(build_request)).await;
+            assert_eq!(build_status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!build_response.success);
+
+            let create_request = CreateReserveRequest {
+                nft_id: "12".repeat(32),
+                owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                    .to_string(),
+                erg_amount: 1_000_000,
+            };
+            let (create_status, create_response) =
+                create_reserve_payload(State(state), Json(create_request)).await;
+            assert_eq!(create_status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!create_response.success);
+        }
     }
 
     #[tokio::test]

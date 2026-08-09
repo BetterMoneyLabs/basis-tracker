@@ -120,9 +120,18 @@ mod tests {
 
         let receipt: serde_json::Value = serde_json::from_str(BASIS_V2_PROVENANCE_JSON).unwrap();
         assert_eq!(receipt["abi_generation"], 2);
+        assert_eq!(receipt["source_repository"], "BetterMoneyLabs/chaincash");
         assert_eq!(
             receipt["contract_source_commit"],
             "9a274396d5f78f7be5ed76bacee5329c42570317"
+        );
+        assert_eq!(
+            receipt["claim_key_vector_commit"],
+            "04031626f09c6590a20ad20d5583c6eccc14412d"
+        );
+        assert_eq!(
+            receipt["claim_key_vector_test_blob"],
+            "52cf88c3f692e0f0c23903562f603fae700b2ebe"
         );
         assert_eq!(receipt["contracts"]["erg"]["ergo_tree_bytes"], 1682);
         assert_eq!(receipt["contracts"]["token"]["ergo_tree_bytes"], 1963);

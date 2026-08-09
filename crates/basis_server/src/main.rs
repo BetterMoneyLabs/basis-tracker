@@ -4,8 +4,8 @@ use axum::{
 };
 use basis_server::{
     api::*, build_redemption, reserve_api::*, store::EventStore, submit_redemption, AppConfig,
-    AppState, ErgoConfig, EventType, PublicationLease, ServerConfig, SharedTrackerState,
-    TrackerBoxUpdateConfig, TrackerBoxUpdater, TrackerCommand, TrackerEvent, TransactionConfig,
+    AppState, EventType, PublicationLease, SharedTrackerState, TrackerBoxUpdateConfig,
+    TrackerBoxUpdater, TrackerCommand, TrackerEvent,
 };
 use basis_store::{
     ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
@@ -180,45 +180,10 @@ async fn main() {
     tracing::info!("Starting basis server...");
     // Load configuration
     tracing::info!("Loading configuration...");
-    let config = match AppConfig::load() {
-        Ok(config) => config,
-        Err(e) => {
-            tracing::warn!("Failed to load configuration: {}", e);
-            tracing::info!("Using default configuration...");
-            AppConfig::load().unwrap_or_else(|_| {
-                // Fallback to hardcoded defaults if config loading fails completely
-                AppConfig {
-                    server: ServerConfig {
-                        host: "0.0.0.0".to_string(),
-                        port: 3048,
-                        data_dir: Some("data".to_string()),
-                        database_url: Some("sqlite:data/basis.db".to_string()),
-                    },
-                    ergo: ErgoConfig {
-                        node: NodeConfig {
-                            start_height: None,
-                            reserve_contract_p2s: None,
-                            node_url: "http://127.0.0.1:9053".to_string(),
-                            scan_name: Some("Basis Reserve Scanner".to_string()),
-                            api_key: None,
-                        },
-                        basis_reserve_contract_p2s:
-                            basis_store::contract_compiler::get_basis_reserve_contract_p2s()
-                                .expect("historical read-only contract identity must decode"),
-                        tracker_nft_id: None,
-                        allow_fresh_tracker_generation: false,
-                        tracker_public_key: None,
-                        tracker_secret_key: None,
-                    },
-                    transaction: TransactionConfig {
-                        fee: 1000000,         // 0.001 ERG
-                        change_address: None, // Will be derived from tracker public key
-                    },
-                    acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
-                }
-            })
-        }
-    };
+    let config = AppConfig::load_for_startup().unwrap_or_else(|error| {
+        tracing::error!("{}", error);
+        std::process::exit(1);
+    });
 
     if let Err(e) = config.validate_runtime_contract_mode() {
         tracing::error!("{}", e);

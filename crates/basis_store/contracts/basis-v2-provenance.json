@@ -1,8 +1,11 @@
 {
   "abi_generation": 2,
   "network": "ergo-mainnet",
+  "source_repository": "BetterMoneyLabs/chaincash",
   "chaincash_base_commit": "78475e30362571acf56e4e38276a9d6c0a84ce0c",
   "contract_source_commit": "9a274396d5f78f7be5ed76bacee5329c42570317",
+  "claim_key_vector_commit": "04031626f09c6590a20ad20d5583c6eccc14412d",
+  "claim_key_vector_test_blob": "52cf88c3f692e0f0c23903562f603fae700b2ebe",
   "contracts": {
     "erg": {
       "source_path": "contracts/offchain/basis-v2.es",

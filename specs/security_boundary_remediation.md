@@ -29,7 +29,8 @@ caller to exercise tracker-owned capabilities or to assert settlement state.
 7. The exact committed Basis v2 ERG ErgoTree is recognized, but startup rejects
    its activation until the v2 scanner and BNS2/BRS2 state are installed. The
    historical identity remains only as a compatibility mode; reserve creation,
-   P2S distribution, and redemption builders remain disabled.
+   server P2S distribution and HTTP redemption builders remain disabled. The
+   older public library builder is a separate legacy-quarantine workstream.
 
 ## Compatibility changes
 
@@ -42,7 +43,7 @@ caller to exercise tracker-owned capabilities or to assert settlement state.
 | `POST /redeem/complete` | Returns `410 Gone`. |
 | `note redeem` / MCP `note_redeem` | Return an error before effects; no boolean reactivation path remains. |
 | Non-local `transaction generate-redemption` | Returns an error; use `--local-sign` or the assisted signer. |
-| Reserve P2S / builders | Historical identity: temporary compatibility only, not a safety endorsement. Exact v2 identity: recognized but startup-disabled. Unknown identity: rejected. All construction/P2S distribution routes return `503 Service Unavailable`. |
+| Server reserve P2S / HTTP builders | Historical identity: temporary compatibility only, not a safety endorsement. Exact v2 identity: recognized but startup-disabled. Unknown identity: rejected. Server construction/P2S distribution routes return `503 Service Unavailable`; legacy library builders are not covered by this branch. |
 
 ## Settlement hand-off
 

@@ -82,9 +82,13 @@ that supplies all of the following as one coherent manifest:
 - reserve-NFT-specific proof/root/box lineage and an idempotent confirmed-chain
   settlement record.
 
-Until that join exists, startup rejects the exact v2 P2S and reserve creation,
-P2S distribution, and redemption build endpoints fail closed. This prevents a
-v1-shaped scanner or transaction from being presented as a v2 operation.
+Until that join exists, normal server startup rejects the exact v2 P2S and the
+reserve creation, P2S distribution, and HTTP redemption-build endpoints fail
+closed. The v1 scanner constructor also rejects exact v2 and unknown configured
+identities, and its internal parser checks the historical ErgoTree before
+decoding registers. The older public library transaction builder remains a
+separate legacy-quarantine dependency; this foundation does not claim that all
+v1 code has been removed.
 
 ## Coexistence and migration
 

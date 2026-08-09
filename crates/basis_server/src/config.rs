@@ -141,6 +141,16 @@ impl AppConfig {
         config.try_deserialize()
     }
 
+    /// Load the process configuration without substituting a different
+    /// contract generation when parsing or deserialization fails.
+    pub fn load_for_startup() -> Result<Self, String> {
+        Self::require_loaded(Self::load())
+    }
+
+    fn require_loaded(result: Result<Self, config::ConfigError>) -> Result<Self, String> {
+        result.map_err(|error| format!("failed to load Basis configuration: {error}"))
+    }
+
     /// Get the socket address for the server
     pub fn socket_addr(&self) -> std::net::SocketAddr {
         format!("{}:{}", self.server.host, self.server.port)
@@ -170,8 +180,9 @@ impl AppConfig {
     /// V2-A carries exact contract identity and message primitives only. The
     /// current scanner and state store are still v1-shaped, so activating the
     /// exact v2 tree here would be unsafe. The historical identity is retained
-    /// temporarily for compatibility; every construction route remains a
-    /// tombstone and this does not attest safety of legacy acceptance state.
+    /// temporarily for compatibility; the server HTTP construction and P2S
+    /// distribution routes remain tombstones. This does not attest safety of
+    /// legacy library builders or acceptance state.
     pub fn validate_runtime_contract_mode(&self) -> Result<(), String> {
         let configured = self.basis_reserve_contract_p2s();
         let legacy = basis_store::contract_compiler::get_basis_reserve_contract_p2s()
@@ -482,6 +493,16 @@ mod tests {
             .validate_runtime_contract_mode()
             .unwrap_err()
             .contains("neither the supported read-only legacy identity"));
+    }
+
+    #[test]
+    fn startup_configuration_errors_never_fall_back_to_legacy() {
+        let error = AppConfig::require_loaded(Err(config::ConfigError::Message(
+            "sentinel malformed configuration".to_string(),
+        )))
+        .unwrap_err();
+        assert!(error.contains("sentinel malformed configuration"));
+        assert!(!error.contains("default configuration"));
     }
 
     #[test]

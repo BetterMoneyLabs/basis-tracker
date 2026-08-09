@@ -9,6 +9,7 @@ use crate::traits::{CryptoError, SignatureVerifier};
 use crate::types::{PubKey, Signature};
 use blake2::{Blake2b, Digest};
 use generic_array::typenum::U32;
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use thiserror::Error;
 
 /// ABI generation authenticated by both Basis v2 reserve contracts.
@@ -52,6 +53,10 @@ pub enum BasisV2Error {
     NegativeStateValue,
     #[error("invalid Schnorr signature")]
     InvalidSignature,
+    #[error("owner secret key does not derive the claim owner public key")]
+    OwnerSecretMismatch,
+    #[error("signature is outside the canonical ErgoScript-compatible 65-byte profile")]
+    NonCanonicalSignature,
 }
 
 impl From<CryptoError> for BasisV2Error {
@@ -68,13 +73,27 @@ pub enum ReserveAssetV2 {
 }
 
 /// All inputs that define the unique settlement domain of a v2 claim.
+///
+/// The fields are intentionally private: constructing the struct directly
+/// would bypass public-key parsing and the token/singleton separation check.
+///
+/// ```compile_fail
+/// use basis_core::basis_v2::{ClaimDomainV2, ReserveAssetV2};
+/// let _ = ClaimDomainV2 {
+///     reserve_nft_id: [1; 32],
+///     tracker_nft_id: [2; 32],
+///     owner_pubkey: [0; 33],
+///     receiver_pubkey: [0; 33],
+///     asset: ReserveAssetV2::Erg,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClaimDomainV2 {
-    pub reserve_nft_id: [u8; 32],
-    pub tracker_nft_id: [u8; 32],
-    pub owner_pubkey: PubKey,
-    pub receiver_pubkey: PubKey,
-    pub asset: ReserveAssetV2,
+    reserve_nft_id: [u8; 32],
+    tracker_nft_id: [u8; 32],
+    owner_pubkey: PubKey,
+    receiver_pubkey: PubKey,
+    asset: ReserveAssetV2,
 }
 
 impl ClaimDomainV2 {
@@ -134,6 +153,26 @@ impl ClaimDomainV2 {
         })
     }
 
+    pub fn reserve_nft_id(&self) -> [u8; 32] {
+        self.reserve_nft_id
+    }
+
+    pub fn tracker_nft_id(&self) -> [u8; 32] {
+        self.tracker_nft_id
+    }
+
+    pub fn owner_pubkey(&self) -> PubKey {
+        self.owner_pubkey
+    }
+
+    pub fn receiver_pubkey(&self) -> PubKey {
+        self.receiver_pubkey
+    }
+
+    pub fn asset(&self) -> ReserveAssetV2 {
+        self.asset
+    }
+
     /// Exact `blake2b256(...)` key consumed by both v2 ErgoScripts.
     pub fn claim_key(&self) -> [u8; 32] {
         let mut hasher = Blake2b::<U32>::new();
@@ -170,12 +209,15 @@ impl ClaimDomainV2 {
 }
 
 /// A debtor-signed cumulative claim in one exact v2 reserve domain.
+///
+/// All fields are private so a caller cannot replace the authenticated domain,
+/// cumulative values, or signature after validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimV2 {
-    pub domain: ClaimDomainV2,
-    pub total_debt: u64,
-    pub timestamp: u64,
-    pub signature: Signature,
+    domain: ClaimDomainV2,
+    total_debt: u64,
+    timestamp: u64,
+    signature: Signature,
 }
 
 impl ClaimV2 {
@@ -185,8 +227,15 @@ impl ClaimV2 {
         timestamp: u64,
         owner_secret: &[u8; 32],
     ) -> Result<Self, BasisV2Error> {
+        let owner_secret =
+            SecretKey::from_slice(owner_secret).map_err(|_| BasisV2Error::OwnerSecretMismatch)?;
+        let derived_owner =
+            PublicKey::from_secret_key(&Secp256k1::new(), &owner_secret).serialize();
+        if derived_owner != domain.owner_pubkey {
+            return Err(BasisV2Error::OwnerSecretMismatch);
+        }
         let message = domain.signing_message(total_debt, timestamp)?;
-        let signature = schnorr_sign(&message, owner_secret, &domain.owner_pubkey)?;
+        let signature = schnorr_sign(&message, &owner_secret.secret_bytes(), &domain.owner_pubkey)?;
         Ok(Self {
             domain,
             total_debt,
@@ -195,12 +244,63 @@ impl ClaimV2 {
         })
     }
 
+    /// Parse a wire claim and require the owner signature before constructing
+    /// an invariant-bearing value.
+    pub fn from_signed(
+        domain: ClaimDomainV2,
+        total_debt: u64,
+        timestamp: u64,
+        signature: Signature,
+    ) -> Result<Self, BasisV2Error> {
+        validate_claim_values(total_debt, timestamp)?;
+        let claim = Self {
+            domain,
+            total_debt,
+            timestamp,
+            signature,
+        };
+        claim.verify()?;
+        Ok(claim)
+    }
+
+    pub fn domain(&self) -> ClaimDomainV2 {
+        self.domain
+    }
+
+    pub fn total_debt(&self) -> u64 {
+        self.total_debt
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    pub fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
     pub fn signing_message(&self) -> Result<[u8; 48], BasisV2Error> {
         self.domain.signing_message(self.total_debt, self.timestamp)
     }
 
     pub fn verify(&self) -> Result<(), BasisV2Error> {
         let message = self.signing_message()?;
+        // The contracts accept a wider 64..=66 byte surface and interpret
+        // `e` and `z` as signed big-endian integers. The Rust wire type is the
+        // deliberately narrower 65-byte canonical profile emitted by
+        // `schnorr_sign`: both 32-byte integers must be non-negative under the
+        // ErgoScript interpretation. Without these guards the generic Rust
+        // verifier can accept an unsigned-scalar signature rejected on-chain.
+        if self.signature[33] & 0x80 != 0 {
+            return Err(BasisV2Error::NonCanonicalSignature);
+        }
+        let mut challenge = Blake2b::<U32>::new();
+        challenge.update(&self.signature[..33]);
+        challenge.update(message);
+        challenge.update(self.domain.owner_pubkey);
+        if challenge.finalize()[0] & 0x80 != 0 {
+            return Err(BasisV2Error::NonCanonicalSignature);
+        }
         SchnorrVerifier
             .verify_signature(&self.signature, &message, &self.domain.owner_pubkey)
             .map_err(BasisV2Error::from)
@@ -208,11 +308,16 @@ impl ClaimV2 {
 }
 
 /// Fixed 24-byte value committed by reserve R5 in ABI v2.
+///
+/// ```compile_fail
+/// use basis_core::basis_v2::RedeemedStateV2;
+/// let _ = RedeemedStateV2 { timestamp: 0, total_debt: 0, redeemed: 1 };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RedeemedStateV2 {
-    pub timestamp: u64,
-    pub total_debt: u64,
-    pub redeemed: u64,
+    timestamp: u64,
+    total_debt: u64,
+    redeemed: u64,
 }
 
 impl RedeemedStateV2 {
@@ -236,6 +341,18 @@ impl RedeemedStateV2 {
         encoded[8..16].copy_from_slice(&self.total_debt.to_be_bytes());
         encoded[16..24].copy_from_slice(&self.redeemed.to_be_bytes());
         encoded
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    pub fn total_debt(&self) -> u64 {
+        self.total_debt
+    }
+
+    pub fn redeemed(&self) -> u64 {
+        self.redeemed
     }
 
     pub fn decode(encoded: &[u8]) -> Result<Self, BasisV2Error> {
@@ -303,14 +420,74 @@ fn decode_non_negative_long(bytes: &[u8]) -> Result<u64, BasisV2Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secp256k1::{PublicKey, Secp256k1, SecretKey};
-
     fn key(secret: u8) -> ([u8; 32], PubKey) {
         let mut bytes = [0u8; 32];
         bytes[31] = secret;
         let secret_key = SecretKey::from_slice(&bytes).unwrap();
         let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key).serialize();
         (bytes, public_key)
+    }
+
+    fn generic_valid_signature_with_sign_bits(
+        domain: ClaimDomainV2,
+        total_debt: u64,
+        timestamp: u64,
+        high_challenge: bool,
+        high_z: bool,
+    ) -> Signature {
+        use crate::traits::SignatureVerifier;
+        use num_bigint::BigUint;
+
+        let message = domain.signing_message(total_debt, timestamp).unwrap();
+        let owner_secret = key(1).0;
+        let owner_scalar = BigUint::from_bytes_be(&owner_secret);
+        let order = BigUint::from_bytes_be(&[
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C,
+            0xD0, 0x36, 0x41, 0x41,
+        ]);
+        let secp = Secp256k1::new();
+
+        for counter in 1u32..10_000 {
+            let mut nonce_hash = Blake2b::<U32>::new();
+            nonce_hash.update(counter.to_be_bytes());
+            let nonce_bytes: [u8; 32] = nonce_hash.finalize().into();
+            let Ok(nonce) = SecretKey::from_slice(&nonce_bytes) else {
+                continue;
+            };
+            let a = PublicKey::from_secret_key(&secp, &nonce).serialize();
+            let mut challenge = Blake2b::<U32>::new();
+            challenge.update(a);
+            challenge.update(message);
+            challenge.update(domain.owner_pubkey());
+            let challenge_bytes: [u8; 32] = challenge.finalize().into();
+            if (challenge_bytes[0] & 0x80 != 0) != high_challenge {
+                continue;
+            }
+            if secp256k1::Scalar::from_be_bytes(challenge_bytes).is_err() {
+                continue;
+            }
+            let z = (BigUint::from_bytes_be(&nonce_bytes)
+                + BigUint::from_bytes_be(&challenge_bytes) * &owner_scalar)
+                % &order;
+            if z == BigUint::from(0u8) {
+                continue;
+            }
+            let z_raw = z.to_bytes_be();
+            let mut z_bytes = [0u8; 32];
+            z_bytes[32 - z_raw.len()..].copy_from_slice(&z_raw);
+            if (z_bytes[0] & 0x80 != 0) != high_z {
+                continue;
+            }
+            let mut signature = [0u8; 65];
+            signature[..33].copy_from_slice(&a);
+            signature[33..].copy_from_slice(&z_bytes);
+            SchnorrVerifier
+                .verify_signature(&signature, &message, &domain.owner_pubkey())
+                .unwrap();
+            return signature;
+        }
+        panic!("failed to find the requested valid Schnorr sign-bit profile");
     }
 
     fn erg_domain() -> ClaimDomainV2 {
@@ -327,11 +504,11 @@ mod tests {
             "656c938601a973fe7dd8b5984b70430bf2c885b69a0d91268b0f5c4383a02d73"
         );
         let token = ClaimDomainV2::token(
-            base.reserve_nft_id,
+            base.reserve_nft_id(),
             [5u8; 32],
-            base.tracker_nft_id,
-            base.owner_pubkey,
-            base.receiver_pubkey,
+            base.tracker_nft_id(),
+            base.owner_pubkey(),
+            base.receiver_pubkey(),
         )
         .unwrap();
         assert_eq!(
@@ -347,44 +524,95 @@ mod tests {
         let mutations = [
             ClaimDomainV2::erg(
                 [3u8; 32],
-                base.tracker_nft_id,
-                base.owner_pubkey,
-                base.receiver_pubkey,
+                base.tracker_nft_id(),
+                base.owner_pubkey(),
+                base.receiver_pubkey(),
             )
             .unwrap(),
             ClaimDomainV2::erg(
-                base.reserve_nft_id,
+                base.reserve_nft_id(),
                 [4u8; 32],
-                base.owner_pubkey,
-                base.receiver_pubkey,
+                base.owner_pubkey(),
+                base.receiver_pubkey(),
             )
             .unwrap(),
             ClaimDomainV2::erg(
-                base.reserve_nft_id,
-                base.tracker_nft_id,
+                base.reserve_nft_id(),
+                base.tracker_nft_id(),
                 key(3).1,
-                base.receiver_pubkey,
+                base.receiver_pubkey(),
             )
             .unwrap(),
             ClaimDomainV2::erg(
-                base.reserve_nft_id,
-                base.tracker_nft_id,
-                base.owner_pubkey,
+                base.reserve_nft_id(),
+                base.tracker_nft_id(),
+                base.owner_pubkey(),
                 key(4).1,
             )
             .unwrap(),
             ClaimDomainV2::token(
-                base.reserve_nft_id,
+                base.reserve_nft_id(),
                 [5u8; 32],
-                base.tracker_nft_id,
-                base.owner_pubkey,
-                base.receiver_pubkey,
+                base.tracker_nft_id(),
+                base.owner_pubkey(),
+                base.receiver_pubkey(),
             )
             .unwrap(),
         ];
         for mutation in mutations {
             assert_ne!(mutation.claim_key(), base_key);
         }
+
+        let token_a = ClaimDomainV2::token(
+            base.reserve_nft_id(),
+            [5u8; 32],
+            base.tracker_nft_id(),
+            base.owner_pubkey(),
+            base.receiver_pubkey(),
+        )
+        .unwrap();
+        let token_b = ClaimDomainV2::token(
+            base.reserve_nft_id(),
+            [6u8; 32],
+            base.tracker_nft_id(),
+            base.owner_pubkey(),
+            base.receiver_pubkey(),
+        )
+        .unwrap();
+        assert_ne!(token_a.claim_key(), token_b.claim_key());
+    }
+
+    #[test]
+    fn domain_constructors_reject_each_invalid_coordinate() {
+        let base = erg_domain();
+        assert_eq!(
+            ClaimDomainV2::erg(
+                base.reserve_nft_id(),
+                base.tracker_nft_id(),
+                [0u8; 33],
+                base.receiver_pubkey(),
+            ),
+            Err(BasisV2Error::InvalidPublicKey)
+        );
+        assert_eq!(
+            ClaimDomainV2::erg(
+                base.reserve_nft_id(),
+                base.tracker_nft_id(),
+                base.owner_pubkey(),
+                [0u8; 33],
+            ),
+            Err(BasisV2Error::InvalidPublicKey)
+        );
+        assert_eq!(
+            ClaimDomainV2::token(
+                base.reserve_nft_id(),
+                base.reserve_nft_id(),
+                base.tracker_nft_id(),
+                base.owner_pubkey(),
+                base.receiver_pubkey(),
+            ),
+            Err(BasisV2Error::DuplicateReserveAssetId)
+        );
     }
 
     #[test]
@@ -394,9 +622,51 @@ mod tests {
         let claim = ClaimV2::sign(domain, 100, 10, &owner_secret).unwrap();
         claim.verify().unwrap();
 
-        let mut wrong = claim.clone();
-        wrong.domain.reserve_nft_id = [9u8; 32];
-        assert_eq!(wrong.verify(), Err(BasisV2Error::InvalidSignature));
+        let wrong_domain = ClaimDomainV2::erg(
+            [9u8; 32],
+            domain.tracker_nft_id(),
+            domain.owner_pubkey(),
+            domain.receiver_pubkey(),
+        )
+        .unwrap();
+        assert!(matches!(
+            ClaimV2::from_signed(
+                wrong_domain,
+                claim.total_debt(),
+                claim.timestamp(),
+                *claim.signature(),
+            ),
+            Err(BasisV2Error::InvalidSignature | BasisV2Error::NonCanonicalSignature)
+        ));
+    }
+
+    #[test]
+    fn signing_rejects_a_secret_for_another_owner() {
+        let domain = ClaimDomainV2::erg([1u8; 32], [2u8; 32], key(1).1, key(2).1).unwrap();
+        assert_eq!(
+            ClaimV2::sign(domain, 100, 10, &key(3).0),
+            Err(BasisV2Error::OwnerSecretMismatch)
+        );
+    }
+
+    #[test]
+    fn wire_claim_rejects_a_generic_signature_with_negative_ergo_challenge() {
+        let domain = erg_domain();
+        let signature = generic_valid_signature_with_sign_bits(domain, 100, 10, true, false);
+        assert_eq!(
+            ClaimV2::from_signed(domain, 100, 10, signature),
+            Err(BasisV2Error::NonCanonicalSignature)
+        );
+    }
+
+    #[test]
+    fn wire_claim_rejects_a_generic_signature_with_negative_ergo_response() {
+        let domain = erg_domain();
+        let signature = generic_valid_signature_with_sign_bits(domain, 100, 10, false, true);
+        assert_eq!(
+            ClaimV2::from_signed(domain, 100, 10, signature),
+            Err(BasisV2Error::NonCanonicalSignature)
+        );
     }
 
     #[test]
@@ -414,14 +684,30 @@ mod tests {
             domain.signing_message(1, BASIS_V2_MAX_LONG + 1),
             Err(BasisV2Error::InvalidTimestamp)
         );
+        assert_eq!(
+            domain.signing_message(1, 0),
+            Err(BasisV2Error::InvalidTimestamp)
+        );
+        assert_eq!(
+            RedeemedStateV2::new(1, BASIS_V2_MAX_LONG + 1, 0),
+            Err(BasisV2Error::InvalidTotalDebt)
+        );
+        assert_eq!(
+            RedeemedStateV2::new(BASIS_V2_MAX_LONG + 1, 1, 0),
+            Err(BasisV2Error::InvalidTimestamp)
+        );
+        assert_eq!(
+            RedeemedStateV2::new(1, 1, BASIS_V2_MAX_LONG + 1),
+            Err(BasisV2Error::RedeemedExceedsDebt)
+        );
     }
 
     #[test]
     fn redeemed_state_roundtrips_and_advances_monotonically() {
         let state = RedeemedStateV2::new(10, 100, 20).unwrap();
         assert_eq!(RedeemedStateV2::decode(&state.encode()).unwrap(), state);
-        assert_eq!(state.advance(10, 100, 30).unwrap().redeemed, 50);
-        assert_eq!(state.advance(11, 120, 30).unwrap().redeemed, 50);
+        assert_eq!(state.advance(10, 100, 30).unwrap().redeemed(), 50);
+        assert_eq!(state.advance(11, 120, 30).unwrap().redeemed(), 50);
         assert_eq!(state.advance(9, 100, 1), Err(BasisV2Error::ClaimRegression));
         assert_eq!(state.advance(11, 99, 1), Err(BasisV2Error::ClaimRegression));
         assert_eq!(

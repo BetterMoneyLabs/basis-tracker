@@ -174,6 +174,16 @@ impl ServerState {
 
     /// Create a server state that uses real Ergo scanner
     pub fn new(config: NodeConfig, data_dir: impl AsRef<Path>) -> Result<Self, ScannerError> {
+        if let Some(configured) = config.reserve_contract_p2s.as_deref() {
+            let historical = crate::contract_compiler::get_basis_reserve_contract_p2s()
+                .map_err(|error| ScannerError::Generic(error.to_string()))?;
+            if configured != historical {
+                return Err(ScannerError::Generic(
+                    "reserve scanner generation is unsupported; v2 requires the BNS2/BRS2 scanner and unknown identities are rejected"
+                        .to_string(),
+                ));
+            }
+        }
         let start_height = config.start_height.unwrap_or(0);
         let client = Client::new();
         let data_dir = data_dir.as_ref();
@@ -446,13 +456,28 @@ impl ServerState {
     }
 
     /// Parse reserve box into ExtendedReserveInfo
-    pub fn parse_reserve_box(
+    pub(crate) fn parse_reserve_box(
         &self,
         scan_box: &ScanBox,
     ) -> Result<ExtendedReserveInfo, ScannerError> {
         let box_id = scan_box.box_id.clone();
         let value = scan_box.value;
         let creation_height = scan_box.creation_height;
+
+        let expected_tree = crate::contract_compiler::get_basis_reserve_ergo_tree_hex()
+            .map_err(|error| ScannerError::Generic(error.to_string()))?;
+        let actual_tree = hex::decode(&scan_box.ergo_tree).map_err(|_| {
+            ScannerError::InvalidReserveBox(format!("Invalid ErgoTree encoding in box {}", box_id))
+        })?;
+        let expected_tree = hex::decode(expected_tree).map_err(|_| {
+            ScannerError::Generic("embedded historical ErgoTree is invalid".to_string())
+        })?;
+        if actual_tree != expected_tree {
+            return Err(ScannerError::InvalidReserveBox(format!(
+                "Reserve contract generation mismatch in box {}",
+                box_id
+            )));
+        }
 
         // Extract owner public key from R4 register
         let owner_pubkey_raw = scan_box
@@ -843,6 +868,10 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn historical_tree() -> String {
+        crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap()
+    }
+
     #[test]
     fn node_config_debug_redacts_api_key() {
         let sentinel = "sentinel-node-api-key-do-not-log";
@@ -873,7 +902,7 @@ mod tests {
             box_id: "test_box_id".to_string(),
             value: 1000000000, // 1 ERG
             creation_height: 1000,
-            ergo_tree: "test_ergo_tree".to_string(),
+            ergo_tree: historical_tree(),
             transaction_id: "test_tx_id".to_string(),
             additional_registers: registers,
             assets: vec![],
@@ -932,7 +961,7 @@ mod tests {
             box_id: "test_box_id_2".to_string(),
             value: 1000000000, // 1 ERG
             creation_height: 1000,
-            ergo_tree: "test_ergo_tree".to_string(),
+            ergo_tree: historical_tree(),
             transaction_id: "test_tx_id".to_string(),
             additional_registers: registers,
             assets: vec![],
@@ -985,7 +1014,7 @@ mod tests {
             box_id: "test_box_id_3".to_string(),
             value: 1000000000, // 1 ERG
             creation_height: 1000,
-            ergo_tree: "test_ergo_tree".to_string(),
+            ergo_tree: historical_tree(),
             transaction_id: "test_tx_id".to_string(),
             additional_registers: registers,
             assets: vec![],
@@ -1021,5 +1050,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn scanner_rejects_v2_and_unknown_generations_before_opening_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "basis_scanner_generation_guard_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let exact_v2 = crate::contract_compiler::get_basis_v2_contract_p2s(
+            crate::contract_compiler::BasisV2ContractKind::Erg,
+        )
+        .unwrap();
+        for configured in [exact_v2, "unknown-generation".to_string()] {
+            let config = NodeConfig {
+                reserve_contract_p2s: Some(configured),
+                ..NodeConfig::default()
+            };
+            assert!(matches!(
+                ServerState::new(config, &root),
+                Err(ScannerError::Generic(message)) if message.contains("generation is unsupported")
+            ));
+            assert!(!root.exists());
+        }
+    }
+
+    #[test]
+    fn parser_rejects_a_box_from_another_contract_generation_first() {
+        let mut registers = HashMap::new();
+        registers.insert(
+            "R4".to_string(),
+            "02c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3".to_string(),
+        );
+        registers.insert("R6".to_string(), format!("0e20{}", "11".repeat(32)));
+        let scan_box = ScanBox {
+            box_id: "wrong-generation".to_string(),
+            value: 1_000_000,
+            ergo_tree: crate::contract_compiler::BASIS_V2_ERG_ERGO_TREE_HEX
+                .trim()
+                .to_string(),
+            creation_height: 1,
+            transaction_id: "tx".to_string(),
+            additional_registers: registers,
+            assets: Vec::new(),
+        };
+        let root = std::env::temp_dir().join(format!(
+            "basis_scanner_parser_guard_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let state = ServerState::new(NodeConfig::default(), &root).unwrap();
+        assert!(matches!(
+            state.parse_reserve_box(&scan_box),
+            Err(ScannerError::InvalidReserveBox(message)) if message.contains("generation mismatch")
+        ));
     }
 }
