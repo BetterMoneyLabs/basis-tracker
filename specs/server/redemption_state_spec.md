@@ -489,7 +489,7 @@ semantics:
 - Acceptance policies can include a `no_pending_refund` predicate to reject notes backed by a reserve with a non-zero R7 refund height.
 
 The runtime now pins the full byte-exact Basis v2 ERG and token ErgoTrees from
-the reviewed ChainCash source receipt. Unknown identities and any one-byte
+the pinned ChainCash candidate source-to-byte receipt. Unknown identities and any one-byte
 mutation are rejected; the historical identity remains only as a temporary
 compatibility mode, and exact v2 activation remains startup-disabled. The old builder
 does not emit the reserve-bound claim domain, fixed 32/24 R5, mandatory

@@ -1,8 +1,6 @@
 //! Simple integration tests that work with the reserves-only scanner implementation
 
-use crate::ergo_scanner::{
-    create_default_scanner, NodeConfig, ReserveEvent, ScannerError, ServerState,
-};
+use crate::ergo_scanner::{NodeConfig, ScannerError, ServerState};
 
 /// Simple integration test suite that works with the reserves-only scanner
 pub struct SimpleIntegrationTestSuite {
@@ -19,7 +17,14 @@ impl SimpleIntegrationTestSuite {
                 .unwrap()
                 .as_nanos()
         ));
-        let scanner = create_default_scanner(data_dir)?;
+        let config = NodeConfig {
+            reserve_contract_p2s: Some(
+                crate::contract_compiler::get_basis_reserve_contract_p2s()
+                    .map_err(|error| ScannerError::Generic(error.to_string()))?,
+            ),
+            ..NodeConfig::default()
+        };
+        let scanner = ServerState::new(config, data_dir)?;
         Ok(Self { scanner })
     }
 

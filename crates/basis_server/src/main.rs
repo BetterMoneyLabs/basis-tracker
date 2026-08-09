@@ -3,12 +3,13 @@ use axum::{
     Router,
 };
 use basis_server::{
-    api::*, build_redemption, reserve_api::*, store::EventStore, submit_redemption, AppConfig,
-    AppState, EventType, PublicationLease, SharedTrackerState, TrackerBoxUpdateConfig,
+    api::*, handle_options, reserve_api::*, reserve_construction_routes, store::EventStore,
+    submit_redemption, AppConfig, AppState, EventType, PublicationLease, SharedTrackerState,
+    TrackerBoxUpdateConfig,
     TrackerBoxUpdater, TrackerCommand, TrackerEvent,
 };
 use basis_store::{
-    ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
+    ergo_scanner::{start_scanner, ReserveEvent, ServerState},
     tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
     ReserveTracker,
 };
@@ -227,20 +228,10 @@ async fn main() {
     scanner_config.reserve_contract_p2s = Some(config.ergo.basis_reserve_contract_p2s.clone());
 
     // Create real scanner state with configured node URL and contract template
-    let ergo_scanner = match ServerState::new(scanner_config, &data_dir) {
-        Ok(scanner) => scanner,
-        Err(e) => {
-            tracing::warn!("Failed to create Ergo scanner: {}", e);
-            tracing::info!("Continuing without blockchain scanner...");
-            // Create a minimal scanner that won't actually scan
-            let minimal_config = NodeConfig {
-                node_url: "http://127.0.0.1:9053".to_string(), // Dummy URL that won't be used
-                ..Default::default()
-            };
-            ServerState::new(minimal_config, &data_dir)
-                .unwrap_or_else(|_| panic!("Failed to create minimal scanner"))
-        }
-    };
+    let ergo_scanner = ServerState::new(scanner_config, &data_dir).unwrap_or_else(|error| {
+        tracing::error!("Failed to create generation-bound Ergo scanner: {}", error);
+        std::process::exit(1);
+    });
 
     // Start the scanner background task
     if let Err(e) = start_scanner(ergo_scanner.clone()).await {
@@ -955,18 +946,10 @@ async fn main() {
             post(prepare_redemption).options(handle_options),
         )
         .route(
-            "/redemption/build",
-            post(build_redemption).options(handle_options),
-        )
-        .route(
             "/redemption/submit",
             post(submit_redemption).options(handle_options),
         )
         .route("/reserves", get(get_all_reserves))
-        .route(
-            "/reserves/create",
-            post(create_reserve_payload).options(handle_options),
-        )
         .route(
             "/reserves/submit",
             post(submit_reserve_transaction).options(handle_options),
@@ -985,10 +968,7 @@ async fn main() {
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
-        .route(
-            "/config/reserve-contract-p2s",
-            get(get_basis_reserve_contract_p2s),
-        )
+        .merge(reserve_construction_routes())
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(
@@ -1366,15 +1346,6 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
             }
         }
     }
-}
-
-/// Handle OPTIONS preflight requests for CORS
-async fn handle_options() -> impl axum::response::IntoResponse {
-    (
-        axum::http::StatusCode::OK,
-        [("Access-Control-Allow-Origin", "*")],
-        "",
-    )
 }
 
 /// Process a reserve event and store it in the event store

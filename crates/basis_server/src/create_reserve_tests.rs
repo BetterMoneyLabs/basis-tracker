@@ -1,16 +1,20 @@
 #[cfg(test)]
 mod create_reserve_tests {
-    use axum::{extract::State, http::StatusCode, Json};
+    use axum::{
+        body::Body,
+        extract::State,
+        http::{Method, Request, StatusCode},
+        Json,
+    };
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
     use crate::{
-        api::{create_reserve_payload, get_basis_reserve_contract_p2s},
-        models::CreateReserveRequest,
-        redemption_build::{build_redemption, RedemptionBuildRequest},
+        api::create_reserve_payload, models::CreateReserveRequest, reserve_construction_routes,
         AppState, TrackerCommand,
     };
     use basis_store::ergo_scanner::{NodeConfig, ServerState};
+    use tower::ServiceExt;
 
     // Helper function to create a unique temporary directory for test storage
     fn unique_test_storage_path(prefix: &str) -> std::path::PathBuf {
@@ -37,6 +41,9 @@ mod create_reserve_tests {
         // Create a minimal configuration
         let config = NodeConfig {
             node_url: "http://localhost:9553".to_string(),
+            reserve_contract_p2s: Some(
+                basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
             ..Default::default()
         };
 
@@ -50,14 +57,8 @@ mod create_reserve_tests {
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let scanner = ServerState::new(config, &data_dir).unwrap_or_else(|_| {
-            // Fallback to a scanner with minimal initialization that doesn't access storage
-            let config = NodeConfig {
-                node_url: "http://example.com".to_string(), // Invalid URL to avoid file access
-                ..Default::default()
-            };
-            ServerState::new(config, &data_dir).expect("Fallback scanner creation should succeed")
-        });
+        let scanner = ServerState::new(config, &data_dir)
+            .expect("explicit historical scanner creation should succeed");
 
         // Create a minimal config for testing
         let test_config = std::sync::Arc::new(crate::config::AppConfig {
@@ -193,35 +194,49 @@ mod create_reserve_tests {
 
         for configured in [exact_v2, legacy, "unknown-generation".to_string()] {
             let state = create_test_app_state_with_p2s(configured);
-            let (p2s_status, p2s_response) =
-                get_basis_reserve_contract_p2s(State(state.clone())).await;
-            assert_eq!(p2s_status, StatusCode::SERVICE_UNAVAILABLE);
-            assert!(!p2s_response.success);
-
-            let build_request = RedemptionBuildRequest {
-                issuer_pubkey: "02".to_string(),
-                recipient_pubkey: "03".to_string(),
-                amount: 1,
-                timestamp: 1,
-                issuer_signature: String::new(),
-                emergency: false,
-                tracker_box_id: None,
-            };
-            let (build_status, build_response) =
-                build_redemption(State(state.clone()), Json(build_request)).await;
-            assert_eq!(build_status, StatusCode::SERVICE_UNAVAILABLE);
-            assert!(!build_response.success);
-
-            let create_request = CreateReserveRequest {
-                nft_id: "12".repeat(32),
-                owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
-                    .to_string(),
-                erg_amount: 1_000_000,
-            };
-            let (create_status, create_response) =
-                create_reserve_payload(State(state), Json(create_request)).await;
-            assert_eq!(create_status, StatusCode::SERVICE_UNAVAILABLE);
-            assert!(!create_response.success);
+            let build_request = serde_json::json!({
+                "issuer_pubkey": "02",
+                "recipient_pubkey": "03",
+                "amount": 1,
+                "timestamp": 1,
+                "issuer_signature": "",
+                "emergency": false,
+                "tracker_box_id": null
+            });
+            let create_request = serde_json::json!({
+                "nft_id": "12".repeat(32),
+                "owner_pubkey": "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12",
+                "erg_amount": 1_000_000
+            });
+            let app = reserve_construction_routes().with_state(state);
+            let requests = [
+                (Method::GET, "/config/reserve-contract-p2s", Body::empty()),
+                (
+                    Method::POST,
+                    "/redemption/build",
+                    Body::from(serde_json::to_vec(&build_request).unwrap()),
+                ),
+                (
+                    Method::POST,
+                    "/reserves/create",
+                    Body::from(serde_json::to_vec(&create_request).unwrap()),
+                ),
+            ];
+            for (method, path, body) in requests {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .header("content-type", "application/json")
+                            .body(body)
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            }
         }
     }
 

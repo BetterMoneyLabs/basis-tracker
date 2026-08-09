@@ -174,15 +174,19 @@ impl ServerState {
 
     /// Create a server state that uses real Ergo scanner
     pub fn new(config: NodeConfig, data_dir: impl AsRef<Path>) -> Result<Self, ScannerError> {
-        if let Some(configured) = config.reserve_contract_p2s.as_deref() {
-            let historical = crate::contract_compiler::get_basis_reserve_contract_p2s()
-                .map_err(|error| ScannerError::Generic(error.to_string()))?;
-            if configured != historical {
-                return Err(ScannerError::Generic(
-                    "reserve scanner generation is unsupported; v2 requires the BNS2/BRS2 scanner and unknown identities are rejected"
-                        .to_string(),
-                ));
-            }
+        let configured = config.reserve_contract_p2s.as_deref().ok_or_else(|| {
+            ScannerError::Generic(
+                "reserve scanner contract generation is required before storage can be opened"
+                    .to_string(),
+            )
+        })?;
+        let historical = crate::contract_compiler::get_basis_reserve_contract_p2s()
+            .map_err(|error| ScannerError::Generic(error.to_string()))?;
+        if configured != historical {
+            return Err(ScannerError::Generic(
+                "reserve scanner generation is unsupported; v2 requires the BNS2/BRS2 scanner and unknown identities are rejected"
+                    .to_string(),
+            ));
         }
         let start_height = config.start_height.unwrap_or(0);
         let client = Client::new();
@@ -872,6 +876,15 @@ mod tests {
         crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap()
     }
 
+    fn historical_config() -> NodeConfig {
+        NodeConfig {
+            reserve_contract_p2s: Some(
+                crate::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
+            ..NodeConfig::default()
+        }
+    }
+
     #[test]
     fn node_config_debug_redacts_api_key() {
         let sentinel = "sentinel-node-api-key-do-not-log";
@@ -909,7 +922,7 @@ mod tests {
         };
 
         // Create a dummy server state for testing
-        let config = NodeConfig::default();
+        let config = historical_config();
         let data_dir = std::env::temp_dir().join(format!(
             "basis_scanner_test_{}_{}",
             std::time::SystemTime::now()
@@ -968,7 +981,7 @@ mod tests {
         };
 
         // Create a dummy server state for testing
-        let config = NodeConfig::default();
+        let config = historical_config();
         let data_dir = std::env::temp_dir().join(format!(
             "basis_scanner_test_{}_{}",
             std::time::SystemTime::now()
@@ -1021,7 +1034,7 @@ mod tests {
         };
 
         // Create a dummy server state for testing
-        let config = NodeConfig::default();
+        let config = historical_config();
         let data_dir = std::env::temp_dir().join(format!(
             "basis_scanner_test_{}_{}",
             std::time::SystemTime::now()
@@ -1053,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn scanner_rejects_v2_and_unknown_generations_before_opening_storage() {
+    fn scanner_rejects_missing_v2_and_unknown_generations_before_opening_storage() {
         let root = std::env::temp_dir().join(format!(
             "basis_scanner_generation_guard_{}_{}",
             std::process::id(),
@@ -1067,16 +1080,75 @@ mod tests {
             crate::contract_compiler::BasisV2ContractKind::Erg,
         )
         .unwrap();
-        for configured in [exact_v2, "unknown-generation".to_string()] {
+        let configurations = [
+            (None, "contract generation is required"),
+            (Some(exact_v2), "generation is unsupported"),
+            (
+                Some("unknown-generation".to_string()),
+                "generation is unsupported",
+            ),
+        ];
+        for (configured, expected) in configurations {
             let config = NodeConfig {
-                reserve_contract_p2s: Some(configured),
+                reserve_contract_p2s: configured,
                 ..NodeConfig::default()
             };
             assert!(matches!(
                 ServerState::new(config, &root),
-                Err(ScannerError::Generic(message)) if message.contains("generation is unsupported")
+                Err(ScannerError::Generic(message)) if message.contains(expected)
             ));
             assert!(!root.exists());
+        }
+    }
+
+    #[test]
+    fn unsupported_generation_never_loads_a_seeded_unversioned_reserve() {
+        let exact_v2 = crate::contract_compiler::get_basis_v2_contract_p2s(
+            crate::contract_compiler::BasisV2ContractKind::Erg,
+        )
+        .unwrap();
+        for (marker, configured) in [
+            (1u8, None),
+            (2u8, Some(exact_v2)),
+            (3u8, Some("unknown-generation".to_string())),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "basis_scanner_seeded_generation_guard_{}_{}_{}",
+                std::process::id(),
+                marker,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let storage = ReserveStorage::open(root.join("reserves")).unwrap();
+            let mut reserve = ExtendedReserveInfo::new(
+                &[marker; 32],
+                &[2u8; 33],
+                1_000_000,
+                Some(&[3u8; 32]),
+                1,
+                0,
+            );
+            reserve.set_contract_address("unversioned-or-wrong-generation".to_string());
+            storage.store_reserve(&reserve).unwrap();
+            drop(storage);
+
+            let config = NodeConfig {
+                reserve_contract_p2s: configured,
+                ..NodeConfig::default()
+            };
+            assert!(ServerState::new(config, &root).is_err());
+
+            let storage = ReserveStorage::open(root.join("reserves")).unwrap();
+            let persisted = storage.get_all_reserves().unwrap();
+            assert_eq!(persisted.len(), 1);
+            assert_eq!(persisted[0].box_id, reserve.box_id);
+            assert_eq!(
+                persisted[0].base_info.contract_address,
+                reserve.base_info.contract_address
+            );
         }
     }
 
@@ -1108,7 +1180,7 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let state = ServerState::new(NodeConfig::default(), &root).unwrap();
+        let state = ServerState::new(historical_config(), &root).unwrap();
         assert!(matches!(
             state.parse_reserve_box(&scan_box),
             Err(ScannerError::InvalidReserveBox(message)) if message.contains("generation mismatch")

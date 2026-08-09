@@ -9,8 +9,8 @@ use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 pub const BASIS_V2_ERG_ERGO_TREE_HEX: &str = include_str!("../contracts/basis-v2.p2s");
 /// Full token-reserve ErgoTree bytes pinned by the ChainCash Basis v2 source receipt.
 pub const BASIS_V2_TOKEN_ERGO_TREE_HEX: &str = include_str!("../contracts/basis-token-v2.p2s");
-/// Machine-readable source-to-byte provenance copied from the reviewed
-/// ChainCash receipt. It is evidence metadata, not an activation flag.
+/// Machine-readable source-to-byte provenance copied from the pinned
+/// ChainCash candidate receipt. It is evidence metadata, not an activation flag.
 pub const BASIS_V2_PROVENANCE_JSON: &str = include_str!("../contracts/basis-v2-provenance.json");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

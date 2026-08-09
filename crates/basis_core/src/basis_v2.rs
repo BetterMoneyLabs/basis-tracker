@@ -494,6 +494,21 @@ mod tests {
         ClaimDomainV2::erg([1u8; 32], [2u8; 32], key(1).1, key(2).1).unwrap()
     }
 
+    fn challenge_is_non_negative(
+        signature: &Signature,
+        domain: ClaimDomainV2,
+        total_debt: u64,
+        timestamp: u64,
+    ) -> bool {
+        let message = domain.signing_message(total_debt, timestamp).unwrap();
+        let mut challenge = Blake2b::<U32>::new();
+        challenge.update(&signature[..33]);
+        challenge.update(message);
+        challenge.update(domain.owner_pubkey());
+        let bytes: [u8; 32] = challenge.finalize().into();
+        bytes[0] & 0x80 == 0 && secp256k1::Scalar::from_be_bytes(bytes).is_ok()
+    }
+
     #[test]
     fn domain_tags_match_the_contract_bytes() {
         assert_eq!(hex::encode(BASIS_V2_ERG_DOMAIN_TAG), "4241534953020000");
@@ -617,27 +632,29 @@ mod tests {
 
     #[test]
     fn signed_claim_is_bound_to_its_exact_domain() {
-        let (owner_secret, owner) = key(1);
-        let domain = ClaimDomainV2::erg([1u8; 32], [2u8; 32], owner, key(2).1).unwrap();
-        let claim = ClaimV2::sign(domain, 100, 10, &owner_secret).unwrap();
-        claim.verify().unwrap();
+        let domain = erg_domain();
+        let signature = generic_valid_signature_with_sign_bits(domain, 100, 10, false, false);
+        ClaimV2::from_signed(domain, 100, 10, signature).unwrap();
 
-        let wrong_domain = ClaimDomainV2::erg(
-            [9u8; 32],
-            domain.tracker_nft_id(),
-            domain.owner_pubkey(),
-            domain.receiver_pubkey(),
-        )
-        .unwrap();
-        assert!(matches!(
-            ClaimV2::from_signed(
-                wrong_domain,
-                claim.total_debt(),
-                claim.timestamp(),
-                *claim.signature(),
-            ),
-            Err(BasisV2Error::InvalidSignature | BasisV2Error::NonCanonicalSignature)
-        ));
+        // Select deterministically a different reserve domain whose challenge
+        // is also in the canonical non-negative profile. The rejection below
+        // must therefore come from the Schnorr equation, not the profile gate.
+        let wrong_domain = (3u8..=u8::MAX)
+            .map(|marker| {
+                ClaimDomainV2::erg(
+                    [marker; 32],
+                    domain.tracker_nft_id(),
+                    domain.owner_pubkey(),
+                    domain.receiver_pubkey(),
+                )
+                .unwrap()
+            })
+            .find(|candidate| challenge_is_non_negative(&signature, *candidate, 100, 10))
+            .expect("a deterministic canonical wrong-domain challenge");
+        assert_eq!(
+            ClaimV2::from_signed(wrong_domain, 100, 10, signature,),
+            Err(BasisV2Error::InvalidSignature)
+        );
     }
 
     #[test]

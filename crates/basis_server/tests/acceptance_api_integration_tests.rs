@@ -823,6 +823,9 @@ async fn create_test_app_with_liability_state(
     let scanner = basis_store::ergo_scanner::ServerState::new(
         NodeConfig {
             node_url: "http://example.com".to_string(),
+            reserve_contract_p2s: Some(
+                basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
             ..Default::default()
         },
         scanner_data_dir,
@@ -916,6 +919,9 @@ async fn create_test_app_with_policy_routes(
     let scanner = basis_store::ergo_scanner::ServerState::new(
         NodeConfig {
             node_url: "http://example.com".to_string(),
+            reserve_contract_p2s: Some(
+                basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
             ..Default::default()
         },
         scanner_data_dir,
@@ -1010,6 +1016,9 @@ async fn create_test_app_with_all_routes(
     let scanner = basis_store::ergo_scanner::ServerState::new(
         NodeConfig {
             node_url: "http://example.com".to_string(),
+            reserve_contract_p2s: Some(
+                basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
             ..Default::default()
         },
         scanner_data_dir,

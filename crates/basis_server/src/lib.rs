@@ -12,6 +12,10 @@ pub mod tracker_box_updater;
 #[cfg(test)]
 mod create_reserve_tests;
 
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use tokio::sync::Mutex;
 
 // Re-export main types for external use
@@ -51,6 +55,34 @@ pub struct AppState {
 pub struct PublicationLease {
     pub id: u64,
     pub digest: [u8; 33],
+}
+
+/// Handle OPTIONS preflight requests for CORS.
+pub async fn handle_options() -> impl axum::response::IntoResponse {
+    (
+        axum::http::StatusCode::OK,
+        [("Access-Control-Allow-Origin", "*")],
+        "",
+    )
+}
+
+/// The generation-sensitive construction routes used by the production
+/// server. Keeping their wiring here lets integration tests exercise the same
+/// router that `main` merges into the application.
+pub fn reserve_construction_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/reserves/create",
+            post(api::create_reserve_payload).options(handle_options),
+        )
+        .route(
+            "/redemption/build",
+            post(redemption_build::build_redemption).options(handle_options),
+        )
+        .route(
+            "/config/reserve-contract-p2s",
+            get(api::get_basis_reserve_contract_p2s),
+        )
 }
 
 // Commands that can be sent to the tracker thread

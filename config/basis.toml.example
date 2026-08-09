@@ -8,10 +8,11 @@ data_dir = "data"
 database_url = "sqlite:data/basis.db"
 
 [ergo]
-# The historical reserve identity is the temporary compatibility default. All
-# reserve construction is disabled; this is not a legacy-safety endorsement.
-# The reviewed and pinned Basis v2 candidate identity is embedded, but runtime activation fails
-# closed until the v2 scanner and BNS2/BRS2 stores are installed.
+# The historical reserve identity is the temporary compatibility default. The
+# server HTTP construction and P2S routes are disabled; this is not a claim
+# about legacy library prototypes and not a legacy-safety endorsement.
+# The pinned Basis v2 candidate identity is embedded, but runtime activation
+# fails closed until the v2 scanner and BNS2/BRS2 stores are installed.
 # Tracker NFT ID (hex-encoded) - required for reserve creation and redemption
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
 tracker_nft_id = "your_tracker_nft_token_id_here"

@@ -168,7 +168,7 @@ impl AppConfig {
         &self.ergo.basis_reserve_contract_p2s
     }
 
-    /// Require the exact ChainCash-reviewed Basis v2 ERG contract identity.
+    /// Require the exact Basis v2 ERG identity from the pinned source-to-byte receipt.
     pub fn validate_basis_v2_erg_contract(&self) -> Result<(), String> {
         basis_store::contract_compiler::validate_basis_v2_contract_p2s(
             self.basis_reserve_contract_p2s(),

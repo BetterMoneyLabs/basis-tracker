@@ -33,6 +33,9 @@ mod cors_tests {
         // Create a default NodeConfig for the scanner
         let config = basis_store::ergo_scanner::NodeConfig {
             node_url: "http://localhost:9053".to_string(),
+            reserve_contract_p2s: Some(
+                basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
             ..Default::default()
         };
 

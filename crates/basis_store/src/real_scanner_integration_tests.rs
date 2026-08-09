@@ -13,6 +13,10 @@ impl RealScannerIntegrationTestSuite {
     pub fn new(node_url: &str) -> Result<Self, ScannerError> {
         let config = NodeConfig {
             node_url: node_url.to_string(),
+            reserve_contract_p2s: Some(
+                crate::contract_compiler::get_basis_reserve_contract_p2s()
+                    .map_err(|error| ScannerError::Generic(error.to_string()))?,
+            ),
             ..Default::default()
         };
         let scanner = ServerState::new(
