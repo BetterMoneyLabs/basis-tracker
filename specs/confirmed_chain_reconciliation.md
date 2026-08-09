@@ -34,8 +34,11 @@ binds all of the following:
 
 For block version 1, each transaction Merkle leaf is the transaction id,
 derived as the Blake2b-256 hash of `bytes_to_sign`. For later versions, the raw
-spending-proof bytes of all inputs are appended to that same transaction-id
-leaf. Witnesses are not separate leaves, hashed independently, or truncated.
+leaf order is every transaction id followed by every witness serialized id.
+Each witness id is `Blake2b256(concat(input spending proofs)).tail`, a 31-byte
+leaf. Transaction and witness leaves are grouped, not interleaved; raw proofs,
+full 32-byte proof hashes, and `transaction-id || proof` leaves are rejected.
+This follows Ergo node v6.0.3 commit `28ebb184`.
 
 Node transaction metadata is used only to locate evidence. The block
 association is established by the selected header, full block, exact
@@ -50,6 +53,15 @@ may be created only with one-shot explicit approval for a history-free BNS1
 generation. Existing confirmed metadata or a pending publication requires the
 exact existing manifest; a missing, orphaned, or differently bound journal is
 rejected before replacement state is written.
+
+Every accepted effect records the complete finality policy snapshot: policy id
+and version, acceptance depth, evidence lifetime, reorg horizon, named network,
+and a digest of the configured node endpoint. It also records a digest of the
+exact canonical evidence and a domain-separated decision digest covering the
+effect and policy. Rollback and retirement tickets carry and revalidate the
+same snapshot. A restart under a different policy, horizon, network, or source
+is rejected; changing those values requires an explicit versioned migration or
+fresh acceptance rule.
 
 BNS1 also stores one checksummed global projection receipt containing the exact
 transaction, successor box, block, inclusion height, accepted depth, intent,
@@ -87,9 +99,16 @@ timeouts and malformed or incoherent evidence never release the fence. This
 can remain an availability wait indefinitely if the configured node loses the
 transaction: the implementation never releases the fence or constructs a
 competing successor, and does not yet schedule exact-byte rebroadcast retries.
+Malformed successful responses and other integrity failures terminate and
+quarantine the publisher. A transport failure while an already accepted anchor
+is being revalidated does the same: all tracker-state and confirmation
+consumers share that one-way health gate, so a stale `Confirmed` value cannot
+remain readable after the sole reorg watcher stops.
 
 If the actor receipt exists at `AcceptanceReady`, its transaction id and root
-must exactly match the journal. An absent receipt is permitted only because the
+must exactly match the journal, while the journal independently revalidates
+every effect field against the retained signed intent, policy/evidence digest,
+decision digest, and transition-event history. An absent receipt is permitted only because the
 actor may already have completed the idempotent apply before the journal moved
 to `Applied`; the actor then verifies the complete persisted provenance before
 accepting replay. Any other join fails closed.
@@ -140,8 +159,9 @@ These are application-finality controls, not consensus finality claims.
 ## Integration dependency: bounded node responses
 
 This change is not a standalone service-resource-bounds closure. It must be
-integrated with the bounded-node-request work rooted at commit `248929c` before
-deployment. In this module, every reconciler evidence request flows through
+integrated with the bounded-node-request work rooted at exact commit
+`248929c5dbb923e4ce7e3530374f4fe66be13fbc` before deployment. In this module,
+every reconciler evidence request flows through
 `get_node_bytes`: `/info`, `/blocks/chainSlice`,
 `/blockchain/transaction/byId`, `/blocks/{id}`, and
 `/blockchain/box/byId`. Its `send` followed by `bytes` needs the shared bounded
@@ -149,3 +169,9 @@ body reader. The transaction-production side also has direct node response
 reads after `send` in `find_tracker_box`, `get_wallet_boxes`, `get_box_binary`,
 `get_node_height`, `sign_transaction`, and `broadcast_transaction`; those JSON,
 text, and error-body reads must consume the same service-bounds abstraction.
+The actor request and reply waits in `begin_publication`, `abort_publication`,
+`record_publication_attempt`, `confirm_publication`, and
+`rollback_publication` also require the same integration's bounded admission
+and response deadlines. Until that exact merge is reviewed and its combined
+closure replayed, this change must not be described or deployed as a standalone
+resource-bounds fix.

@@ -534,9 +534,9 @@ impl TrackerStateManager {
     }
 
     fn ensure_healthy(&self) -> Result<(), NoteError> {
-        if self.poisoned.load(Ordering::SeqCst) {
+        if self.poisoned.load(Ordering::SeqCst) || !self.publication_health.is_healthy() {
             Err(NoteError::StorageOutcomeUnknown(
-                "Tracker state manager is quarantined after an indeterminate durable write; restart and reconcile before reuse"
+                "Tracker state manager or confirmed-chain publisher is quarantined; restart and reconcile before exposing commitment effects"
                     .to_string(),
             ))
         } else {
@@ -1089,27 +1089,41 @@ impl TrackerStateManager {
     }
 
     /// Get a clone of the confirmation record for a note, if one exists.
+    pub fn try_get_confirmation(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<Option<NoteConfirmation>, NoteError> {
+        self.ensure_healthy()?;
+        let key = Self::confirmation_key(issuer_pubkey, recipient_pubkey);
+        Ok(self.confirmations.get(&key).cloned())
+    }
+
+    /// Compatibility accessor for process-internal callers. A quarantined
+    /// publisher is service-fatal and must never yield a stale confirmation.
     pub fn get_confirmation(
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Option<NoteConfirmation> {
-        if let Err(e) = self.ensure_healthy() {
-            panic!("Cannot read confirmation from quarantined tracker: {:?}", e);
-        }
-        let key = Self::confirmation_key(issuer_pubkey, recipient_pubkey);
-        self.confirmations.get(&key).cloned()
+        self.try_get_confirmation(issuer_pubkey, recipient_pubkey)
+            .unwrap_or_else(|error| {
+                panic!("Cannot read confirmation from quarantined tracker: {error:?}")
+            })
     }
 
     /// Get a snapshot of all confirmation records keyed by note key.
+    pub fn try_all_confirmations(
+        &self,
+    ) -> Result<std::collections::HashMap<NoteKeyBytes, NoteConfirmation>, NoteError> {
+        self.ensure_healthy()?;
+        Ok(self.confirmations.clone())
+    }
+
     pub fn all_confirmations(&self) -> std::collections::HashMap<NoteKeyBytes, NoteConfirmation> {
-        if let Err(e) = self.ensure_healthy() {
-            panic!(
-                "Cannot read confirmations from quarantined tracker: {:?}",
-                e
-            );
-        }
-        self.confirmations.clone()
+        self.try_all_confirmations().unwrap_or_else(|error| {
+            panic!("Cannot read confirmations from quarantined tracker: {error:?}")
+        })
     }
 
     /// Reconstruct the latest historical on-chain projection from the

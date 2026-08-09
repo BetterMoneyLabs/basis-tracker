@@ -19,6 +19,8 @@ use std::{
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
+const RECONCILIATION_NETWORK_ID: &str = "ergo-mainnet";
+
 /// Create a default tracker public key that looks realistic (compressed format with proper prefix)
 fn create_default_tracker_pubkey() -> [u8; 33] {
     [
@@ -62,7 +64,7 @@ pub struct SharedTrackerState {
     pub tracker_pubkey: Arc<RwLock<[u8; 33]>>,
     pub tracker_box_id: Arc<RwLock<Option<String>>>,
     pub tracker_nft_id: Arc<RwLock<Option<String>>>,
-    pub confirmed: Arc<RwLock<ConfirmedState>>,
+    confirmed: Arc<RwLock<ConfirmedState>>,
     pub pending: Arc<RwLock<PendingState>>,
     historical_confirmation: Arc<RwLock<Option<basis_store::ConfirmedProjectionAnchor>>>,
     confirmation_history_present: Arc<RwLock<bool>>,
@@ -202,6 +204,9 @@ impl SharedTrackerState {
 
     /// Snapshot the confirmed state.
     pub fn get_confirmed(&self) -> ConfirmedState {
+        if !self.is_publication_healthy() {
+            return ConfirmedState::default();
+        }
         self.confirmed.read().map(|c| c.clone()).unwrap_or_default()
     }
 
@@ -462,6 +467,8 @@ mod secret_redaction_tests {
 pub enum TrackerBoxUpdaterError {
     #[error("HTTP request failed: {0}")]
     HttpError(String),
+    #[error("node response or local observation integrity failed: {0}")]
+    InvalidNodeResponse(String),
     #[error("No tracker NFT ID configured")]
     NoTrackerNftId,
     #[error("No tracker box found on chain")]
@@ -590,6 +597,22 @@ impl TrackerBoxUpdater {
     pub async fn start(
         config: TrackerBoxUpdateConfig,
         shared_state: SharedTrackerState,
+        shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        cmd_tx: Option<tokio::sync::mpsc::Sender<crate::TrackerCommand>>,
+    ) -> Result<(), TrackerBoxUpdaterError> {
+        let health = shared_state.clone();
+        let result = Self::run(config, shared_state, shutdown_rx, cmd_tx).await;
+        if result.is_err() {
+            // Every non-graceful updater termination closes the same one-way
+            // gate consumed by tracker accounting and redemption reads.
+            health.quarantine_publication();
+        }
+        result
+    }
+
+    async fn run(
+        config: TrackerBoxUpdateConfig,
+        shared_state: SharedTrackerState,
         mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
         cmd_tx: Option<tokio::sync::mpsc::Sender<crate::TrackerCommand>>,
     ) -> Result<(), TrackerBoxUpdaterError> {
@@ -632,15 +655,20 @@ impl TrackerBoxUpdater {
             ));
         }
         let client = Self::node_client(&config)?;
+        let source_id =
+            ReconciliationPolicy::source_id_for(RECONCILIATION_NETWORK_ID, &config.node_url);
         let policy = ReconciliationPolicy::new(
             config.min_successor_depth,
             config.max_evidence_age_ms,
             reorg_monitor_depth,
+            RECONCILIATION_NETWORK_ID,
+            source_id,
         );
         let restored_pending = Self::restored_pending_transaction(&shared_state)?;
         let historical_confirmation = shared_state.get_historical_confirmation();
+        let confirmation_history_present = shared_state.has_confirmation_history();
         let bootstrap = Self::journal_bootstrap_policy(
-            shared_state.has_confirmation_history(),
+            confirmation_history_present,
             restored_pending.is_some(),
             config.allow_fresh_reconciliation_journal,
         );
@@ -654,6 +682,8 @@ impl TrackerBoxUpdater {
             &journal,
             restored_pending.as_ref(),
             historical_confirmation.as_ref(),
+            confirmation_history_present,
+            &policy,
         )?;
 
         info!(
@@ -664,9 +694,18 @@ impl TrackerBoxUpdater {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
-                _ = shutdown_rx.recv() => {
-                    info!("Tracker box updater received shutdown signal, stopping");
-                    return Ok(());
+                shutdown = shutdown_rx.recv() => {
+                    match shutdown {
+                        Ok(()) => {
+                            info!("Tracker box updater received shutdown signal, stopping");
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(format!(
+                                "tracker updater shutdown channel failed: {error}"
+                            )));
+                        }
+                    }
                 }
             }
 
@@ -734,14 +773,13 @@ impl TrackerBoxUpdater {
                     &shared_state,
                     &journal,
                     &accepted,
-                    policy,
+                    &policy,
                 )
                 .await
                 {
-                    if Self::is_retryable_chain_observation_error(&error) {
-                        warn!(%error, tx_id = %accepted.tx_id(), "Unable to revalidate accepted chain anchor; retaining fail-closed state");
-                        continue;
-                    }
+                    // Once an effect is exposed as Confirmed, loss of its sole
+                    // reorg monitor is an effect-consumer health failure, not
+                    // an availability-only retry. Quarantine before returning.
                     shared_state.quarantine_publication();
                     return Err(error);
                 }
@@ -769,15 +807,19 @@ impl TrackerBoxUpdater {
                 }
                 RecoveryAction::QueryExactTransaction(intent) => {
                     Self::ensure_pending_matches(&shared_state, &intent)?;
-                    match Self::observe_transaction(&config, &client, &intent, policy).await {
+                    match Self::observe_transaction(&config, &client, &intent, &policy).await {
                         Ok(TransactionObservation::Pending) => {
                             info!(tx_id = %intent.tx_id(), "Exact tracker transaction is not yet policy-accepted");
                         }
                         Ok(TransactionObservation::Accepted(effect)) => {
                             journal.record_validated_effect(effect)?;
                         }
-                        Err(error) => {
+                        Err(error) if Self::is_retryable_pending_observation_error(&error) => {
                             warn!(tx_id = %intent.tx_id(), %error, "Confirmed-chain evidence unavailable or invalid; retaining the fence");
+                        }
+                        Err(error) => {
+                            shared_state.quarantine_publication();
+                            return Err(error);
                         }
                     }
                     continue;
@@ -956,9 +998,16 @@ impl TrackerBoxUpdater {
         journal: &ReconciliationJournal,
         restored_pending: Option<&(String, [u8; 33])>,
         historical_confirmation: Option<&basis_store::ConfirmedProjectionAnchor>,
+        confirmation_history_present: bool,
+        policy: &ReconciliationPolicy,
     ) -> Result<(), TrackerBoxUpdaterError> {
         journal
-            .validate_tracker_startup_join(restored_pending, historical_confirmation)
+            .validate_tracker_startup_join(
+                restored_pending,
+                historical_confirmation,
+                confirmation_history_present,
+                policy,
+            )
             .map_err(|error| {
                 TrackerBoxUpdaterError::BroadcastOutcomeUnknown(format!(
                     "tracker startup reconciliation join failed: {error}"
@@ -995,29 +1044,21 @@ impl TrackerBoxUpdater {
     fn unix_time_ms() -> Result<u64, TrackerBoxUpdaterError> {
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| TrackerBoxUpdaterError::HttpError(error.to_string()))?
+            .map_err(|error| TrackerBoxUpdaterError::InvalidNodeResponse(error.to_string()))?
             .as_millis();
         u64::try_from(millis).map_err(|_| {
-            TrackerBoxUpdaterError::HttpError("system time exceeds u64 milliseconds".to_string())
+            TrackerBoxUpdaterError::InvalidNodeResponse(
+                "system time exceeds u64 milliseconds".to_string(),
+            )
         })
     }
 
-    fn is_retryable_chain_observation_error(error: &TrackerBoxUpdaterError) -> bool {
+    fn is_retryable_pending_observation_error(error: &TrackerBoxUpdaterError) -> bool {
         match error {
             TrackerBoxUpdaterError::HttpError(_) => true,
-            TrackerBoxUpdaterError::Reconciliation(error) => !matches!(
-                error,
-                ReconciliationError::TicketInProgress
-                    | ReconciliationError::DuplicateTransactionConflict
-                    | ReconciliationError::NoTicket
-                    | ReconciliationError::IntentMismatch
-                    | ReconciliationError::InvalidPhase
-                    | ReconciliationError::Journal(_)
-                    | ReconciliationError::JournalBindingRequired
-                    | ReconciliationError::JournalBindingMismatch
-                    | ReconciliationError::AccountingProjectionMismatch
-                    | ReconciliationError::OutcomeUnknown(_)
-            ),
+            TrackerBoxUpdaterError::Reconciliation(
+                ReconciliationError::IncoherentSnapshot | ReconciliationError::StaleEvidence,
+            ) => true,
             _ => false,
         }
     }
@@ -1064,14 +1105,16 @@ impl TrackerBoxUpdater {
     ) -> Result<NodeTip, TrackerBoxUpdaterError> {
         let bytes = Self::get_node_bytes(config, client, "/info", false)
             .await?
-            .ok_or_else(|| TrackerBoxUpdaterError::HttpError("missing /info body".to_string()))?;
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::InvalidNodeResponse("missing /info body".to_string())
+            })?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|error| TrackerBoxUpdaterError::HttpError(error.to_string()))?;
+            .map_err(|error| TrackerBoxUpdaterError::InvalidNodeResponse(error.to_string()))?;
         let height = value
             .get("fullHeight")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| {
-                TrackerBoxUpdaterError::HttpError("/info lacks fullHeight".to_string())
+                TrackerBoxUpdaterError::InvalidNodeResponse("/info lacks fullHeight".to_string())
             })?;
         let ids = ["bestFullHeaderId", "bestHeaderId"]
             .iter()
@@ -1080,7 +1123,7 @@ impl TrackerBoxUpdater {
             .map(str::to_string)
             .collect::<std::collections::BTreeSet<_>>();
         if ids.len() != 1 {
-            return Err(TrackerBoxUpdaterError::HttpError(
+            return Err(TrackerBoxUpdaterError::InvalidNodeResponse(
                 "/info does not expose one coherent full-chain tip id".to_string(),
             ));
         }
@@ -1096,14 +1139,15 @@ impl TrackerBoxUpdater {
         inclusion_height: u64,
     ) -> Result<ActiveChainProof, TrackerBoxUpdaterError> {
         let before = Self::fetch_tip(config, client).await?;
-        let to_height = before
-            .height
-            .checked_add(1)
-            .ok_or_else(|| TrackerBoxUpdaterError::HttpError("node height overflow".to_string()))?;
+        let to_height = before.height.checked_add(1).ok_or_else(|| {
+            TrackerBoxUpdaterError::InvalidNodeResponse("node height overflow".to_string())
+        })?;
         let path = format!("/blocks/chainSlice?fromHeight={inclusion_height}&toHeight={to_height}");
         let chain_slice = Self::get_node_bytes(config, client, &path, false)
             .await?
-            .ok_or_else(|| TrackerBoxUpdaterError::HttpError("missing chain slice".to_string()))?;
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::InvalidNodeResponse("missing chain slice".to_string())
+            })?;
         let after = Self::fetch_tip(config, client).await?;
         Ok(ActiveChainProof::from_node_responses(
             before.id,
@@ -1128,13 +1172,15 @@ impl TrackerBoxUpdater {
                 ReconciliationError::IncompleteAncestry,
             ));
         }
-        let to_height = selected_through_height
-            .checked_add(1)
-            .ok_or_else(|| TrackerBoxUpdaterError::HttpError("node height overflow".to_string()))?;
+        let to_height = selected_through_height.checked_add(1).ok_or_else(|| {
+            TrackerBoxUpdaterError::InvalidNodeResponse("node height overflow".to_string())
+        })?;
         let path = format!("/blocks/chainSlice?fromHeight={inclusion_height}&toHeight={to_height}");
         let chain_slice = Self::get_node_bytes(config, client, &path, false)
             .await?
-            .ok_or_else(|| TrackerBoxUpdaterError::HttpError("missing chain slice".to_string()))?;
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::InvalidNodeResponse("missing chain slice".to_string())
+            })?;
         let after = Self::fetch_tip(config, client).await?;
         Ok(ActiveChainProof::from_bounded_node_responses(
             before.id,
@@ -1152,7 +1198,7 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         client: &reqwest::Client,
         intent: &ReconciliationIntent,
-        policy: ReconciliationPolicy,
+        policy: &ReconciliationPolicy,
     ) -> Result<TransactionObservation, TrackerBoxUpdaterError> {
         let transaction_path = format!("/blockchain/transaction/byId/{}", intent.tx_id());
         let Some(observation_bytes) =
@@ -1161,7 +1207,7 @@ impl TrackerBoxUpdater {
             return Ok(TransactionObservation::Pending);
         };
         let observation: serde_json::Value = serde_json::from_slice(&observation_bytes)
-            .map_err(|error| TrackerBoxUpdaterError::HttpError(error.to_string()))?;
+            .map_err(|error| TrackerBoxUpdaterError::InvalidNodeResponse(error.to_string()))?;
         let Some(inclusion_height) = observation
             .get("inclusionHeight")
             .and_then(serde_json::Value::as_u64)
@@ -1174,7 +1220,7 @@ impl TrackerBoxUpdater {
             "dataInputs": observation.get("dataInputs").cloned().unwrap_or_else(|| serde_json::json!([])),
             "outputs": observation.get("outputs").cloned().unwrap_or(serde_json::Value::Null),
         }))
-        .map_err(|error| TrackerBoxUpdaterError::HttpError(error.to_string()))?;
+        .map_err(|error| TrackerBoxUpdaterError::InvalidNodeResponse(error.to_string()))?;
 
         let before = Self::fetch_tip(config, client).await?;
         if before
@@ -1184,15 +1230,16 @@ impl TrackerBoxUpdater {
         {
             return Ok(TransactionObservation::Pending);
         }
-        let to_height = before
-            .height
-            .checked_add(1)
-            .ok_or_else(|| TrackerBoxUpdaterError::HttpError("node height overflow".to_string()))?;
+        let to_height = before.height.checked_add(1).ok_or_else(|| {
+            TrackerBoxUpdaterError::InvalidNodeResponse("node height overflow".to_string())
+        })?;
         let chain_path =
             format!("/blocks/chainSlice?fromHeight={inclusion_height}&toHeight={to_height}");
         let chain_slice = Self::get_node_bytes(config, client, &chain_path, false)
             .await?
-            .ok_or_else(|| TrackerBoxUpdaterError::HttpError("missing chain slice".to_string()))?;
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::InvalidNodeResponse("missing chain slice".to_string())
+            })?;
         let first_header: serde_json::Value =
             serde_json::from_slice::<serde_json::Value>(&chain_slice)
                 .ok()
@@ -1203,19 +1250,19 @@ impl TrackerBoxUpdater {
                         .cloned()
                 })
                 .ok_or_else(|| {
-                    TrackerBoxUpdaterError::HttpError("empty chain slice".to_string())
+                    TrackerBoxUpdaterError::InvalidNodeResponse("empty chain slice".to_string())
                 })?;
         let block_id = first_header
             .get("id")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| {
-                TrackerBoxUpdaterError::HttpError("first header lacks id".to_string())
+                TrackerBoxUpdaterError::InvalidNodeResponse("first header lacks id".to_string())
             })?;
         let full_block =
             Self::get_node_bytes(config, client, &format!("/blocks/{block_id}"), false)
                 .await?
                 .ok_or_else(|| {
-                    TrackerBoxUpdaterError::HttpError("missing full block".to_string())
+                    TrackerBoxUpdaterError::InvalidNodeResponse("missing full block".to_string())
                 })?;
         let predecessor = Self::get_node_bytes(
             config,
@@ -1224,7 +1271,9 @@ impl TrackerBoxUpdater {
             false,
         )
         .await?
-        .ok_or_else(|| TrackerBoxUpdaterError::HttpError("missing predecessor".to_string()))?;
+        .ok_or_else(|| {
+            TrackerBoxUpdaterError::InvalidNodeResponse("missing predecessor".to_string())
+        })?;
         let after = Self::fetch_tip(config, client).await?;
         let chain = ActiveChainProof::from_node_responses(
             before.id,
@@ -1247,7 +1296,7 @@ impl TrackerBoxUpdater {
         Ok(TransactionObservation::Accepted(validate_chain_effect(
             intent,
             &evidence,
-            policy,
+            policy.clone(),
             Self::unix_time_ms()?,
         )?))
     }
@@ -1319,7 +1368,7 @@ impl TrackerBoxUpdater {
         shared_state: &SharedTrackerState,
         journal: &ReconciliationJournal,
         effect: &ValidatedChainEffect,
-        policy: ReconciliationPolicy,
+        policy: &ReconciliationPolicy,
     ) -> Result<(), TrackerBoxUpdaterError> {
         let tip = Self::fetch_tip(config, client).await?;
         let observed_depth = tip
@@ -2272,28 +2321,47 @@ mod publication_health_tests {
     fn publication_quarantine_is_one_way() {
         let state = SharedTrackerState::new();
         assert!(state.is_publication_healthy());
+        state.set_confirmed(
+            [0x42; 33],
+            "11".repeat(32),
+            "22".repeat(32),
+            "33".repeat(32),
+            100,
+            6,
+        );
+        assert_eq!(state.get_confirmed().digest, Some([0x42; 33]));
 
         state.quarantine_publication();
         assert!(!state.is_publication_healthy());
+        let hidden = state.get_confirmed();
+        assert!(hidden.digest.is_none());
+        assert!(hidden.tx_id.is_none());
+        assert!(hidden.box_id.is_none());
 
         state.quarantine_publication();
         assert!(!state.is_publication_healthy());
     }
 
     #[test]
-    fn only_chain_observation_failures_are_retryable_after_anchor_revalidation() {
-        assert!(TrackerBoxUpdater::is_retryable_chain_observation_error(
+    fn only_pending_transport_or_coherent_snapshot_races_are_retryable() {
+        assert!(TrackerBoxUpdater::is_retryable_pending_observation_error(
             &TrackerBoxUpdaterError::HttpError("node unavailable".to_string())
         ));
-        assert!(TrackerBoxUpdater::is_retryable_chain_observation_error(
+        assert!(TrackerBoxUpdater::is_retryable_pending_observation_error(
             &TrackerBoxUpdaterError::Reconciliation(ReconciliationError::StaleEvidence)
         ));
-        assert!(!TrackerBoxUpdater::is_retryable_chain_observation_error(
+        assert!(!TrackerBoxUpdater::is_retryable_pending_observation_error(
+            &TrackerBoxUpdaterError::InvalidNodeResponse("malformed /info".to_string())
+        ));
+        assert!(!TrackerBoxUpdater::is_retryable_pending_observation_error(
+            &TrackerBoxUpdaterError::Reconciliation(ReconciliationError::TransactionRootMismatch)
+        ));
+        assert!(!TrackerBoxUpdater::is_retryable_pending_observation_error(
             &TrackerBoxUpdaterError::Reconciliation(ReconciliationError::OutcomeUnknown(
                 "journal persist".to_string(),
             ))
         ));
-        assert!(!TrackerBoxUpdater::is_retryable_chain_observation_error(
+        assert!(!TrackerBoxUpdater::is_retryable_pending_observation_error(
             &TrackerBoxUpdaterError::BroadcastOutcomeUnknown("actor rejected".to_string())
         ));
     }
@@ -2451,9 +2519,10 @@ mod publication_health_tests {
         };
         let (_shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
         assert!(matches!(
-            TrackerBoxUpdater::start(config, state, shutdown_rx, None).await,
+            TrackerBoxUpdater::start(config, state.clone(), shutdown_rx, None).await,
             Err(TrackerBoxUpdaterError::InvalidConfiguration(_))
         ));
+        assert!(!state.is_publication_healthy());
         assert!(
             tokio::time::timeout(Duration::from_millis(50), listener.accept())
                 .await
@@ -2569,6 +2638,48 @@ mod publication_health_tests {
             reopened.recovery_action().unwrap(),
             basis_store::chain_reconciliation::RecoveryAction::Idle
         ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orphan_confirmation_rows_reject_idle_journal_before_node_io() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let node_url = format!("http://{}", listener.local_addr().unwrap());
+        let state = SharedTrackerState::new();
+        state.set_tracker_nft_id("11".repeat(32));
+        // BNS1 row fragments exist, but their global BCP1 projection receipt
+        // was lost. This must not be mistaken for a fresh Idle generation.
+        state.set_confirmation_history_present(true);
+        let parent = tempfile::tempdir().unwrap();
+        let journal_path = parent.path().join("journal");
+        {
+            let _empty = ReconciliationJournal::open(
+                &journal_path,
+                ReconciliationJournalBinding::tracker_v1([0x11; 32]),
+                JournalBootstrap::FreshAllowed,
+            )
+            .unwrap();
+        }
+        let manifest_path = journal_path.join("confirmed-chain.manifest");
+        let manifest_before = std::fs::read(&manifest_path).unwrap();
+        let config = TrackerBoxUpdateConfig {
+            node_url,
+            reorg_monitor_depth: Some(12),
+            allow_fresh_reconciliation_journal: true,
+            reconciliation_journal_path: journal_path,
+            ..TrackerBoxUpdateConfig::default()
+        };
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+        assert!(matches!(
+            TrackerBoxUpdater::start(config, state.clone(), shutdown_rx, None).await,
+            Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(_))
+        ));
+        assert!(!state.is_publication_healthy());
+        assert_eq!(std::fs::read(manifest_path).unwrap(), manifest_before);
         assert!(
             tokio::time::timeout(Duration::from_millis(50), listener.accept())
                 .await

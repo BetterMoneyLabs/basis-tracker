@@ -16,6 +16,34 @@ use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+struct UpdaterTaskHealthGuard {
+    shared_state: SharedTrackerState,
+    graceful: bool,
+}
+
+impl UpdaterTaskHealthGuard {
+    fn new(shared_state: SharedTrackerState) -> Self {
+        Self {
+            shared_state,
+            graceful: false,
+        }
+    }
+
+    fn mark_graceful(&mut self) {
+        self.graceful = true;
+    }
+}
+
+impl Drop for UpdaterTaskHealthGuard {
+    fn drop(&mut self) {
+        if !self.graceful {
+            // Also runs during task unwinding, so a panic cannot silently
+            // leave the sole reorg watcher dead while effects remain readable.
+            self.shared_state.quarantine_publication();
+        }
+    }
+}
+
 fn reject_while_publication_is_fenced(command: TrackerCommand) {
     use basis_store::NoteError;
 
@@ -671,16 +699,13 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = Ok(redemption_manager
+                    let result = redemption_manager
                         .tracker
-                        .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                        .try_get_confirmation(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetAllConfirmations { response_tx } => {
-                    let result = redemption_manager
-                        .tracker
-                        .validated_state()
-                        .map(|_| redemption_manager.tracker.all_confirmations());
+                    let result = redemption_manager.tracker.try_all_confirmations();
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::BeginPublication {
@@ -817,7 +842,8 @@ async fn main() {
     let updater_cmd_tx = tx.clone();
     let updater_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        if let Err(e) = TrackerBoxUpdater::start(
+        let mut health_guard = UpdaterTaskHealthGuard::new(shared_state_clone.clone());
+        match TrackerBoxUpdater::start(
             updater_config,
             shared_state_clone,
             updater_shutdown_rx,
@@ -825,7 +851,11 @@ async fn main() {
         )
         .await
         {
-            tracing::error!("Tracker box updater failed: {}", e);
+            Ok(()) => health_guard.mark_graceful(),
+            Err(e) => tracing::error!(
+                "Tracker box updater failed and commitment effects were quarantined: {}",
+                e
+            ),
         }
     });
     tracing::info!("Tracker box updater started successfully");
@@ -1194,6 +1224,22 @@ mod publication_fence_tests {
             proof_rx.await,
             Ok(Err(basis_store::NoteError::PublicationInProgress))
         ));
+    }
+
+    #[test]
+    fn updater_task_guard_quarantines_unexpected_termination_only() {
+        let failed = SharedTrackerState::new();
+        {
+            let _guard = UpdaterTaskHealthGuard::new(failed.clone());
+        }
+        assert!(!failed.is_publication_healthy());
+
+        let graceful = SharedTrackerState::new();
+        {
+            let mut guard = UpdaterTaskHealthGuard::new(graceful.clone());
+            guard.mark_graceful();
+        }
+        assert!(graceful.is_publication_healthy());
     }
 
     #[tokio::test]

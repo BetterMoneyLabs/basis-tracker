@@ -509,8 +509,8 @@ mod test_module {
 #[cfg(test)]
 mod confirmation_state_tests {
     use crate::{
-        FreshGenerationApproval, IouNote, NoteConfirmationStatus, TrackerGenerationConfig,
-        TrackerStateManager,
+        FreshGenerationApproval, IouNote, NoteConfirmationStatus, NoteError,
+        TrackerGenerationConfig, TrackerStateManager,
     };
     use secp256k1::{Secp256k1, SecretKey};
 
@@ -741,6 +741,54 @@ mod confirmation_state_tests {
             tx_b
         );
         assert_eq!(confirmation.redeemable_amount(0), 0);
+    }
+
+    #[test]
+    fn shared_publication_quarantine_hides_a_previously_confirmed_effect() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let publication_health = crate::PublicationHealth::new();
+        let mut manager = TrackerStateManager::try_new_with_publication_health(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+            publication_health.clone(),
+        )
+        .unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1_000, 1))
+            .unwrap();
+        let root = manager.validated_state().unwrap().avl_root_digest;
+        let tx_id = "11".repeat(32);
+        manager.mark_notes_pending(root, &tx_id, 100).unwrap();
+        let effect = crate::chain_reconciliation::validated_tracker_effect_for_test(
+            "22".repeat(32),
+            tx_id,
+            "33".repeat(32),
+            "44".repeat(32),
+            101,
+            6,
+            root,
+        );
+        manager.confirm_validated_publication(&effect).unwrap();
+        assert_eq!(
+            manager
+                .get_confirmation(&issuer, &recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::Confirmed
+        );
+
+        publication_health.quarantine();
+        assert!(matches!(
+            manager.try_get_confirmation(&issuer, &recipient),
+            Err(NoteError::StorageOutcomeUnknown(_))
+        ));
+        assert!(matches!(
+            manager.validated_state(),
+            Err(NoteError::StorageOutcomeUnknown(_))
+        ));
     }
 
     #[test]

@@ -36,6 +36,13 @@ const JOURNAL_MANIFEST_CHECKSUM_DOMAIN: &[u8] = b"basis-confirmed-chain-manifest
 const MAX_SIGNED_TRANSACTION_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHAIN_HEADERS: usize = 4096;
 const MAX_HISTORY_ENTRIES: usize = 256;
+const FINALITY_POLICY_ID: &str = "basis.tracker.confirmed-chain";
+const FINALITY_POLICY_VERSION: u16 = 1;
+const EVIDENCE_HASH_DOMAIN: &[u8] = b"basis-confirmed-chain-evidence-v1";
+const EFFECT_DECISION_DOMAIN: &[u8] = b"basis-confirmed-chain-effect-v1";
+const ROLLBACK_DECISION_DOMAIN: &[u8] = b"basis-confirmed-chain-rollback-v1";
+const RETIREMENT_DECISION_DOMAIN: &[u8] = b"basis-confirmed-chain-retirement-v1";
+const NODE_SOURCE_DOMAIN: &[u8] = b"basis-confirmed-chain-node-source-v1";
 
 /// Largest bounded reorg-monitoring horizon accepted by this implementation.
 /// The inclusive chain window contains `depth + 1` headers.
@@ -900,48 +907,58 @@ fn validate_full_block_inclusion(
     Ok(())
 }
 
-/// Exact Ergo `BlockTransactions.transactionsRoot` construction. For modern
-/// blocks the witness bytes are appended to the transaction id in the same
-/// Merkle leaf; they are not hashed, truncated, or inserted as separate
-/// leaves. Version 1 commits only to transaction ids.
+/// Exact Ergo node `BlockTransactions.transactionsRoot` construction.
+/// Version 1 commits to transaction serialized ids only. Later block versions
+/// append a second, grouped run of witness serialized ids after every
+/// transaction id. A witness id is `Blake2b256(concat(input proofs)).tail`, so
+/// it is a 31-byte Merkle leaf; it is never raw, full-width, interleaved, or
+/// appended to its transaction-id leaf.
 fn transaction_merkle_root(
     transactions: &[Transaction],
     block_version: u8,
 ) -> Result<Digest32, ReconciliationError> {
-    let leaves = transactions
-        .iter()
-        .map(|transaction| {
-            let unsigned_bytes = transaction.bytes_to_sign().map_err(|error| {
-                ReconciliationError::MalformedBlock(format!(
-                    "cannot serialize transaction bytes-to-sign: {error}"
-                ))
-            })?;
-            let transaction_id = blake2b256_hash(&unsigned_bytes);
-            if transaction.id().as_ref() != transaction_id.as_slice() {
-                return Err(ReconciliationError::TransactionMismatch);
-            }
-            let mut leaf = transaction_id.to_vec();
-            if block_version != 1 {
-                leaf.extend(
-                    transaction
-                        .inputs
-                        .iter()
-                        .flat_map(|input| input.spending_proof.proof.as_ref().iter().copied()),
-                );
-            }
-            Ok(MerkleNode::from_bytes(leaf))
-        })
-        .collect::<Result<Vec<_>, ReconciliationError>>()?;
+    let mut leaves = Vec::with_capacity(if block_version == 1 {
+        transactions.len()
+    } else {
+        transactions.len().saturating_mul(2)
+    });
+    for transaction in transactions {
+        let unsigned_bytes = transaction.bytes_to_sign().map_err(|error| {
+            ReconciliationError::MalformedBlock(format!(
+                "cannot serialize transaction bytes-to-sign: {error}"
+            ))
+        })?;
+        let transaction_id = blake2b256_hash(&unsigned_bytes);
+        if transaction.id().as_ref() != transaction_id.as_slice() {
+            return Err(ReconciliationError::TransactionMismatch);
+        }
+        leaves.push(MerkleNode::from_bytes(transaction_id.to_vec()));
+    }
+    if block_version != 1 {
+        for transaction in transactions {
+            let proof_bytes = transaction
+                .inputs
+                .iter()
+                .flat_map(|input| input.spending_proof.proof.as_ref().iter().copied())
+                .collect::<Vec<_>>();
+            let witness_hash = blake2b256_hash(&proof_bytes);
+            leaves.push(MerkleNode::from_bytes(witness_hash[1..].to_vec()));
+        }
+    }
     Ok(MerkleTree::new(leaves).root_hash_special())
 }
 
 /// Application finality policy. Depth counts successors, so the tip block has
 /// depth zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationPolicy {
+    policy_id: String,
+    policy_version: u16,
     min_successor_depth: u64,
     max_evidence_age_ms: u64,
     reorg_monitor_depth: u64,
+    network_id: String,
+    source_id: [u8; 32],
 }
 
 impl ReconciliationPolicy {
@@ -949,12 +966,32 @@ impl ReconciliationPolicy {
         min_successor_depth: u64,
         max_evidence_age_ms: u64,
         reorg_monitor_depth: u64,
+        network_id: impl Into<String>,
+        source_id: [u8; 32],
     ) -> Self {
         Self {
+            policy_id: FINALITY_POLICY_ID.to_string(),
+            policy_version: FINALITY_POLICY_VERSION,
             min_successor_depth,
             max_evidence_age_ms,
             reorg_monitor_depth,
+            network_id: network_id.into(),
+            source_id,
         }
+    }
+
+    /// Bind policy decisions to one named network and one configured node
+    /// endpoint without persisting the endpoint itself.
+    pub fn source_id_for(network_id: &str, node_url: &str) -> [u8; 32] {
+        let endpoint = node_url.trim_end_matches('/');
+        let mut material =
+            Vec::with_capacity(NODE_SOURCE_DOMAIN.len() + network_id.len() + endpoint.len() + 16);
+        material.extend_from_slice(NODE_SOURCE_DOMAIN);
+        material.extend_from_slice(&(network_id.len() as u64).to_be_bytes());
+        material.extend_from_slice(network_id.as_bytes());
+        material.extend_from_slice(&(endpoint.len() as u64).to_be_bytes());
+        material.extend_from_slice(endpoint.as_bytes());
+        blake2b256_hash(&material)
     }
 
     pub fn min_successor_depth(&self) -> u64 {
@@ -966,7 +1003,16 @@ impl ReconciliationPolicy {
     }
 
     fn validate(&self) -> Result<(), ReconciliationError> {
-        if self.max_evidence_age_ms == 0
+        if self.policy_id != FINALITY_POLICY_ID
+            || self.policy_version != FINALITY_POLICY_VERSION
+            || self.network_id.is_empty()
+            || self.network_id.len() > 64
+            || !self
+                .network_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            || self.source_id == [0u8; 32]
+            || self.max_evidence_age_ms == 0
             || self.reorg_monitor_depth == 0
             || self.reorg_monitor_depth < self.min_successor_depth
             || self.reorg_monitor_depth > MAX_REORG_MONITOR_DEPTH
@@ -1006,6 +1052,9 @@ pub struct ValidatedChainEffect {
     successor_box_id: String,
     observed_at_unix_ms: u64,
     effect: ReconciliationEffect,
+    policy: ReconciliationPolicy,
+    evidence_hash: [u8; 32],
+    decision_id: [u8; 32],
 }
 
 #[derive(Deserialize)]
@@ -1020,6 +1069,9 @@ struct StoredValidatedChainEffect {
     successor_box_id: String,
     observed_at_unix_ms: u64,
     effect: ReconciliationEffect,
+    policy: ReconciliationPolicy,
+    evidence_hash: [u8; 32],
+    decision_id: [u8; 32],
 }
 
 impl<'de> Deserialize<'de> for ValidatedChainEffect {
@@ -1044,11 +1096,99 @@ impl<'de> Deserialize<'de> for ValidatedChainEffect {
             successor_box_id: stored.successor_box_id,
             observed_at_unix_ms: stored.observed_at_unix_ms,
             effect: stored.effect,
+            policy: stored.policy,
+            evidence_hash: stored.evidence_hash,
+            decision_id: stored.decision_id,
         })
     }
 }
 
 impl ValidatedChainEffect {
+    fn compute_decision_id(&self) -> Result<[u8; 32], ReconciliationError> {
+        hash_serialized(
+            EFFECT_DECISION_DOMAIN,
+            &(
+                &self.intent_id,
+                &self.tx_id,
+                &self.block_id,
+                self.inclusion_height,
+                self.successor_depth,
+                &self.tip_id,
+                self.tip_height,
+                &self.successor_box_id,
+                self.observed_at_unix_ms,
+                &self.effect,
+                &self.policy,
+                self.evidence_hash,
+            ),
+        )
+    }
+
+    fn validate(&self) -> Result<(), ReconciliationError> {
+        self.policy.validate()?;
+        if normalize_id(self.intent_id.clone(), "effect intent id")? != self.intent_id
+            || normalize_id(self.tx_id.clone(), "effect transaction id")? != self.tx_id
+            || normalize_id(self.block_id.clone(), "effect block id")? != self.block_id
+            || normalize_id(self.tip_id.clone(), "effect tip id")? != self.tip_id
+            || normalize_id(self.successor_box_id.clone(), "effect successor box id")?
+                != self.successor_box_id
+            || self.evidence_hash == [0u8; 32]
+            || self.decision_id != self.compute_decision_id()?
+            || self.inclusion_height.checked_add(self.successor_depth) != Some(self.tip_height)
+            || self.successor_depth < self.policy.min_successor_depth
+        {
+            return Err(ReconciliationError::MalformedDecision(
+                "validated effect fields or decision digest are inconsistent".to_string(),
+            ));
+        }
+        match &self.effect {
+            ReconciliationEffect::TrackerPublication {
+                committed_root,
+                protocol_nft_id,
+                protocol_nft_index,
+            } => {
+                if committed_root.len() != 33
+                    || normalize_id(protocol_nft_id.clone(), "effect protocol NFT")?
+                        != *protocol_nft_id
+                    || *protocol_nft_index != 0
+                {
+                    return Err(ReconciliationError::MalformedDecision(
+                        "validated tracker effect manifest is inconsistent".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_against_intent(
+        &self,
+        intent: &ReconciliationIntent,
+    ) -> Result<(), ReconciliationError> {
+        self.validate()?;
+        intent.validate()?;
+        if self.intent_id != intent.intent_id
+            || self.tx_id != intent.tx_id
+            || self.successor_box_id != intent.successor.box_id
+            || self.effect != intent.effect
+        {
+            return Err(ReconciliationError::IntentMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_runtime_policy(
+        &self,
+        policy: &ReconciliationPolicy,
+    ) -> Result<(), ReconciliationError> {
+        self.validate()?;
+        policy.validate()?;
+        if &self.policy != policy {
+            return Err(ReconciliationError::PolicyMismatch);
+        }
+        Ok(())
+    }
+
     pub fn intent_id(&self) -> &str {
         &self.intent_id
     }
@@ -1071,6 +1211,10 @@ impl ValidatedChainEffect {
 
     pub fn successor_box_id(&self) -> &str {
         &self.successor_box_id
+    }
+
+    pub fn policy(&self) -> &ReconciliationPolicy {
+        &self.policy
     }
 
     pub fn tracker_root(&self) -> Option<[u8; 33]> {
@@ -1105,7 +1249,7 @@ pub(crate) fn validated_tracker_effect_for_test(
     successor_depth: u64,
     root: [u8; 33],
 ) -> ValidatedChainEffect {
-    ValidatedChainEffect {
+    let mut effect = ValidatedChainEffect {
         intent_id,
         tx_id,
         block_id,
@@ -1120,7 +1264,12 @@ pub(crate) fn validated_tracker_effect_for_test(
             protocol_nft_id: "dd".repeat(32),
             protocol_nft_index: 0,
         },
-    }
+        policy: ReconciliationPolicy::new(6, 100, 12, "ergo-test", [0xee; 32]),
+        evidence_hash: [0xef; 32],
+        decision_id: [0u8; 32],
+    };
+    effect.decision_id = effect.compute_decision_id().unwrap();
+    effect
 }
 
 pub fn validate_chain_effect(
@@ -1167,7 +1316,8 @@ pub fn validate_chain_effect(
             required: policy.min_successor_depth,
         });
     }
-    Ok(ValidatedChainEffect {
+    let evidence_hash = hash_serialized(EVIDENCE_HASH_DOMAIN, evidence)?;
+    let mut effect = ValidatedChainEffect {
         intent_id: intent.intent_id.clone(),
         tx_id: intent.tx_id.clone(),
         block_id: evidence.reported_block_id.clone(),
@@ -1178,7 +1328,13 @@ pub fn validate_chain_effect(
         successor_box_id: intent.successor.box_id.clone(),
         observed_at_unix_ms: evidence.chain.observed_at_unix_ms,
         effect: intent.effect.clone(),
-    })
+        policy,
+        evidence_hash,
+        decision_id: [0u8; 32],
+    };
+    effect.decision_id = effect.compute_decision_id()?;
+    effect.validate_against_intent(intent)?;
+    Ok(effect)
 }
 
 /// Evidence that an earlier accepted block is no longer the first block in a
@@ -1193,6 +1349,9 @@ pub struct ValidatedRollback {
     observed_tip_id: String,
     observed_tip_height: u64,
     observed_at_unix_ms: u64,
+    policy: ReconciliationPolicy,
+    evidence_hash: [u8; 32],
+    decision_id: [u8; 32],
 }
 
 #[derive(Deserialize)]
@@ -1205,6 +1364,9 @@ struct StoredValidatedRollback {
     observed_tip_id: String,
     observed_tip_height: u64,
     observed_at_unix_ms: u64,
+    policy: ReconciliationPolicy,
+    evidence_hash: [u8; 32],
+    decision_id: [u8; 32],
 }
 
 impl<'de> Deserialize<'de> for ValidatedRollback {
@@ -1227,11 +1389,73 @@ impl<'de> Deserialize<'de> for ValidatedRollback {
             observed_tip_id: stored.observed_tip_id,
             observed_tip_height: stored.observed_tip_height,
             observed_at_unix_ms: stored.observed_at_unix_ms,
+            policy: stored.policy,
+            evidence_hash: stored.evidence_hash,
+            decision_id: stored.decision_id,
         })
     }
 }
 
 impl ValidatedRollback {
+    fn compute_decision_id(&self) -> Result<[u8; 32], ReconciliationError> {
+        hash_serialized(
+            ROLLBACK_DECISION_DOMAIN,
+            &(
+                &self.intent_id,
+                &self.tx_id,
+                &self.removed_block_id,
+                &self.replacement_block_id,
+                self.inclusion_height,
+                &self.observed_tip_id,
+                self.observed_tip_height,
+                self.observed_at_unix_ms,
+                &self.policy,
+                self.evidence_hash,
+            ),
+        )
+    }
+
+    fn validate(&self) -> Result<(), ReconciliationError> {
+        self.policy.validate()?;
+        if normalize_id(self.intent_id.clone(), "rollback intent id")? != self.intent_id
+            || normalize_id(self.tx_id.clone(), "rollback transaction id")? != self.tx_id
+            || normalize_id(self.removed_block_id.clone(), "rollback removed block id")?
+                != self.removed_block_id
+            || normalize_id(
+                self.replacement_block_id.clone(),
+                "rollback replacement block id",
+            )? != self.replacement_block_id
+            || normalize_id(self.observed_tip_id.clone(), "rollback observed tip id")?
+                != self.observed_tip_id
+            || self.removed_block_id == self.replacement_block_id
+            || self.observed_tip_height < self.inclusion_height
+            || self.evidence_hash == [0u8; 32]
+            || self.decision_id != self.compute_decision_id()?
+        {
+            return Err(ReconciliationError::MalformedDecision(
+                "validated rollback fields or decision digest are inconsistent".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_against_effect(
+        &self,
+        effect: &ValidatedChainEffect,
+    ) -> Result<(), ReconciliationError> {
+        self.validate()?;
+        effect.validate()?;
+        if self.intent_id != effect.intent_id
+            || self.tx_id != effect.tx_id
+            || self.removed_block_id != effect.block_id
+            || self.inclusion_height != effect.inclusion_height
+            || self.policy != effect.policy
+        {
+            return Err(ReconciliationError::IntentMismatch);
+        }
+        Ok(())
+    }
+
     pub fn intent_id(&self) -> &str {
         &self.intent_id
     }
@@ -1247,7 +1471,7 @@ impl ValidatedRollback {
 
 #[cfg(test)]
 pub(crate) fn validated_rollback_for_test(effect: &ValidatedChainEffect) -> ValidatedRollback {
-    ValidatedRollback {
+    let mut rollback = ValidatedRollback {
         intent_id: effect.intent_id.clone(),
         tx_id: effect.tx_id.clone(),
         removed_block_id: effect.block_id.clone(),
@@ -1256,15 +1480,21 @@ pub(crate) fn validated_rollback_for_test(effect: &ValidatedChainEffect) -> Vali
         observed_tip_id: "ff".repeat(32),
         observed_tip_height: effect.tip_height + 1,
         observed_at_unix_ms: 1_001,
-    }
+        policy: effect.policy.clone(),
+        evidence_hash: [0xfa; 32],
+        decision_id: [0u8; 32],
+    };
+    rollback.decision_id = rollback.compute_decision_id().unwrap();
+    rollback
 }
 
 pub fn validate_rollback(
     accepted: &ValidatedChainEffect,
     selected_chain: &ActiveChainProof,
-    policy: ReconciliationPolicy,
+    policy: &ReconciliationPolicy,
     now_unix_ms: u64,
 ) -> Result<ValidatedRollback, ReconciliationError> {
+    accepted.validate_runtime_policy(policy)?;
     selected_chain.validate()?;
     if !selected_chain.covers_tip() {
         return Err(ReconciliationError::IncompleteAncestry);
@@ -1277,7 +1507,8 @@ pub fn validate_rollback(
     if replacement == accepted.block_id {
         return Err(ReconciliationError::RollbackNotProven);
     }
-    Ok(ValidatedRollback {
+    let evidence_hash = hash_serialized(EVIDENCE_HASH_DOMAIN, selected_chain)?;
+    let mut rollback = ValidatedRollback {
         intent_id: accepted.intent_id.clone(),
         tx_id: accepted.tx_id.clone(),
         removed_block_id: accepted.block_id.clone(),
@@ -1286,7 +1517,13 @@ pub fn validate_rollback(
         observed_tip_id: selected_chain.tip_id.clone(),
         observed_tip_height: selected_chain.tip_height,
         observed_at_unix_ms: selected_chain.observed_at_unix_ms,
-    })
+        policy: policy.clone(),
+        evidence_hash,
+        decision_id: [0u8; 32],
+    };
+    rollback.decision_id = rollback.compute_decision_id()?;
+    rollback.validate_against_effect(accepted)?;
+    Ok(rollback)
 }
 
 /// Validate an accepted anchor against the same coherent-chain authority used
@@ -1294,9 +1531,10 @@ pub fn validate_rollback(
 pub fn validate_anchor_still_active(
     accepted: &ValidatedChainEffect,
     selected_chain: &ActiveChainProof,
-    policy: ReconciliationPolicy,
+    policy: &ReconciliationPolicy,
     now_unix_ms: u64,
 ) -> Result<(), ReconciliationError> {
+    accepted.validate_runtime_policy(policy)?;
     selected_chain.validate()?;
     if !selected_chain.covers_tip() {
         return Err(ReconciliationError::IncompleteAncestry);
@@ -1323,6 +1561,9 @@ pub struct ValidatedRetirement {
     observed_tip_id: String,
     observed_tip_height: u64,
     observed_at_unix_ms: u64,
+    policy: ReconciliationPolicy,
+    evidence_hash: [u8; 32],
+    decision_id: [u8; 32],
 }
 
 #[derive(Deserialize)]
@@ -1335,6 +1576,9 @@ struct StoredValidatedRetirement {
     observed_tip_id: String,
     observed_tip_height: u64,
     observed_at_unix_ms: u64,
+    policy: ReconciliationPolicy,
+    evidence_hash: [u8; 32],
+    decision_id: [u8; 32],
 }
 
 impl<'de> Deserialize<'de> for ValidatedRetirement {
@@ -1357,7 +1601,70 @@ impl<'de> Deserialize<'de> for ValidatedRetirement {
             observed_tip_id: stored.observed_tip_id,
             observed_tip_height: stored.observed_tip_height,
             observed_at_unix_ms: stored.observed_at_unix_ms,
+            policy: stored.policy,
+            evidence_hash: stored.evidence_hash,
+            decision_id: stored.decision_id,
         })
+    }
+}
+
+impl ValidatedRetirement {
+    fn compute_decision_id(&self) -> Result<[u8; 32], ReconciliationError> {
+        hash_serialized(
+            RETIREMENT_DECISION_DOMAIN,
+            &(
+                &self.intent_id,
+                &self.tx_id,
+                &self.block_id,
+                self.inclusion_height,
+                self.monitor_depth,
+                &self.observed_tip_id,
+                self.observed_tip_height,
+                self.observed_at_unix_ms,
+                &self.policy,
+                self.evidence_hash,
+            ),
+        )
+    }
+
+    fn validate(&self) -> Result<(), ReconciliationError> {
+        self.policy.validate()?;
+        if normalize_id(self.intent_id.clone(), "retirement intent id")? != self.intent_id
+            || normalize_id(self.tx_id.clone(), "retirement transaction id")? != self.tx_id
+            || normalize_id(self.block_id.clone(), "retirement block id")? != self.block_id
+            || normalize_id(self.observed_tip_id.clone(), "retirement observed tip id")?
+                != self.observed_tip_id
+            || self.monitor_depth != self.policy.reorg_monitor_depth
+            || self.observed_tip_height
+                < self
+                    .inclusion_height
+                    .checked_add(self.monitor_depth)
+                    .ok_or(ReconciliationError::DepthMismatch)?
+            || self.evidence_hash == [0u8; 32]
+            || self.decision_id != self.compute_decision_id()?
+        {
+            return Err(ReconciliationError::MalformedDecision(
+                "validated retirement fields or decision digest are inconsistent".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_against_effect(
+        &self,
+        effect: &ValidatedChainEffect,
+    ) -> Result<(), ReconciliationError> {
+        self.validate()?;
+        effect.validate()?;
+        if self.intent_id != effect.intent_id
+            || self.tx_id != effect.tx_id
+            || self.block_id != effect.block_id
+            || self.inclusion_height != effect.inclusion_height
+            || self.policy != effect.policy
+        {
+            return Err(ReconciliationError::IntentMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -1379,9 +1686,10 @@ pub enum ReorgHorizonDecision {
 pub fn validate_reorg_horizon(
     accepted: &ValidatedChainEffect,
     selected_window: &ActiveChainProof,
-    policy: ReconciliationPolicy,
+    policy: &ReconciliationPolicy,
     now_unix_ms: u64,
 ) -> Result<ReorgHorizonDecision, ReconciliationError> {
+    accepted.validate_runtime_policy(policy)?;
     selected_window.validate()?;
     policy.validate_freshness(selected_window.observed_at_unix_ms, now_unix_ms)?;
     if selected_window.inclusion_height != accepted.inclusion_height {
@@ -1397,7 +1705,8 @@ pub fn validate_reorg_horizon(
         return Err(ReconciliationError::IncompleteAncestry);
     }
     if selected_window.first_block_id() != accepted.block_id {
-        return Ok(ReorgHorizonDecision::Rollback(ValidatedRollback {
+        let evidence_hash = hash_serialized(EVIDENCE_HASH_DOMAIN, selected_window)?;
+        let mut rollback = ValidatedRollback {
             intent_id: accepted.intent_id.clone(),
             tx_id: accepted.tx_id.clone(),
             removed_block_id: accepted.block_id.clone(),
@@ -1406,9 +1715,16 @@ pub fn validate_reorg_horizon(
             observed_tip_id: selected_window.tip_id.clone(),
             observed_tip_height: selected_window.tip_height,
             observed_at_unix_ms: selected_window.observed_at_unix_ms,
-        }));
+            policy: policy.clone(),
+            evidence_hash,
+            decision_id: [0u8; 32],
+        };
+        rollback.decision_id = rollback.compute_decision_id()?;
+        rollback.validate_against_effect(accepted)?;
+        return Ok(ReorgHorizonDecision::Rollback(rollback));
     }
-    Ok(ReorgHorizonDecision::Retire(ValidatedRetirement {
+    let evidence_hash = hash_serialized(EVIDENCE_HASH_DOMAIN, selected_window)?;
+    let mut retirement = ValidatedRetirement {
         intent_id: accepted.intent_id.clone(),
         tx_id: accepted.tx_id.clone(),
         block_id: accepted.block_id.clone(),
@@ -1417,7 +1733,13 @@ pub fn validate_reorg_horizon(
         observed_tip_id: selected_window.tip_id.clone(),
         observed_tip_height: selected_window.tip_height,
         observed_at_unix_ms: selected_window.observed_at_unix_ms,
-    }))
+        policy: policy.clone(),
+        evidence_hash,
+        decision_id: [0u8; 32],
+    };
+    retirement.decision_id = retirement.compute_decision_id()?;
+    retirement.validate_against_effect(accepted)?;
+    Ok(ReorgHorizonDecision::Retire(retirement))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1437,6 +1759,7 @@ struct PendingTicket {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct AcceptedAnchor {
+    intent: ReconciliationIntent,
     effect: ValidatedChainEffect,
     rollback: Option<ValidatedRollback>,
     applied: bool,
@@ -1584,9 +1907,12 @@ impl ReconciliationJournal {
         &self,
         restored_pending: Option<&(String, [u8; 33])>,
         historical_confirmation: Option<&ConfirmedProjectionAnchor>,
+        confirmation_history_present: bool,
+        runtime_policy: &ReconciliationPolicy,
     ) -> Result<(), ReconciliationError> {
         let state = self.read_state()?;
         let action = Self::recovery_action_from_state(&state)?;
+        runtime_policy.validate()?;
         let receipt_matches = |tx_id: &str, root: [u8; 33]| {
             restored_pending.is_some_and(|(restored_tx_id, restored_root)| {
                 restored_tx_id.eq_ignore_ascii_case(tx_id) && *restored_root == root
@@ -1641,6 +1967,7 @@ impl ReconciliationJournal {
 
         let mut candidates = Vec::with_capacity(2);
         if let Some(accepted) = &state.accepted {
+            accepted.effect.validate_runtime_policy(runtime_policy)?;
             candidates.push(&accepted.effect);
         }
         if let Some(effect) = state.pending.as_ref().and_then(|pending| {
@@ -1648,9 +1975,13 @@ impl ReconciliationJournal {
                 .then_some(pending.accepted_effect.as_ref())
                 .flatten()
         }) {
+            effect.validate_runtime_policy(runtime_policy)?;
             if !candidates.contains(&effect) {
                 candidates.push(effect);
             }
+        }
+        if historical_confirmation.is_some() && !confirmation_history_present {
+            return Err(ReconciliationError::AccountingProjectionMismatch);
         }
         if let Some(anchor) = historical_confirmation {
             if !candidates
@@ -1666,7 +1997,7 @@ impl ReconciliationJournal {
                 .is_some_and(|accepted| accepted.applied);
             let safe_absence = matches!(&action, RecoveryAction::ApplyRollback(_))
                 || matches!(&action, RecoveryAction::ApplyAccepted(effect) if effect_receipt_matches(effect));
-            if accepted_was_applied && !safe_absence {
+            if (accepted_was_applied || confirmation_history_present) && !safe_absence {
                 return Err(ReconciliationError::AccountingProjectionMismatch);
             }
         }
@@ -1771,10 +2102,7 @@ impl ReconciliationJournal {
                 .pending
                 .as_mut()
                 .ok_or(ReconciliationError::NoTicket)?;
-            if pending.intent.intent_id != effect.intent_id || pending.intent.tx_id != effect.tx_id
-            {
-                return Err(ReconciliationError::IntentMismatch);
-            }
+            effect.validate_against_intent(&pending.intent)?;
             if pending.phase == PendingPhase::AcceptanceReady {
                 return if pending.accepted_effect.as_ref() == Some(&effect) {
                     Ok(false)
@@ -1809,7 +2137,9 @@ impl ReconciliationJournal {
             {
                 return Err(ReconciliationError::InvalidPhase);
             }
+            let accepted_intent = pending.intent.clone();
             state.accepted = Some(AcceptedAnchor {
+                intent: accepted_intent,
                 effect: effect.clone(),
                 rollback: None,
                 applied: true,
@@ -1827,6 +2157,7 @@ impl ReconciliationJournal {
                 .accepted
                 .as_mut()
                 .ok_or(ReconciliationError::NoTicket)?;
+            rollback.validate_against_effect(&anchor.effect)?;
             if anchor.retirement.is_some() {
                 return Err(ReconciliationError::InvalidPhase);
             }
@@ -1859,6 +2190,7 @@ impl ReconciliationJournal {
                 .accepted
                 .as_mut()
                 .ok_or(ReconciliationError::NoTicket)?;
+            retirement.validate_against_effect(&anchor.effect)?;
             if anchor.effect.intent_id != retirement.intent_id
                 || anchor.effect.tx_id != retirement.tx_id
                 || anchor.effect.block_id != retirement.block_id
@@ -1952,6 +2284,7 @@ impl ReconciliationJournal {
             }
         }
         if let Some(accepted) = &state.accepted {
+            self.ensure_bound_nft(accepted.intent.protocol_nft_id())?;
             self.ensure_bound_nft(accepted.effect.protocol_nft_id())?;
         }
         Ok(())
@@ -2090,12 +2423,32 @@ fn append_event(
 }
 
 fn validate_state(state: &JournalState) -> Result<(), ReconciliationError> {
+    let has_event = |kind: &str, tx_id: &str| {
+        state
+            .history
+            .iter()
+            .any(|event| event.kind == kind && event.tx_id == tx_id)
+    };
     let mut prior = 0u64;
     for event in &state.history {
+        let expected_event_id = hex::encode(blake2b256_hash(
+            format!("{}:{}:{}", event.sequence, event.kind, event.tx_id).as_bytes(),
+        ));
         if event.sequence <= prior
             || event.sequence > state.sequence
             || normalize_id(event.event_id.clone(), "event id")? != event.event_id
             || normalize_id(event.tx_id.clone(), "event tx id")? != event.tx_id
+            || event.event_id != expected_event_id
+            || !matches!(
+                event.kind.as_str(),
+                "prepared"
+                    | "submission_armed"
+                    | "policy_accepted"
+                    | "applied"
+                    | "rollback_detected"
+                    | "rollback_applied"
+                    | "reorg_horizon_retired"
+            )
         {
             return Err(ReconciliationError::Journal(
                 "journal history is malformed".to_string(),
@@ -2103,16 +2456,81 @@ fn validate_state(state: &JournalState) -> Result<(), ReconciliationError> {
         }
         prior = event.sequence;
     }
+    if prior != state.sequence {
+        return Err(ReconciliationError::Journal(
+            "journal sequence is not represented by its final retained event".to_string(),
+        ));
+    }
     if let Some(pending) = &state.pending {
         pending.intent.validate()?;
-        if pending.phase == PendingPhase::AcceptanceReady && pending.accepted_effect.is_none() {
+        if !has_event("prepared", pending.intent.tx_id()) {
             return Err(ReconciliationError::Journal(
-                "acceptance-ready ticket lacks evidence".to_string(),
+                "pending ticket has no matching prepared event".to_string(),
             ));
+        }
+        match (pending.phase, pending.accepted_effect.as_ref()) {
+            (PendingPhase::AcceptanceReady, Some(effect)) => {
+                if !has_event("submission_armed", pending.intent.tx_id())
+                    || !has_event("policy_accepted", pending.intent.tx_id())
+                {
+                    return Err(ReconciliationError::Journal(
+                        "acceptance-ready ticket lacks its transition events".to_string(),
+                    ));
+                }
+                effect.validate_against_intent(&pending.intent)?;
+            }
+            (PendingPhase::AcceptanceReady, None) => {
+                return Err(ReconciliationError::Journal(
+                    "acceptance-ready ticket lacks evidence".to_string(),
+                ));
+            }
+            (PendingPhase::Prepared, None) => {}
+            (PendingPhase::SubmissionArmed, None) => {
+                if !has_event("submission_armed", pending.intent.tx_id()) {
+                    return Err(ReconciliationError::Journal(
+                        "armed ticket lacks its transition event".to_string(),
+                    ));
+                }
+            }
+            (PendingPhase::Prepared | PendingPhase::SubmissionArmed, Some(_)) => {
+                return Err(ReconciliationError::Journal(
+                    "pre-acceptance ticket contains a validated effect".to_string(),
+                ));
+            }
         }
     }
     if let Some(accepted) = &state.accepted {
-        normalize_id(accepted.effect.intent_id.clone(), "accepted intent id")?;
+        accepted.effect.validate_against_intent(&accepted.intent)?;
+        if !accepted.applied
+            || !has_event("applied", accepted.effect.tx_id())
+            || (accepted.rollback.is_some() && accepted.retirement.is_some())
+        {
+            return Err(ReconciliationError::Journal(
+                "accepted anchor phase is inconsistent".to_string(),
+            ));
+        }
+        if let Some(rollback) = &accepted.rollback {
+            if !has_event("rollback_detected", rollback.tx_id()) {
+                return Err(ReconciliationError::Journal(
+                    "rollback ticket lacks its transition event".to_string(),
+                ));
+            }
+            rollback.validate_against_effect(&accepted.effect)?;
+        }
+        if let Some(retirement) = &accepted.retirement {
+            if !has_event("reorg_horizon_retired", &retirement.tx_id) {
+                return Err(ReconciliationError::Journal(
+                    "retirement ticket lacks its transition event".to_string(),
+                ));
+            }
+            retirement.validate_against_effect(&accepted.effect)?;
+        }
+        if state.pending.as_ref().is_some_and(|pending| {
+            pending.intent.tx_id == accepted.effect.tx_id
+                || pending.intent.intent_id == accepted.effect.intent_id
+        }) {
+            return Err(ReconciliationError::DuplicateTransactionConflict);
+        }
     }
     Ok(())
 }
@@ -2163,6 +2581,19 @@ fn deserialize_state(bytes: &[u8]) -> Result<JournalState, ReconciliationError> 
         .map_err(|error| ReconciliationError::Journal(error.to_string()))?;
     validate_state(&state)?;
     Ok(state)
+}
+
+fn hash_serialized<T: Serialize + ?Sized>(
+    domain: &[u8],
+    value: &T,
+) -> Result<[u8; 32], ReconciliationError> {
+    let encoded = serde_json::to_vec(value)
+        .map_err(|error| ReconciliationError::Journal(error.to_string()))?;
+    let mut material = Vec::with_capacity(domain.len() + 8 + encoded.len());
+    material.extend_from_slice(domain);
+    material.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+    material.extend_from_slice(&encoded);
+    Ok(blake2b256_hash(&material))
 }
 
 fn normalize_id(value: String, label: &str) -> Result<String, ReconciliationError> {
@@ -2223,6 +2654,10 @@ pub enum ReconciliationError {
     IncompleteAncestry,
     #[error("reconciliation policy has an invalid finality or monitoring horizon")]
     InvalidPolicy,
+    #[error("runtime finality policy/source differs from the policy that accepted this effect")]
+    PolicyMismatch,
+    #[error("validated reconciliation decision is malformed: {0}")]
+    MalformedDecision(String),
     #[error("successor depth {observed} is below policy depth {required}")]
     DepthTooShallow { observed: u64, required: u64 },
     #[error("chain evidence is stale")]
@@ -2580,7 +3015,7 @@ mod tests {
     }
 
     fn policy() -> ReconciliationPolicy {
-        ReconciliationPolicy::new(6, 100, 12)
+        ReconciliationPolicy::new(6, 100, 12, "ergo-test", [0x42; 32])
     }
 
     fn journal_binding() -> ReconciliationJournalBinding {
@@ -2590,6 +3025,14 @@ mod tests {
     fn open_test_journal(path: &Path) -> ReconciliationJournal {
         ReconciliationJournal::open(path, journal_binding(), JournalBootstrap::FreshAllowed)
             .unwrap()
+    }
+
+    fn write_unvalidated_state(journal: &ReconciliationJournal, state: &JournalState) {
+        journal
+            .partition
+            .insert(JOURNAL_KEY, serialize_state(state).unwrap())
+            .unwrap();
+        journal.keyspace.persist(PersistMode::SyncData).unwrap();
     }
 
     #[test]
@@ -2737,45 +3180,116 @@ mod tests {
     }
 
     #[test]
-    fn transaction_root_matches_frozen_reference_and_rejects_old_mutants() {
-        let (_, signed, _) = tracker_fixture();
-        let transaction = parse_transaction(&signed).unwrap();
-        let root_v2 = transaction_merkle_root(&[transaction.clone()], 2).unwrap();
-        // Frozen from sigma-rust `ergo-chain-generation::transactions_root`
-        // for this exact transaction fixture.
+    fn transaction_root_matches_node_v6_reference_and_rejects_layout_mutants() {
+        let (_, signed_a, _) = tracker_fixture();
+        let (signed_b, _) = tracker_transaction(
+            "0702dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7",
+            [0x03, 0x20, 0x00],
+            true,
+            false,
+        );
+        let transactions = vec![
+            parse_transaction(&signed_a).unwrap(),
+            parse_transaction(&signed_b).unwrap(),
+        ];
+        let root_v2 = transaction_merkle_root(&transactions, 2).unwrap();
+        // Independent JVM golden reproduced with Ergo node v6.0.3 commit
+        // 28ebb184: Algos.hash(010203).tail for both witnesses, then the
+        // node's Algos.merkleTreeRoot over the two ids followed by two witness
+        // ids. This is not computed through the Rust helper under test.
         assert_eq!(
             hex::encode(root_v2.as_ref()),
-            "7950d92caa1b621ed4deed01f326883792f9e6505e99513daf737cc42431fa78"
+            "c392f72d35ee256968ae2d2426280d38f4f89d4f722aea8b7e0c0b864b1dce4f"
         );
 
-        let unsigned_id = blake2b256_hash(&transaction.bytes_to_sign().unwrap());
-        assert_eq!(transaction.id().as_ref(), unsigned_id.as_slice());
-        let root_v1 = transaction_merkle_root(&[transaction.clone()], 1).unwrap();
+        let transaction_ids = transactions
+            .iter()
+            .map(|transaction| {
+                let id = blake2b256_hash(&transaction.bytes_to_sign().unwrap());
+                assert_eq!(transaction.id().as_ref(), id.as_slice());
+                id
+            })
+            .collect::<Vec<_>>();
+        let witnesses = transactions
+            .iter()
+            .map(|transaction| {
+                transaction
+                    .inputs
+                    .iter()
+                    .flat_map(|input| input.spending_proof.proof.as_ref().iter().copied())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let witness_hashes = witnesses
+            .iter()
+            .map(|witness| blake2b256_hash(witness))
+            .collect::<Vec<_>>();
+
+        let root_v1 = transaction_merkle_root(&transactions, 1).unwrap();
         assert_eq!(
             root_v1,
-            MerkleTree::new(vec![MerkleNode::from_bytes(unsigned_id.to_vec())]).root_hash_special()
+            MerkleTree::new(
+                transaction_ids
+                    .iter()
+                    .map(|id| MerkleNode::from_bytes(id.to_vec()))
+                    .collect::<Vec<_>>()
+            )
+            .root_hash_special()
         );
 
-        let witness = transaction
-            .inputs
-            .iter()
-            .flat_map(|input| input.spending_proof.proof.as_ref().iter().copied())
-            .collect::<Vec<_>>();
-        let separated = MerkleTree::new(vec![
-            MerkleNode::from_bytes(unsigned_id.to_vec()),
-            MerkleNode::from_bytes(blake2b256_hash(&witness)[1..].to_vec()),
-        ])
+        let appended_raw = MerkleTree::new(
+            transaction_ids
+                .iter()
+                .zip(&witnesses)
+                .map(|(id, witness)| {
+                    let mut leaf = id.to_vec();
+                    leaf.extend_from_slice(witness);
+                    MerkleNode::from_bytes(leaf)
+                })
+                .collect::<Vec<_>>(),
+        )
         .root_hash_special();
-        let mut hashed_leaf = unsigned_id.to_vec();
-        hashed_leaf.extend_from_slice(&blake2b256_hash(&witness)[1..]);
-        let hashed = MerkleTree::new(vec![MerkleNode::from_bytes(hashed_leaf)]).root_hash_special();
-        let mut truncated_leaf = unsigned_id.to_vec();
-        truncated_leaf.extend_from_slice(&witness[1..]);
-        let truncated =
-            MerkleTree::new(vec![MerkleNode::from_bytes(truncated_leaf)]).root_hash_special();
-        assert_ne!(root_v2, separated);
-        assert_ne!(root_v2, hashed);
-        assert_ne!(root_v2, truncated);
+        let grouped_raw = MerkleTree::new(
+            transaction_ids
+                .iter()
+                .map(|id| MerkleNode::from_bytes(id.to_vec()))
+                .chain(
+                    witnesses
+                        .iter()
+                        .map(|witness| MerkleNode::from_bytes(witness.clone())),
+                )
+                .collect::<Vec<_>>(),
+        )
+        .root_hash_special();
+        let grouped_full_hash = MerkleTree::new(
+            transaction_ids
+                .iter()
+                .map(|id| MerkleNode::from_bytes(id.to_vec()))
+                .chain(
+                    witness_hashes
+                        .iter()
+                        .map(|hash| MerkleNode::from_bytes(hash.to_vec())),
+                )
+                .collect::<Vec<_>>(),
+        )
+        .root_hash_special();
+        let interleaved_tail = MerkleTree::new(
+            transaction_ids
+                .iter()
+                .zip(&witness_hashes)
+                .flat_map(|(id, hash)| {
+                    [
+                        MerkleNode::from_bytes(id.to_vec()),
+                        MerkleNode::from_bytes(hash[1..].to_vec()),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        )
+        .root_hash_special();
+        assert_ne!(root_v2, appended_raw);
+        assert_ne!(root_v2, grouped_raw);
+        assert_ne!(root_v2, grouped_full_hash);
+        assert_ne!(root_v2, interleaved_tail);
     }
 
     #[test]
@@ -2967,11 +3481,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_rollback(&effect, &original_chain, policy(), 1_000),
+            validate_rollback(&effect, &original_chain, &policy(), 1_000),
             Err(ReconciliationError::RollbackNotProven)
         );
         let replacement = chain(100, 7, 9);
-        let rollback = validate_rollback(&effect, &replacement, policy(), 1_000).unwrap();
+        let rollback = validate_rollback(&effect, &replacement, &policy(), 1_000).unwrap();
         assert_eq!(rollback.removed_block_id(), effect.block_id());
         assert!(serde_json::from_slice::<ValidatedChainEffect>(
             &serde_json::to_vec(&effect).unwrap()
@@ -2984,7 +3498,7 @@ mod tests {
 
         let mut forged = replacement;
         forged.headers[1].parent_id = id(3);
-        assert!(validate_rollback(&effect, &forged, policy(), 1_000).is_err());
+        assert!(validate_rollback(&effect, &forged, &policy(), 1_000).is_err());
     }
 
     #[test]
@@ -3012,7 +3526,7 @@ mod tests {
             &signed,
         );
         let retirement =
-            match validate_reorg_horizon(&effect, &old_but_active, policy(), 1_000).unwrap() {
+            match validate_reorg_horizon(&effect, &old_but_active, &policy(), 1_000).unwrap() {
                 ReorgHorizonDecision::Retire(retirement) => retirement,
                 ReorgHorizonDecision::Rollback(_) => panic!("unchanged anchor must retire"),
             };
@@ -3029,7 +3543,7 @@ mod tests {
             None,
         );
         assert!(matches!(
-            validate_reorg_horizon(&effect, &replacement, policy(), 1_000).unwrap(),
+            validate_reorg_horizon(&effect, &replacement, &policy(), 1_000).unwrap(),
             ReorgHorizonDecision::Rollback(rollback)
                 if rollback.removed_block_id() == effect.block_id()
         ));
@@ -3042,7 +3556,7 @@ mod tests {
             &signed,
         );
         assert_eq!(
-            validate_reorg_horizon(&effect, &too_short, policy(), 1_000),
+            validate_reorg_horizon(&effect, &too_short, &policy(), 1_000),
             Err(ReconciliationError::IncompleteAncestry)
         );
         let too_long = bounded_chain_for_transaction(
@@ -3053,7 +3567,7 @@ mod tests {
             &signed,
         );
         assert_eq!(
-            validate_reorg_horizon(&effect, &too_long, policy(), 1_000),
+            validate_reorg_horizon(&effect, &too_long, &policy(), 1_000),
             Err(ReconciliationError::IncompleteAncestry)
         );
 
@@ -3080,9 +3594,10 @@ mod tests {
             Err(ReconciliationError::DepthMismatch)
         );
 
-        let invalid = ReconciliationPolicy::new(6, 100, MAX_REORG_MONITOR_DEPTH + 1);
+        let invalid =
+            ReconciliationPolicy::new(6, 100, MAX_REORG_MONITOR_DEPTH + 1, "ergo-test", [0x42; 32]);
         assert_eq!(
-            validate_reorg_horizon(&effect, &old_but_active, invalid, 1_000),
+            validate_reorg_horizon(&effect, &old_but_active, &invalid, 1_000),
             Err(ReconciliationError::InvalidPolicy)
         );
     }
@@ -3110,7 +3625,7 @@ mod tests {
             &signed_a,
         );
         let retirement =
-            match validate_reorg_horizon(&effect_a, &selected, policy(), 1_000).unwrap() {
+            match validate_reorg_horizon(&effect_a, &selected, &policy(), 1_000).unwrap() {
                 ReorgHorizonDecision::Retire(retirement) => retirement,
                 ReorgHorizonDecision::Rollback(_) => panic!("same anchor"),
             };
@@ -3260,7 +3775,7 @@ mod tests {
             .iter()
             .any(|candidate| history_a.matches_validated_effect(candidate)));
         assert_eq!(
-            journal.validate_tracker_startup_join(None, Some(&history_a)),
+            journal.validate_tracker_startup_join(None, Some(&history_a), true, &policy()),
             Err(ReconciliationError::AccountingProjectionMismatch)
         );
     }
@@ -3300,32 +3815,175 @@ mod tests {
         acceptance.arm_submission(intent.intent_id()).unwrap();
         acceptance.record_validated_effect(effect.clone()).unwrap();
         assert!(acceptance
-            .validate_tracker_startup_join(Some(&pending), None)
+            .validate_tracker_startup_join(Some(&pending), None, false, &policy())
             .is_ok());
         assert_eq!(
-            acceptance.validate_tracker_startup_join(None, None),
+            acceptance.validate_tracker_startup_join(None, None, false, &policy()),
             Err(ReconciliationError::AccountingProjectionMismatch)
         );
         assert!(acceptance
-            .validate_tracker_startup_join(None, Some(&projection))
+            .validate_tracker_startup_join(None, Some(&projection), true, &policy())
             .is_ok());
         assert_eq!(
-            acceptance.validate_tracker_startup_join(Some(&("aa".repeat(32), pending.1)), None,),
+            acceptance.validate_tracker_startup_join(
+                Some(&("aa".repeat(32), pending.1)),
+                None,
+                false,
+                &policy(),
+            ),
             Err(ReconciliationError::AccountingProjectionMismatch)
         );
         assert_eq!(
-            acceptance.validate_tracker_startup_join(Some(&(pending.0.clone(), [0x99; 33])), None,),
+            acceptance.validate_tracker_startup_join(
+                Some(&(pending.0.clone(), [0x99; 33])),
+                None,
+                false,
+                &policy(),
+            ),
             Err(ReconciliationError::AccountingProjectionMismatch)
         );
 
         acceptance.mark_applied(&effect).unwrap();
         assert_eq!(
-            acceptance.validate_tracker_startup_join(None, None),
+            acceptance.validate_tracker_startup_join(None, None, false, &policy()),
             Err(ReconciliationError::AccountingProjectionMismatch)
         );
         assert!(acceptance
-            .validate_tracker_startup_join(None, Some(&projection))
+            .validate_tracker_startup_join(None, Some(&projection), true, &policy())
             .is_ok());
+    }
+
+    #[test]
+    fn checksummed_journal_mutants_cannot_mint_effects_or_retirement() {
+        let (intent, signed, predecessor) = tracker_fixture();
+        let effect = validate_chain_effect(
+            &intent,
+            &evidence(
+                signed.clone(),
+                predecessor,
+                chain_for_transaction(100, 6, 0, &signed),
+            ),
+            policy(),
+            1_000,
+        )
+        .unwrap();
+        let pending = (effect.tx_id().to_string(), effect.tracker_root().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let journal = open_test_journal(temp.path());
+        journal.record_prepared(intent).unwrap();
+        journal.arm_submission(effect.intent_id()).unwrap();
+        journal.record_validated_effect(effect.clone()).unwrap();
+        let original = journal.read_state().unwrap();
+
+        let mut mutants = Vec::new();
+        for mutate in 0..11 {
+            let mut state = original.clone();
+            let accepted_effect = state
+                .pending
+                .as_mut()
+                .and_then(|pending| pending.accepted_effect.as_mut())
+                .unwrap();
+            match mutate {
+                0 => accepted_effect.successor_box_id = id(0x71),
+                1 => accepted_effect.block_id = id(0x72),
+                2 => accepted_effect.inclusion_height += 1,
+                3 => accepted_effect.successor_depth += 1,
+                4 => accepted_effect.intent_id = id(0x73),
+                5 => accepted_effect.tip_id = id(0x74),
+                6 => accepted_effect.policy.reorg_monitor_depth += 1,
+                7 => accepted_effect.evidence_hash = [0x75; 32],
+                8 => accepted_effect.decision_id = [0x76; 32],
+                9 => accepted_effect.policy.policy_id = "basis.invalid-policy".to_string(),
+                10 => accepted_effect.policy.policy_version += 1,
+                _ => unreachable!(),
+            }
+            mutants.push(state);
+        }
+        let mut bad_event = original.clone();
+        bad_event.history.last_mut().unwrap().event_id = id(0x77);
+        mutants.push(bad_event);
+
+        for mutant in mutants {
+            // `serialize_state` recomputes the outer BCJ1 checksum. Each
+            // mutation must still fail its inner authority/transition join.
+            write_unvalidated_state(&journal, &mutant);
+            assert!(journal
+                .validate_tracker_startup_join(Some(&pending), None, false, &policy())
+                .is_err());
+        }
+
+        write_unvalidated_state(&journal, &original);
+        journal.mark_applied(&effect).unwrap();
+        let applied = journal.read_state().unwrap();
+        let mut accepted_successor_mutant = applied.clone();
+        let mutated_effect = &mut accepted_successor_mutant.accepted.as_mut().unwrap().effect;
+        mutated_effect.successor_box_id = id(0x78);
+        // Even a coordinated recomputation of the inner decision digest cannot
+        // detach an applied effect from the signed intent retained by BCJ1.
+        mutated_effect.decision_id = mutated_effect.compute_decision_id().unwrap();
+        write_unvalidated_state(&journal, &accepted_successor_mutant);
+        assert!(journal.recovery_action().is_err());
+
+        write_unvalidated_state(&journal, &applied);
+        let selected = bounded_chain_for_transaction(100, 12, 12, 0, &signed);
+        let retirement = match validate_reorg_horizon(&effect, &selected, &policy(), 1_000).unwrap()
+        {
+            ReorgHorizonDecision::Retire(retirement) => retirement,
+            ReorgHorizonDecision::Rollback(_) => panic!("matching chain must retire"),
+        };
+        let mut fake_retired = applied;
+        fake_retired.accepted.as_mut().unwrap().retirement = Some(retirement);
+        write_unvalidated_state(&journal, &fake_retired);
+        assert!(journal.recovery_action().is_err());
+    }
+
+    #[test]
+    fn startup_rejects_orphan_history_and_policy_drift() {
+        let empty_dir = tempfile::tempdir().unwrap();
+        let empty = open_test_journal(empty_dir.path());
+        assert_eq!(
+            empty.validate_tracker_startup_join(None, None, true, &policy()),
+            Err(ReconciliationError::AccountingProjectionMismatch)
+        );
+
+        let (intent, signed, predecessor) = tracker_fixture();
+        let effect = validate_chain_effect(
+            &intent,
+            &evidence(
+                signed.clone(),
+                predecessor,
+                chain_for_transaction(100, 6, 0, &signed),
+            ),
+            policy(),
+            1_000,
+        )
+        .unwrap();
+        let projection = projection_anchor(&effect);
+        let dir = tempfile::tempdir().unwrap();
+        let journal = open_test_journal(dir.path());
+        journal.record_prepared(intent).unwrap();
+        journal.arm_submission(effect.intent_id()).unwrap();
+        journal.record_validated_effect(effect.clone()).unwrap();
+        journal.mark_applied(&effect).unwrap();
+
+        for horizon in [6, 13] {
+            let changed = ReconciliationPolicy::new(6, 100, horizon, "ergo-test", [0x42; 32]);
+            assert_eq!(
+                journal.validate_tracker_startup_join(None, Some(&projection), true, &changed,),
+                Err(ReconciliationError::PolicyMismatch)
+            );
+        }
+        for changed in [
+            ReconciliationPolicy::new(7, 100, 12, "ergo-test", [0x42; 32]),
+            ReconciliationPolicy::new(6, 101, 12, "ergo-test", [0x42; 32]),
+            ReconciliationPolicy::new(6, 100, 12, "ergo-testnet", [0x42; 32]),
+            ReconciliationPolicy::new(6, 100, 12, "ergo-test", [0x43; 32]),
+        ] {
+            assert_eq!(
+                journal.validate_tracker_startup_join(None, Some(&projection), true, &changed,),
+                Err(ReconciliationError::PolicyMismatch)
+            );
+        }
     }
 
     #[test]
@@ -3369,14 +4027,19 @@ mod tests {
             RecoveryAction::ApplyRollback(found) if found == rollback
         ));
         assert!(journal
-            .validate_tracker_startup_join(Some(&pending_b), None)
+            .validate_tracker_startup_join(Some(&pending_b), None, true, &policy())
             .is_ok());
         assert_eq!(
-            journal.validate_tracker_startup_join(None, None),
+            journal.validate_tracker_startup_join(None, None, true, &policy()),
             Err(ReconciliationError::AccountingProjectionMismatch)
         );
         assert_eq!(
-            journal.validate_tracker_startup_join(Some(&("aa".repeat(32), pending_b.1)), None,),
+            journal.validate_tracker_startup_join(
+                Some(&("aa".repeat(32), pending_b.1)),
+                None,
+                true,
+                &policy(),
+            ),
             Err(ReconciliationError::AccountingProjectionMismatch)
         );
     }
@@ -3467,7 +4130,7 @@ mod tests {
         journal.arm_submission(intent_b.intent_id()).unwrap();
 
         let replacement = chain(100, 7, 9);
-        let rollback = validate_rollback(&effect_a, &replacement, policy(), 1_000).unwrap();
+        let rollback = validate_rollback(&effect_a, &replacement, &policy(), 1_000).unwrap();
         journal.record_rollback(rollback.clone()).unwrap();
         assert!(matches!(
             journal.recovery_action().unwrap(),
