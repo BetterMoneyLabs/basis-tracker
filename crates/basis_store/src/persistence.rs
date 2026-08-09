@@ -1,9 +1,9 @@
 //! Persistence layer for a bounded, versioned IOU-note state snapshot.
 
 use crate::{
-    blake2b256_hash, reserve_tracker::ExtendedReserveInfo, FreshGenerationApproval, IouNote,
-    NoteConfirmation, NoteError, NoteKey, PendingTrackerPublication, PubKey, TrackerBoxInfo,
-    TrackerGenerationConfig,
+    blake2b256_hash, reserve_tracker::ExtendedReserveInfo, ConfirmedProjectionAnchor,
+    FreshGenerationApproval, IouNote, NoteConfirmation, NoteError, NoteKey,
+    PendingTrackerPublication, PubKey, TrackerBoxInfo, TrackerGenerationConfig,
 };
 use fjall::{Config, Keyspace, PartitionCreateOptions, PersistMode};
 use fs2::FileExt;
@@ -21,11 +21,14 @@ const NOTE_STATE_KEY: &[u8] = b"note_state_v2";
 const NOTE_SCHEMA_KEY: &[u8] = b"note_schema_v2";
 const NOTE_GENERATION_KEY: &[u8] = b"tracker_generation_v1";
 const PENDING_PUBLICATION_KEY: &[u8] = b"pending_publication_v1";
+const CONFIRMED_PROJECTION_KEY: &[u8] = b"confirmed_projection_v1";
 const GENERATION_MAGIC: &[u8; 4] = b"BNG1";
 const PENDING_PUBLICATION_MAGIC: &[u8; 4] = b"BPA1";
+const CONFIRMED_PROJECTION_MAGIC: &[u8; 4] = b"BCP1";
 const SNAPSHOT_CHECKSUM_DOMAIN: &[u8] = b"basis-note-state-snapshot-v2";
 const GENERATION_CHECKSUM_DOMAIN: &[u8] = b"basis-tracker-generation-v1";
 const PENDING_PUBLICATION_CHECKSUM_DOMAIN: &[u8] = b"basis-pending-publication-v1";
+const CONFIRMED_PROJECTION_CHECKSUM_DOMAIN: &[u8] = b"basis-confirmed-projection-v1";
 const NOTE_STATE_HEADER_LEN: usize = 4 + 4 + 33 + 32;
 const NOTE_RECORD_LEN: usize = 33 + 8 + 8 + 8 + 65 + 33;
 const MAX_NOTE_COUNT: usize = 50_000;
@@ -33,6 +36,8 @@ const GENERATION_MANIFEST_BODY_LEN: usize = 4 + 32 + 33 + 1 + 33;
 const GENERATION_MANIFEST_LEN: usize = GENERATION_MANIFEST_BODY_LEN + 32;
 const PENDING_PUBLICATION_BODY_LEN: usize = 4 + 33 + 32 + 8;
 const PENDING_PUBLICATION_LEN: usize = PENDING_PUBLICATION_BODY_LEN + 32;
+const CONFIRMED_PROJECTION_BODY_LEN: usize = 4 + 32 + 32 + 32 + 8 + 8 + 32 + 33;
+const CONFIRMED_PROJECTION_LEN: usize = CONFIRMED_PROJECTION_BODY_LEN + 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredNoteState {
@@ -864,6 +869,77 @@ impl NoteStorage {
         })
     }
 
+    fn serialize_confirmed_projection(
+        anchor: &ConfirmedProjectionAnchor,
+    ) -> Result<Vec<u8>, NoteError> {
+        let decode_id = |value: &str| {
+            hex::decode(value)
+                .ok()
+                .filter(|bytes| bytes.len() == 32)
+                .ok_or_else(|| {
+                    NoteError::StorageError(
+                        "confirmed projection contains a malformed id".to_string(),
+                    )
+                })
+        };
+        let tx_id = decode_id(anchor.tx_id())?;
+        let box_id = decode_id(anchor.box_id())?;
+        let block_id = decode_id(anchor.block_id())?;
+        let intent_id = decode_id(anchor.intent_id())?;
+        let mut bytes = Vec::with_capacity(CONFIRMED_PROJECTION_LEN);
+        bytes.extend_from_slice(CONFIRMED_PROJECTION_MAGIC);
+        bytes.extend_from_slice(&tx_id);
+        bytes.extend_from_slice(&box_id);
+        bytes.extend_from_slice(&block_id);
+        bytes.extend_from_slice(&anchor.height().to_be_bytes());
+        bytes.extend_from_slice(&anchor.successor_depth().to_be_bytes());
+        bytes.extend_from_slice(&intent_id);
+        bytes.extend_from_slice(&anchor.root());
+        let mut checksum_input =
+            Vec::with_capacity(CONFIRMED_PROJECTION_CHECKSUM_DOMAIN.len() + bytes.len());
+        checksum_input.extend_from_slice(CONFIRMED_PROJECTION_CHECKSUM_DOMAIN);
+        checksum_input.extend_from_slice(&bytes);
+        bytes.extend_from_slice(&blake2b256_hash(&checksum_input));
+        Ok(bytes)
+    }
+
+    fn deserialize_confirmed_projection(
+        bytes: &[u8],
+    ) -> Result<ConfirmedProjectionAnchor, NoteError> {
+        if bytes.len() != CONFIRMED_PROJECTION_LEN || &bytes[..4] != CONFIRMED_PROJECTION_MAGIC {
+            return Err(NoteError::StorageError(
+                "Malformed confirmed tracker projection".to_string(),
+            ));
+        }
+        let mut checksum_input = Vec::with_capacity(
+            CONFIRMED_PROJECTION_CHECKSUM_DOMAIN.len() + CONFIRMED_PROJECTION_BODY_LEN,
+        );
+        checksum_input.extend_from_slice(CONFIRMED_PROJECTION_CHECKSUM_DOMAIN);
+        checksum_input.extend_from_slice(&bytes[..CONFIRMED_PROJECTION_BODY_LEN]);
+        if bytes[CONFIRMED_PROJECTION_BODY_LEN..] != blake2b256_hash(&checksum_input) {
+            return Err(NoteError::StorageError(
+                "Confirmed tracker projection checksum mismatch".to_string(),
+            ));
+        }
+        let height = u64::from_be_bytes(bytes[100..108].try_into().map_err(|_| {
+            NoteError::StorageError("Malformed confirmed projection height".to_string())
+        })?);
+        let successor_depth = u64::from_be_bytes(bytes[108..116].try_into().map_err(|_| {
+            NoteError::StorageError("Malformed confirmed projection depth".to_string())
+        })?);
+        let mut root = [0u8; 33];
+        root.copy_from_slice(&bytes[148..181]);
+        Ok(ConfirmedProjectionAnchor::from_parts(
+            hex::encode(&bytes[4..36]),
+            hex::encode(&bytes[36..68]),
+            hex::encode(&bytes[68..100]),
+            height,
+            successor_depth,
+            hex::encode(&bytes[116..148]),
+            root,
+        ))
+    }
+
     pub(crate) fn pending_publication(
         &self,
     ) -> Result<Option<PendingTrackerPublication>, NoteError> {
@@ -940,6 +1016,66 @@ impl NoteStorage {
                 e
             ))
         })
+    }
+
+    pub(crate) fn confirmed_projection(
+        &self,
+    ) -> Result<Option<ConfirmedProjectionAnchor>, NoteError> {
+        self.schema_partition
+            .get(CONFIRMED_PROJECTION_KEY)
+            .map_err(|error| {
+                NoteError::StorageError(format!(
+                    "Failed to read confirmed tracker projection: {error}"
+                ))
+            })?
+            .map(|bytes| Self::deserialize_confirmed_projection(bytes.as_ref()))
+            .transpose()
+    }
+
+    pub(crate) fn store_confirmed_projection(
+        &self,
+        anchor: &ConfirmedProjectionAnchor,
+    ) -> Result<(), NoteError> {
+        let _guard = self.write_lock.lock().map_err(|_| {
+            NoteError::StorageError("Note storage write lock is poisoned".to_string())
+        })?;
+        self.schema_partition
+            .insert(
+                CONFIRMED_PROJECTION_KEY,
+                Self::serialize_confirmed_projection(anchor)?,
+            )
+            .map_err(|error| {
+                NoteError::StorageOutcomeUnknown(format!(
+                    "Confirmed projection write outcome is unknown: {error}"
+                ))
+            })?;
+        self.keyspace
+            .persist(PersistMode::SyncData)
+            .map_err(|error| {
+                NoteError::StorageOutcomeUnknown(format!(
+                    "Confirmed projection durability is unknown: {error}"
+                ))
+            })
+    }
+
+    pub(crate) fn clear_confirmed_projection(&self) -> Result<(), NoteError> {
+        let _guard = self.write_lock.lock().map_err(|_| {
+            NoteError::StorageError("Note storage write lock is poisoned".to_string())
+        })?;
+        self.schema_partition
+            .remove(CONFIRMED_PROJECTION_KEY)
+            .map_err(|error| {
+                NoteError::StorageOutcomeUnknown(format!(
+                    "Confirmed projection removal outcome is unknown: {error}"
+                ))
+            })?;
+        self.keyspace
+            .persist(PersistMode::SyncData)
+            .map_err(|error| {
+                NoteError::StorageOutcomeUnknown(format!(
+                    "Confirmed projection removal durability is unknown: {error}"
+                ))
+            })
     }
 
     /// Store an IOU note with its issuer public key

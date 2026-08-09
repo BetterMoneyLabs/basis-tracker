@@ -111,18 +111,17 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_transaction_confirmation_check_not_found() {
-        // Test that check_transaction_confirmation handles a non-existent tx gracefully
-        // Using a local/mock URL that will definitely timeout/fail
+    async fn test_transaction_observation_rejects_an_unreachable_node() {
+        // A transport failure cannot be interpreted as confirmation evidence.
         let config = TrackerBoxUpdateConfig {
             node_url: "http://localhost:99999".to_string(), // Invalid port - will fail fast
             ..Default::default()
         };
 
-        // Check a non-existent transaction ID (64 hex chars)
+        // Probe one syntactically valid transaction ID (64 hex chars).
         let fake_tx_id = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        let result = TrackerBoxUpdater::check_transaction_confirmation(&config, fake_tx_id).await;
+        let result = TrackerBoxUpdater::probe_transaction_observation(&config, fake_tx_id).await;
 
         // Should return an error since the node is unreachable
         assert!(result.is_err(), "Should error when node is unreachable");

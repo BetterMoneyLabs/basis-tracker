@@ -17,6 +17,34 @@ use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+struct UpdaterTaskHealthGuard {
+    shared_state: SharedTrackerState,
+    graceful: bool,
+}
+
+impl UpdaterTaskHealthGuard {
+    fn new(shared_state: SharedTrackerState) -> Self {
+        Self {
+            shared_state,
+            graceful: false,
+        }
+    }
+
+    fn mark_graceful(&mut self) {
+        self.graceful = true;
+    }
+}
+
+impl Drop for UpdaterTaskHealthGuard {
+    fn drop(&mut self) {
+        if !self.graceful {
+            // Also runs during task unwinding, so a panic cannot silently
+            // leave the sole reorg watcher dead while effects remain readable.
+            self.shared_state.quarantine_publication();
+        }
+    }
+}
+
 fn reject_while_publication_is_fenced(command: TrackerCommand) {
     use basis_store::NoteError;
 
@@ -56,6 +84,9 @@ fn reject_while_publication_is_fenced(command: TrackerCommand) {
         }
         TrackerCommand::RecordPublicationAttempt { response_tx, .. }
         | TrackerCommand::ConfirmPublication { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
+        }
+        TrackerCommand::RollbackPublication { response_tx, .. } => {
             let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
         }
         TrackerCommand::AbortPublication { response_tx, .. } => {
@@ -107,12 +138,10 @@ fn handle_command_while_publication_is_fenced(
             Some(active_lease)
         }
         TrackerCommand::ConfirmPublication {
-            tx_id,
-            box_id,
-            height,
+            effect,
             response_tx,
         } => {
-            let result = tracker.confirm_pending_publication(&tx_id, &box_id, height);
+            let result = tracker.confirm_validated_publication(&effect);
             let confirmed = result.is_ok();
             if result.as_ref().is_err_and(|error| {
                 !matches!(error, basis_store::NoteError::PublicationLeaseMismatch)
@@ -125,6 +154,17 @@ fn handle_command_while_publication_is_fenced(
             } else {
                 Some(active_lease)
             }
+        }
+        TrackerCommand::RollbackPublication {
+            rollback,
+            response_tx,
+        } => {
+            let result = tracker.rollback_validated_publication(&rollback);
+            if result.is_err() {
+                shared_state.quarantine_publication();
+            }
+            let _ = response_tx.send(result);
+            Some(active_lease)
         }
         TrackerCommand::AbortPublication { lease, response_tx } if lease == active_lease => {
             let result = tracker.pending_publication().and_then(|pending| {
@@ -391,6 +431,24 @@ async fn main() {
                 return;
             }
         };
+        let initial_confirmation = match tracker.validated_confirmation_anchor() {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        let confirmation_history_present = match tracker.has_persisted_confirmation_history() {
+            Ok(present) => present,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        shared_state_for_tracker.set_confirmation_history_present(confirmation_history_present);
+        shared_state_for_tracker.set_historical_confirmation(initial_confirmation);
         let mut active_publication =
             restore_pending_publication(initial_pending.as_ref(), &shared_state_for_tracker);
         let _ = init_tx.send(Ok((initial_root, initial_pending.clone())));
@@ -491,32 +549,23 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = Ok(tracker.get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                    let result = tracker.try_get_confirmation(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetAllConfirmations { response_tx } => {
-                    let result = tracker
-                        .validated_state()
-                        .map(|_| tracker.all_confirmations());
+                    let result = tracker.try_all_confirmations();
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::BeginPublication {
                     tracker_nft_id,
                     observed_root,
-                    box_id,
-                    height,
+                    box_id: _,
+                    height: _,
                     response_tx,
                 } => {
                     let result = tracker
                         .validate_observed_generation(&tracker_nft_id, observed_root)
-                        .and_then(|_| {
-                            tracker.reconcile_with_confirmed_digest(
-                                &observed_root,
-                                &box_id,
-                                height,
-                            )?;
-                            tracker.validated_state()
-                        })
+                        .and_then(|_| tracker.validated_state())
                         .and_then(|state| {
                             next_publication_id
                                 .checked_add(1)
@@ -540,9 +589,30 @@ async fn main() {
                         }
                     }
                 }
-                TrackerCommand::RecordPublicationAttempt { response_tx, .. }
-                | TrackerCommand::ConfirmPublication { response_tx, .. } => {
+                TrackerCommand::RecordPublicationAttempt { response_tx, .. } => {
                     let _ = response_tx.send(Err(basis_store::NoteError::PublicationLeaseMismatch));
+                }
+                TrackerCommand::ConfirmPublication {
+                    effect,
+                    response_tx,
+                } => {
+                    let result = tracker.confirm_validated_publication(&effect);
+                    if result.as_ref().is_err_and(|error| {
+                        !matches!(error, basis_store::NoteError::PublicationLeaseMismatch)
+                    }) {
+                        shared_state_for_tracker.quarantine_publication();
+                    }
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::RollbackPublication {
+                    rollback,
+                    response_tx,
+                } => {
+                    let result = tracker.rollback_validated_publication(&rollback);
+                    if result.is_err() {
+                        shared_state_for_tracker.quarantine_publication();
+                    }
+                    let _ = response_tx.send(result);
                 }
                 TrackerCommand::AbortPublication { response_tx, .. } => {
                     let _ = response_tx.send(Err(basis_store::NoteError::PublicationLeaseMismatch));
@@ -594,6 +664,15 @@ async fn main() {
         fee: config.transaction.fee,
         change_address: config.get_change_address().ok(),
         tracker_secret_key: config.tracker_secret_key_bytes(),
+        min_successor_depth: config.ergo.confirmed_chain_min_successor_depth.unwrap_or(6),
+        max_evidence_age_ms: config
+            .ergo
+            .confirmed_chain_max_evidence_age_ms
+            .unwrap_or(60_000),
+        reorg_monitor_depth: config.ergo.confirmed_chain_reorg_monitor_depth,
+        reconciliation_journal_path: data_dir.join("confirmed-chain"),
+        allow_fresh_reconciliation_journal: config.ergo.allow_fresh_reconciliation_journal,
+        ..TrackerBoxUpdateConfig::default()
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
@@ -606,7 +685,8 @@ async fn main() {
     let updater_cmd_tx = tx.clone();
     let updater_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        if let Err(e) = TrackerBoxUpdater::start(
+        let mut health_guard = UpdaterTaskHealthGuard::new(shared_state_clone.clone());
+        match TrackerBoxUpdater::start(
             updater_config,
             shared_state_clone,
             updater_shutdown_rx,
@@ -614,7 +694,11 @@ async fn main() {
         )
         .await
         {
-            tracing::error!("Tracker box updater failed: {}", e);
+            Ok(()) => health_guard.mark_graceful(),
+            Err(e) => tracing::error!(
+                "Tracker box updater failed and commitment effects were quarantined: {}",
+                e
+            ),
         }
     });
     tracing::info!("Tracker box updater started successfully");
@@ -944,6 +1028,22 @@ mod publication_fence_tests {
         ));
     }
 
+    #[test]
+    fn updater_task_guard_quarantines_unexpected_termination_only() {
+        let failed = SharedTrackerState::new();
+        {
+            let _guard = UpdaterTaskHealthGuard::new(failed.clone());
+        }
+        assert!(!failed.is_publication_healthy());
+
+        let graceful = SharedTrackerState::new();
+        {
+            let mut guard = UpdaterTaskHealthGuard::new(graceful.clone());
+            guard.mark_graceful();
+        }
+        assert!(graceful.is_publication_healthy());
+    }
+
     #[tokio::test]
     async fn stale_publication_receipt_cannot_release_the_actor_fence() {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -1033,21 +1133,20 @@ mod publication_fence_tests {
             Ok(Err(basis_store::NoteError::PublicationInProgress))
         ));
 
-        let (wrong_tx, wrong_rx) = tokio::sync::oneshot::channel();
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        let restored_lease = active.unwrap();
         active = handle_command_while_publication_is_fenced(
-            active.unwrap(),
-            TrackerCommand::ConfirmPublication {
-                tx_id: "22".repeat(32),
-                box_id: "wrong-box".to_string(),
-                height: 200,
-                response_tx: wrong_tx,
+            restored_lease,
+            TrackerCommand::AbortPublication {
+                lease: restored_lease,
+                response_tx: abort_tx,
             },
             &mut tracker,
             &restarted_shared,
         );
         assert!(matches!(
-            wrong_rx.await,
-            Ok(Err(basis_store::NoteError::PublicationLeaseMismatch))
+            abort_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
         ));
         assert!(active.is_some());
         assert!(restarted_shared.is_publication_healthy());
@@ -1059,34 +1158,7 @@ mod publication_fence_tests {
             TrackerBoxUpdater::restored_pending_transaction(&restarted_shared).unwrap(),
             Some((tx_id.clone(), digest))
         );
-
-        let (confirm_tx, confirm_rx) = tokio::sync::oneshot::channel();
-        active = handle_command_while_publication_is_fenced(
-            active.unwrap(),
-            TrackerCommand::ConfirmPublication {
-                tx_id: tx_id.clone(),
-                box_id: "confirmed-box".to_string(),
-                height: 201,
-                response_tx: confirm_tx,
-            },
-            &mut tracker,
-            &restarted_shared,
-        );
-        assert!(matches!(confirm_rx.await, Ok(Ok(_))));
-        assert!(active.is_none());
-        assert!(tracker.pending_publication().unwrap().is_none());
-
-        // The updater clears its shared pending cache only after the actor has
-        // durably accepted the exact confirmation.
-        restarted_shared.clear_pending();
-        let updater_pending = restarted_shared.get_pending();
-        assert!(updater_pending.tx_id.is_none());
-        assert!(updater_pending.digest.is_none());
-        assert!(updater_pending.submitted_height.is_none());
-        assert_eq!(
-            TrackerBoxUpdater::restored_pending_transaction(&restarted_shared).unwrap(),
-            None
-        );
+        assert!(active.is_some());
     }
 }
 

@@ -20,6 +20,16 @@ tracker_nft_id = "your_tracker_nft_token_id_here"
 # Set true only once when intentionally creating a new, empty tracker generation.
 # Keep false for every restart and for every existing on-chain tracker NFT.
 allow_fresh_tracker_generation = false
+# Confirmation policy, expressed as successor depth (the inclusion tip is 0).
+confirmed_chain_min_successor_depth = 6
+confirmed_chain_max_evidence_age_ms = 60000
+# Required explicit application horizon. Maintainers must ratify and uncomment
+# a value; the publisher stays disabled while it is absent, below the
+# acceptance depth, or above the implementation bound of 4095.
+# confirmed_chain_reorg_monitor_depth = 720
+# Set true only together with a genuinely new, history-free BNS1 generation.
+# Keep false for every restart; a missing/misdirected journal then fails closed.
+allow_fresh_reconciliation_journal = false
 # Tracker public key - can be hex-encoded public key or P2PK address
 tracker_public_key = "your_tracker_public_key_or_p2pk_address_here"
 # Tracker secret key for local signing (hex-encoded, 32 bytes)

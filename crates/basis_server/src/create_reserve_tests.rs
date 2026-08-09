@@ -78,6 +78,10 @@ mod create_reserve_tests {
                     "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
                 ),
                 allow_fresh_tracker_generation: false,
+                confirmed_chain_min_successor_depth: None,
+                confirmed_chain_max_evidence_age_ms: None,
+                confirmed_chain_reorg_monitor_depth: None,
+                allow_fresh_reconciliation_journal: false,
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),

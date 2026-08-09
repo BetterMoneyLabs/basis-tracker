@@ -79,6 +79,11 @@ impl BoundedResponse {
         String::from_utf8_lossy(&self.body)
     }
 
+    /// Return the already-buffered, size-checked response body.
+    pub fn bytes(&self) -> &[u8] {
+        &self.body
+    }
+
     pub(crate) fn into_parts(self) -> (StatusCode, Vec<u8>) {
         (self.status, self.body)
     }
