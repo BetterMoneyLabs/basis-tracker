@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
 
 use crate::{
     ergo_scanner::{
@@ -93,7 +93,6 @@ pub struct TrackerServerStateInner {
 pub struct TrackerServerState {
     pub config: TrackerNodeConfig,
     pub inner: Arc<Mutex<TrackerServerStateInner>>,
-    pub client: Client,
     pub(crate) request_permits: Arc<Semaphore>,
     pub metadata_storage: ScannerMetadataStorage,
     pub tracker_storage: TrackerStorage,
@@ -624,7 +623,6 @@ pub fn create_tracker_server_state(
     TrackerServerState {
         config,
         inner: Arc::new(Mutex::new(inner)),
-        client: Client::new(),
         request_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_SCANNER_REQUESTS)),
         metadata_storage,
         tracker_storage,

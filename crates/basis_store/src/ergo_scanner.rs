@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use reqwest::{Client, RequestBuilder, StatusCode};
+use reqwest::{RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
 
 pub(crate) const SCAN_PAGE_SIZE: usize = 100;
@@ -362,7 +362,6 @@ pub struct ServerStateInner {
 pub struct ServerState {
     pub config: NodeConfig,
     pub inner: Arc<Mutex<ServerStateInner>>,
-    pub client: Client,
     pub(crate) request_permits: Arc<Semaphore>,
     pub reserve_tracker: ReserveTracker,
     pub metadata_storage: ScannerMetadataStorage,
@@ -436,7 +435,6 @@ impl ServerState {
             ));
         }
         let start_height = config.start_height.unwrap_or(0);
-        let client = Client::new();
         let data_dir = data_dir.as_ref();
 
         // Log which Ergo node is being used (INFO level)
@@ -505,7 +503,6 @@ impl ServerState {
         Ok(Self {
             config,
             inner,
-            client,
             request_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_SCANNER_REQUESTS)),
             reserve_tracker,
             metadata_storage,
