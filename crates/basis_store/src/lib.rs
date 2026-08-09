@@ -310,6 +310,10 @@ pub enum NoteError {
     /// commit. The operation may become visible after restart, so the current
     /// manager must be quarantined rather than treating this as a rollback.
     StorageOutcomeUnknown(String),
+    /// The sole tracker actor is fenced across an external commitment effect.
+    PublicationInProgress,
+    /// A publication completion/abort did not present the actor's active lease.
+    PublicationLeaseMismatch,
     UnsupportedOperation,
 }
 
@@ -844,7 +848,7 @@ impl TrackerStateManager {
         // if the new value matches what is already on-chain / in-flight.
         let mut key32 = [0u8; 32];
         key32.copy_from_slice(&key_bytes);
-        self.recompute_confirmation_status(&key32, note.amount_collected);
+        self.recompute_confirmation_status(&key32, note.amount_collected)?;
 
         Ok(())
     }
@@ -858,26 +862,30 @@ impl TrackerStateManager {
         out
     }
 
-    /// Recompute a single note's confirmation status from its local value versus
-    /// the cached confirmed/pending values. Persists the result best-effort.
-    fn recompute_confirmation_status(&mut self, key: &NoteKeyBytes, local_value: u64) {
-        let entry = self
+    /// Recompute and durably persist one note's confirmation status.
+    fn recompute_confirmation_status(
+        &mut self,
+        key: &NoteKeyBytes,
+        local_value: u64,
+    ) -> Result<(), NoteError> {
+        let mut updated = self
             .confirmations
-            .entry(*key)
-            .or_insert_with(NoteConfirmation::local_only);
+            .get(key)
+            .cloned()
+            .unwrap_or_else(NoteConfirmation::local_only);
 
-        let confirmed = entry.confirmed_total_debt;
-        let pending = entry.pending_total_debt;
-
-        entry.status = if Some(local_value) == confirmed {
+        updated.status = if Some(local_value) == updated.confirmed_total_debt {
             NoteConfirmationStatus::Confirmed
-        } else if Some(local_value) == pending {
+        } else if Some(local_value) == updated.pending_total_debt {
             NoteConfirmationStatus::Pending
         } else {
             NoteConfirmationStatus::LocalOnly
         };
 
-        let _ = self.storage.store_confirmation(key, entry);
+        let storage_result = self.storage.store_confirmation(key, &updated);
+        self.quarantine_on_storage_failure(storage_result)?;
+        self.confirmations.insert(*key, updated);
+        Ok(())
     }
 
     /// Rebuild the in-memory confirmation map from storage. Called on startup.
@@ -962,16 +970,19 @@ impl TrackerStateManager {
         for (issuer_pubkey, note) in &notes {
             let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
             let local_value = note.amount_collected;
-            let entry = self
+            let mut updated = self
                 .confirmations
-                .entry(key)
-                .or_insert_with(NoteConfirmation::local_only);
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(NoteConfirmation::local_only);
 
-            if Some(local_value) != entry.confirmed_total_debt {
-                entry.pending_total_debt = Some(local_value);
-                entry.pending_tx_id = Some(tx_id.to_string());
-                entry.status = NoteConfirmationStatus::Pending;
-                let _ = self.storage.store_confirmation(&key, entry);
+            if Some(local_value) != updated.confirmed_total_debt {
+                updated.pending_total_debt = Some(local_value);
+                updated.pending_tx_id = Some(tx_id.to_string());
+                updated.status = NoteConfirmationStatus::Pending;
+                let storage_result = self.storage.store_confirmation(&key, &updated);
+                self.quarantine_on_storage_failure(storage_result)?;
+                self.confirmations.insert(key, updated);
                 count += 1;
             }
         }
@@ -1002,14 +1013,16 @@ impl TrackerStateManager {
                 .unwrap_or(false);
 
             if should_confirm {
-                if let Some(entry) = self.confirmations.get_mut(&key) {
-                    entry.confirmed_total_debt = entry.pending_total_debt;
-                    entry.pending_total_debt = None;
-                    entry.pending_tx_id = None;
-                    entry.confirmed_box_id = Some(box_id.to_string());
-                    entry.confirmed_height = Some(height);
-                    entry.status = NoteConfirmationStatus::Confirmed;
-                    let _ = self.storage.store_confirmation(&key, entry);
+                if let Some(mut updated) = self.confirmations.get(&key).cloned() {
+                    updated.confirmed_total_debt = updated.pending_total_debt;
+                    updated.pending_total_debt = None;
+                    updated.pending_tx_id = None;
+                    updated.confirmed_box_id = Some(box_id.to_string());
+                    updated.confirmed_height = Some(height);
+                    updated.status = NoteConfirmationStatus::Confirmed;
+                    let storage_result = self.storage.store_confirmation(&key, &updated);
+                    self.quarantine_on_storage_failure(storage_result)?;
+                    self.confirmations.insert(key, updated);
                     count += 1;
                 }
             }
@@ -1042,16 +1055,18 @@ impl TrackerStateManager {
                 .unwrap_or(false);
 
             if is_pending {
-                if let Some(entry) = self.confirmations.get_mut(&key) {
-                    entry.pending_total_debt = None;
-                    entry.pending_tx_id = None;
+                if let Some(mut updated) = self.confirmations.get(&key).cloned() {
+                    updated.pending_total_debt = None;
+                    updated.pending_tx_id = None;
                     let local_value = note.amount_collected;
-                    entry.status = if Some(local_value) == entry.confirmed_total_debt {
+                    updated.status = if Some(local_value) == updated.confirmed_total_debt {
                         NoteConfirmationStatus::Confirmed
                     } else {
                         NoteConfirmationStatus::LocalOnly
                     };
-                    let _ = self.storage.store_confirmation(&key, entry);
+                    let storage_result = self.storage.store_confirmation(&key, &updated);
+                    self.quarantine_on_storage_failure(storage_result)?;
+                    self.confirmations.insert(key, updated);
                     count += 1;
                 }
             }
@@ -1081,21 +1096,24 @@ impl TrackerStateManager {
         for (issuer_pubkey, note) in &notes {
             let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
             let local_value = note.amount_collected;
-            let entry = self
+            let mut updated = self
                 .confirmations
-                .entry(key)
-                .or_insert_with(NoteConfirmation::local_only);
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(NoteConfirmation::local_only);
 
-            if entry.status != NoteConfirmationStatus::Confirmed
-                || entry.confirmed_total_debt != Some(local_value)
+            if updated.status != NoteConfirmationStatus::Confirmed
+                || updated.confirmed_total_debt != Some(local_value)
             {
-                entry.confirmed_total_debt = Some(local_value);
-                entry.pending_total_debt = None;
-                entry.pending_tx_id = None;
-                entry.confirmed_box_id = Some(box_id.to_string());
-                entry.confirmed_height = Some(height);
-                entry.status = NoteConfirmationStatus::Confirmed;
-                let _ = self.storage.store_confirmation(&key, entry);
+                updated.confirmed_total_debt = Some(local_value);
+                updated.pending_total_debt = None;
+                updated.pending_tx_id = None;
+                updated.confirmed_box_id = Some(box_id.to_string());
+                updated.confirmed_height = Some(height);
+                updated.status = NoteConfirmationStatus::Confirmed;
+                let storage_result = self.storage.store_confirmation(&key, &updated);
+                self.quarantine_on_storage_failure(storage_result)?;
+                self.confirmations.insert(key, updated);
                 count += 1;
             }
         }
@@ -1212,6 +1230,7 @@ impl TrackerStateManager {
         recipient_pubkey: &PubKey,
     ) -> Result<TrackerLookupProof, NoteError> {
         self.ensure_healthy()?;
+        self.validate_complete_snapshot_against_live()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -1267,6 +1286,7 @@ impl TrackerStateManager {
         recipient_pubkey: &PubKey,
     ) -> Result<ReserveLookupProof, NoteError> {
         self.ensure_healthy()?;
+        self.validate_complete_snapshot_against_live()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -1332,6 +1352,7 @@ impl TrackerStateManager {
         new_already_redeemed: u64,
     ) -> Result<(Vec<u8>, Vec<u8>), NoteError> {
         self.ensure_healthy()?;
+        self.validate_complete_snapshot_against_live()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
         // Value: timestamp (8 bytes BE) || already_redeemed (8 bytes BE)
@@ -1352,14 +1373,10 @@ impl TrackerStateManager {
 
     /// Current reserve AVL tree root digest (33 bytes). The on-chain reserve box being spent must
     /// have exactly this R5 digest for the insert proof to verify on-chain.
-    pub fn reserve_state_digest(&self) -> Vec<u8> {
-        if let Err(e) = self.ensure_healthy() {
-            panic!(
-                "Cannot read reserve state from quarantined tracker: {:?}",
-                e
-            );
-        }
-        self.reserve_avl_state.root_digest().to_vec()
+    pub fn reserve_state_digest(&self) -> Result<Vec<u8>, NoteError> {
+        self.ensure_healthy()?;
+        self.validate_complete_snapshot_against_live()?;
+        Ok(self.reserve_avl_state.root_digest().to_vec())
     }
 
     /// Update the already_redeemed amount in the reserve AVL tree.
@@ -1398,6 +1415,7 @@ impl TrackerStateManager {
         recipient_pubkey: &PubKey,
     ) -> Result<NoteProof, NoteError> {
         self.ensure_healthy()?;
+        self.validate_complete_snapshot_against_live()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -1529,10 +1547,24 @@ impl TrackerStateManager {
             .as_millis() as u64;
     }
 
-    /// Get the current tracker state
+    /// Return a fully validated snapshot of the current tracker state.
+    ///
+    /// Root exposure is a publication boundary: the checksummed BNS2 snapshot,
+    /// replayed physical AVL state, and cached digest must still agree at the
+    /// instant this value is produced.
+    pub fn validated_state(&self) -> Result<TrackerState, NoteError> {
+        self.ensure_healthy()?;
+        self.validate_complete_snapshot_against_live()?;
+        Ok(self.current_state.clone())
+    }
+
+    /// Compatibility accessor for local callers. It performs the same complete
+    /// validation but preserves the historical reference-returning API. Server
+    /// publication surfaces use `validated_state` through the sole actor so a
+    /// quarantine becomes a typed unavailable response rather than a panic.
     pub fn get_state(&self) -> &TrackerState {
-        if let Err(e) = self.ensure_healthy() {
-            panic!("Cannot publish state from quarantined tracker: {:?}", e);
+        if let Err(error) = self.validated_state() {
+            panic!("Cannot expose invalid tracker state: {error:?}");
         }
         &self.current_state
     }

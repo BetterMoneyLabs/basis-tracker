@@ -290,42 +290,27 @@ impl NoteStorage {
             .get(NOTE_STATE_KEY)
             .map_err(|e| NoteError::StorageError(format!("Failed to read note state: {}", e)))?;
 
-        match (schema, state) {
-            (Some(schema), Some(_)) => {
+        // Inspect the generation binding before mutating either authoritative
+        // partition.  A manifest without a complete schema/state pair is an
+        // interrupted or foreign initialization, not permission to synthesize
+        // a fresh empty state over the same tracker NFT.
+        let stored_generation = self
+            .schema_partition
+            .get(NOTE_GENERATION_KEY)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read generation: {}", e)))?;
+
+        match (schema, state, stored_generation) {
+            (Some(schema), Some(_), Some(generation_bytes)) => {
                 if schema.as_ref() != NOTE_STATE_MAGIC {
                     return Err(NoteError::MigrationRequired(
                         "Unsupported note storage schema requires an explicit migration"
                             .to_string(),
                     ));
                 }
-                let state = self.read_state_strict()?;
-                self.ensure_generation_manifest(generation, &state)
+                self.read_state_strict()?;
+                self.validate_generation_manifest(generation, generation_bytes.as_ref())
             }
-            (Some(_), None) => Err(NoteError::StorageError(
-                "Note schema exists without authoritative state".to_string(),
-            )),
-            (None, Some(_)) => {
-                // Recover an initialization interrupted after the authoritative
-                // empty state was synced but before the schema marker was synced.
-                self.read_state_partition_strict()?;
-                self.schema_partition
-                    .insert(NOTE_SCHEMA_KEY, NOTE_STATE_MAGIC)
-                    .map_err(|e| {
-                        NoteError::StorageOutcomeUnknown(format!(
-                            "Note schema initialization outcome is unknown: {}",
-                            e
-                        ))
-                    })?;
-                self.keyspace.persist(PersistMode::SyncData).map_err(|e| {
-                    NoteError::StorageOutcomeUnknown(format!(
-                        "Note schema initialization durability is unknown: {}",
-                        e
-                    ))
-                })?;
-                let state = self.read_state_strict()?;
-                self.ensure_generation_manifest(generation, &state)
-            }
-            (None, None) => {
+            (None, None, None) => {
                 if generation.fresh_generation != FreshGenerationApproval::Approve {
                     return Err(NoteError::GenerationBindingRequired(
                         "A new data directory requires explicit fresh tracker generation approval"
@@ -347,6 +332,24 @@ impl NoteStorage {
                     avl_root_digest: empty_root,
                     notes: Vec::new(),
                 };
+                let manifest = StoredGeneration {
+                    tracker_nft_id: generation.tracker_nft_id,
+                    bootstrap_root: empty.avl_root_digest,
+                    anchor_root: None,
+                };
+
+                // Publish all three initialization records as one durability
+                // attempt.  If any insert or the sync has an unknown outcome,
+                // the next open sees a partial tuple and fails closed without
+                // writing a replacement.
+                self.schema_partition
+                    .insert(NOTE_GENERATION_KEY, Self::serialize_generation(&manifest))
+                    .map_err(|e| {
+                        NoteError::StorageOutcomeUnknown(format!(
+                            "Tracker generation binding outcome is unknown: {}",
+                            e
+                        ))
+                    })?;
                 self.notes_partition
                     .insert(NOTE_STATE_KEY, Self::serialize_note_state(&empty)?)
                     .map_err(|e| {
@@ -355,12 +358,6 @@ impl NoteStorage {
                             e
                         ))
                     })?;
-                self.keyspace.persist(PersistMode::SyncData).map_err(|e| {
-                    NoteError::StorageOutcomeUnknown(format!(
-                        "Empty note state durability is unknown: {}",
-                        e
-                    ))
-                })?;
                 self.schema_partition
                     .insert(NOTE_SCHEMA_KEY, NOTE_STATE_MAGIC)
                     .map_err(|e| {
@@ -371,74 +368,71 @@ impl NoteStorage {
                     })?;
                 self.keyspace.persist(PersistMode::SyncData).map_err(|e| {
                     NoteError::StorageOutcomeUnknown(format!(
-                        "Note schema initialization durability is unknown: {}",
+                        "Tracker generation initialization durability is unknown: {}",
                         e
                     ))
-                })?;
-                self.ensure_generation_manifest(generation, &empty)
+                })
             }
+            (Some(_), Some(_), None) => Err(NoteError::GenerationBindingRequired(
+                "Complete note state is missing its tracker generation manifest; explicit migration is required"
+                    .to_string(),
+            )),
+            (None, None, Some(_)) | (None, Some(_), Some(_)) | (Some(_), None, Some(_)) => {
+                Err(NoteError::GenerationMismatch(
+                    "Tracker generation manifest exists without a complete authoritative schema/state pair"
+                        .to_string(),
+                ))
+            }
+            (Some(_), None, None) => Err(NoteError::StorageError(
+                "Note schema exists without authoritative state".to_string(),
+            )),
+            (None, Some(_), None) => Err(NoteError::StorageError(
+                "Authoritative note state exists without its schema and generation binding"
+                    .to_string(),
+            )),
         }
     }
 
-    fn ensure_generation_manifest(
+    fn validate_generation_manifest(
         &self,
         generation: TrackerGenerationConfig,
-        state: &StoredNoteState,
+        stored: &[u8],
     ) -> Result<(), NoteError> {
-        let stored = self
-            .schema_partition
-            .get(NOTE_GENERATION_KEY)
-            .map_err(|e| NoteError::StorageError(format!("Failed to read generation: {}", e)))?;
-
-        if let Some(bytes) = stored {
-            let manifest = Self::deserialize_generation(bytes.as_ref())?;
-            if manifest.tracker_nft_id != generation.tracker_nft_id {
-                return Err(NoteError::GenerationMismatch(
-                    "Configured tracker NFT does not match the generation bound to this data directory"
-                        .to_string(),
-                ));
-            }
-            return Ok(());
-        }
-
-        if generation.fresh_generation != FreshGenerationApproval::Approve {
-            return Err(NoteError::GenerationBindingRequired(
-                "Tracker generation manifest is missing; explicit fresh-generation approval is required"
+        let manifest = Self::deserialize_generation(stored)?;
+        if manifest.tracker_nft_id != generation.tracker_nft_id {
+            return Err(NoteError::GenerationMismatch(
+                "Configured tracker NFT does not match the generation bound to this data directory"
                     .to_string(),
             ));
         }
-        if !state.notes.is_empty() {
-            return Err(NoteError::MigrationRequired(
-                "A non-empty note snapshot without a generation manifest requires explicit migration"
-                    .to_string(),
-            ));
-        }
-
-        let manifest = StoredGeneration {
-            tracker_nft_id: generation.tracker_nft_id,
-            bootstrap_root: state.avl_root_digest,
-            anchor_root: None,
-        };
-        self.schema_partition
-            .insert(NOTE_GENERATION_KEY, Self::serialize_generation(&manifest))
-            .map_err(|e| {
-                NoteError::StorageOutcomeUnknown(format!(
-                    "Tracker generation binding outcome is unknown: {}",
-                    e
-                ))
-            })?;
-        self.keyspace.persist(PersistMode::SyncData).map_err(|e| {
-            NoteError::StorageOutcomeUnknown(format!(
-                "Tracker generation binding durability is unknown: {}",
-                e
-            ))
-        })
+        Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn remove_state_for_test(&self) -> Result<(), NoteError> {
         self.notes_partition
             .remove(NOTE_STATE_KEY)
+            .map_err(|e| NoteError::StorageError(e.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_schema_for_test(&self) -> Result<(), NoteError> {
+        self.schema_partition
+            .remove(NOTE_SCHEMA_KEY)
+            .map_err(|e| NoteError::StorageError(e.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_generation_for_test(&self) -> Result<(), NoteError> {
+        self.schema_partition
+            .remove(NOTE_GENERATION_KEY)
+            .map_err(|e| NoteError::StorageError(e.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persist_for_test(&self) -> Result<(), NoteError> {
+        self.keyspace
+            .persist(PersistMode::SyncData)
             .map_err(|e| NoteError::StorageError(e.to_string()))
     }
 
@@ -964,13 +958,32 @@ impl NoteStorage {
         key_bytes: &[u8; 32],
         confirmation: &NoteConfirmation,
     ) -> Result<(), NoteError> {
+        let _guard = self.write_lock.lock().map_err(|_| {
+            NoteError::StorageError("Note storage write lock is poisoned".to_string())
+        })?;
         let value = serde_json::to_vec(confirmation).map_err(|e| {
             NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
         })?;
         self.confirmations_partition
             .insert(key_bytes, &value)
-            .map_err(|e| NoteError::StorageError(format!("Failed to store confirmation: {}", e)))?;
-        Ok(())
+            .map_err(|e| {
+                NoteError::StorageOutcomeUnknown(format!(
+                    "Confirmation write outcome is unknown; restart and reconcile: {}",
+                    e
+                ))
+            })?;
+        #[cfg(test)]
+        if self.fail_next_persist.swap(false, Ordering::SeqCst) {
+            return Err(NoteError::StorageOutcomeUnknown(
+                "Injected confirmation durability outcome uncertainty".to_string(),
+            ));
+        }
+        self.keyspace.persist(PersistMode::SyncData).map_err(|e| {
+            NoteError::StorageOutcomeUnknown(format!(
+                "Confirmation durability is unknown; restart and reconcile: {}",
+                e
+            ))
+        })
     }
 
     /// Retrieve all confirmation records.

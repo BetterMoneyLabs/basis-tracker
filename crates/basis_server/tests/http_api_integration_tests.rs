@@ -6,9 +6,10 @@ mod http_api_tests {
     use basis_server::{
         api::{
             get_note_state, get_notes_by_issuer, get_notes_by_recipient, get_pending_tx,
-            get_tracker_state,
+            get_tracker_state, submit_reserve_transaction,
         },
         config,
+        models::ReserveCreationResponse,
         store::EventStore,
         AppState, TrackerCommand,
     };
@@ -117,7 +118,10 @@ mod http_api_tests {
                             avl_proof: vec![1, 2, 3, 4], // Mock proof data
                             operations: vec![],
                         };
-                        let result = Ok(mock_proof);
+                        let result = redemption_manager
+                            .tracker
+                            .validated_state()
+                            .map(|state| (mock_proof, state));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetTrackerLookupProof {
@@ -131,7 +135,11 @@ mod http_api_tests {
                             value: vec![0u8; 8],
                             proof: vec![1, 2, 3, 4],
                         };
-                        let _ = response_tx.send(Ok(mock_proof));
+                        let result = redemption_manager
+                            .tracker
+                            .validated_state()
+                            .map(|state| (mock_proof, state));
+                        let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetReserveLookupProof {
                         issuer_pubkey: _,
@@ -144,7 +152,11 @@ mod http_api_tests {
                             value: vec![0u8; 8],
                             proof: Some(vec![1, 2, 3, 4]),
                         };
-                        let _ = response_tx.send(Ok(mock_proof));
+                        let result = redemption_manager
+                            .tracker
+                            .reserve_state_digest()
+                            .map(|root| (mock_proof, root));
+                        let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetReserveInsertProof {
                         issuer_pubkey: _,
@@ -154,7 +166,14 @@ mod http_api_tests {
                         response_tx,
                     } => {
                         // Mock reserve insert proof
-                        let _ = response_tx.send(Ok((vec![1, 2, 3, 4], vec![5, 6, 7, 8])));
+                        let result =
+                            redemption_manager
+                                .tracker
+                                .reserve_state_digest()
+                                .map(|current_root| {
+                                    (vec![1, 2, 3, 4], current_root.clone(), current_root)
+                                });
+                        let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByRecipientWithIssuer {
                         recipient_pubkey: _,
@@ -174,7 +193,8 @@ mod http_api_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
-                        let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
+                        let _ =
+                            response_tx.send(Ok(redemption_manager.tracker.all_confirmations()));
                     }
                     TrackerCommand::MarkNotesPending {
                         digest,
@@ -218,6 +238,9 @@ mod http_api_tests {
                         let digest = redemption_manager.tracker.reserve_state_digest();
                         let _ = response_tx.send(digest);
                     }
+                    TrackerCommand::GetValidatedState { response_tx } => {
+                        let _ = response_tx.send(redemption_manager.tracker.validated_state());
+                    }
                     TrackerCommand::ValidateObservedGeneration {
                         tracker_nft_id,
                         observed_root,
@@ -227,6 +250,15 @@ mod http_api_tests {
                             .tracker
                             .validate_observed_generation(&tracker_nft_id, observed_root);
                         let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::BeginPublication { response_tx, .. } => {
+                        let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
+                    }
+                    TrackerCommand::CompletePublication { response_tx, .. } => {
+                        let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
+                    }
+                    TrackerCommand::AbortPublication { response_tx, .. } => {
+                        let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
                     }
                 }
             }
@@ -480,9 +512,15 @@ mod http_api_tests {
     async fn test_get_tracker_state() {
         let state = create_mock_app_state().await;
         let digest = [1u8; 33];
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::GetValidatedState { response_tx })
+            .await
+            .unwrap();
+        let local_digest = response_rx.await.unwrap().unwrap().avl_root_digest;
         {
             let shared = state.shared_tracker_state.lock().await;
-            shared.set_avl_root_digest(digest);
             shared.set_confirmed(digest, "box1".to_string(), 100);
         }
 
@@ -490,7 +528,7 @@ mod http_api_tests {
         assert_eq!(response.0, StatusCode::OK);
         assert!(response.1.success);
         let data = response.1.data.clone().unwrap();
-        assert_eq!(data.local_digest, hex::encode(digest));
+        assert_eq!(data.local_digest, hex::encode(local_digest));
         assert_eq!(data.confirmed_digest, Some(hex::encode(digest)));
         assert_eq!(data.confirmed_box_id, Some("box1".to_string()));
         assert_eq!(data.confirmed_height, Some(100));
@@ -512,6 +550,21 @@ mod http_api_tests {
         assert_eq!(data.pending_tx_id, Some("tx1".to_string()));
         assert_eq!(data.pending_digest, Some(hex::encode(digest)));
         assert_eq!(data.submitted_height, Some(150));
+    }
+
+    #[tokio::test]
+    async fn reserve_wallet_proxy_is_a_gone_tombstone() {
+        let state = create_mock_app_state().await;
+        let payload = ReserveCreationResponse {
+            requests: Vec::new(),
+            fee: 1_000_000,
+            change_address: "not-forwarded".to_string(),
+        };
+
+        let response =
+            submit_reserve_transaction(axum::extract::State(state), axum::extract::Json(payload))
+                .await;
+        assert_eq!(response.0, StatusCode::GONE);
     }
 
     #[tokio::test]

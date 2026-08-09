@@ -117,7 +117,10 @@ mod cors_tests {
                             avl_proof: vec![1, 2, 3, 4], // Mock proof data
                             operations: vec![],
                         };
-                        let result = Ok(mock_proof);
+                        let result = redemption_manager
+                            .tracker
+                            .validated_state()
+                            .map(|state| (mock_proof, state));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetTrackerLookupProof {
@@ -131,7 +134,11 @@ mod cors_tests {
                             value: vec![0u8; 8],
                             proof: vec![1, 2, 3, 4],
                         };
-                        let _ = response_tx.send(Ok(mock_proof));
+                        let result = redemption_manager
+                            .tracker
+                            .validated_state()
+                            .map(|state| (mock_proof, state));
+                        let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetReserveLookupProof {
                         issuer_pubkey: _,
@@ -144,7 +151,11 @@ mod cors_tests {
                             value: vec![0u8; 8],
                             proof: Some(vec![1, 2, 3, 4]),
                         };
-                        let _ = response_tx.send(Ok(mock_proof));
+                        let result = redemption_manager
+                            .tracker
+                            .reserve_state_digest()
+                            .map(|root| (mock_proof, root));
+                        let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetReserveInsertProof {
                         issuer_pubkey: _,
@@ -154,7 +165,14 @@ mod cors_tests {
                         response_tx,
                     } => {
                         // Mock reserve insert proof
-                        let _ = response_tx.send(Ok((vec![1, 2, 3, 4], vec![5, 6, 7, 8])));
+                        let result =
+                            redemption_manager
+                                .tracker
+                                .reserve_state_digest()
+                                .map(|current_root| {
+                                    (vec![1, 2, 3, 4], current_root.clone(), current_root)
+                                });
+                        let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByRecipientWithIssuer {
                         recipient_pubkey: _,
@@ -174,7 +192,8 @@ mod cors_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
-                        let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
+                        let _ =
+                            response_tx.send(Ok(redemption_manager.tracker.all_confirmations()));
                     }
                     TrackerCommand::MarkNotesPending {
                         digest,
@@ -207,6 +226,9 @@ mod cors_tests {
                         let digest = redemption_manager.tracker.reserve_state_digest();
                         let _ = response_tx.send(digest);
                     }
+                    TrackerCommand::GetValidatedState { response_tx } => {
+                        let _ = response_tx.send(redemption_manager.tracker.validated_state());
+                    }
                     TrackerCommand::ReconcileWithConfirmedDigest {
                         digest,
                         box_id,
@@ -227,6 +249,15 @@ mod cors_tests {
                             .tracker
                             .validate_observed_generation(&tracker_nft_id, observed_root);
                         let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::BeginPublication { response_tx, .. } => {
+                        let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
+                    }
+                    TrackerCommand::CompletePublication { response_tx, .. } => {
+                        let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
+                    }
+                    TrackerCommand::AbortPublication { response_tx, .. } => {
+                        let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
                     }
                 }
             }

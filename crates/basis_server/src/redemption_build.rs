@@ -483,7 +483,7 @@ async fn build_redemption_inner(
     // Select the smallest reserve that covers the redemption, leaves a valid remainder, is actually
     // unspent on-chain, AND whose on-chain R5 (reserve AVL tree) matches the tracker's current
     // reserve tree digest — otherwise the insert proof cannot verify on-chain.
-    let reserve_box_id = {
+    let (reserve_box_id, selected_reserve_digest) = {
         // The tracker's current reserve tree root digest; the spent reserve's R5 must equal this.
         let tracker_reserve_digest = {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -499,10 +499,17 @@ async fn build_redemption_inner(
                 );
             }
             match rx.await {
-                Ok(d) => hex::encode(d),
+                Ok(Ok(d)) => d,
+                Ok(Err(e)) => {
+                    return api_err(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("tracker reserve state unavailable: {e:?}"),
+                    )
+                }
                 Err(_) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, "tracker unavailable"),
             }
         };
+        let tracker_reserve_digest_hex = hex::encode(&tracker_reserve_digest);
 
         let scanner = state.ergo_scanner.lock().await;
         let reserves = match scanner.reserve_storage().get_all_reserves() {
@@ -552,7 +559,7 @@ async fn build_redemption_inner(
         for (box_id, _) in &candidates {
             match node.box_details(box_id).await {
                 Ok(b) if b.value >= required => match b.r5_digest_hex() {
-                    Some(d) if d == tracker_reserve_digest => {
+                    Some(d) if d == tracker_reserve_digest_hex => {
                         found = Some(box_id.clone());
                         break;
                     }
@@ -561,7 +568,7 @@ async fn build_redemption_inner(
                             "reserve {} R5 {} != tracker tree {}; skipping",
                             box_id,
                             &d[..16.min(d.len())],
-                            &tracker_reserve_digest[..16.min(tracker_reserve_digest.len())]
+                            &tracker_reserve_digest_hex[..16.min(tracker_reserve_digest_hex.len())]
                         );
                     }
                     None => {
@@ -574,13 +581,14 @@ async fn build_redemption_inner(
             }
         }
         match found {
-            Some(id) => id,
+            Some(id) => (id, tracker_reserve_digest),
             None => {
                 return api_err(
                     StatusCode::BAD_REQUEST,
                     format!(
                         "no unspent reserve with >= {required} nanoERG collateral and a reserve tree matching the tracker (digest {}) for issuer {}",
-                        &tracker_reserve_digest[..16.min(tracker_reserve_digest.len())],
+                        &tracker_reserve_digest_hex
+                            [..16.min(tracker_reserve_digest_hex.len())],
                         payload.issuer_pubkey
                     ),
                 )
@@ -638,7 +646,7 @@ async fn build_redemption_inner(
             );
         }
         match rx.await {
-            Ok(Ok(proof)) => {
+            Ok(Ok((proof, _state))) => {
                 let total_debt = if proof.value.len() == 8 {
                     let mut b = [0u8; 8];
                     b.copy_from_slice(&proof.value);
@@ -683,8 +691,8 @@ async fn build_redemption_inner(
                 "tracker thread unavailable",
             );
         }
-        let lookup = match rx.await {
-            Ok(Ok(p)) => p,
+        let (lookup, lookup_root) = match rx.await {
+            Ok(Ok(result)) => result,
             Ok(Err(e)) => {
                 return api_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -725,7 +733,7 @@ async fn build_redemption_inner(
                 "tracker thread unavailable",
             );
         }
-        let (insert_bytes, new_digest) = match irx.await {
+        let (insert_bytes, new_digest, insert_current_root) = match irx.await {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
                 return api_err(
@@ -735,6 +743,12 @@ async fn build_redemption_inner(
             }
             Err(_) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, "tracker unavailable"),
         };
+        if lookup_root != insert_current_root || lookup_root != selected_reserve_digest {
+            return api_err(
+                StatusCode::CONFLICT,
+                "reserve state changed while building proofs; retry from a fresh snapshot",
+            );
+        }
         (
             lookup.proof,
             insert_bytes,

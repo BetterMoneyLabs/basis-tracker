@@ -42,7 +42,6 @@ pub struct PendingState {
 /// Shared state for the tracker box updater
 #[derive(Debug, Clone)]
 pub struct SharedTrackerState {
-    pub avl_root_digest: Arc<RwLock<[u8; 33]>>,
     pub tracker_pubkey: Arc<RwLock<[u8; 33]>>,
     pub tracker_box_id: Arc<RwLock<Option<String>>>,
     pub tracker_nft_id: Arc<RwLock<Option<String>>>,
@@ -56,7 +55,6 @@ impl SharedTrackerState {
     /// This should only be used in tests - production code should use new_with_tracker_key.
     pub fn new() -> Self {
         Self {
-            avl_root_digest: Arc::new(RwLock::new([0u8; 33])),
             tracker_pubkey: Arc::new(RwLock::new(create_default_tracker_pubkey())),
             tracker_box_id: Arc::new(RwLock::new(None)),
             tracker_nft_id: Arc::new(RwLock::new(None)),
@@ -68,19 +66,12 @@ impl SharedTrackerState {
 
     pub fn new_with_tracker_key(tracker_pubkey: [u8; 33]) -> Self {
         Self {
-            avl_root_digest: Arc::new(RwLock::new([0u8; 33])),
             tracker_pubkey: Arc::new(RwLock::new(tracker_pubkey)),
             tracker_box_id: Arc::new(RwLock::new(None)),
             tracker_nft_id: Arc::new(RwLock::new(None)),
             confirmed: Arc::new(RwLock::new(ConfirmedState::default())),
             pending: Arc::new(RwLock::new(PendingState::default())),
             publication_health: basis_store::PublicationHealth::new(),
-        }
-    }
-
-    pub fn set_avl_root_digest(&self, digest: [u8; 33]) {
-        if let Ok(mut root_lock) = self.avl_root_digest.write() {
-            *root_lock = digest;
         }
     }
 
@@ -102,14 +93,6 @@ impl SharedTrackerState {
         }
     }
 
-    pub fn get_avl_root_digest(&self) -> [u8; 33] {
-        if let Ok(root_lock) = self.avl_root_digest.read() {
-            *root_lock
-        } else {
-            [0u8; 33]
-        }
-    }
-
     /// Shared one-way health signal for the state manager and publisher.
     pub fn publication_health(&self) -> basis_store::PublicationHealth {
         self.publication_health.clone()
@@ -121,12 +104,6 @@ impl SharedTrackerState {
 
     pub fn is_publication_healthy(&self) -> bool {
         self.publication_health.is_healthy()
-    }
-
-    /// Return the cached root only while the owning manager is healthy.
-    pub fn publication_digest(&self) -> Option<[u8; 33]> {
-        self.is_publication_healthy()
-            .then(|| self.get_avl_root_digest())
     }
 
     pub fn get_tracker_pubkey(&self) -> [u8; 33] {
@@ -394,8 +371,8 @@ pub enum TrackerBoxUpdaterError {
     InsufficientFeeInputs { available: u64, required: u64 },
     #[error("Failed to sign transaction: {0}")]
     SigningFailed(String),
-    #[error("Failed to broadcast transaction: {0}")]
-    BroadcastFailed(String),
+    #[error("Broadcast outcome is unknown; tracker publication remains fenced: {0}")]
+    BroadcastOutcomeUnknown(String),
 }
 
 /// Ergo box as returned by the blockchain API
@@ -538,19 +515,7 @@ impl TrackerBoxUpdater {
                 }
             };
 
-            let current_digest = match shared_state.publication_digest() {
-                Some(digest) => digest,
-                None => {
-                    error!("Tracker state is quarantined; refusing commitment publication");
-                    continue;
-                }
-            };
             let tracker_pubkey = shared_state.get_tracker_pubkey();
-
-            if current_digest == [0u8; 33] {
-                info!("AVL root digest not initialized yet, skipping update");
-                continue;
-            }
 
             let tracker_box = match Self::find_tracker_box(&config, &tracker_nft_id).await {
                 Ok(box_data) => box_data,
@@ -563,7 +528,7 @@ impl TrackerBoxUpdater {
             // Refresh the confirmed box id in shared state from the live node.
             shared_state.set_tracker_box_id(tracker_box.box_id.clone());
 
-            let mut generation_validated = false;
+            let mut publication_lease = None;
             if let Some(r5_value) = tracker_box.additional_registers.get("R5") {
                 if let Ok(r5_bytes) = hex::decode(r5_value) {
                     if r5_bytes.len() >= 34 {
@@ -579,10 +544,10 @@ impl TrackerBoxUpdater {
                             tracker_box.creation_height as u64,
                         );
 
-                        // The first observed root must match the explicitly
-                        // approved bootstrap root for this NFT. Every update is
-                        // blocked until the state manager durably validates or
-                        // anchors that generation.
+                        // The actor validates/reconciles the observed generation
+                        // and then remains fenced until this exact external
+                        // publication attempt is completed or explicitly
+                        // aborted.
                         let tracker_nft_bytes: [u8; 32] = match hex::decode(&tracker_nft_id)
                             .ok()
                             .and_then(|bytes| bytes.try_into().ok())
@@ -594,63 +559,72 @@ impl TrackerBoxUpdater {
                                 continue;
                             }
                         };
-                        let generation_valid = if let Some(ref tx) = cmd_tx {
+                        let lease = if let Some(ref tx) = cmd_tx {
                             let (rtx, rrx) = tokio::sync::oneshot::channel();
                             if tx
-                                .send(crate::TrackerCommand::ValidateObservedGeneration {
+                                .send(crate::TrackerCommand::BeginPublication {
                                     tracker_nft_id: tracker_nft_bytes,
                                     observed_root: onchain_digest_arr,
+                                    box_id: tracker_box.box_id.clone(),
+                                    height: tracker_box.creation_height as u64,
                                     response_tx: rtx,
                                 })
                                 .await
                                 .is_err()
                             {
-                                false
+                                None
                             } else {
-                                matches!(rrx.await, Ok(Ok(())))
+                                match rrx.await {
+                                    Ok(Ok(lease)) => Some(lease),
+                                    _ => None,
+                                }
                             }
                         } else {
-                            false
+                            None
                         };
-                        if !generation_valid {
+                        let lease = match lease {
+                            Some(lease) => lease,
+                            None => {
+                                shared_state.quarantine_publication();
+                                error!("Tracker actor refused the publication fence");
+                                continue;
+                            }
+                        };
+                        if lease.digest == [0u8; 33] {
                             shared_state.quarantine_publication();
-                            error!("Tracker generation validation failed; refusing commitment publication");
+                            error!("Tracker actor returned an uninitialized publication digest");
                             continue;
                         }
-                        generation_validated = true;
-
-                        // Reconcile per-note confirmation records with the
-                        // observed on-chain digest (handles restarts where the
-                        // local tree already matches the on-chain commitment).
-                        if let Some(ref tx) = cmd_tx {
-                            let (rtx, rrx) = tokio::sync::oneshot::channel();
-                            let _ = tx
-                                .send(crate::TrackerCommand::ReconcileWithConfirmedDigest {
-                                    digest: onchain_digest_arr,
-                                    box_id: tracker_box.box_id.clone(),
-                                    height: tracker_box.creation_height as u64,
-                                    response_tx: rtx,
-                                })
-                                .await;
-                            let _ = rrx.await;
-                        }
+                        let current_digest = lease.digest;
+                        publication_lease = Some(lease);
 
                         if onchain_digest == current_digest.as_slice() {
                             info!("On-chain tracker box already has current AVL root digest");
                             last_submitted_digest = Some(current_digest);
+                            if !Self::abort_publication(&cmd_tx, lease).await {
+                                shared_state.quarantine_publication();
+                                return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
+                                    "tracker actor did not release a no-op publication fence"
+                                        .to_string(),
+                                ));
+                            }
                             continue;
                         }
                     }
                 }
             }
 
-            if !generation_validated {
-                shared_state.quarantine_publication();
-                error!(
+            let publication_lease = match publication_lease {
+                Some(lease) => lease,
+                None => {
+                    shared_state.quarantine_publication();
+                    error!(
                     "Tracker box has no valid R5 generation root; refusing commitment publication"
                 );
-                continue;
-            }
+                    continue;
+                }
+            };
+            let current_digest = publication_lease.digest;
 
             // If a previous submission for a different digest is still pending
             // and never confirmed, skip submitting a new one (the confirmation
@@ -658,6 +632,13 @@ impl TrackerBoxUpdater {
             if let Some(last) = last_submitted_digest {
                 if last == current_digest {
                     info!("AVL root digest unchanged, skipping redundant update");
+                    if !Self::abort_publication(&cmd_tx, publication_lease).await {
+                        shared_state.quarantine_publication();
+                        return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
+                            "tracker actor did not release a redundant publication fence"
+                                .to_string(),
+                        ));
+                    }
                     continue;
                 }
             }
@@ -678,27 +659,81 @@ impl TrackerBoxUpdater {
                     );
 
                     let submitted_height = Self::get_node_height(&config).await.unwrap_or(0) as u64;
-                    shared_state.set_pending(current_digest, tx_id.clone(), submitted_height);
-                    pending_tx = Some((tx_id.clone(), current_digest));
-
-                    if let Some(ref tx) = cmd_tx {
-                        let (rtx, rrx) = tokio::sync::oneshot::channel();
-                        let _ = tx
-                            .send(crate::TrackerCommand::MarkNotesPending {
-                                digest: current_digest,
-                                tx_id,
-                                submitted_height,
-                                response_tx: rtx,
-                            })
-                            .await;
-                        let _ = rrx.await;
+                    if !Self::complete_publication(
+                        &cmd_tx,
+                        publication_lease,
+                        tx_id.clone(),
+                        submitted_height,
+                    )
+                    .await
+                    {
+                        shared_state.quarantine_publication();
+                        return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
+                            "broadcast succeeded but actor receipt was not durably accepted"
+                                .to_string(),
+                        ));
                     }
+                    shared_state.set_pending(current_digest, tx_id.clone(), submitted_height);
+                    pending_tx = Some((tx_id, current_digest));
                 }
                 Err(e) => {
                     error!("Failed to submit tracker box update: {}", e);
+                    if matches!(e, TrackerBoxUpdaterError::BroadcastOutcomeUnknown(_)) {
+                        shared_state.quarantine_publication();
+                        return Err(e);
+                    }
+                    if !Self::abort_publication(&cmd_tx, publication_lease).await {
+                        shared_state.quarantine_publication();
+                        return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
+                            "tracker actor did not release a failed publication fence".to_string(),
+                        ));
+                    }
                 }
             }
         }
+    }
+
+    async fn abort_publication(
+        cmd_tx: &Option<tokio::sync::mpsc::Sender<crate::TrackerCommand>>,
+        lease: crate::PublicationLease,
+    ) -> bool {
+        let Some(tx) = cmd_tx else {
+            return false;
+        };
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        if tx
+            .send(crate::TrackerCommand::AbortPublication { lease, response_tx })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        matches!(response_rx.await, Ok(Ok(())))
+    }
+
+    async fn complete_publication(
+        cmd_tx: &Option<tokio::sync::mpsc::Sender<crate::TrackerCommand>>,
+        lease: crate::PublicationLease,
+        tx_id: String,
+        submitted_height: u64,
+    ) -> bool {
+        let Some(tx) = cmd_tx else {
+            return false;
+        };
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        if tx
+            .send(crate::TrackerCommand::CompletePublication {
+                lease,
+                tx_id,
+                submitted_height,
+                response_tx,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        matches!(response_rx.await, Ok(Ok(_)))
     }
 
     /// Fetch a minimal summary (box_id, creation_height) for a tracker box by
@@ -1037,21 +1072,32 @@ impl TrackerBoxUpdater {
         let response = request
             .send()
             .await
-            .map_err(|e| TrackerBoxUpdaterError::BroadcastFailed(e.to_string()))?;
+            .map_err(|e| TrackerBoxUpdaterError::BroadcastOutcomeUnknown(e.to_string()))?;
 
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
         info!(status = %status, "Transaction broadcast request completed");
 
+        Self::parse_broadcast_response(status, &body_text)
+    }
+
+    fn parse_broadcast_response(
+        status: reqwest::StatusCode,
+        body_text: &str,
+    ) -> Result<String, TrackerBoxUpdaterError> {
+        // Once the request crossed the network boundary, an HTTP error does not
+        // prove the node failed before admission. Keep the actor fence intact
+        // until restart/reconciliation rather than authorizing a competing
+        // successor transaction.
         if !status.is_success() {
-            return Err(TrackerBoxUpdaterError::BroadcastFailed(format!(
-                "HTTP {}",
+            return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(format!(
+                "HTTP {} returned after transaction submission",
                 status
             )));
         }
 
-        let body: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
-            TrackerBoxUpdaterError::BroadcastFailed(format!("JSON parse error: {}", e))
+        let body: serde_json::Value = serde_json::from_str(body_text).map_err(|e| {
+            TrackerBoxUpdaterError::BroadcastOutcomeUnknown(format!("JSON parse error: {}", e))
         })?;
 
         // The Ergo node's /transactions endpoint returns the tx id as a plain
@@ -1063,7 +1109,7 @@ impl TrackerBoxUpdater {
                 .or_else(|| body["txId"].as_str())
                 .map(|s| s.to_string())
                 .ok_or_else(|| {
-                    TrackerBoxUpdaterError::BroadcastFailed("Missing tx id".to_string())
+                    TrackerBoxUpdaterError::BroadcastOutcomeUnknown("Missing tx id".to_string())
                 }),
         }
     }
@@ -1292,22 +1338,36 @@ fn change_address_to_ergo_tree(address_str: &str) -> Result<String, TrackerBoxUp
 
 #[cfg(test)]
 mod publication_health_tests {
-    use super::SharedTrackerState;
+    use super::{SharedTrackerState, TrackerBoxUpdater, TrackerBoxUpdaterError};
 
     #[test]
-    fn cached_root_is_not_publishable_after_one_way_quarantine() {
+    fn publication_quarantine_is_one_way() {
         let state = SharedTrackerState::new();
-        let prior_root = [0x11; 33];
-        state.set_avl_root_digest(prior_root);
-        assert_eq!(state.publication_digest(), Some(prior_root));
+        assert!(state.is_publication_healthy());
 
         state.quarantine_publication();
-        assert_eq!(state.publication_digest(), None);
         assert!(!state.is_publication_healthy());
 
-        // The signal is intentionally one-way; replacing the cached value does
-        // not make any root publishable again in this process.
-        state.set_avl_root_digest([0x22; 33]);
-        assert_eq!(state.publication_digest(), None);
+        state.quarantine_publication();
+        assert!(!state.is_publication_healthy());
+    }
+
+    #[test]
+    fn non_success_broadcast_response_has_unknown_outcome() {
+        assert!(matches!(
+            TrackerBoxUpdater::parse_broadcast_response(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "node failed"
+            ),
+            Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn success_without_transaction_id_has_unknown_outcome() {
+        assert!(matches!(
+            TrackerBoxUpdater::parse_broadcast_response(reqwest::StatusCode::OK, "{}"),
+            Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(_))
+        ));
     }
 }

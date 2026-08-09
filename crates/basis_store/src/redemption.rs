@@ -1028,8 +1028,8 @@ mod tests {
             )
             .expect("reference update");
         assert_eq!(
-            redemption_manager.tracker.reserve_state_digest(),
-            reference.reserve_state_digest(),
+            redemption_manager.tracker.reserve_state_digest().unwrap(),
+            reference.reserve_state_digest().unwrap(),
             "reserve tree must use pre-refresh timestamp and cumulative amount"
         );
 
@@ -1047,8 +1047,8 @@ mod tests {
             )
             .expect("reference update 2");
         assert_eq!(
-            redemption_manager.tracker.reserve_state_digest(),
-            reference2.reserve_state_digest(),
+            redemption_manager.tracker.reserve_state_digest().unwrap(),
+            reference2.reserve_state_digest().unwrap(),
             "second settlement update must accumulate without rewriting signed fields"
         );
     }
@@ -1132,8 +1132,8 @@ mod tests {
             )
             .expect("reference update");
         assert_eq!(
-            redemption_manager.tracker.reserve_state_digest(),
-            reference.reserve_state_digest(),
+            redemption_manager.tracker.reserve_state_digest().unwrap(),
+            reference.reserve_state_digest().unwrap(),
             "reserve tree must use the explicit on-chain cumulative value"
         );
     }

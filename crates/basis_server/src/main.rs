@@ -4,8 +4,8 @@ use axum::{
 };
 use basis_server::{
     api::*, build_redemption, reserve_api::*, store::EventStore, submit_redemption, AppConfig,
-    AppState, ErgoConfig, EventType, ServerConfig, SharedTrackerState, TrackerBoxUpdateConfig,
-    TrackerBoxUpdater, TrackerCommand, TrackerEvent, TransactionConfig,
+    AppState, ErgoConfig, EventType, PublicationLease, ServerConfig, SharedTrackerState,
+    TrackerBoxUpdateConfig, TrackerBoxUpdater, TrackerCommand, TrackerEvent, TransactionConfig,
 };
 use basis_store::{
     ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
@@ -15,6 +15,76 @@ use basis_store::{
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+fn reject_while_publication_is_fenced(command: TrackerCommand) {
+    use basis_store::NoteError;
+
+    match command {
+        TrackerCommand::AddNote { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNotesByIssuer { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetProjectedIssuerGrossDebt { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNotesByRecipient { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNotesByRecipientWithIssuer { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNoteByIssuerAndRecipient { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNotes { response_tx } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GenerateProof { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetTrackerLookupProof { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetReserveLookupProof { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetReserveInsertProof { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetReserveStateDigest { response_tx } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetValidatedState { response_tx } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetConfirmation { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetAllConfirmations { response_tx } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::MarkNotesPending { response_tx, .. }
+        | TrackerCommand::ConfirmPendingNotes { response_tx, .. }
+        | TrackerCommand::RevertPendingNotes { response_tx }
+        | TrackerCommand::ReconcileWithConfirmedDigest { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::ValidateObservedGeneration { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::BeginPublication { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::CompletePublication { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
+        }
+        TrackerCommand::AbortPublication { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -282,8 +352,14 @@ async fn main() {
                 return;
             }
         };
-        let initial_root = tracker.get_state().avl_root_digest;
-        shared_state_for_tracker.set_avl_root_digest(initial_root);
+        let initial_root = match tracker.validated_state() {
+            Ok(state) => state.avl_root_digest,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
         let _ = init_tx.send(Ok(initial_root));
         tracing::info!(
             "Tracker thread initialized with AVL root digest: {}",
@@ -291,9 +367,53 @@ async fn main() {
         );
 
         let mut redemption_manager = RedemptionManager::new(tracker);
+        let mut active_publication: Option<PublicationLease> = None;
+        let mut next_publication_id = 1u64;
 
         while let Some(cmd) = rx.blocking_recv() {
             tracing::debug!("Tracker thread received command: {:?}", cmd);
+
+            if let Some(active_lease) = active_publication {
+                match cmd {
+                    TrackerCommand::CompletePublication {
+                        lease,
+                        tx_id,
+                        submitted_height,
+                        response_tx,
+                    } if lease == active_lease => {
+                        let result =
+                            redemption_manager
+                                .tracker
+                                .validated_state()
+                                .and_then(|state| {
+                                    if state.avl_root_digest != lease.digest {
+                                        return Err(
+                                            basis_store::NoteError::PublicationLeaseMismatch,
+                                        );
+                                    }
+                                    redemption_manager.tracker.mark_notes_pending(
+                                        lease.digest,
+                                        &tx_id,
+                                        submitted_height,
+                                    )
+                                });
+                        if result.is_err() {
+                            shared_state_for_tracker.quarantine_publication();
+                        }
+                        active_publication = None;
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::AbortPublication { lease, response_tx }
+                        if lease == active_lease =>
+                    {
+                        active_publication = None;
+                        let _ = response_tx.send(Ok(()));
+                    }
+                    other => reject_while_publication_is_fenced(other),
+                }
+                continue;
+            }
+
             match cmd {
                 TrackerCommand::AddNote {
                     issuer_pubkey,
@@ -306,9 +426,6 @@ async fn main() {
                     // Update shared state for tracker box updater if successful
                     if result.is_ok() {
                         // Update the shared AVL root digest to match the current tracker state
-                        let current_root = redemption_manager.tracker.get_state().avl_root_digest;
-                        shared_state_for_tracker.set_avl_root_digest(current_root);
-
                         // Note: In a real implementation, we'd send this back to the async context to store
                         // For now, we'll handle event storage in the async handler
                     }
@@ -375,7 +492,13 @@ async fn main() {
                 } => {
                     let result = redemption_manager
                         .tracker
-                        .generate_proof(&issuer_pubkey, &recipient_pubkey);
+                        .generate_proof(&issuer_pubkey, &recipient_pubkey)
+                        .and_then(|proof| {
+                            redemption_manager
+                                .tracker
+                                .validated_state()
+                                .map(|state| (proof, state))
+                        });
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetTrackerLookupProof {
@@ -385,7 +508,13 @@ async fn main() {
                 } => {
                     let result = redemption_manager
                         .tracker
-                        .generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                        .generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey)
+                        .and_then(|proof| {
+                            redemption_manager
+                                .tracker
+                                .validated_state()
+                                .map(|state| (proof, state))
+                        });
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveLookupProof {
@@ -395,7 +524,13 @@ async fn main() {
                 } => {
                     let result = redemption_manager
                         .tracker
-                        .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                        .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey)
+                        .and_then(|proof| {
+                            redemption_manager
+                                .tracker
+                                .reserve_state_digest()
+                                .map(|root| (proof, root))
+                        });
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveInsertProof {
@@ -405,17 +540,28 @@ async fn main() {
                     new_already_redeemed,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.generate_reserve_insert_proof(
-                        &issuer_pubkey,
-                        &recipient_pubkey,
-                        timestamp,
-                        new_already_redeemed,
-                    );
+                    let result = redemption_manager
+                        .tracker
+                        .generate_reserve_insert_proof(
+                            &issuer_pubkey,
+                            &recipient_pubkey,
+                            timestamp,
+                            new_already_redeemed,
+                        )
+                        .and_then(|(proof, updated_root)| {
+                            redemption_manager
+                                .tracker
+                                .reserve_state_digest()
+                                .map(|current_root| (proof, updated_root, current_root))
+                        });
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveStateDigest { response_tx } => {
                     let digest = redemption_manager.tracker.reserve_state_digest();
                     let _ = response_tx.send(digest);
+                }
+                TrackerCommand::GetValidatedState { response_tx } => {
+                    let _ = response_tx.send(redemption_manager.tracker.validated_state());
                 }
                 TrackerCommand::GetConfirmation {
                     issuer_pubkey,
@@ -428,7 +574,11 @@ async fn main() {
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetAllConfirmations { response_tx } => {
-                    let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
+                    let result = redemption_manager
+                        .tracker
+                        .validated_state()
+                        .map(|_| redemption_manager.tracker.all_confirmations());
+                    let _ = response_tx.send(result);
                 }
                 TrackerCommand::MarkNotesPending {
                     digest,
@@ -477,6 +627,53 @@ async fn main() {
                         .tracker
                         .validate_observed_generation(&tracker_nft_id, observed_root);
                     let _ = response_tx.send(result);
+                }
+                TrackerCommand::BeginPublication {
+                    tracker_nft_id,
+                    observed_root,
+                    box_id,
+                    height,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .validate_observed_generation(&tracker_nft_id, observed_root)
+                        .and_then(|_| {
+                            redemption_manager.tracker.reconcile_with_confirmed_digest(
+                                &observed_root,
+                                &box_id,
+                                height,
+                            )?;
+                            redemption_manager.tracker.validated_state()
+                        })
+                        .and_then(|state| {
+                            next_publication_id
+                                .checked_add(1)
+                                .ok_or(basis_store::NoteError::PublicationLeaseMismatch)?;
+                            Ok(PublicationLease {
+                                id: next_publication_id,
+                                digest: state.avl_root_digest,
+                            })
+                        });
+
+                    match result {
+                        Ok(lease) => {
+                            if response_tx.send(Ok(lease)).is_ok() {
+                                active_publication = Some(lease);
+                                next_publication_id += 1;
+                            }
+                        }
+                        Err(error) => {
+                            shared_state_for_tracker.quarantine_publication();
+                            let _ = response_tx.send(Err(error));
+                        }
+                    }
+                }
+                TrackerCommand::CompletePublication { response_tx, .. } => {
+                    let _ = response_tx.send(Err(basis_store::NoteError::PublicationLeaseMismatch));
+                }
+                TrackerCommand::AbortPublication { response_tx, .. } => {
+                    let _ = response_tx.send(Err(basis_store::NoteError::PublicationLeaseMismatch));
                 }
             }
         }
@@ -855,6 +1052,67 @@ async fn main() {
         tracing::error!("Server error: {}", e);
         std::process::exit(1);
     };
+}
+
+#[cfg(test)]
+mod publication_fence_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn active_publication_rejects_state_mutation_and_root_exposure() {
+        let (add_tx, add_rx) = tokio::sync::oneshot::channel();
+        reject_while_publication_is_fenced(TrackerCommand::AddNote {
+            issuer_pubkey: [2u8; 33],
+            note: basis_store::IouNote {
+                recipient_pubkey: [3u8; 33],
+                amount_collected: 1,
+                amount_redeemed: 0,
+                timestamp: 1,
+                signature: [0u8; 65],
+            },
+            response_tx: add_tx,
+        });
+        assert!(matches!(
+            add_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+
+        let (state_tx, state_rx) = tokio::sync::oneshot::channel();
+        reject_while_publication_is_fenced(TrackerCommand::GetValidatedState {
+            response_tx: state_tx,
+        });
+        assert!(matches!(
+            state_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+
+        let (proof_tx, proof_rx) = tokio::sync::oneshot::channel();
+        reject_while_publication_is_fenced(TrackerCommand::GenerateProof {
+            issuer_pubkey: [2u8; 33],
+            recipient_pubkey: [3u8; 33],
+            response_tx: proof_tx,
+        });
+        assert!(matches!(
+            proof_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_publication_receipt_cannot_release_the_actor_fence() {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        reject_while_publication_is_fenced(TrackerCommand::AbortPublication {
+            lease: PublicationLease {
+                id: 7,
+                digest: [7u8; 33],
+            },
+            response_tx,
+        });
+        assert!(matches!(
+            response_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationLeaseMismatch))
+        ));
+    }
 }
 
 /// Background task that continuously scans the blockchain for reserve events

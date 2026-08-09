@@ -321,6 +321,12 @@ pub async fn create_note(
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()
                 }
+                NoteError::PublicationInProgress => {
+                    "Tracker publication in progress; retry".to_string()
+                }
+                NoteError::PublicationLeaseMismatch => {
+                    "Tracker publication lease mismatch".to_string()
+                }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -459,6 +465,12 @@ pub async fn get_notes_by_issuer(
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()
                 }
+                NoteError::PublicationInProgress => {
+                    "Tracker publication in progress; retry".to_string()
+                }
+                NoteError::PublicationLeaseMismatch => {
+                    "Tracker publication lease mismatch".to_string()
+                }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -582,6 +594,12 @@ pub async fn get_notes_by_recipient(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()
+                }
+                NoteError::PublicationInProgress => {
+                    "Tracker publication in progress; retry".to_string()
+                }
+                NoteError::PublicationLeaseMismatch => {
+                    "Tracker publication lease mismatch".to_string()
                 }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
@@ -744,6 +762,12 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()
                 }
+                NoteError::PublicationInProgress => {
+                    "Tracker publication in progress; retry".to_string()
+                }
+                NoteError::PublicationLeaseMismatch => {
+                    "Tracker publication lease mismatch".to_string()
+                }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -848,6 +872,12 @@ pub async fn get_all_notes(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()
+                }
+                NoteError::PublicationInProgress => {
+                    "Tracker publication in progress; retry".to_string()
+                }
+                NoteError::PublicationLeaseMismatch => {
+                    "Tracker publication lease mismatch".to_string()
                 }
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
@@ -1759,13 +1789,8 @@ pub async fn get_tracker_proof(
         }
     };
 
-    // Get tracker state digest from shared state
-    let tracker_state_digest = {
-        let tracker_state = state.shared_tracker_state.lock().await;
-        hex::encode(&tracker_state.get_avl_root_digest())
-    };
-
-    // Request tracker lookup proof from tracker thread
+    // Request the lookup proof and its exact validated BNS2-backed root from
+    // the owning tracker actor in one serialized command.
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     if let Err(e) = state
@@ -1788,7 +1813,8 @@ pub async fn get_tracker_proof(
 
     // Wait for response from tracker thread
     match response_rx.await {
-        Ok(Ok(proof)) => {
+        Ok(Ok((proof, tracker_state))) => {
+            let tracker_state_digest = hex::encode(tracker_state.avl_root_digest);
             // Extract total debt from proof value
             let total_debt = if proof.value.len() == 8 {
                 let mut bytes = [0u8; 8];
@@ -1943,7 +1969,7 @@ pub async fn get_reserve_proof(
 
     // Wait for response from tracker thread
     match response_rx.await {
-        Ok(Ok(proof)) => {
+        Ok(Ok((proof, lookup_root))) => {
             // The reserve tree stores timestamp || already_redeemed as a 16-byte big-endian value.
             let already_redeemed = if proof.value.len() == 16 {
                 let mut bytes = [0u8; 8];
@@ -2006,6 +2032,15 @@ pub async fn get_reserve_proof(
                     );
                 }
             };
+
+            if lookup_root != insert_proof.2 {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(crate::models::error_response(
+                        "Reserve state changed while generating proofs; retry".to_string(),
+                    )),
+                );
+            }
 
             let proof_data = crate::models::ReserveProofData {
                 key: hex::encode(&proof.key),
@@ -2475,17 +2510,7 @@ pub async fn prepare_redemption(
         );
     }
 
-    // Get the current tracker state digest from shared tracker state
-    let tracker_state_digest = {
-        // Get the current AVL root digest from shared tracker state
-        let shared_state = state.shared_tracker_state.lock().await;
-        let current_digest = shared_state.get_avl_root_digest();
-        drop(shared_state); // Release the lock early
-        hex::encode(&current_digest)
-    };
-
-    // Generate a real AVL proof for the note
-    // Send command to tracker thread to generate the proof
+    // Generate a proof together with the exact validated actor-owned root.
     let (proof_response_tx, proof_response_rx) = tokio::sync::oneshot::channel();
 
     let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
@@ -2554,11 +2579,11 @@ pub async fn prepare_redemption(
     }
 
     // Wait for response from tracker thread
-    let proof_result = match proof_response_rx.await {
-        Ok(Ok(note_proof)) => {
-            // Convert the proof to a hex string for transmission
-            hex::encode(&note_proof.avl_proof)
-        }
+    let (proof_result, tracker_state_digest) = match proof_response_rx.await {
+        Ok(Ok((note_proof, tracker_state))) => (
+            hex::encode(&note_proof.avl_proof),
+            hex::encode(tracker_state.avl_root_digest),
+        ),
         Ok(Err(e)) => {
             tracing::error!("Failed to generate proof: {:?}", e);
             return (
@@ -2671,17 +2696,7 @@ pub async fn get_redemption_proof(
         }
     }
 
-    // Get the current tracker state digest from shared tracker state
-    let tracker_state_digest = {
-        // Get the current AVL root digest from shared tracker state
-        let shared_state = state.shared_tracker_state.lock().await;
-        let current_digest = shared_state.get_avl_root_digest();
-        drop(shared_state); // Release the lock early
-        hex::encode(&current_digest)
-    };
-
-    // Generate a real AVL proof for the note
-    // Send command to tracker thread to generate the proof
+    // Generate a proof together with the exact validated actor-owned root.
     let (proof_response_tx, proof_response_rx) = tokio::sync::oneshot::channel();
 
     let issuer_pubkey_bytes = match hex::decode(issuer_pubkey) {
@@ -2750,11 +2765,11 @@ pub async fn get_redemption_proof(
     }
 
     // Wait for response from tracker thread
-    let proof_result = match proof_response_rx.await {
-        Ok(Ok(note_proof)) => {
-            // Convert the proof to a hex string for transmission
-            hex::encode(&note_proof.avl_proof)
-        }
+    let (proof_result, tracker_state_digest) = match proof_response_rx.await {
+        Ok(Ok((note_proof, tracker_state))) => (
+            hex::encode(&note_proof.avl_proof),
+            hex::encode(tracker_state.avl_root_digest),
+        ),
         Ok(Err(e)) => {
             tracing::error!("Failed to generate proof: {:?}", e);
             return (
@@ -3104,14 +3119,47 @@ pub async fn get_tracker_state(
 ) -> (StatusCode, Json<ApiResponse<TrackerStateResponse>>) {
     tracing::debug!("Getting tracker state");
 
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(TrackerCommand::GetValidatedState { response_tx })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::models::error_response(
+                "Tracker state actor unavailable".to_string(),
+            )),
+        );
+    }
+    let local_state = match response_rx.await {
+        Ok(Ok(local_state)) => local_state,
+        Ok(Err(error)) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(crate::models::error_response(format!(
+                    "Tracker state is unavailable: {error:?}"
+                ))),
+            )
+        }
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(crate::models::error_response(
+                    "Tracker state actor stopped".to_string(),
+                )),
+            )
+        }
+    };
+
     let shared = state.shared_tracker_state.lock().await;
-    let local_digest = shared.get_avl_root_digest();
     let confirmed = shared.get_confirmed();
     let pending = shared.get_pending();
     let tracker_box_id = shared.get_tracker_box_id();
 
     let response = TrackerStateResponse {
-        local_digest: hex::encode(local_digest),
+        local_digest: hex::encode(local_state.avl_root_digest),
         confirmed_digest: confirmed.digest.map(hex::encode),
         confirmed_box_id: confirmed.box_id,
         confirmed_height: confirmed.height,

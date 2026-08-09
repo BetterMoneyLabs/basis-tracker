@@ -44,6 +44,15 @@ pub struct AppState {
     // Tracker box ID is fetched from tracker_storage directly
 }
 
+/// Opaque actor-issued fence held across tracker commitment signing and
+/// broadcast. While a lease is active, the tracker actor rejects every other
+/// command so no state transition can race the external effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicationLease {
+    pub id: u64,
+    pub digest: [u8; 33],
+}
+
 // Commands that can be sent to the tracker thread
 #[derive(Debug)]
 pub enum TrackerCommand {
@@ -89,21 +98,25 @@ pub enum TrackerCommand {
     GenerateProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
-        response_tx:
-            tokio::sync::oneshot::Sender<Result<basis_store::NoteProof, basis_store::NoteError>>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<(basis_store::NoteProof, basis_store::TrackerState), basis_store::NoteError>,
+        >,
     },
     GetTrackerLookupProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
         response_tx: tokio::sync::oneshot::Sender<
-            Result<basis_store::TrackerLookupProof, basis_store::NoteError>,
+            Result<
+                (basis_store::TrackerLookupProof, basis_store::TrackerState),
+                basis_store::NoteError,
+            >,
         >,
     },
     GetReserveLookupProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
         response_tx: tokio::sync::oneshot::Sender<
-            Result<basis_store::ReserveLookupProof, basis_store::NoteError>,
+            Result<(basis_store::ReserveLookupProof, Vec<u8>), basis_store::NoteError>,
         >,
     },
     GetReserveInsertProof {
@@ -111,12 +124,18 @@ pub enum TrackerCommand {
         recipient_pubkey: basis_store::PubKey,
         timestamp: u64,
         new_already_redeemed: u64,
-        response_tx:
-            tokio::sync::oneshot::Sender<Result<(Vec<u8>, Vec<u8>), basis_store::NoteError>>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<(Vec<u8>, Vec<u8>, Vec<u8>), basis_store::NoteError>,
+        >,
     },
     /// Get the current reserve AVL tree root digest (33 bytes).
     GetReserveStateDigest {
-        response_tx: tokio::sync::oneshot::Sender<Vec<u8>>,
+        response_tx: tokio::sync::oneshot::Sender<Result<Vec<u8>, basis_store::NoteError>>,
+    },
+    /// Get the current BNS2-backed tracker state through its owning actor.
+    GetValidatedState {
+        response_tx:
+            tokio::sync::oneshot::Sender<Result<basis_store::TrackerState, basis_store::NoteError>>,
     },
     /// Get the confirmation record for a single note.
     GetConfirmation {
@@ -129,7 +148,10 @@ pub enum TrackerCommand {
     /// Get a snapshot of all confirmation records keyed by note key.
     GetAllConfirmations {
         response_tx: tokio::sync::oneshot::Sender<
-            std::collections::HashMap<[u8; 32], basis_store::NoteConfirmation>,
+            Result<
+                std::collections::HashMap<[u8; 32], basis_store::NoteConfirmation>,
+                basis_store::NoteError,
+            >,
         >,
     },
     /// Mark all currently-local notes as pending for an in-flight update tx.
@@ -161,6 +183,28 @@ pub enum TrackerCommand {
     ValidateObservedGeneration {
         tracker_nft_id: [u8; 32],
         observed_root: [u8; 33],
+        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
+    },
+    /// Validate and reconcile an observed tracker generation, then freeze the
+    /// actor until the external publication attempt is resolved.
+    BeginPublication {
+        tracker_nft_id: [u8; 32],
+        observed_root: [u8; 33],
+        box_id: String,
+        height: u64,
+        response_tx: tokio::sync::oneshot::Sender<Result<PublicationLease, basis_store::NoteError>>,
+    },
+    /// Bind a submitted transaction to the exact leased digest and release the
+    /// actor fence.
+    CompletePublication {
+        lease: PublicationLease,
+        tx_id: String,
+        submitted_height: u64,
+        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
+    },
+    /// Release an actor fence after a no-op or failed publication attempt.
+    AbortPublication {
+        lease: PublicationLease,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
     },
 }
