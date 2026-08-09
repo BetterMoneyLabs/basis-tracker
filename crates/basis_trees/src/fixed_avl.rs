@@ -4,6 +4,13 @@
 //! candidates from a `HashMap`. Basis v2 instead authenticates exact 32/8 and
 //! 32/24 tree shapes, and its root depends on first-insertion order. This
 //! wrapper makes both constraints explicit and never exposes removal.
+//!
+//! Unsupported value widths are absent from the public type surface:
+//!
+//! ```compile_fail
+//! use basis_trees::TrackerAvlTree;
+//! let _ = TrackerAvlTree::<16>::new();
+//! ```
 
 use crate::TreeError;
 use bytes::Bytes;
@@ -66,21 +73,11 @@ impl FixedTreeShape {
     }
 }
 
-/// Mandatory membership or non-membership lookup evidence.
+/// Internal membership or non-membership lookup evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LookupWitness<const VALUE_LEN: usize> {
+struct LookupWitness<const VALUE_LEN: usize> {
     proof: Vec<u8>,
     value: Option<[u8; VALUE_LEN]>,
-}
-
-impl<const VALUE_LEN: usize> LookupWitness<VALUE_LEN> {
-    pub fn proof(&self) -> &[u8] {
-        &self.proof
-    }
-
-    pub const fn value(&self) -> Option<[u8; VALUE_LEN]> {
-        self.value
-    }
 }
 
 /// An insert-or-update proof and the root it produces without mutating state.
@@ -105,36 +102,33 @@ impl TransitionWitness {
 /// Persistence owns the ordered entry vector. Reopening the tree must replay
 /// exactly that vector; sorting a snapshot or iterating a hash map is not an
 /// equivalent reconstruction.
-pub struct FixedAvlTree<const VALUE_LEN: usize> {
+struct FixedAvlInner<const VALUE_LEN: usize> {
     prover: BatchAVLProver,
     ordered_entries: Vec<([u8; BASIS_V2_KEY_LENGTH], [u8; VALUE_LEN])>,
     positions: HashMap<[u8; BASIS_V2_KEY_LENGTH], usize>,
 }
 
-impl<const VALUE_LEN: usize> FixedAvlTree<VALUE_LEN> {
-    pub fn new() -> Result<Self, TreeError> {
-        if VALUE_LEN != 8 && VALUE_LEN != 24 {
-            return Err(TreeError::InvalidState);
-        }
-        Ok(Self {
+impl<const VALUE_LEN: usize> FixedAvlInner<VALUE_LEN> {
+    fn new() -> Self {
+        Self {
             prover: Self::empty_prover(),
             ordered_entries: Vec::new(),
             positions: HashMap::new(),
-        })
+        }
     }
 
-    pub fn from_ordered_entries<I>(entries: I) -> Result<Self, TreeError>
+    fn from_ordered_entries<I>(entries: I) -> Result<Self, TreeError>
     where
         I: IntoIterator<Item = ([u8; BASIS_V2_KEY_LENGTH], [u8; VALUE_LEN])>,
     {
-        let mut tree = Self::new()?;
+        let mut tree = Self::new();
         for (key, value) in entries {
             tree.insert(key, value)?;
         }
         Ok(tree)
     }
 
-    pub const fn shape() -> FixedTreeShape {
+    const fn shape() -> FixedTreeShape {
         FixedTreeShape {
             key_length: BASIS_V2_KEY_LENGTH,
             value_length: VALUE_LEN,
@@ -144,34 +138,34 @@ impl<const VALUE_LEN: usize> FixedAvlTree<VALUE_LEN> {
         }
     }
 
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.ordered_entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.ordered_entries.is_empty()
     }
 
-    pub fn get(&self, key: &[u8; BASIS_V2_KEY_LENGTH]) -> Option<[u8; VALUE_LEN]> {
+    fn get(&self, key: &[u8; BASIS_V2_KEY_LENGTH]) -> Option<[u8; VALUE_LEN]> {
         self.positions
             .get(key)
             .map(|position| self.ordered_entries[*position].1)
     }
 
-    pub fn ordered_entries(
+    fn ordered_entries(
         &self,
     ) -> impl ExactSizeIterator<Item = &([u8; BASIS_V2_KEY_LENGTH], [u8; VALUE_LEN])> {
         self.ordered_entries.iter()
     }
 
-    pub fn root_digest(&self) -> Result<[u8; 33], TreeError> {
+    fn root_digest(&self) -> Result<[u8; 33], TreeError> {
         let mut digest = [0u8; 33];
         let value = self.prover.digest().ok_or(TreeError::InvalidState)?;
         digest.copy_from_slice(&value);
         Ok(digest)
     }
 
-    pub fn insert(
+    fn insert(
         &mut self,
         key: [u8; BASIS_V2_KEY_LENGTH],
         value: [u8; VALUE_LEN],
@@ -186,7 +180,7 @@ impl<const VALUE_LEN: usize> FixedAvlTree<VALUE_LEN> {
         Ok(())
     }
 
-    pub fn update(
+    fn update(
         &mut self,
         key: [u8; BASIS_V2_KEY_LENGTH],
         value: [u8; VALUE_LEN],
@@ -198,7 +192,7 @@ impl<const VALUE_LEN: usize> FixedAvlTree<VALUE_LEN> {
     }
 
     /// Generate mandatory lookup evidence for either an existing or absent key.
-    pub fn lookup_witness(
+    fn lookup_witness(
         &mut self,
         key: [u8; BASIS_V2_KEY_LENGTH],
     ) -> Result<LookupWitness<VALUE_LEN>, TreeError> {
@@ -228,7 +222,7 @@ impl<const VALUE_LEN: usize> FixedAvlTree<VALUE_LEN> {
     ///
     /// The real tree is not mutated. Rebuilding the temporary prover uses the
     /// authoritative first-insertion order, never hash-map iteration order.
-    pub fn transition_witness(
+    fn transition_witness(
         &self,
         key: [u8; BASIS_V2_KEY_LENGTH],
         value: [u8; VALUE_LEN],
@@ -264,18 +258,7 @@ impl<const VALUE_LEN: usize> FixedAvlTree<VALUE_LEN> {
     }
 
     /// Verify exactly one membership or non-membership lookup operation.
-    pub fn verify_lookup(
-        starting_digest: &[u8; 33],
-        key: &[u8; BASIS_V2_KEY_LENGTH],
-        witness: &LookupWitness<VALUE_LEN>,
-    ) -> bool {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::verify_lookup_inner(starting_digest, key, witness)
-        }))
-        .unwrap_or(false)
-    }
-
-    fn verify_lookup_inner(
+    fn verify_lookup(
         starting_digest: &[u8; 33],
         key: &[u8; BASIS_V2_KEY_LENGTH],
         witness: &LookupWitness<VALUE_LEN>,
@@ -325,14 +308,174 @@ impl<const VALUE_LEN: usize> FixedAvlTree<VALUE_LEN> {
     }
 }
 
+macro_rules! define_fixed_tree {
+    ($tree:ident, $witness:ident, $value_len:literal, $description:literal) => {
+        #[doc = $description]
+        pub struct $tree {
+            inner: FixedAvlInner<$value_len>,
+        }
+
+        #[doc = concat!("Mandatory membership or non-membership evidence for `", stringify!($tree), "`.")]
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct $witness {
+            inner: LookupWitness<$value_len>,
+        }
+
+        impl $witness {
+            pub fn proof(&self) -> &[u8] {
+                &self.inner.proof
+            }
+
+            pub const fn value(&self) -> Option<[u8; $value_len]> {
+                self.inner.value
+            }
+        }
+
+        impl $tree {
+            pub fn new() -> Self {
+                Self {
+                    inner: FixedAvlInner::new(),
+                }
+            }
+
+            pub fn from_ordered_entries<I>(entries: I) -> Result<Self, TreeError>
+            where
+                I: IntoIterator<
+                    Item = ([u8; BASIS_V2_KEY_LENGTH], [u8; $value_len]),
+                >,
+            {
+                Ok(Self {
+                    inner: FixedAvlInner::from_ordered_entries(entries)?,
+                })
+            }
+
+            pub const fn shape() -> FixedTreeShape {
+                FixedAvlInner::<$value_len>::shape()
+            }
+
+            pub fn len(&self) -> usize {
+                self.inner.len()
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.inner.is_empty()
+            }
+
+            pub fn get(
+                &self,
+                key: &[u8; BASIS_V2_KEY_LENGTH],
+            ) -> Option<[u8; $value_len]> {
+                self.inner.get(key)
+            }
+
+            pub fn ordered_entries(
+                &self,
+            ) -> impl ExactSizeIterator<
+                Item = &([u8; BASIS_V2_KEY_LENGTH], [u8; $value_len]),
+            > {
+                self.inner.ordered_entries()
+            }
+
+            pub fn root_digest(&self) -> Result<[u8; 33], TreeError> {
+                self.inner.root_digest()
+            }
+
+            pub fn insert(
+                &mut self,
+                key: [u8; BASIS_V2_KEY_LENGTH],
+                value: [u8; $value_len],
+            ) -> Result<(), TreeError> {
+                self.inner.insert(key, value)
+            }
+
+            pub fn update(
+                &mut self,
+                key: [u8; BASIS_V2_KEY_LENGTH],
+                value: [u8; $value_len],
+            ) -> Result<(), TreeError> {
+                self.inner.update(key, value)
+            }
+
+            pub fn lookup_witness(
+                &mut self,
+                key: [u8; BASIS_V2_KEY_LENGTH],
+            ) -> Result<$witness, TreeError> {
+                Ok($witness {
+                    inner: self.inner.lookup_witness(key)?,
+                })
+            }
+
+            pub fn transition_witness(
+                &self,
+                key: [u8; BASIS_V2_KEY_LENGTH],
+                value: [u8; $value_len],
+            ) -> Result<TransitionWitness, TreeError> {
+                self.inner.transition_witness(key, value)
+            }
+
+            /// Verify exactly one lookup without unwinding on malformed proof bytes.
+            pub fn verify_lookup(
+                starting_digest: &[u8; 33],
+                key: &[u8; BASIS_V2_KEY_LENGTH],
+                witness: &$witness,
+            ) -> bool {
+                FixedAvlInner::<$value_len>::verify_lookup(
+                    starting_digest,
+                    key,
+                    &witness.inner,
+                )
+            }
+        }
+
+        impl Default for $tree {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+    };
+}
+
+define_fixed_tree!(
+    TrackerAvlTree,
+    TrackerLookupWitness,
+    8,
+    "Basis v2 tracker debt tree with exact 32-byte keys and 8-byte values."
+);
+
+define_fixed_tree!(
+    ReserveAvlTree,
+    ReserveLookupWitness,
+    24,
+    "Basis v2 reserve redemption tree with exact 32-byte keys and 24-byte values."
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
+    const SCALA_VECTORS: &str = include_str!("../tests/fixtures/basis_v2_avl_scala_0403162.json");
+
+    fn decode_hex(encoded: &str) -> Vec<u8> {
+        assert_eq!(encoded.len() % 2, 0);
+        encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).unwrap();
+                u8::from_str_radix(pair, 16).unwrap()
+            })
+            .collect()
+    }
+
+    fn digest33(encoded: &str) -> [u8; 33] {
+        decode_hex(encoded).try_into().unwrap()
+    }
 
     #[test]
     fn exposes_the_exact_v2_shapes() {
         assert_eq!(
-            FixedAvlTree::<8>::shape(),
+            TrackerAvlTree::shape(),
             FixedTreeShape {
                 key_length: 32,
                 value_length: 8,
@@ -341,29 +484,36 @@ mod tests {
                 remove_allowed: false,
             }
         );
-        assert_eq!(FixedAvlTree::<24>::shape().value_length(), 24);
-        assert!(matches!(
-            FixedAvlTree::<0>::new(),
-            Err(TreeError::InvalidState)
-        ));
-        assert!(matches!(
-            FixedAvlTree::<16>::new(),
-            Err(TreeError::InvalidState)
-        ));
+        assert_eq!(ReserveAvlTree::shape().value_length(), 24);
     }
 
     #[test]
     fn insertion_order_is_explicit_and_replayable() {
         let entries = [([1u8; 32], [10u8; 8]), ([2u8; 32], [20u8; 8])];
-        let tree = FixedAvlTree::<8>::from_ordered_entries(entries).unwrap();
-        let replay = FixedAvlTree::<8>::from_ordered_entries(entries).unwrap();
+        let tree = TrackerAvlTree::from_ordered_entries(entries).unwrap();
+        let replay = TrackerAvlTree::from_ordered_entries(entries).unwrap();
         assert_eq!(tree.root_digest().unwrap(), replay.root_digest().unwrap());
         assert_eq!(tree.ordered_entries().copied().collect::<Vec<_>>(), entries);
+
+        let ordered = [
+            ([1u8; 32], [11u8; 8]),
+            ([2u8; 32], [22u8; 8]),
+            ([3u8; 32], [33u8; 8]),
+            ([4u8; 32], [44u8; 8]),
+        ];
+        let reversed = [ordered[3], ordered[2], ordered[1], ordered[0]];
+        let ordered_tree = TrackerAvlTree::from_ordered_entries(ordered).unwrap();
+        let reversed_tree = TrackerAvlTree::from_ordered_entries(reversed).unwrap();
+        assert_ne!(
+            ordered_tree.root_digest().unwrap(),
+            reversed_tree.root_digest().unwrap(),
+            "reversing the authoritative replay order must not be treated as equivalent"
+        );
     }
 
     #[test]
     fn insert_and_update_are_strict() {
-        let mut tree = FixedAvlTree::<8>::new().unwrap();
+        let mut tree = TrackerAvlTree::new();
         tree.insert([1u8; 32], [2u8; 8]).unwrap();
         assert!(matches!(
             tree.insert([1u8; 32], [3u8; 8]),
@@ -380,49 +530,47 @@ mod tests {
 
     #[test]
     fn membership_and_non_membership_both_have_verifiable_proofs() {
-        let mut tree = FixedAvlTree::<24>::new().unwrap();
+        let mut tree = ReserveAvlTree::new();
         tree.insert([1u8; 32], [2u8; 24]).unwrap();
         let digest = tree.root_digest().unwrap();
 
         let membership = tree.lookup_witness([1u8; 32]).unwrap();
-        assert_eq!(membership.value, Some([2u8; 24]));
-        assert!(!membership.proof.is_empty());
-        assert!(FixedAvlTree::<24>::verify_lookup(
+        assert_eq!(membership.value(), Some([2u8; 24]));
+        assert!(!membership.proof().is_empty());
+        assert!(ReserveAvlTree::verify_lookup(
             &digest,
             &[1u8; 32],
             &membership
         ));
 
         let non_membership = tree.lookup_witness([9u8; 32]).unwrap();
-        assert_eq!(non_membership.value, None);
-        assert!(!non_membership.proof.is_empty());
-        assert!(FixedAvlTree::<24>::verify_lookup(
+        assert_eq!(non_membership.value(), None);
+        assert!(!non_membership.proof().is_empty());
+        assert!(ReserveAvlTree::verify_lookup(
             &digest,
             &[9u8; 32],
             &non_membership
         ));
 
         let mut wrong = non_membership.clone();
-        wrong.value = Some([0u8; 24]);
-        assert!(!FixedAvlTree::<24>::verify_lookup(
-            &digest, &[9u8; 32], &wrong
-        ));
+        wrong.inner.value = Some([0u8; 24]);
+        assert!(!ReserveAvlTree::verify_lookup(&digest, &[9u8; 32], &wrong));
 
         let mut wrong_proof = membership.clone();
-        wrong_proof.proof[0] ^= 1;
-        assert!(!FixedAvlTree::<24>::verify_lookup(
+        wrong_proof.inner.proof[0] ^= 1;
+        assert!(!ReserveAvlTree::verify_lookup(
             &digest,
             &[1u8; 32],
             &wrong_proof
         ));
-        assert!(!FixedAvlTree::<24>::verify_lookup(
+        assert!(!ReserveAvlTree::verify_lookup(
             &digest,
             &[3u8; 32],
             &membership
         ));
         let mut wrong_digest = digest;
         wrong_digest[1] ^= 1;
-        assert!(!FixedAvlTree::<24>::verify_lookup(
+        assert!(!ReserveAvlTree::verify_lookup(
             &wrong_digest,
             &[1u8; 32],
             &membership
@@ -431,7 +579,7 @@ mod tests {
 
     #[test]
     fn transition_proof_is_deterministic_and_does_not_mutate() {
-        let mut tree = FixedAvlTree::<8>::new().unwrap();
+        let mut tree = TrackerAvlTree::new();
         tree.insert([1u8; 32], [2u8; 8]).unwrap();
         tree.insert([3u8; 32], [4u8; 8]).unwrap();
         let before = tree.root_digest().unwrap();
@@ -443,5 +591,135 @@ mod tests {
 
         tree.update([1u8; 32], [5u8; 8]).unwrap();
         assert_eq!(tree.root_digest().unwrap(), witness.new_digest());
+    }
+
+    #[test]
+    fn new_key_transition_witness_matches_the_inserted_successor() {
+        let mut tree = ReserveAvlTree::new();
+        tree.insert([1u8; 32], [2u8; 24]).unwrap();
+        let before = tree.root_digest().unwrap();
+
+        let witness = tree.transition_witness([3u8; 32], [4u8; 24]).unwrap();
+        assert_eq!(tree.root_digest().unwrap(), before);
+
+        tree.insert([3u8; 32], [4u8; 24]).unwrap();
+        assert_eq!(tree.root_digest().unwrap(), witness.new_digest());
+    }
+
+    #[test]
+    fn malformed_lookup_proofs_return_false_without_unwinding() {
+        let mut tree = ReserveAvlTree::new();
+        tree.insert([1u8; 32], [2u8; 24]).unwrap();
+        tree.insert([3u8; 32], [4u8; 24]).unwrap();
+        let digest = tree.root_digest().unwrap();
+        let valid = tree.lookup_witness([1u8; 32]).unwrap();
+
+        for cut in 0..valid.proof().len() {
+            let malformed = ReserveLookupWitness {
+                inner: LookupWitness {
+                    proof: valid.proof()[..cut].to_vec(),
+                    value: valid.value(),
+                },
+            };
+            assert!(!ReserveAvlTree::verify_lookup(
+                &digest, &[1u8; 32], &malformed
+            ));
+        }
+
+        let malformed = ReserveLookupWitness {
+            inner: LookupWitness {
+                proof: vec![0, 4],
+                value: valid.value(),
+            },
+        };
+        assert!(!ReserveAvlTree::verify_lookup(
+            &digest, &[1u8; 32], &malformed
+        ));
+
+        let mut bit_mutations_exercised = 0;
+        for offset in 0..valid.proof().len() {
+            for bit in 0..8 {
+                let mut mutated = valid.clone();
+                mutated.inner.proof[offset] ^= 1 << bit;
+                let _ = ReserveAvlTree::verify_lookup(&digest, &[1u8; 32], &mutated);
+                bit_mutations_exercised += 1;
+            }
+        }
+        assert_eq!(bit_mutations_exercised, valid.proof().len() * 8);
+    }
+
+    #[test]
+    fn matches_chaincash_scala_golden_vectors_byte_for_byte() {
+        let vectors: Value = serde_json::from_str(SCALA_VECTORS).unwrap();
+        assert_eq!(
+            vectors["source"]["commit"].as_str().unwrap(),
+            "04031626f09c6590a20ad20d5583c6eccc14412d"
+        );
+
+        let tracker = &vectors["tracker_32_8"];
+        let mut tracker_tree = TrackerAvlTree::new();
+        assert_eq!(
+            tracker_tree.root_digest().unwrap(),
+            digest33(tracker["empty_digest_hex"].as_str().unwrap())
+        );
+        tracker_tree.insert([1; 32], [2; 8]).unwrap();
+        tracker_tree.insert([3; 32], [4; 8]).unwrap();
+        assert_eq!(
+            tracker_tree.root_digest().unwrap(),
+            digest33(tracker["starting_digest_hex"].as_str().unwrap())
+        );
+        let tracker_lookup = tracker_tree.lookup_witness([1; 32]).unwrap();
+        let tracker_lookup_bytes = decode_hex(tracker["lookup_proof_hex"].as_str().unwrap());
+        assert_eq!(tracker_lookup.proof(), tracker_lookup_bytes);
+        assert_eq!(tracker_lookup.proof().len(), 143);
+        assert_eq!(
+            tracker["lookup_proof_sha256"].as_str().unwrap(),
+            "5b3e3451d8137978f6b86ea2021bdc0d8e31a80ecbbe8ed48f9d67e9c1f3ca54"
+        );
+        let tracker_update = tracker_tree.transition_witness([1; 32], [5; 8]).unwrap();
+        let tracker_update_bytes = decode_hex(tracker["update_proof_hex"].as_str().unwrap());
+        assert_eq!(tracker_update.proof(), tracker_update_bytes);
+        assert_eq!(
+            tracker["update_proof_sha256"].as_str().unwrap(),
+            "5b3e3451d8137978f6b86ea2021bdc0d8e31a80ecbbe8ed48f9d67e9c1f3ca54"
+        );
+        tracker_tree.update([1; 32], [5; 8]).unwrap();
+        assert_eq!(
+            tracker_tree.root_digest().unwrap(),
+            digest33(tracker["output_digest_hex"].as_str().unwrap())
+        );
+
+        let reserve = &vectors["reserve_32_24"];
+        let mut reserve_tree = ReserveAvlTree::new();
+        assert_eq!(
+            reserve_tree.root_digest().unwrap(),
+            digest33(reserve["empty_digest_hex"].as_str().unwrap())
+        );
+        reserve_tree.insert([1; 32], [2; 24]).unwrap();
+        assert_eq!(
+            reserve_tree.root_digest().unwrap(),
+            digest33(reserve["starting_digest_hex"].as_str().unwrap())
+        );
+        let reserve_absence = reserve_tree.lookup_witness([3; 32]).unwrap();
+        let reserve_absence_bytes = decode_hex(reserve["absence_proof_hex"].as_str().unwrap());
+        assert_eq!(reserve_absence.value(), None);
+        assert_eq!(reserve_absence.proof(), reserve_absence_bytes);
+        assert_eq!(reserve_absence.proof().len(), 125);
+        assert_eq!(
+            reserve["absence_proof_sha256"].as_str().unwrap(),
+            "80f33ed16eee7c83ba7d316d07a5bb988a2e5c8f83a50487e4698829dfe02d76"
+        );
+        let reserve_insert = reserve_tree.transition_witness([3; 32], [4; 24]).unwrap();
+        let reserve_insert_bytes = decode_hex(reserve["insert_proof_hex"].as_str().unwrap());
+        assert_eq!(reserve_insert.proof(), reserve_insert_bytes);
+        assert_eq!(
+            reserve["insert_proof_sha256"].as_str().unwrap(),
+            "80f33ed16eee7c83ba7d316d07a5bb988a2e5c8f83a50487e4698829dfe02d76"
+        );
+        reserve_tree.insert([3; 32], [4; 24]).unwrap();
+        assert_eq!(
+            reserve_tree.root_digest().unwrap(),
+            digest33(reserve["output_digest_hex"].as_str().unwrap())
+        );
     }
 }

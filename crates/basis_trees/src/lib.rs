@@ -21,7 +21,10 @@ pub mod avl_tree_tests;
 pub use avl_tree::BasisAvlTree;
 
 pub use errors::TreeError;
-pub use fixed_avl::{FixedAvlTree, FixedTreeShape, LookupWitness, TransitionWitness};
+pub use fixed_avl::{
+    FixedTreeShape, ReserveAvlTree, ReserveLookupWitness, TrackerAvlTree, TrackerLookupWitness,
+    TransitionWitness,
+};
 pub use proofs::{MembershipProof, NonMembershipProof, StateProof};
 pub use state::TrackerState;
 pub use storage::{NodeType, OperationType, TreeCheckpoint, TreeNode, TreeOperation, TreeStorage};
