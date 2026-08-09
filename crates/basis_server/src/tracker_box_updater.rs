@@ -435,7 +435,8 @@ struct PreparedTrackerUpdate {
 }
 
 impl TrackerBoxUpdater {
-    pub(crate) fn restored_pending_transaction(
+    #[doc(hidden)]
+    pub fn restored_pending_transaction(
         shared_state: &SharedTrackerState,
     ) -> Result<Option<(String, [u8; 33])>, TrackerBoxUpdaterError> {
         let pending = shared_state.get_pending();

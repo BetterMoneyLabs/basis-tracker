@@ -1185,6 +1185,10 @@ mod publication_fence_tests {
         assert_eq!(updater_pending.tx_id.as_deref(), Some(tx_id.as_str()));
         assert_eq!(updater_pending.digest, Some(digest));
         assert_eq!(updater_pending.submitted_height, Some(100));
+        assert_eq!(
+            TrackerBoxUpdater::restored_pending_transaction(&restarted_shared).unwrap(),
+            Some((tx_id.clone(), digest))
+        );
 
         let mut redemption_manager = basis_store::RedemptionManager::new(reopened);
 
@@ -1245,6 +1249,10 @@ mod publication_fence_tests {
                 .tx_id(),
             tx_id
         );
+        assert_eq!(
+            TrackerBoxUpdater::restored_pending_transaction(&restarted_shared).unwrap(),
+            Some((tx_id.clone(), digest))
+        );
 
         let (confirm_tx, confirm_rx) = tokio::sync::oneshot::channel();
         active = handle_command_while_publication_is_fenced(
@@ -1273,6 +1281,10 @@ mod publication_fence_tests {
         assert!(updater_pending.tx_id.is_none());
         assert!(updater_pending.digest.is_none());
         assert!(updater_pending.submitted_height.is_none());
+        assert_eq!(
+            TrackerBoxUpdater::restored_pending_transaction(&restarted_shared).unwrap(),
+            None
+        );
     }
 }
 
