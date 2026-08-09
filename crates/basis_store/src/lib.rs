@@ -9,6 +9,22 @@
 //! ```
 //!
 //! ```compile_fail
+//! use basis_store::redemption::RedemptionManager;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::RedemptionRequest;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::RedemptionData;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::RedemptionError;
+//! ```
+//!
+//! ```compile_fail
 //! use basis_store::transaction_builder::RedemptionTransactionBuilder;
 //! ```
 

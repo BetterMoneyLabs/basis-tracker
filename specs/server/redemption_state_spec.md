@@ -1,5 +1,14 @@
 # Redemption State Specification
 
+> **Historical v1 design — superseded.** The production Rust redemption
+> manager and transaction builder described here are quarantined as test-only
+> fixtures. The current `POST /redeem` and `POST /redeem/complete` handlers are
+> unconditional `410 Gone` tombstones and perform no state or network effects.
+> Retain this document only for lineage analysis; use
+> [`../legacy_runtime_quarantine.md`](../legacy_runtime_quarantine.md) for the
+> enforced boundary and require a separately reviewed v2 runtime specification
+> before restoring transaction construction.
+
 ## Overview
 This document specifies the state management and process flow for redemption operations in the Basis Tracker system. Redemption allows holders of IOU notes to claim collateral from the issuer's reserve based on the outstanding debt represented by the note. The contract tracks cumulative redeemed amounts using AVL trees to prevent double redemptions.
 
@@ -272,10 +281,12 @@ After the unsigned redemption transaction is built:
 
 ## API Endpoints
 
-### POST /redeem
-Initiates a redemption process for an IOU note.
+### POST /redeem (retired)
 
-**Request Body:**
+The current handler returns `410 Gone` before payload validation. The payload
+and response below record the superseded v1 design only.
+
+**Historical v1 Request Body:**
 ```json
 {
   "issuer_pubkey": "hex_encoded_public_key",
@@ -285,11 +296,10 @@ Initiates a redemption process for an IOU note.
 }
 ```
 
-**Response:**
-- Success: `200 OK` with redemption details
-- Failure: `400 Bad Request` or `500 Internal Server Error` with error message
+**Current Response:**
+- `410 Gone`; no redemption is built, signed, submitted, or recorded.
 
-**Success Response:**
+**Historical v1 Success Response:**
 ```json
 {
   "success": true,
