@@ -27,7 +27,10 @@ construction, and settlement boundaries.
    caller-supplied box metadata; the reviewed interim implementation also
    rejected any mismatch between node JSON and the exact Sigma-parsed input ID,
    tree, value or assets. The separately active tracker-box publisher is bound
-   by the same exact-input and owner-derived-change rule.
+   by a stronger exact-input and owner-derived-change rule: canonical raw bytes
+   must match JSON ID, value, tree, ordered assets, complete R4-R9 register
+   bytes/key set, and creation height; fee boxes must be token-free exact P2PK
+   boxes for the tracker key.
 9. Node API keys and tracker signing material are redacted from every loggable
    configuration `Debug` representation, including both reserve and tracker
    scanner configs. Signing and broadcast failures expose status/category only,
@@ -38,6 +41,13 @@ construction, and settlement boundaries.
 11. `reserve create --submit` is a retired compatibility flag that fails before
     requesting a payload; user-facing output directs the owner to an external
     wallet and never advertises tracker-side broadcast.
+12. The tracker publisher signs only in process with ergo-lib `Wallet`. The
+    configured secret must derive both the configured public key and the
+    tracker input's `GroupElement` R4. Construction, signing, and post-sign
+    validation use one ordered, duplicate-free exact input set and one state
+    context made from 10 linked headers plus the matching `/info` parameters.
+    Only the signed transaction is submitted to `/transactions`; there is no
+    node-wallet signing request or configurable publisher change address.
 
 ## HTTP compatibility changes
 
