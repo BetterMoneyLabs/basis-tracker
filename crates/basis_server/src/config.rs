@@ -64,8 +64,8 @@ pub struct ErgoConfig {
     pub allow_fresh_tracker_generation: bool,
     /// Tracker server's public key for the Ergo blockchain (hex-encoded, 33 bytes for compressed format)
     pub tracker_public_key: Option<String>,
-    /// Tracker server's secret key for local signing (hex-encoded, 32 bytes)
-    /// If provided, the server will sign redemption transactions locally instead of using the Ergo node API
+    /// Tracker server's secret key for local signing (hex-encoded, 32 bytes).
+    /// The tracker-box publisher never sends this key to the Ergo node.
     pub tracker_secret_key: Option<String>,
 }
 

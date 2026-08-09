@@ -23,7 +23,7 @@ allow_fresh_tracker_generation = false
 # Tracker public key - can be hex-encoded public key or P2PK address
 tracker_public_key = "your_tracker_public_key_or_p2pk_address_here"
 # Tracker secret key for local signing (hex-encoded, 32 bytes)
-# If provided, the server will sign redemption transactions locally instead of using the Ergo node API
+# The tracker-box publisher signs in process and never sends this key to the node.
 # WARNING: never commit this value to version control
 tracker_secret_key = "your_tracker_secret_key_here"
 

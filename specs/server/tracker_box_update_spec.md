@@ -1,10 +1,10 @@
 # Historical Tracker Box Update Mechanism Specification
 
-> **Status: partially superseded design reference.** The updater remains a
-> migration input, but the v1 redemption builder and raw completion command
-> shown below have been retired from production APIs. Actor-owned durable state,
-> confirmed-chain reconciliation, and exact v2 generation admission are defined
-> in separate current workstreams. This document is not deployment authority.
+> **Status: mixed current/historical reference.** The local-signing boundary in
+> this document describes the active tracker publisher. The v1 redemption
+> builder and raw completion command shown below are retired from production
+> APIs. Actor-owned durable state, confirmed-chain reconciliation, and exact v2
+> generation admission are defined separately.
 
 ## Overview
 
@@ -69,9 +69,7 @@ pub struct TrackerBoxUpdateConfig {
     pub api_key: Option<String>,
     /// Transaction fee in nanoERG paid by wallet inputs for each tracker update
     pub fee: u64,
-    /// Optional change address for the fee-input change output
-    pub change_address: Option<String>,
-    /// Optional tracker secret key (32 bytes) used as a dlog secret when signing
+    /// Tracker secret key (32 bytes), required when the publisher signs an update
     pub tracker_secret_key: Option<[u8; 32]>,
 }
 ```
@@ -184,16 +182,21 @@ The background task executes the following algorithm in a continuous loop:
    - R4: Tracker public key as EcPoint constant (33 bytes, compressed secp256k1 point) - identifies the tracker server
    - R5: Serialized `SAvlTree` constant containing the current AVL tree root digest (37 bytes total; see "R5 Register Serialization Format" below)
    - R6: Serialized `Coll[Byte]` constant containing the tracker NFT ID (preserved from the input tracker box)
-9. **Build Unsigned Transaction**:
-   - **Inputs**: the current tracker box (spends it) plus one or more wallet-owned P2PK/no-token boxes to pay the configured fee
-   - **Outputs**: new tracker box with the same value and updated R4/R5/R6; fee output to the standard fee contract; optional change output to the change address
-   - **inputsRaw**: serialized bytes of the tracker box and all fee inputs
-   - **secrets.dlog**: the configured tracker secret key (hex) so the node can satisfy `proveDlog(trackerPubkey)`; may be omitted if the tracker key is already in the node wallet
-10. **Submit Transaction**:
-   - POST the unsigned transaction to `/wallet/transaction/sign` to obtain a signed transaction
-   - POST the signed transaction to `/transactions` to broadcast it
+9. **Bind Inputs and State Context**:
+   - Fetch each selected input through both the node JSON view and `/utxo/byIdBinary/{boxId}`.
+   - Parse the binary with Sigma serialization and require exact equality for box ID, value, ErgoTree bytes, ordered assets, R4-R9 bytes/key set, and creation height.
+   - Require one ordered, duplicate-free input list containing the tracker box followed by the same exact boxes supplied to the signer.
+   - Fetch exactly 10 newest-first headers from `/blocks/lastHeaders/10`; require a descending parent-linked chain and bind `fullHeight`, `bestFullHeaderId`, block version, and the complete nested signing parameter set from `/info` to the same tip.
+10. **Authorize and Build**:
+   - Require the configured secret to derive the configured tracker public key and require the exact tracker input R4 to be that key as a `GroupElement`.
+   - Select only token-free fee inputs whose exact ErgoTree is the P2PK tree derived from that same key.
+   - Preserve the tracker value, ErgoTree, ordered tokens, and R6-R9; replace only R4/R5. Pay the miner fee and send any checked, non-dust change to the derived P2PK tree. There is no configurable publisher change address.
+11. **Sign and Submit**:
+   - Build a typed ergo-lib unsigned transaction using checked value arithmetic and current dust parameters.
+   - Sign locally with `Wallet`, then validate the signed transaction again against the same exact inputs and `ErgoStateContext`.
+   - POST only the signed transaction to `/transactions`; the secret and raw-input signing bundle never cross the HTTP boundary.
    - Log the transaction ID on successful broadcast and mark it as pending confirmation
-11. **Error Handling**:
+12. **Error Handling**:
     - If any step fails, log an appropriate ERROR message
     - Continue with the scheduled interval regardless of failures
 
@@ -295,7 +298,7 @@ impl TrackerBoxUpdater {
         // Logs warning if multiple boxes found (indicates inconsistent state)
     }
 
-    /// Submit a tracker box update transaction via /wallet/transaction/sign and broadcast via /transactions
+    /// Bind exact inputs, sign locally, and broadcast via /transactions
     async fn submit_tracker_update(
         config: &TrackerBoxUpdateConfig,
         tracker_box: &ErgoBoxApi,
@@ -304,8 +307,9 @@ impl TrackerBoxUpdater {
     ) -> Result<String, TrackerBoxUpdaterError> {
         // Build R4 (GroupElement), R5 (SAvlTree), and R6 (Coll[Byte]) registers
         // Select wallet fee inputs covering config.fee
-        // Fetch raw bytes for the tracker box and all fee inputs
-        // Assemble UnsignedErgoTransaction and sign with /wallet/transaction/sign
+        // Fetch and bind raw bytes for the tracker box and all fee inputs
+        // Build a typed UnsignedTransaction and sign it locally with ergo-lib Wallet
+        // Validate the signed transaction against the same exact inputs/context
         // Broadcast signed transaction with /transactions
         // Returns transaction ID
     }
@@ -528,7 +532,7 @@ The service handles the following error conditions:
 4. **No Tracker Box Found**: Tracker NFT ID not found on chain
 5. **No Fee Inputs**: Wallet has no suitable P2PK/no-token boxes to pay the update fee
 6. **Insufficient Fee Inputs**: Wallet boxes don't cover the configured fee
-7. **Signing Failed**: `/wallet/transaction/sign` rejected the unsigned transaction (bad inputs, missing secrets, etc.)
+7. **Signing Failed**: local authorization, proof generation, or post-sign validation failed
 8. **Broadcast Failed**: `/transactions` rejected the signed transaction
 9. **Transaction Not Found**: Submitted transaction ID not found on chain after extended waiting
 10. **Serialization Errors**: Failed to decode ergoTree hex, parse ergoTree bytes, or encode addresses
@@ -546,8 +550,10 @@ The service handles the following error conditions:
 2. **Resource Management**: Proper handling of async resources and channels
 3. **Log Security**: No sensitive cryptographic information exposed in logs
 4. **Rate Limiting**: Built-in 10-minute interval prevents excessive resource usage
-5. **Secret Handling**: The configured `tracker_secret_key` is passed only to the node's `/wallet/transaction/sign` endpoint as a `dlog` secret; it is never logged or broadcast
-6. **Pending Transaction State**: Prevents duplicate submissions while waiting for confirmation
+5. **Secret Handling**: The configured `tracker_secret_key` is consumed only by the in-process ergo-lib wallet. It is redacted from `Debug`, never placed in a JSON artifact, and never sent to the node.
+6. **Exact Fee Authority**: Every fee input is token-free and protected by the exact P2PK tree derived from the tracker key; change returns only to that same tree.
+7. **Pinned Validation Context**: Header order, links, height, version, and current `/info` parameters are validated once and reused for construction, signing, and post-sign validation.
+8. **Pending Transaction State**: Prevents duplicate submissions while waiting for confirmation
 
 ## Performance Characteristics
 

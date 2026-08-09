@@ -1,10 +1,33 @@
 //! Tracker Box Updater Service
 //!
 //! This module implements a background service that periodically updates the R4 and R5 register values
-//! of the tracker box every 10 minutes by submitting transactions to the Ergo blockchain via the
-//! node's /wallet/transaction/sign and /transactions endpoints.
+//! of the tracker box every 10 minutes. Exact node box bytes and one linked state context are
+//! validated locally, signed with ergo-lib, and only the signed transaction is sent to the node.
 
-use ergo_lib::chain::transaction::Transaction;
+use ergo_lib::chain::{
+    ergo_state_context::{ErgoStateContext, Headers},
+    parameters::Parameters,
+    transaction::{unsigned::UnsignedTransaction, Transaction, UnsignedInput},
+};
+use ergo_lib::ergo_chain_types::{EcPoint, Header, PreHeader};
+use ergo_lib::ergotree_ir::{
+    chain::{
+        address::Address,
+        context_extension::ContextExtension,
+        ergo_box::{
+            box_value::BoxValue, ErgoBox, ErgoBoxCandidate, NonMandatoryRegisterId,
+            NonMandatoryRegisters,
+        },
+    },
+    ergo_tree::ErgoTree,
+    mir::constant::{Constant, TryExtractInto},
+    serialization::SigmaSerializable,
+    sigma_protocol::sigma_boolean::ProveDlog,
+};
+use ergo_lib::wallet::{
+    secret_key::SecretKey, tx_builder::new_miner_fee_box, tx_context::TransactionContext, Wallet,
+};
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
@@ -174,7 +197,6 @@ pub struct TrackerBoxUpdateConfig {
     pub api_key: Option<String>,
     pub update_interval_seconds: u64,
     pub fee: u64,
-    pub change_address: Option<String>,
     pub tracker_secret_key: Option<[u8; 32]>,
 }
 
@@ -185,7 +207,6 @@ impl std::fmt::Debug for TrackerBoxUpdateConfig {
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("update_interval_seconds", &self.update_interval_seconds)
             .field("fee", &self.fee)
-            .field("change_address", &self.change_address)
             .field(
                 "tracker_secret_key",
                 &self.tracker_secret_key.as_ref().map(|_| "<redacted>"),
@@ -201,7 +222,6 @@ impl Default for TrackerBoxUpdateConfig {
             api_key: None,
             update_interval_seconds: 600,
             fee: 1_000_000,
-            change_address: None,
             tracker_secret_key: None,
         }
     }
@@ -209,86 +229,7 @@ impl Default for TrackerBoxUpdateConfig {
 
 #[cfg(test)]
 mod secret_redaction_tests {
-    use super::{TrackerBoxUpdateConfig, TrackerBoxUpdater};
-    use std::io::{self, Write};
-    use std::sync::{Arc, Mutex};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    #[derive(Clone, Default)]
-    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
-        type Writer = BufferWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            BufferWriter(Arc::clone(&self.0))
-        }
-    }
-
-    impl Write for BufferWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("log buffer lock")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    async fn one_error_response(body: &'static str) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let address = listener.local_addr().expect("loopback address");
-        let task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept request");
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            loop {
-                let count = stream.read(&mut buffer).await.expect("read request");
-                if count == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..count]);
-                if let Some(header_end) =
-                    request.windows(4).position(|window| window == b"\r\n\r\n")
-                {
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= header_end + 4 + content_length {
-                        break;
-                    }
-                }
-            }
-
-            let response = format!(
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .expect("write response");
-            request
-        });
-        (format!("http://{address}"), task)
-    }
+    use super::TrackerBoxUpdateConfig;
 
     #[test]
     fn updater_config_debug_redacts_all_secrets() {
@@ -303,53 +244,6 @@ mod secret_redaction_tests {
         assert!(!rendered.contains(api_sentinel));
         assert!(!rendered.contains("171, 171"));
         assert!(rendered.matches("<redacted>").count() >= 2);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn node_signing_error_and_logs_do_not_echo_secret_bearing_bodies() {
-        let tracker_sentinel = "sentinel-tracker-private-key-do-not-log";
-        let api_sentinel = "sentinel-updater-api-key-do-not-log";
-        let response_sentinel = "sentinel-node-response-do-not-log";
-        let (node_url, server) = one_error_response(response_sentinel).await;
-        let config = TrackerBoxUpdateConfig {
-            node_url,
-            api_key: Some(api_sentinel.to_string()),
-            ..TrackerBoxUpdateConfig::default()
-        };
-        let unsigned_tx = serde_json::json!({
-            "tx": {"inputs": [], "dataInputs": [], "outputs": []},
-            "secrets": {"dlog": [tracker_sentinel]}
-        });
-
-        let writer = SharedWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(writer.clone())
-            .finish();
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let guard = tracing::dispatcher::set_default(&dispatch);
-        let error = TrackerBoxUpdater::sign_transaction(&config, unsigned_tx)
-            .await
-            .expect_err("loopback node must reject signing")
-            .to_string();
-        drop(guard);
-
-        let request = server.await.expect("loopback server task");
-        assert!(request
-            .windows(tracker_sentinel.len())
-            .any(|window| window == tracker_sentinel.as_bytes()));
-        assert!(request
-            .windows(api_sentinel.len())
-            .any(|window| window == api_sentinel.as_bytes()));
-
-        let logs = String::from_utf8(writer.0.lock().expect("log buffer lock").clone())
-            .expect("UTF-8 logs");
-        for sentinel in [tracker_sentinel, api_sentinel, response_sentinel] {
-            assert!(!error.contains(sentinel));
-            assert!(!logs.contains(sentinel));
-        }
-        assert!(logs.contains("Node signing request completed"));
     }
 }
 
@@ -370,14 +264,22 @@ pub enum TrackerBoxUpdaterError {
     NoFeeInputs,
     #[error("Insufficient wallet funds to pay transaction fee: {available} < {required}")]
     InsufficientFeeInputs { available: u64, required: u64 },
-    #[error("Failed to sign transaction: {0}")]
+    #[error("Tracker signing key is not configured")]
+    MissingTrackerSecretKey,
+    #[error("Tracker input validation failed: {0}")]
+    InputValidation(String),
+    #[error("Tracker state context validation failed: {0}")]
+    StateContextValidation(String),
+    #[error("Tracker transaction arithmetic failed: {0}")]
+    ArithmeticError(String),
+    #[error("Failed to sign transaction locally: {0}")]
     SigningFailed(String),
     #[error("Broadcast outcome is unknown; tracker publication remains fenced: {0}")]
     BroadcastOutcomeUnknown(String),
 }
 
 /// Ergo box as returned by the blockchain API
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErgoBoxApi {
     pub box_id: String,
@@ -432,6 +334,18 @@ pub struct TrackerBoxUpdater;
 struct PreparedTrackerUpdate {
     signed_tx: serde_json::Value,
     tx_id: String,
+    submitted_height: u64,
+}
+
+struct LocalSigningMaterial {
+    secret: SecretKey,
+    tracker_point: EcPoint,
+    p2pk_tree: ErgoTree,
+}
+
+struct LocalSigningContext {
+    state_context: ErgoStateContext,
+    creation_height: u32,
 }
 
 impl TrackerBoxUpdater {
@@ -689,10 +603,7 @@ impl TrackerBoxUpdater {
                 }
             };
 
-            let submitted_height = Self::get_node_height(&config)
-                .await
-                .map(|height| height as u64)
-                .unwrap_or(tracker_box.creation_height as u64);
+            let submitted_height = prepared.submitted_height;
             if !Self::record_publication_attempt(
                 &cmd_tx,
                 publication_lease,
@@ -952,64 +863,48 @@ impl TrackerBoxUpdater {
         Ok(entries.into_iter().map(|e| e.box_details).collect())
     }
 
-    /// Select wallet boxes covering the required fee, excluding the tracker box itself.
-    /// Prefers boxes without tokens; falls back to token-bearing boxes and preserves their tokens
-    /// in the change output.
-    fn select_fee_inputs(
-        wallet_boxes: &[ErgoBoxApi],
+    /// Select only token-free fee boxes whose advertised tree is the exact local signer P2PK.
+    /// The selected JSON is subsequently rebound field-for-field to canonical Sigma bytes.
+    fn select_fee_inputs<'a>(
+        wallet_boxes: &'a [ErgoBoxApi],
         required: u64,
         tracker_box_id: &str,
-    ) -> (Vec<String>, u64) {
-        let candidates: Vec<&ErgoBoxApi> = wallet_boxes
+        owner_tree: &ErgoTree,
+    ) -> Result<(Vec<&'a ErgoBoxApi>, u64), TrackerBoxUpdaterError> {
+        let owner_tree_bytes = owner_tree.sigma_serialize_bytes().map_err(|error| {
+            TrackerBoxUpdaterError::SerializationError(format!(
+                "Failed to serialize fee-owner tree: {error}"
+            ))
+        })?;
+        let mut candidates = wallet_boxes
             .iter()
-            .filter(|b| b.box_id != tracker_box_id)
-            .collect();
+            .filter(|box_| box_.box_id != tracker_box_id && box_.assets.is_empty())
+            .filter(|box_| {
+                hex::decode(&box_.ergo_tree)
+                    .map(|bytes| bytes == owner_tree_bytes)
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|box_| box_.value);
 
-        // Try token-free boxes first.
-        let mut token_free: Vec<&ErgoBoxApi> = candidates
-            .iter()
-            .filter(|b| b.assets.is_empty())
-            .copied()
-            .collect();
-        token_free.sort_by_key(|b| b.value);
-
-        if let Some(box_) = token_free.iter().find(|b| b.value >= required) {
-            return (vec![box_.box_id.clone()], box_.value);
+        if let Some(box_) = candidates.iter().find(|box_| box_.value >= required) {
+            return Ok((vec![*box_], box_.value));
         }
 
         let mut selected = Vec::new();
         let mut total = 0u64;
-        for box_ in token_free {
-            total += box_.value;
-            selected.push(box_.box_id.clone());
+        for box_ in candidates {
+            total = total.checked_add(box_.value).ok_or_else(|| {
+                TrackerBoxUpdaterError::ArithmeticError(
+                    "fee-input value sum overflowed u64".to_string(),
+                )
+            })?;
+            selected.push(box_);
             if total >= required {
-                return (selected, total);
+                break;
             }
         }
-
-        // Fall back to token-bearing boxes if necessary.
-        let mut token_boxes: Vec<&ErgoBoxApi> = candidates
-            .iter()
-            .filter(|b| !b.assets.is_empty())
-            .copied()
-            .collect();
-        token_boxes.sort_by_key(|b| b.value);
-
-        if let Some(box_) = token_boxes.iter().find(|b| b.value >= required) {
-            return (vec![box_.box_id.clone()], box_.value);
-        }
-
-        let mut selected = Vec::new();
-        let mut total = 0u64;
-        for box_ in token_boxes {
-            total += box_.value;
-            selected.push(box_.box_id.clone());
-            if total >= required {
-                return (selected, total);
-            }
-        }
-
-        (selected, total)
+        Ok((selected, total))
     }
 
     /// Fetch the hex-encoded serialized bytes of a box from the Ergo node.
@@ -1051,80 +946,465 @@ impl TrackerBoxUpdater {
         Ok(binary.bytes)
     }
 
-    /// Get the current blockchain height from the Ergo node.
-    async fn get_node_height(
+    /// Fetch exactly ten linked headers and the matching live parameter set from one node tip.
+    async fn get_signing_context(
         config: &TrackerBoxUpdateConfig,
-    ) -> Result<u32, TrackerBoxUpdaterError> {
+    ) -> Result<LocalSigningContext, TrackerBoxUpdaterError> {
         let client = crate::bounded_http::node_http()
             .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
-        let url = format!("{}/info", config.node_url.trim_end_matches('/'));
+        let base = config.node_url.trim_end_matches('/');
+        let headers_url = format!("{base}/blocks/lastHeaders/10");
+        let info_url = format!("{base}/info");
 
-        let mut request = client.get(&url);
+        let mut headers_request = client.get(&headers_url);
+        let mut info_request = client.get(&info_url);
         if let Some(ref api_key) = config.api_key {
-            request = request.header("api_key", api_key);
+            headers_request = headers_request.header("api_key", api_key);
+            info_request = info_request.header("api_key", api_key);
         }
 
-        let response = client
-            .execute(request)
+        let headers_response = client
+            .execute(headers_request)
             .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text_lossy();
+        if !headers_response.status().is_success() {
+            let status = headers_response.status();
+            let body = headers_response.text_lossy();
             return Err(TrackerBoxUpdaterError::HttpError(format!(
-                "HTTP {} fetching node height: {}",
+                "HTTP {} fetching signing headers: {}",
                 status, body
             )));
         }
+        let headers: Vec<Header> = headers_response.json().map_err(|error| {
+            TrackerBoxUpdaterError::StateContextValidation(format!("invalid header JSON: {error}"))
+        })?;
 
-        let body: serde_json::Value = response
-            .json()
-            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
-
-        body["fullHeight"]
-            .as_u64()
-            .map(|h| h as u32)
-            .ok_or_else(|| TrackerBoxUpdaterError::HttpError("Missing fullHeight".to_string()))
-    }
-
-    /// Sign an unsigned transaction using the Ergo node's /wallet/transaction/sign endpoint.
-    async fn sign_transaction(
-        config: &TrackerBoxUpdateConfig,
-        unsigned_tx: serde_json::Value,
-    ) -> Result<serde_json::Value, TrackerBoxUpdaterError> {
-        info!("Requesting node signature for tracker-box update");
-
-        let client = crate::bounded_http::node_http()
-            .map_err(|e| TrackerBoxUpdaterError::SigningFailed(e.to_string()))?;
-        let url = format!(
-            "{}/wallet/transaction/sign",
-            config.node_url.trim_end_matches('/')
-        );
-
-        let mut request = client.post(&url).json(&unsigned_tx);
-        if let Some(ref api_key) = config.api_key {
-            request = request.header("api_key", api_key);
-        }
-
-        let response = client
-            .execute(request)
+        let info_response = client
+            .execute(info_request)
             .await
-            .map_err(|e| TrackerBoxUpdaterError::SigningFailed(e.to_string()))?;
-
-        let status = response.status();
-        info!(status = %status, "Node signing request completed");
-
-        if !status.is_success() {
-            return Err(TrackerBoxUpdaterError::SigningFailed(format!(
-                "HTTP {}",
-                status
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
+        if !info_response.status().is_success() {
+            let status = info_response.status();
+            let body = info_response.text_lossy();
+            return Err(TrackerBoxUpdaterError::HttpError(format!(
+                "HTTP {} fetching signing parameters: {}",
+                status, body
             )));
         }
+        let info: serde_json::Value = info_response.json().map_err(|error| {
+            TrackerBoxUpdaterError::StateContextValidation(format!("invalid /info JSON: {error}"))
+        })?;
+        Self::validate_signing_context(headers, info)
+    }
 
-        response
-            .json()
-            .map_err(|e| TrackerBoxUpdaterError::SigningFailed(format!("JSON parse error: {}", e)))
+    fn validate_signing_context(
+        headers: Vec<Header>,
+        info: serde_json::Value,
+    ) -> Result<LocalSigningContext, TrackerBoxUpdaterError> {
+        if headers.len() != 10 {
+            return Err(TrackerBoxUpdaterError::StateContextValidation(format!(
+                "expected exactly 10 headers, got {}",
+                headers.len()
+            )));
+        }
+        for pair in headers.windows(2) {
+            let expected_parent_height = pair[0].height.checked_sub(1).ok_or_else(|| {
+                TrackerBoxUpdaterError::StateContextValidation(
+                    "header height underflow".to_string(),
+                )
+            })?;
+            if pair[0].parent_id != pair[1].id || pair[1].height != expected_parent_height {
+                return Err(TrackerBoxUpdaterError::StateContextValidation(
+                    "headers are not one descending parent-linked chain".to_string(),
+                ));
+            }
+        }
+
+        let tip_height = headers[0].height;
+        let info_height = info
+            .get("fullHeight")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|height| u32::try_from(height).ok())
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::StateContextValidation(
+                    "/info fullHeight is missing or out of range".to_string(),
+                )
+            })?;
+        if info_height != tip_height {
+            return Err(TrackerBoxUpdaterError::StateContextValidation(format!(
+                "/info and header tip differ: {info_height} != {tip_height}"
+            )));
+        }
+        let info_tip_id = info
+            .get("bestFullHeaderId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::StateContextValidation(
+                    "/info bestFullHeaderId is missing".to_string(),
+                )
+            })?;
+        if !info_tip_id.eq_ignore_ascii_case(&headers[0].id.to_string()) {
+            return Err(TrackerBoxUpdaterError::StateContextValidation(
+                "/info and header chain do not share one tip id".to_string(),
+            ));
+        }
+
+        let parameters_json = info.get("parameters").cloned().ok_or_else(|| {
+            TrackerBoxUpdaterError::StateContextValidation(
+                "/info has no parameters object".to_string(),
+            )
+        })?;
+        let parameters_height = parameters_json
+            .get("height")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|height| u32::try_from(height).ok())
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::StateContextValidation(
+                    "/info parameter height is missing or out of range".to_string(),
+                )
+            })?;
+        if parameters_height > tip_height {
+            return Err(TrackerBoxUpdaterError::StateContextValidation(
+                "/info parameter height is ahead of the pinned tip".to_string(),
+            ));
+        }
+        let parameters: Parameters = serde_json::from_value(parameters_json).map_err(|error| {
+            TrackerBoxUpdaterError::StateContextValidation(format!(
+                "/info has no complete parameter set: {error}"
+            ))
+        })?;
+        if parameters.block_version() != i32::from(headers[0].version)
+            || parameters.storage_fee_factor() <= 0
+            || parameters.min_value_per_byte() <= 0
+            || parameters.max_block_size() <= 0
+            || parameters.max_block_cost() <= 0
+            || parameters.token_access_cost() < 0
+            || parameters.input_cost() < 0
+            || parameters.data_input_cost() < 0
+            || parameters.output_cost() < 0
+        {
+            return Err(TrackerBoxUpdaterError::StateContextValidation(
+                "/info parameters are invalid or not pinned to the header version".to_string(),
+            ));
+        }
+
+        let headers: Headers = headers.try_into().map_err(|headers: Vec<Header>| {
+            TrackerBoxUpdaterError::StateContextValidation(format!(
+                "expected exactly 10 headers, got {}",
+                headers.len()
+            ))
+        })?;
+        let pre_header = PreHeader::from(headers[0].clone());
+        Ok(LocalSigningContext {
+            state_context: ErgoStateContext::new(pre_header, headers, parameters),
+            creation_height: tip_height,
+        })
+    }
+
+    fn bind_exact_box(
+        advertised: &ErgoBoxApi,
+        raw_hex: &str,
+    ) -> Result<ErgoBox, TrackerBoxUpdaterError> {
+        if raw_hex.is_empty() || raw_hex.len() % 2 != 0 || raw_hex.len() > ErgoBox::MAX_BOX_SIZE * 2
+        {
+            return Err(TrackerBoxUpdaterError::InputValidation(format!(
+                "box {} raw encoding has an invalid length",
+                advertised.box_id
+            )));
+        }
+        let raw = hex::decode(raw_hex).map_err(|_| {
+            TrackerBoxUpdaterError::InputValidation(format!(
+                "box {} raw encoding is not base16",
+                advertised.box_id
+            ))
+        })?;
+        let exact = ErgoBox::sigma_parse_bytes(&raw).map_err(|error| {
+            TrackerBoxUpdaterError::InputValidation(format!(
+                "box {} is not a canonical Sigma box: {error}",
+                advertised.box_id
+            ))
+        })?;
+        let canonical = exact.sigma_serialize_bytes().map_err(|error| {
+            TrackerBoxUpdaterError::SerializationError(format!(
+                "Failed to reserialize exact box {}: {error}",
+                advertised.box_id
+            ))
+        })?;
+        if canonical != raw {
+            return Err(Self::box_mismatch(advertised, "raw canonical bytes"));
+        }
+        if !exact
+            .box_id()
+            .to_string()
+            .eq_ignore_ascii_case(&advertised.box_id)
+        {
+            return Err(Self::box_mismatch(advertised, "box id"));
+        }
+        if *exact.value.as_u64() != advertised.value {
+            return Err(Self::box_mismatch(advertised, "value"));
+        }
+        let tree_bytes = exact.ergo_tree.sigma_serialize_bytes().map_err(|error| {
+            TrackerBoxUpdaterError::SerializationError(format!(
+                "Failed to serialize exact tree {}: {error}",
+                advertised.box_id
+            ))
+        })?;
+        if hex::decode(&advertised.ergo_tree)
+            .map(|bytes| bytes != tree_bytes)
+            .unwrap_or(true)
+        {
+            return Err(Self::box_mismatch(advertised, "ergo tree"));
+        }
+
+        let exact_assets = exact
+            .tokens
+            .as_ref()
+            .map(|tokens| tokens.as_vec().as_slice())
+            .unwrap_or_default();
+        if exact_assets.len() != advertised.assets.len() {
+            return Err(Self::box_mismatch(advertised, "asset cardinality"));
+        }
+        for (exact_asset, advertised_asset) in exact_assets.iter().zip(&advertised.assets) {
+            if hex::decode(&advertised_asset.token_id)
+                .map(|bytes| bytes.as_slice() != exact_asset.token_id.as_ref())
+                .unwrap_or(true)
+                || *exact_asset.amount.as_u64() != advertised_asset.amount
+            {
+                return Err(Self::box_mismatch(advertised, "ordered assets"));
+            }
+        }
+
+        let mut exact_registers = std::collections::HashMap::new();
+        for register_id in NonMandatoryRegisterId::REG_IDS {
+            if let Some(constant) = exact
+                .additional_registers
+                .get_constant(register_id)
+                .map_err(|error| {
+                    TrackerBoxUpdaterError::InputValidation(format!(
+                        "box {} has an invalid {register_id}: {error}",
+                        advertised.box_id
+                    ))
+                })?
+            {
+                exact_registers.insert(
+                    register_id.to_string(),
+                    constant.sigma_serialize_bytes().map_err(|error| {
+                        TrackerBoxUpdaterError::SerializationError(format!(
+                            "Failed to serialize box {} {register_id}: {error}",
+                            advertised.box_id
+                        ))
+                    })?,
+                );
+            }
+        }
+        if exact_registers.len() != advertised.additional_registers.len() {
+            return Err(Self::box_mismatch(advertised, "register key set"));
+        }
+        for (register_id, advertised_value) in &advertised.additional_registers {
+            let Some(exact_value) = exact_registers.get(register_id) else {
+                return Err(Self::box_mismatch(advertised, "register key set"));
+            };
+            if hex::decode(advertised_value)
+                .map(|bytes| bytes != *exact_value)
+                .unwrap_or(true)
+            {
+                return Err(Self::box_mismatch(advertised, "register bytes"));
+            }
+        }
+        if exact.creation_height != advertised.creation_height {
+            return Err(Self::box_mismatch(advertised, "creation height"));
+        }
+        Ok(exact)
+    }
+
+    fn box_mismatch(advertised: &ErgoBoxApi, field: &str) -> TrackerBoxUpdaterError {
+        TrackerBoxUpdaterError::InputValidation(format!(
+            "box {} JSON/raw {field} mismatch",
+            advertised.box_id
+        ))
+    }
+
+    fn local_signing_material(
+        tracker_pubkey: &[u8; 33],
+        tracker_secret_key: Option<&[u8; 32]>,
+        tracker_box: &ErgoBox,
+    ) -> Result<LocalSigningMaterial, TrackerBoxUpdaterError> {
+        let tracker_point = EcPoint::sigma_parse_bytes(tracker_pubkey).map_err(|error| {
+            TrackerBoxUpdaterError::InputValidation(format!(
+                "configured tracker public key is invalid: {error}"
+            ))
+        })?;
+        if tracker_point
+            .sigma_serialize_bytes()
+            .map(|bytes| bytes.as_slice() != tracker_pubkey)
+            .unwrap_or(true)
+        {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "configured tracker public key is not canonical".to_string(),
+            ));
+        }
+        let secret_bytes =
+            tracker_secret_key.ok_or(TrackerBoxUpdaterError::MissingTrackerSecretKey)?;
+        let secret = SecretKey::dlog_from_bytes(secret_bytes).ok_or_else(|| {
+            TrackerBoxUpdaterError::InputValidation(
+                "configured tracker secret is not a valid dlog scalar".to_string(),
+            )
+        })?;
+        let expected_address = Address::P2Pk(ProveDlog::new(tracker_point.clone()));
+        let derived_address = secret.get_address_from_public_image();
+        if derived_address != expected_address {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "tracker secret does not match configured public key".to_string(),
+            ));
+        }
+        let p2pk_tree = derived_address.script().map_err(|error| {
+            TrackerBoxUpdaterError::SerializationError(format!(
+                "Failed to derive tracker P2PK tree: {error}"
+            ))
+        })?;
+
+        let r4 = tracker_box
+            .additional_registers
+            .get_constant(NonMandatoryRegisterId::R4)
+            .map_err(|error| {
+                TrackerBoxUpdaterError::InputValidation(format!("tracker R4 is invalid: {error}"))
+            })?
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::InputValidation("tracker R4 is missing".to_string())
+            })?;
+        let r4_point: EcPoint = r4.try_extract_into().map_err(|error| {
+            TrackerBoxUpdaterError::InputValidation(format!(
+                "tracker R4 is not a GroupElement: {error}"
+            ))
+        })?;
+        if r4_point
+            .sigma_serialize_bytes()
+            .map(|bytes| bytes.as_slice() != tracker_pubkey)
+            .unwrap_or(true)
+        {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "tracker R4 does not match configured public key".to_string(),
+            ));
+        }
+
+        Ok(LocalSigningMaterial {
+            secret,
+            tracker_point,
+            p2pk_tree,
+        })
+    }
+
+    fn validate_input_closure<T>(
+        input_ids: impl Iterator<Item = T>,
+        exact_boxes: &[ErgoBox],
+    ) -> Result<(), TrackerBoxUpdaterError>
+    where
+        T: ToString,
+    {
+        let input_ids = input_ids.map(|id| id.to_string()).collect::<Vec<_>>();
+        if input_ids.len() != exact_boxes.len() {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "transaction inputs and exact boxes differ in cardinality".to_string(),
+            ));
+        }
+        let mut unique = HashSet::with_capacity(input_ids.len());
+        for (input_id, exact_box) in input_ids.iter().zip(exact_boxes) {
+            if !unique.insert(input_id.to_ascii_lowercase()) {
+                return Err(TrackerBoxUpdaterError::InputValidation(
+                    "transaction input ids are not unique".to_string(),
+                ));
+            }
+            if !input_id.eq_ignore_ascii_case(&exact_box.box_id().to_string()) {
+                return Err(TrackerBoxUpdaterError::InputValidation(
+                    "transaction input order differs from exact box order".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_output_dust(
+        unsigned_tx: &UnsignedTransaction,
+        parameters: &Parameters,
+    ) -> Result<(), TrackerBoxUpdaterError> {
+        let min_value_per_byte = u64::try_from(parameters.min_value_per_byte()).map_err(|_| {
+            TrackerBoxUpdaterError::StateContextValidation("negative minValuePerByte".to_string())
+        })?;
+        for (index, candidate) in unsigned_tx.output_candidates.iter().enumerate() {
+            let output = ErgoBox::from_box_candidate(candidate, unsigned_tx.id(), index as u16)
+                .map_err(|error| {
+                    TrackerBoxUpdaterError::SerializationError(format!(
+                        "Failed to materialize output {index}: {error}"
+                    ))
+                })?;
+            let size = u64::try_from(
+                output
+                    .sigma_serialize_bytes()
+                    .map_err(|error| {
+                        TrackerBoxUpdaterError::SerializationError(format!(
+                            "Failed to size output {index}: {error}"
+                        ))
+                    })?
+                    .len(),
+            )
+            .map_err(|_| {
+                TrackerBoxUpdaterError::ArithmeticError("output size does not fit u64".to_string())
+            })?;
+            let minimum = size.checked_mul(min_value_per_byte).ok_or_else(|| {
+                TrackerBoxUpdaterError::ArithmeticError("dust threshold overflowed u64".to_string())
+            })?;
+            if *candidate.value.as_u64() < minimum {
+                return Err(TrackerBoxUpdaterError::InputValidation(format!(
+                    "output {index} is dust: {} < {minimum}",
+                    candidate.value.as_u64()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn sign_locally(
+        unsigned_tx: UnsignedTransaction,
+        exact_boxes: Vec<ErgoBox>,
+        material: &LocalSigningMaterial,
+        state_context: &ErgoStateContext,
+    ) -> Result<Transaction, TrackerBoxUpdaterError> {
+        if unsigned_tx.data_inputs.is_some() {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "tracker update must not contain data inputs".to_string(),
+            ));
+        }
+        Self::validate_input_closure(
+            unsigned_tx.inputs.iter().map(|input| input.box_id),
+            &exact_boxes,
+        )?;
+        let unsigned_tx_id = unsigned_tx.id();
+        let signing_context = TransactionContext::new(unsigned_tx, exact_boxes.clone(), Vec::new())
+            .map_err(|error| TrackerBoxUpdaterError::InputValidation(error.to_string()))?;
+        let wallet = Wallet::from_secrets(vec![material.secret.clone()]);
+        let signed = wallet
+            .sign_transaction(signing_context, state_context, None)
+            .map_err(|error| TrackerBoxUpdaterError::SigningFailed(error.to_string()))?;
+        if signed.data_inputs.is_some() {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "signed tracker update unexpectedly contains data inputs".to_string(),
+            ));
+        }
+        if signed.id() != unsigned_tx_id {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "local signer changed the unsigned transaction intent".to_string(),
+            ));
+        }
+        Self::validate_input_closure(signed.inputs.iter().map(|input| input.box_id), &exact_boxes)?;
+        TransactionContext::new(signed.clone(), exact_boxes, Vec::new())
+            .map_err(|error| TrackerBoxUpdaterError::InputValidation(error.to_string()))?
+            .validate(state_context)
+            .map_err(|error| {
+                TrackerBoxUpdaterError::SigningFailed(format!(
+                    "post-sign transaction validation failed: {error}"
+                ))
+            })?;
+        Ok(signed)
     }
 
     /// Broadcast a signed transaction to the Ergo node's /transactions endpoint.
@@ -1246,7 +1526,7 @@ impl TrackerBoxUpdater {
         Ok(tx_id)
     }
 
-    /// Submit a tracker box update transaction via /wallet/transaction/sign
+    /// Bind exact inputs, build the tracker successor, and sign it locally with ergo-lib.
     async fn prepare_tracker_update(
         tracker_nft_id: &str,
         config: &TrackerBoxUpdateConfig,
@@ -1254,141 +1534,235 @@ impl TrackerBoxUpdater {
         tracker_pubkey: &[u8; 33],
         avl_root_digest: &[u8; 33],
     ) -> Result<PreparedTrackerUpdate, TrackerBoxUpdaterError> {
-        let mut r4_bytes = vec![0x07u8];
-        r4_bytes.extend_from_slice(tracker_pubkey);
-        let r4_value = hex::encode(&r4_bytes);
-
         let mut r5_bytes = vec![0x64u8];
         r5_bytes.extend_from_slice(avl_root_digest);
         r5_bytes.push(0x03u8); // insert + update allowed (insertOrUpdate contract)
         r5_bytes.extend_from_slice(&vlq_encode(32));
         r5_bytes.extend_from_slice(&vlq_encode(0));
-        let r5_value = hex::encode(&r5_bytes);
-
-        let mut output_registers = tracker_box.additional_registers.clone();
-        output_registers.insert("R4".to_string(), r4_value);
-        output_registers.insert("R5".to_string(), r5_value);
-
-        let change_address = match &config.change_address {
-            Some(addr) if !addr.is_empty() => addr.clone(),
-            _ => derive_change_address(tracker_pubkey)?,
-        };
-
-        let current_height = Self::get_node_height(config).await?;
-        let wallet_boxes = Self::get_wallet_boxes(config).await?;
-
-        let (fee_input_ids, fee_input_total) =
-            Self::select_fee_inputs(&wallet_boxes, config.fee, &tracker_box.box_id);
-
-        if fee_input_ids.is_empty() {
-            return Err(TrackerBoxUpdaterError::NoFeeInputs);
+        let r5_constant = Constant::sigma_parse_bytes(&r5_bytes).map_err(|error| {
+            TrackerBoxUpdaterError::SerializationError(format!(
+                "Failed to construct tracker R5: {error}"
+            ))
+        })?;
+        if r5_constant
+            .sigma_serialize_bytes()
+            .map(|bytes| bytes != r5_bytes)
+            .unwrap_or(true)
+        {
+            return Err(TrackerBoxUpdaterError::SerializationError(
+                "Tracker R5 serialization is not canonical".to_string(),
+            ));
         }
 
-        if fee_input_total < config.fee {
+        let local_context = Self::get_signing_context(config).await?;
+        let wallet_boxes = Self::get_wallet_boxes(config).await?;
+        let tracker_raw = Self::get_box_binary(config, &tracker_box.box_id).await?;
+        let exact_tracker_box = Self::bind_exact_box(tracker_box, &tracker_raw)?;
+        let material = Self::local_signing_material(
+            tracker_pubkey,
+            config.tracker_secret_key.as_ref(),
+            &exact_tracker_box,
+        )?;
+
+        let tracker_nft = hex::decode(tracker_nft_id).map_err(|_| {
+            TrackerBoxUpdaterError::InputValidation(
+                "configured tracker NFT id is not base16".to_string(),
+            )
+        })?;
+        if tracker_nft.len() != 32 {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "configured tracker NFT id is not 32 bytes".to_string(),
+            ));
+        }
+        let tracker_tokens = exact_tracker_box
+            .tokens
+            .as_ref()
+            .map(|tokens| tokens.as_vec().as_slice())
+            .unwrap_or_default();
+        if tracker_tokens.first().map(|token| {
+            token.token_id.as_ref() == tracker_nft.as_slice() && *token.amount.as_u64() == 1
+        }) != Some(true)
+            || tracker_tokens
+                .iter()
+                .filter(|token| token.token_id.as_ref() == tracker_nft.as_slice())
+                .count()
+                != 1
+        {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "tracker input must carry its singleton NFT first and exactly once".to_string(),
+            ));
+        }
+
+        let (fee_inputs, advertised_fee_total) = Self::select_fee_inputs(
+            &wallet_boxes,
+            config.fee,
+            &tracker_box.box_id,
+            &material.p2pk_tree,
+        )?;
+
+        if fee_inputs.is_empty() {
+            return Err(TrackerBoxUpdaterError::NoFeeInputs);
+        }
+        if advertised_fee_total < config.fee {
             return Err(TrackerBoxUpdaterError::InsufficientFeeInputs {
-                available: fee_input_total,
+                available: advertised_fee_total,
                 required: config.fee,
             });
         }
 
-        let mut inputs = vec![serde_json::json!({
-            "boxId": tracker_box.box_id,
-            "extension": serde_json::json!({})
-        })];
-        let mut inputs_raw = vec![Self::get_box_binary(config, &tracker_box.box_id).await?];
-
-        for fee_box_id in &fee_input_ids {
-            inputs.push(serde_json::json!({
-                "boxId": fee_box_id,
-                "extension": serde_json::json!({})
-            }));
-            inputs_raw.push(Self::get_box_binary(config, fee_box_id).await?);
+        let owner_tree_bytes = material
+            .p2pk_tree
+            .sigma_serialize_bytes()
+            .map_err(|error| {
+                TrackerBoxUpdaterError::SerializationError(format!(
+                    "Failed to serialize fee-owner tree: {error}"
+                ))
+            })?;
+        let mut exact_boxes = vec![exact_tracker_box.clone()];
+        let mut exact_fee_total = 0u64;
+        for advertised_fee_box in fee_inputs {
+            let raw = Self::get_box_binary(config, &advertised_fee_box.box_id).await?;
+            let exact_fee_box = Self::bind_exact_box(advertised_fee_box, &raw)?;
+            if exact_fee_box.tokens.is_some()
+                || exact_fee_box
+                    .ergo_tree
+                    .sigma_serialize_bytes()
+                    .map(|bytes| bytes != owner_tree_bytes)
+                    .unwrap_or(true)
+            {
+                return Err(TrackerBoxUpdaterError::InputValidation(format!(
+                    "fee input {} is not token-free exact signer P2PK",
+                    advertised_fee_box.box_id
+                )));
+            }
+            exact_fee_total = exact_fee_total
+                .checked_add(*exact_fee_box.value.as_u64())
+                .ok_or_else(|| {
+                    TrackerBoxUpdaterError::ArithmeticError(
+                        "exact fee-input value sum overflowed u64".to_string(),
+                    )
+                })?;
+            exact_boxes.push(exact_fee_box);
         }
+        if exact_fee_total < config.fee {
+            return Err(TrackerBoxUpdaterError::InsufficientFeeInputs {
+                available: exact_fee_total,
+                required: config.fee,
+            });
+        }
+        let total_input_value = exact_tracker_box
+            .value
+            .as_u64()
+            .checked_add(exact_fee_total)
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::ArithmeticError(
+                    "tracker and fee-input sum overflowed u64".to_string(),
+                )
+            })?;
+        if total_input_value > BoxValue::MAX_RAW {
+            return Err(TrackerBoxUpdaterError::ArithmeticError(
+                "tracker and fee-input sum exceeds BoxValue::MAX_RAW".to_string(),
+            ));
+        }
+        let change_amount = exact_fee_total.checked_sub(config.fee).ok_or_else(|| {
+            TrackerBoxUpdaterError::ArithmeticError("fee subtraction underflowed".to_string())
+        })?;
 
-        let change_amount = fee_input_total.saturating_sub(config.fee);
-
-        // Preserve any tokens from the fee inputs in the change output so they are not burned.
-        let change_assets: Vec<serde_json::Value> = fee_input_ids
-            .iter()
-            .flat_map(|id| {
-                wallet_boxes
-                    .iter()
-                    .find(|b| &b.box_id == id)
-                    .map(|b| {
-                        b.assets.iter().map(|a| {
-                            serde_json::json!({
-                                "tokenId": a.token_id,
-                                "amount": a.amount
-                            })
-                        })
-                    })
-                    .into_iter()
-                    .flatten()
-            })
-            .collect();
-
-        // Ensure the tracker NFT is always the first token in the output tracker box,
-        // followed by any other tokens preserved from the input tracker box.
-        let mut output_assets = Vec::new();
-        let mut other_assets = Vec::new();
-        for asset in &tracker_box.assets {
-            if asset.token_id == tracker_nft_id {
-                output_assets.push(asset.clone());
-            } else {
-                other_assets.push(asset.clone());
+        let mut register_constants = Vec::new();
+        for register_id in NonMandatoryRegisterId::REG_IDS {
+            match exact_tracker_box
+                .additional_registers
+                .get_constant(register_id)
+                .map_err(|error| {
+                    TrackerBoxUpdaterError::InputValidation(format!(
+                        "tracker {register_id} is invalid: {error}"
+                    ))
+                })? {
+                Some(constant) => register_constants.push(constant),
+                None => break,
             }
         }
-        output_assets.extend(other_assets);
+        if register_constants.len() < 2 {
+            return Err(TrackerBoxUpdaterError::InputValidation(
+                "tracker input must contain R4 and R5".to_string(),
+            ));
+        }
+        register_constants[0] = Constant::from(material.tracker_point.clone());
+        register_constants[1] = r5_constant;
+        let output_registers =
+            NonMandatoryRegisters::try_from(register_constants).map_err(|error| {
+                TrackerBoxUpdaterError::SerializationError(format!(
+                    "Failed to construct tracker registers: {error}"
+                ))
+            })?;
 
-        let mut outputs = vec![
-            serde_json::json!({
-                "value": tracker_box.value,
-                "ergoTree": tracker_box.ergo_tree,
-                "creationHeight": current_height,
-                "assets": output_assets,
-                "additionalRegisters": output_registers
-            }),
-            serde_json::json!({
-                "value": config.fee,
-                "ergoTree": "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304",
-                "creationHeight": current_height,
-                "assets": [],
-                "additionalRegisters": {}
-            }),
-        ];
-
+        let current_height = local_context.creation_height;
+        let tracker_output = ErgoBoxCandidate {
+            value: exact_tracker_box.value,
+            ergo_tree: exact_tracker_box.ergo_tree.clone(),
+            tokens: exact_tracker_box.tokens.clone(),
+            additional_registers: output_registers,
+            creation_height: current_height,
+        };
+        let fee_value = BoxValue::new(config.fee).map_err(|error| {
+            TrackerBoxUpdaterError::InputValidation(format!(
+                "configured fee is not a valid box value: {error}"
+            ))
+        })?;
+        let fee_output = new_miner_fee_box(fee_value, current_height).map_err(|error| {
+            TrackerBoxUpdaterError::SerializationError(format!(
+                "Failed to construct miner-fee output: {error}"
+            ))
+        })?;
+        let mut outputs = vec![tracker_output, fee_output];
         if change_amount > 0 {
-            outputs.push(serde_json::json!({
-                "value": change_amount,
-                "ergoTree": change_address_to_ergo_tree(&change_address)?,
-                "creationHeight": current_height,
-                "assets": change_assets,
-                "additionalRegisters": {}
-            }));
+            let change_value = BoxValue::new(change_amount).map_err(|error| {
+                TrackerBoxUpdaterError::InputValidation(format!(
+                    "fee-input change is not a valid box value: {error}"
+                ))
+            })?;
+            outputs.push(ErgoBoxCandidate {
+                value: change_value,
+                ergo_tree: material.p2pk_tree.clone(),
+                tokens: None,
+                additional_registers: NonMandatoryRegisters::empty(),
+                creation_height: current_height,
+            });
         }
 
-        let secrets = config
-            .tracker_secret_key
-            .as_ref()
-            .map(|sk| vec![hex::encode(sk)])
-            .unwrap_or_default();
+        let inputs = exact_boxes
+            .iter()
+            .map(|box_| UnsignedInput::new(box_.box_id(), ContextExtension::empty()))
+            .collect();
+        let unsigned_tx =
+            UnsignedTransaction::new_from_vec(inputs, Vec::new(), outputs).map_err(|error| {
+                TrackerBoxUpdaterError::SerializationError(format!(
+                    "Failed to build unsigned tracker update: {error}"
+                ))
+            })?;
+        Self::validate_input_closure(
+            unsigned_tx.inputs.iter().map(|input| input.box_id),
+            &exact_boxes,
+        )?;
+        Self::validate_output_dust(&unsigned_tx, &local_context.state_context.parameters)?;
 
-        let unsigned_tx = serde_json::json!({
-            "tx": {
-                "inputs": inputs,
-                "dataInputs": [],
-                "outputs": outputs
-            },
-            "inputsRaw": inputs_raw,
-            "dataInputsRaw": [],
-            "secrets": {
-                "dlog": secrets
-            }
-        });
-
-        let signed_tx = Self::sign_transaction(config, unsigned_tx).await?;
+        let signed = Self::sign_locally(
+            unsigned_tx,
+            exact_boxes,
+            &material,
+            &local_context.state_context,
+        )?;
+        let signed_tx = serde_json::to_value(signed).map_err(|error| {
+            TrackerBoxUpdaterError::SerializationError(format!(
+                "Failed to serialize signed tracker update: {error}"
+            ))
+        })?;
         let tx_id = Self::signed_transaction_id(&signed_tx)?;
-        Ok(PreparedTrackerUpdate { signed_tx, tx_id })
+        Ok(PreparedTrackerUpdate {
+            signed_tx,
+            tx_id,
+            submitted_height: u64::from(current_height),
+        })
     }
 
     /// Check if a transaction has been confirmed on-chain by querying the blockchain API
@@ -1428,49 +1802,568 @@ impl TrackerBoxUpdater {
     }
 }
 
-/// Derive a P2PK change address from a compressed tracker public key.
-fn derive_change_address(tracker_pubkey: &[u8; 33]) -> Result<String, TrackerBoxUpdaterError> {
-    use ergo_lib::ergo_chain_types::EcPoint;
-    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
-    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+#[cfg(test)]
+mod signing_boundary_tests {
+    use super::*;
+    use ergo_lib::ergotree_ir::{
+        chain::{
+            ergo_box::BoxTokens,
+            token::{Token, TokenAmount, TokenId},
+            tx_id::TxId,
+        },
+        mir::{
+            create_provedlog::CreateProveDlog, expr::Expr, extract_reg_as::ExtractRegisterAs,
+            global_vars::GlobalVars, option_get::OptionGet, unary_op::OneArgOpTryBuild,
+        },
+        types::stype::SType,
+    };
+    use std::str::FromStr;
 
-    let ec_point = EcPoint::sigma_parse_bytes(tracker_pubkey).map_err(|e| {
-        TrackerBoxUpdaterError::SerializationError(format!("Invalid tracker pubkey: {}", e))
-    })?;
-    let prove_dlog = ProveDlog::new(ec_point);
-    let address = Address::P2Pk(prove_dlog);
-    let encoder =
-        ergo_lib::ergotree_ir::chain::address::AddressEncoder::new(NetworkPrefix::Mainnet);
-    Ok(encoder.address_to_str(&address))
-}
+    const GENERATOR_P2PK_TREE: &str =
+        "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
-/// Convert a P2PK or P2S address string to its hex-encoded ergoTree bytes.
-fn change_address_to_ergo_tree(address_str: &str) -> Result<String, TrackerBoxUpdaterError> {
-    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
-    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+    fn signer() -> (SecretKey, [u8; 32], [u8; 33], ErgoTree) {
+        let secret_bytes = [1u8; 32];
+        let secret = SecretKey::dlog_from_bytes(&secret_bytes).expect("valid scalar");
+        let address = secret.get_address_from_public_image();
+        let tracker_pubkey = match &address {
+            Address::P2Pk(prove_dlog) => prove_dlog
+                .h
+                .sigma_serialize_bytes()
+                .expect("serialize public key")
+                .try_into()
+                .expect("33-byte public key"),
+            _ => panic!("dlog secret must derive P2PK"),
+        };
+        let p2pk_tree = address.script().expect("derive P2PK tree");
+        (secret, secret_bytes, tracker_pubkey, p2pk_tree)
+    }
 
-    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-    let address = encoder.parse_address_from_str(address_str).map_err(|e| {
-        TrackerBoxUpdaterError::SerializationError(format!(
-            "Invalid address '{}': {}",
-            address_str, e
+    fn tracker_contract() -> ErgoTree {
+        let r4: Expr = ExtractRegisterAs::new(
+            GlobalVars::SelfBox.into(),
+            NonMandatoryRegisterId::R4 as i8,
+            SType::SOption(SType::SGroupElement.into()),
+        )
+        .expect("R4 extraction")
+        .into();
+        let r4 = OptionGet::try_build(r4).expect("R4 get").into();
+        let proposition: Expr = CreateProveDlog::try_build(r4)
+            .expect("proveDlog from R4")
+            .into();
+        ErgoTree::try_from(proposition).expect("tracker contract tree")
+    }
+
+    fn r5_constant(byte: u8) -> Constant {
+        let mut bytes = vec![0x64];
+        bytes.extend_from_slice(&[byte; 33]);
+        bytes.extend_from_slice(&[0x03, 0x20, 0x00]);
+        Constant::sigma_parse_bytes(&bytes).expect("AVL constant")
+    }
+
+    fn token(id_byte: u8, amount: u64) -> Token {
+        Token::from((
+            TokenId::from_str(&hex::encode([id_byte; 32])).expect("token id"),
+            TokenAmount::try_from(amount).expect("token amount"),
         ))
-    })?;
-    let tree = address.script().map_err(|e| {
-        TrackerBoxUpdaterError::SerializationError(format!(
-            "Failed to get script for address '{}': {}",
-            address_str, e
-        ))
-    })?;
-    Ok(hex::encode(tree.sigma_serialize_bytes().map_err(|e| {
-        TrackerBoxUpdaterError::SerializationError(format!("Failed to serialize ergoTree: {:?}", e))
-    })?))
+    }
+
+    fn make_box(
+        tree: ErgoTree,
+        value: u64,
+        tokens: Vec<Token>,
+        registers: Vec<Constant>,
+        height: u32,
+        tx_byte: u8,
+        index: u16,
+    ) -> ErgoBox {
+        ErgoBox::new(
+            BoxValue::new(value).expect("box value"),
+            tree,
+            if tokens.is_empty() {
+                None
+            } else {
+                Some(BoxTokens::try_from(tokens).expect("box tokens"))
+            },
+            NonMandatoryRegisters::try_from(registers).expect("registers"),
+            height,
+            TxId::from_str(&hex::encode([tx_byte; 32])).expect("tx id"),
+            index,
+        )
+        .expect("box")
+    }
+
+    fn tracker_box() -> (ErgoBox, [u8; 32], [u8; 33], [u8; 32], ErgoTree) {
+        let (_secret, secret_bytes, pubkey, p2pk_tree) = signer();
+        let point = EcPoint::sigma_parse_bytes(&pubkey).expect("public point");
+        let nft = [0x11; 32];
+        let tracker = make_box(
+            tracker_contract(),
+            3_000_000,
+            vec![token(0x11, 1), token(0x22, 7)],
+            vec![Constant::from(point), r5_constant(0x33)],
+            90,
+            0x44,
+            0,
+        );
+        (tracker, nft, pubkey, secret_bytes, p2pk_tree)
+    }
+
+    fn api_and_raw(box_: &ErgoBox) -> (ErgoBoxApi, String) {
+        let value = serde_json::to_value(box_.clone()).expect("box JSON");
+        let api = serde_json::from_value(value).expect("API projection");
+        let raw = hex::encode(box_.sigma_serialize_bytes().expect("box bytes"));
+        (api, raw)
+    }
+
+    fn linked_headers() -> Vec<Header> {
+        (0..10)
+            .map(|index| {
+                let id = format!("{:064x}", index + 1);
+                let parent_id = if index < 9 {
+                    format!("{:064x}", index + 2)
+                } else {
+                    "00".repeat(32)
+                };
+                serde_json::from_value(serde_json::json!({
+                    "version": 3,
+                    "id": id,
+                    "parentId": parent_id,
+                    "adProofsRoot": "00".repeat(32),
+                    "stateRoot": "00".repeat(33),
+                    "transactionsRoot": "00".repeat(32),
+                    "timestamp": 1_700_000_000_000u64 + index as u64,
+                    "nBits": 117586360,
+                    "height": 100 - index,
+                    "extensionHash": "00".repeat(32),
+                    "powSolutions": {
+                        "pk": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                        "n": "0000000000000000"
+                    },
+                    "votes": "000000",
+                    "unparsedBytes": ""
+                }))
+                .expect("header JSON")
+            })
+            .collect()
+    }
+
+    fn node_info() -> serde_json::Value {
+        serde_json::json!({
+            "fullHeight": 100,
+            "bestFullHeaderId": format!("{:064x}", 1),
+            "parameters": {
+                "height": 90,
+                "blockVersion": 3,
+                "storageFeeFactor": 1_250_000,
+                "minValuePerByte": 360,
+                "maxBlockSize": 1_275_000,
+                "maxBlockCost": 8_000_000,
+                "tokenAccessCost": 100,
+                "inputCost": 2_000,
+                "dataInputCost": 100,
+                "outputCost": 100
+            }
+        })
+    }
+
+    #[test]
+    fn exact_box_binding_rejects_independent_json_and_raw_mutants() {
+        let (box_, _, _, _, _) = tracker_box();
+        let (api, raw) = api_and_raw(&box_);
+        assert_eq!(TrackerBoxUpdater::bind_exact_box(&api, &raw).unwrap(), box_);
+
+        let mut mutants = Vec::new();
+        let mut id = api.clone();
+        id.box_id = "aa".repeat(32);
+        mutants.push(("id", id));
+        let mut value = api.clone();
+        value.value += 1;
+        mutants.push(("value", value));
+        let mut tree = api.clone();
+        tree.ergo_tree = GENERATOR_P2PK_TREE.to_string();
+        mutants.push(("tree", tree));
+        let mut asset_id = api.clone();
+        asset_id.assets[0].token_id = "bb".repeat(32);
+        mutants.push(("asset id", asset_id));
+        let mut asset_amount = api.clone();
+        asset_amount.assets[0].amount += 1;
+        mutants.push(("asset amount", asset_amount));
+        let mut asset_order = api.clone();
+        asset_order.assets.swap(0, 1);
+        mutants.push(("asset order", asset_order));
+        let mut register = api.clone();
+        register
+            .additional_registers
+            .insert("R4".to_string(), "0e00".to_string());
+        mutants.push(("register", register));
+        let mut extra_register = api.clone();
+        extra_register
+            .additional_registers
+            .insert("R9".to_string(), "0101".to_string());
+        mutants.push(("register key set", extra_register));
+        let mut height = api.clone();
+        height.creation_height += 1;
+        mutants.push(("height", height));
+
+        for (name, mutant) in mutants {
+            assert!(
+                TrackerBoxUpdater::bind_exact_box(&mutant, &raw).is_err(),
+                "{name} mutant must reject"
+            );
+        }
+        assert!(TrackerBoxUpdater::bind_exact_box(&api, &format!("{raw}00")).is_err());
+        assert!(
+            TrackerBoxUpdater::bind_exact_box(&api, &"00".repeat(ErgoBox::MAX_BOX_SIZE + 1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn tracker_authority_binds_secret_pubkey_and_group_element_r4() {
+        let (tracker, _, pubkey, secret, _) = tracker_box();
+        TrackerBoxUpdater::local_signing_material(&pubkey, Some(&secret), &tracker)
+            .expect("matching authority");
+
+        let wrong_secret = [2u8; 32];
+        assert!(
+            TrackerBoxUpdater::local_signing_material(&pubkey, Some(&wrong_secret), &tracker)
+                .is_err()
+        );
+        assert!(
+            TrackerBoxUpdater::local_signing_material(&pubkey, Some(&[0u8; 32]), &tracker).is_err()
+        );
+        assert!(TrackerBoxUpdater::local_signing_material(&pubkey, None, &tracker).is_err());
+
+        let wrong_type = Constant::from(pubkey.iter().map(|byte| *byte as i8).collect::<Vec<_>>());
+        let wrong_r4 = make_box(
+            tracker_contract(),
+            3_000_000,
+            vec![token(0x11, 1)],
+            vec![wrong_type, r5_constant(0x33)],
+            90,
+            0x45,
+            0,
+        );
+        assert!(
+            TrackerBoxUpdater::local_signing_material(&pubkey, Some(&secret), &wrong_r4).is_err()
+        );
+
+        let (_, _, other_pubkey, _, _) = {
+            let other = SecretKey::dlog_from_bytes(&[2u8; 32]).expect("valid scalar");
+            let address = other.get_address_from_public_image();
+            let other_pubkey: [u8; 33] = match &address {
+                Address::P2Pk(p) => p.h.sigma_serialize_bytes().unwrap().try_into().unwrap(),
+                _ => unreachable!(),
+            };
+            (
+                other,
+                [2u8; 32],
+                other_pubkey,
+                [0u8; 32],
+                address.script().unwrap(),
+            )
+        };
+        assert!(TrackerBoxUpdater::local_signing_material(
+            &other_pubkey,
+            Some(&[2u8; 32]),
+            &tracker
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn state_context_requires_ten_linked_headers_and_same_info_pin() {
+        TrackerBoxUpdater::validate_signing_context(linked_headers(), node_info())
+            .expect("linked state context");
+
+        let mut short = linked_headers();
+        short.pop();
+        assert!(TrackerBoxUpdater::validate_signing_context(short, node_info()).is_err());
+        let mut wrong_parent = linked_headers();
+        wrong_parent[0].parent_id = wrong_parent[9].id;
+        assert!(TrackerBoxUpdater::validate_signing_context(wrong_parent, node_info()).is_err());
+        let mut wrong_height = linked_headers();
+        wrong_height[1].height -= 1;
+        assert!(TrackerBoxUpdater::validate_signing_context(wrong_height, node_info()).is_err());
+        let mut stale_info = node_info();
+        stale_info["fullHeight"] = serde_json::json!(99);
+        assert!(TrackerBoxUpdater::validate_signing_context(linked_headers(), stale_info).is_err());
+        let mut wrong_tip = node_info();
+        wrong_tip["bestFullHeaderId"] = serde_json::json!("ff".repeat(32));
+        assert!(TrackerBoxUpdater::validate_signing_context(linked_headers(), wrong_tip).is_err());
+        let mut incomplete_info = node_info();
+        incomplete_info
+            .get_mut("parameters")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("maxBlockCost");
+        assert!(
+            TrackerBoxUpdater::validate_signing_context(linked_headers(), incomplete_info).is_err()
+        );
+        let mut wrong_version = node_info();
+        wrong_version["parameters"]["blockVersion"] = serde_json::json!(4);
+        assert!(
+            TrackerBoxUpdater::validate_signing_context(linked_headers(), wrong_version).is_err()
+        );
+        let mut future_parameters = node_info();
+        future_parameters["parameters"]["height"] = serde_json::json!(101);
+        assert!(
+            TrackerBoxUpdater::validate_signing_context(linked_headers(), future_parameters)
+                .is_err()
+        );
+        let mut flat_parameters = node_info();
+        let parameters = flat_parameters
+            .as_object_mut()
+            .unwrap()
+            .remove("parameters")
+            .unwrap();
+        flat_parameters
+            .as_object_mut()
+            .unwrap()
+            .extend(parameters.as_object().unwrap().clone());
+        assert!(
+            TrackerBoxUpdater::validate_signing_context(linked_headers(), flat_parameters).is_err()
+        );
+    }
+
+    #[test]
+    fn input_closure_rejects_cardinality_order_and_duplicate_ids() {
+        let (tracker, _, _, _, p2pk_tree) = tracker_box();
+        let fee = make_box(p2pk_tree, 2_000_000, vec![], vec![], 90, 0x55, 0);
+        let boxes = vec![tracker.clone(), fee.clone()];
+        let ids = vec![tracker.box_id().to_string(), fee.box_id().to_string()];
+        TrackerBoxUpdater::validate_input_closure(ids.clone().into_iter(), &boxes).unwrap();
+        assert!(
+            TrackerBoxUpdater::validate_input_closure(ids[..1].iter().cloned(), &boxes).is_err()
+        );
+        assert!(
+            TrackerBoxUpdater::validate_input_closure(ids.iter().rev().cloned(), &boxes).is_err()
+        );
+        assert!(TrackerBoxUpdater::validate_input_closure(
+            vec![ids[0].clone(), ids[0].clone()].into_iter(),
+            &[tracker.clone(), tracker]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fee_selection_requires_exact_owner_token_free_and_checked_sum() {
+        let (tracker, _, _, _, owner_tree) = tracker_box();
+        let owner = make_box(owner_tree.clone(), 1_100_000, vec![], vec![], 90, 0x51, 0);
+        let other_tree = SecretKey::dlog_from_bytes(&[2u8; 32])
+            .expect("other scalar")
+            .get_address_from_public_image()
+            .script()
+            .expect("other P2PK tree");
+        let other_owner = make_box(other_tree, 9_000_000, vec![], vec![], 90, 0x52, 0);
+        let token_bearing = make_box(
+            owner_tree.clone(),
+            9_000_000,
+            vec![token(0x77, 1)],
+            vec![],
+            90,
+            0x53,
+            0,
+        );
+        let mut advertised = vec![
+            api_and_raw(&other_owner).0,
+            api_and_raw(&token_bearing).0,
+            api_and_raw(&owner).0,
+        ];
+        let (selected, total) = TrackerBoxUpdater::select_fee_inputs(
+            &advertised,
+            1_000_000,
+            &tracker.box_id().to_string(),
+            &owner_tree,
+        )
+        .expect("one exact owner box");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].box_id, owner.box_id().to_string());
+        assert_eq!(total, 1_100_000);
+
+        let owner_tree_hex = hex::encode(owner_tree.sigma_serialize_bytes().unwrap());
+        for (index, value) in [u64::MAX - 2, u64::MAX - 1].into_iter().enumerate() {
+            advertised.push(ErgoBoxApi {
+                box_id: hex::encode([0x80 + index as u8; 32]),
+                value,
+                ergo_tree: owner_tree_hex.clone(),
+                assets: Vec::new(),
+                additional_registers: std::collections::HashMap::new(),
+                creation_height: 90,
+            });
+        }
+        assert!(matches!(
+            TrackerBoxUpdater::select_fee_inputs(
+                &advertised[3..],
+                u64::MAX,
+                &tracker.box_id().to_string(),
+                &owner_tree,
+            ),
+            Err(TrackerBoxUpdaterError::ArithmeticError(_))
+        ));
+    }
+
+    #[test]
+    fn wallet_locally_signs_contract_tracker_and_exact_p2pk_fee_inputs() {
+        let (tracker, _, pubkey, secret, p2pk_tree) = tracker_box();
+        assert_ne!(
+            tracker.ergo_tree, p2pk_tree,
+            "tracker is a contract, not P2PK"
+        );
+        let material =
+            TrackerBoxUpdater::local_signing_material(&pubkey, Some(&secret), &tracker).unwrap();
+        let local_context =
+            TrackerBoxUpdater::validate_signing_context(linked_headers(), node_info()).unwrap();
+
+        for fee_values in [vec![2_000_000], vec![600_000, 600_000]] {
+            let fee_boxes = fee_values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    make_box(
+                        p2pk_tree.clone(),
+                        value,
+                        vec![],
+                        vec![],
+                        90,
+                        0x60 + index as u8,
+                        0,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let fee_total = fee_boxes
+                .iter()
+                .map(|box_| *box_.value.as_u64())
+                .sum::<u64>();
+            let mut boxes = vec![tracker.clone()];
+            boxes.extend(fee_boxes);
+            let inputs = boxes
+                .iter()
+                .map(|box_| UnsignedInput::new(box_.box_id(), ContextExtension::empty()))
+                .collect();
+            let outputs = vec![
+                ErgoBoxCandidate {
+                    value: tracker.value,
+                    ergo_tree: tracker.ergo_tree.clone(),
+                    tokens: tracker.tokens.clone(),
+                    additional_registers: tracker.additional_registers.clone(),
+                    creation_height: local_context.creation_height,
+                },
+                new_miner_fee_box(
+                    BoxValue::new(1_000_000).unwrap(),
+                    local_context.creation_height,
+                )
+                .unwrap(),
+                ErgoBoxCandidate {
+                    value: BoxValue::new(fee_total - 1_000_000).unwrap(),
+                    ergo_tree: p2pk_tree.clone(),
+                    tokens: None,
+                    additional_registers: NonMandatoryRegisters::empty(),
+                    creation_height: local_context.creation_height,
+                },
+            ];
+            let unsigned = UnsignedTransaction::new_from_vec(inputs, Vec::new(), outputs).unwrap();
+            TrackerBoxUpdater::validate_output_dust(
+                &unsigned,
+                &local_context.state_context.parameters,
+            )
+            .unwrap();
+            let signed = TrackerBoxUpdater::sign_locally(
+                unsigned,
+                boxes,
+                &material,
+                &local_context.state_context,
+            )
+            .expect("local contract and P2PK proofs");
+            assert!(signed.inputs.iter().all(|input| !input
+                .spending_proof
+                .proof
+                .clone()
+                .to_bytes()
+                .is_empty()));
+            let signed_json = serde_json::to_string(&signed).expect("signed transaction JSON");
+            assert!(!signed_json.contains(&hex::encode(secret)));
+        }
+
+        let dust_fee = make_box(p2pk_tree.clone(), 1_010_800, vec![], vec![], 90, 0x70, 0);
+        let dust_boxes = vec![tracker.clone(), dust_fee];
+        let dust_inputs = dust_boxes
+            .iter()
+            .map(|box_| UnsignedInput::new(box_.box_id(), ContextExtension::empty()))
+            .collect();
+        let dust_outputs = vec![
+            ErgoBoxCandidate {
+                value: tracker.value,
+                ergo_tree: tracker.ergo_tree.clone(),
+                tokens: tracker.tokens.clone(),
+                additional_registers: tracker.additional_registers.clone(),
+                creation_height: local_context.creation_height,
+            },
+            new_miner_fee_box(
+                BoxValue::new(1_000_000).unwrap(),
+                local_context.creation_height,
+            )
+            .unwrap(),
+            ErgoBoxCandidate {
+                value: BoxValue::new(10_800).unwrap(),
+                ergo_tree: p2pk_tree.clone(),
+                tokens: None,
+                additional_registers: NonMandatoryRegisters::empty(),
+                creation_height: local_context.creation_height,
+            },
+        ];
+        let dust_tx =
+            UnsignedTransaction::new_from_vec(dust_inputs, Vec::new(), dust_outputs).unwrap();
+        assert!(TrackerBoxUpdater::validate_output_dust(
+            &dust_tx,
+            &local_context.state_context.parameters
+        )
+        .is_err());
+
+        let invalid_fee = make_box(p2pk_tree, 2_000_000, vec![], vec![], 90, 0x71, 0);
+        let invalid_boxes = vec![tracker.clone(), invalid_fee];
+        let invalid_inputs = invalid_boxes
+            .iter()
+            .map(|box_| UnsignedInput::new(box_.box_id(), ContextExtension::empty()))
+            .collect();
+        let invalid_outputs = vec![
+            ErgoBoxCandidate {
+                value: tracker.value,
+                ergo_tree: tracker.ergo_tree.clone(),
+                tokens: tracker.tokens.clone(),
+                additional_registers: tracker.additional_registers.clone(),
+                creation_height: local_context.creation_height,
+            },
+            new_miner_fee_box(
+                BoxValue::new(1_000_000).unwrap(),
+                local_context.creation_height,
+            )
+            .unwrap(),
+        ];
+        let invalid_tx =
+            UnsignedTransaction::new_from_vec(invalid_inputs, Vec::new(), invalid_outputs).unwrap();
+        assert!(matches!(
+            TrackerBoxUpdater::sign_locally(
+                invalid_tx,
+                invalid_boxes,
+                &material,
+                &local_context.state_context,
+            ),
+            Err(TrackerBoxUpdaterError::SigningFailed(message))
+                if message.contains("post-sign transaction validation failed")
+        ));
+    }
 }
 
 #[cfg(test)]
 mod publication_health_tests {
-    use super::{SharedTrackerState, TrackerBoxUpdater, TrackerBoxUpdaterError};
+    use super::{
+        AssetApi, ErgoBoxApi, SharedTrackerState, TrackerBoxUpdater, TrackerBoxUpdaterError,
+    };
+    use ergo_lib::ergotree_ir::{ergo_tree::ErgoTree, serialization::SigmaSerializable};
+    use std::collections::HashMap;
 
     const SIGNED_TRANSACTION_JSON: &str = r#"{
       "id": "9148408c04c2e38a6402a7950d6157730fa7d49e9ab3b9cadec481d7769918e9",
@@ -1510,6 +2403,35 @@ mod publication_health_tests {
 
         state.quarantine_publication();
         assert!(!state.is_publication_healthy());
+    }
+
+    #[test]
+    fn tracker_fee_selection_rejects_token_bearing_boxes() {
+        let token_box = ErgoBoxApi {
+            box_id: "11".repeat(32),
+            value: 2_000_000,
+            ergo_tree: "00".to_string(),
+            assets: vec![AssetApi {
+                token_id: "22".repeat(32),
+                amount: 1,
+            }],
+            additional_registers: HashMap::new(),
+            creation_height: 100,
+        };
+
+        let owner_tree = ErgoTree::sigma_parse_bytes(
+            &hex::decode(
+                "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .expect("P2PK hex"),
+        )
+        .expect("P2PK tree");
+        let wallet_boxes = [token_box];
+        let (selected, total) =
+            TrackerBoxUpdater::select_fee_inputs(&wallet_boxes, 1_000_000, "33", &owner_tree)
+                .expect("selection must not overflow");
+        assert!(selected.is_empty());
+        assert_eq!(total, 0);
     }
 
     #[test]

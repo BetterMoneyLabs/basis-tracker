@@ -592,7 +592,6 @@ async fn main() {
         api_key: config.ergo.node.api_key.clone(),
         update_interval_seconds: 600, // 10 minutes
         fee: config.transaction.fee,
-        change_address: config.get_change_address().ok(),
         tracker_secret_key: config.tracker_secret_key_bytes(),
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
