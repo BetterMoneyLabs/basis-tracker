@@ -1,5 +1,8 @@
 use axum::{extract::State, http::StatusCode, Json};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     models::{
@@ -1321,20 +1324,22 @@ pub async fn get_policy_by_recipient(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EventPageQuery {
+    page: Option<usize>,
+    page_size: Option<usize>,
+}
+
 // Get paginated tracker events from event store
 #[axum::debug_handler]
 pub async fn get_events_paginated(
     State(state): State<AppState>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    axum::extract::Query(params): axum::extract::Query<EventPageQuery>,
 ) -> (StatusCode, Json<ApiResponse<Vec<TrackerEvent>>>) {
     tracing::debug!("Getting paginated events: {:?}", params);
 
-    // Parse pagination parameters with defaults
-    let page = params.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
-    let page_size = params
-        .get("page_size")
-        .and_then(|ps| ps.parse().ok())
-        .unwrap_or(20);
+    let page = params.page.unwrap_or(0);
+    let page_size = params.page_size.unwrap_or(20);
 
     // Get events from event store
     let events = match state
@@ -1343,6 +1348,16 @@ pub async fn get_events_paginated(
         .await
     {
         Ok(events) => events,
+        Err(
+            e @ (crate::store::EventStoreError::InvalidPageSize
+            | crate::store::EventStoreError::PaginationOverflow),
+        ) => {
+            tracing::debug!("Rejected event pagination request: {e}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(e.to_string())),
+            );
+        }
         Err(e) => {
             tracing::error!("Failed to retrieve events: {:?}", e);
             return (
@@ -1375,7 +1390,7 @@ pub async fn get_events(
     tracing::debug!("Getting recent events");
 
     // Get recent events (last 50 events by default)
-    let events = match state.event_store.get_events_paginated(0, 50).await {
+    let events = match state.event_store.get_recent_events(50).await {
         Ok(events) => events,
         Err(e) => {
             tracing::error!("Failed to retrieve events: {:?}", e);
@@ -1473,7 +1488,20 @@ pub async fn get_key_status(
     };
 
     // Calculate total debt and note count
-    let total_debt: u64 = notes.iter().map(|note| note.outstanding_debt()).sum();
+    let total_debt = match notes.iter().try_fold(0u64, |total, note| {
+        total.checked_add(note.outstanding_debt())
+    }) {
+        Some(total) => total,
+        None => {
+            tracing::warn!("Issuer outstanding-debt aggregate overflow");
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(crate::models::error_response(
+                    "Outstanding debt aggregate exceeds the supported u64 range".to_string(),
+                )),
+            );
+        }
+    };
     let note_count = notes.len();
 
     // Get collateral from reserve tracker
