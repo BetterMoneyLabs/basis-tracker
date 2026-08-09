@@ -14,7 +14,9 @@ never converted in place.
 
 All integers use unsigned big-endian encoding. All lengths are fixed except for
 the bounded record sequence. The entry count is limited to 50,000 and the exact
-snapshot length is checked before record allocation.
+snapshot length is checked before record allocation. Startup checks the
+single-row partition invariant by reading at most two keys; it never performs
+an unbounded row count before rejecting foreign or corrupt state.
 
 ## Full v2 claim record
 

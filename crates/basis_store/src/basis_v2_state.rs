@@ -363,6 +363,11 @@ impl ReserveRedeemedStoreV2 {
         Ok(self.records.len())
     }
 
+    pub fn is_empty(&self) -> Result<bool, V2StateError> {
+        self.ensure_healthy()?;
+        Ok(self.records.is_empty())
+    }
+
     pub fn root_digest(&self) -> Result<[u8; 33], V2StateError> {
         self.ensure_healthy()?;
         self.tree.root_digest().map_err(Into::into)
@@ -528,6 +533,7 @@ fn open_exact_partition(
     let writer_lock_path = path.join(WRITER_LOCK_FILE);
     let writer_lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&writer_lock_path)
@@ -591,13 +597,30 @@ fn read_only_snapshot(
     key: &[u8],
     maximum_len: usize,
 ) -> Result<Vec<u8>, V2StateError> {
-    let len = partition
-        .len()
-        .map_err(|error| V2StateError::Storage(error.to_string()))?;
-    if len != 1 {
-        return Err(V2StateError::Corrupt(format!(
-            "authoritative partition must contain exactly one row, found {len}"
-        )));
+    // Probe at most two keys. `Partition::len()` exhausts the full iterator in
+    // Fjall 2.11.2, which would make rejection time attacker/corruption-sized.
+    let mut keys = partition.keys();
+    let first_key = keys
+        .next()
+        .transpose()
+        .map_err(|error| V2StateError::Storage(error.to_string()))?
+        .ok_or_else(|| {
+            V2StateError::Corrupt("authoritative partition contains no rows".to_string())
+        })?;
+    if keys
+        .next()
+        .transpose()
+        .map_err(|error| V2StateError::Storage(error.to_string()))?
+        .is_some()
+    {
+        return Err(V2StateError::Corrupt(
+            "authoritative partition contains more than one row".to_string(),
+        ));
+    }
+    if first_key.as_ref() != key {
+        return Err(V2StateError::Corrupt(
+            "authoritative snapshot row is missing".to_string(),
+        ));
     }
     let bytes = partition
         .get(key)
@@ -1217,6 +1240,57 @@ mod tests {
         keyspace.persist(PersistMode::SyncData).unwrap();
     }
 
+    const LOCK_HELPER_PATH_ENV: &str = "BASIS_V2_STATE_LOCK_HELPER_PATH";
+    const LOCK_HELPER_EXPECT_ENV: &str = "BASIS_V2_STATE_LOCK_HELPER_EXPECT";
+    const LOCK_HELPER_TEST: &str =
+        "basis_v2_state::tests::tracker_writer_lease_blocks_another_process";
+
+    fn run_lock_helper(path: &Path, expected: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(LOCK_HELPER_TEST)
+            .arg("--nocapture")
+            .env(LOCK_HELPER_PATH_ENV, path)
+            .env(LOCK_HELPER_EXPECT_ENV, expected)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "lock helper failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn tracker_writer_lease_blocks_another_process() {
+        if let Some(path) = std::env::var_os(LOCK_HELPER_PATH_ENV) {
+            let expected = std::env::var(LOCK_HELPER_EXPECT_ENV).unwrap();
+            let result = TrackerClaimStoreV2::open(
+                Path::new(&path),
+                [23u8; 32],
+                FreshV2StateApproval::Reject,
+            );
+            match expected.as_str() {
+                "blocked" => {
+                    assert_eq!(result.err().unwrap(), V2StateError::WriterAlreadyActive)
+                }
+                "open" => assert!(result.unwrap().is_empty().unwrap()),
+                other => panic!("unsupported lock-helper expectation: {other}"),
+            }
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        let store =
+            TrackerClaimStoreV2::open(temp.path(), [23u8; 32], FreshV2StateApproval::Approve)
+                .unwrap();
+
+        run_lock_helper(temp.path(), "blocked");
+        drop(store);
+        run_lock_helper(temp.path(), "open");
+    }
+
     #[test]
     fn tracker_requires_fresh_approval_enforces_binding_and_single_writer() {
         let temp = TempDir::new().unwrap();
@@ -1398,10 +1472,19 @@ mod tests {
     }
 
     #[test]
-    fn tracker_restart_rejects_checksum_signature_root_order_duplicate_and_bounds_corruption() {
+    fn tracker_restart_rejects_checksum_generation_signature_root_order_duplicate_and_bounds_corruption(
+    ) {
         assert!(matches!(
             tracker_corruption_case(|bytes| *bytes.last_mut().unwrap() ^= 1),
             V2StateError::Corrupt(_)
+        ));
+
+        assert!(matches!(
+            tracker_corruption_case(|bytes| {
+                bytes[4] = BASIS_V2_ABI_GENERATION + 1;
+                rewrite_checksum(bytes, TRACKER_CHECKSUM_DOMAIN);
+            }),
+            V2StateError::MigrationRequired(_)
         ));
 
         assert!(matches!(
@@ -1505,6 +1588,7 @@ mod tests {
             FreshV2StateApproval::Approve,
         )
         .unwrap();
+        assert!(first.is_empty().unwrap());
         assert_eq!(
             ReserveRedeemedStoreV2::open(&first_path, first_binding, FreshV2StateApproval::Reject)
                 .err()
@@ -1561,6 +1645,29 @@ mod tests {
             ReserveRedeemedStoreV2::open(&first_path, second_binding, FreshV2StateApproval::Reject)
                 .err()
                 .unwrap(),
+            V2StateError::BindingMismatch
+        );
+        let wrong_tracker_binding = ReserveStoreBindingV2::erg([99u8; 32], first_reserve);
+        assert_eq!(
+            ReserveRedeemedStoreV2::open(
+                &first_path,
+                wrong_tracker_binding,
+                FreshV2StateApproval::Reject,
+            )
+            .err()
+            .unwrap(),
+            V2StateError::BindingMismatch
+        );
+        let wrong_asset_binding =
+            ReserveStoreBindingV2::token(tracker, first_reserve, [33u8; 32]).unwrap();
+        assert_eq!(
+            ReserveRedeemedStoreV2::open(
+                &first_path,
+                wrong_asset_binding,
+                FreshV2StateApproval::Reject,
+            )
+            .err()
+            .unwrap(),
             V2StateError::BindingMismatch
         );
     }
@@ -1757,15 +1864,31 @@ mod tests {
     }
 
     #[test]
-    fn reserve_restart_rejects_checksum_signature_state_root_order_and_legacy_corruption() {
+    fn reserve_restart_rejects_checksum_generation_signature_state_root_order_and_legacy_corruption(
+    ) {
         assert!(matches!(
             reserve_corruption_case(|bytes| *bytes.last_mut().unwrap() ^= 1),
             V2StateError::Corrupt(_)
         ));
         assert!(matches!(
             reserve_corruption_case(|bytes| {
+                bytes[4] = BASIS_V2_ABI_GENERATION + 1;
+                rewrite_checksum(bytes, RESERVE_CHECKSUM_DOMAIN);
+            }),
+            V2StateError::MigrationRequired(_)
+        ));
+        assert!(matches!(
+            reserve_corruption_case(|bytes| {
                 let signature_offset = RESERVE_HEADER_LEN + 179;
                 bytes[signature_offset + 10] ^= 1;
+                rewrite_checksum(bytes, RESERVE_CHECKSUM_DOMAIN);
+            }),
+            V2StateError::Corrupt(_)
+        ));
+        assert!(matches!(
+            reserve_corruption_case(|bytes| {
+                let state_timestamp_offset = RESERVE_HEADER_LEN + CLAIM_RECORD_LEN;
+                bytes[state_timestamp_offset + 7] ^= 1;
                 rewrite_checksum(bytes, RESERVE_CHECKSUM_DOMAIN);
             }),
             V2StateError::Corrupt(_)
