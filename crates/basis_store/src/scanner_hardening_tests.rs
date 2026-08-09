@@ -336,6 +336,65 @@ fn assert_only_stale_reserve(state: &ServerState, stale_box_id: &str) {
     assert_eq!(persisted[0].box_id, stale_box_id);
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ReserveStateSnapshot {
+    persisted_value_bytes: Vec<Vec<u8>>,
+    in_memory_value_bytes: Vec<Vec<u8>>,
+}
+
+fn reserve_state_snapshot(state: &ServerState) -> ReserveStateSnapshot {
+    fn sorted_value_bytes(reserves: Vec<ExtendedReserveInfo>) -> Vec<Vec<u8>> {
+        let mut values: Vec<Vec<u8>> = reserves
+            .into_iter()
+            .map(|reserve| {
+                serde_json::to_vec(&reserve).expect("reserve snapshot value must serialize")
+            })
+            .collect();
+        values.sort();
+        values
+    }
+
+    ReserveStateSnapshot {
+        persisted_value_bytes: sorted_value_bytes(
+            state
+                .reserve_storage
+                .get_all_reserves()
+                .expect("reserve storage snapshot must be readable"),
+        ),
+        in_memory_value_bytes: sorted_value_bytes(state.reserve_tracker.get_all_reserves()),
+    }
+}
+
+async fn wait_for_request_count(node: &MockNode, minimum: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if node.requests().len() >= minimum {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("mock node must observe the expected requests");
+}
+
+async fn wait_for_request_matching(node: &MockNode, expected: &str) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if node
+                .requests()
+                .iter()
+                .any(|request| request.contains(expected))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("mock node must observe the expected request");
+}
+
 #[tokio::test]
 async fn reserve_scan_paginates_past_explicit_page_size() {
     let first_page: Vec<Value> = (0..SCAN_PAGE_SIZE)
@@ -443,6 +502,39 @@ async fn complete_empty_snapshot_removes_stale_reserves() {
 }
 
 #[tokio::test]
+async fn reserve_page_zero_404_preserves_exact_previous_snapshot() {
+    let node = MockNode::start(|target| {
+        if target.starts_with("/blockchain/indexedHeight") {
+            // The only injected fault is the page response: every height probe
+            // is stable and caught up.
+            indexed_height(500)
+        } else {
+            MockResponse::status(404)
+        }
+    })
+    .await;
+    let temp_dir = tempfile::tempdir().expect("temporary data dir must open");
+    let state = reserve_state(&node, &temp_dir);
+    insert_stale_reserve(&state);
+    let before = reserve_state_snapshot(&state);
+
+    let error = state
+        .process_scan_boxes()
+        .await
+        .expect_err("HTTP 404 must not be interpreted as an empty page");
+
+    assert!(matches!(error, ScannerError::NodeError(_)));
+    assert_eq!(reserve_state_snapshot(&state), before);
+    assert_eq!(
+        node.requests()
+            .iter()
+            .filter(|request| request.contains("/blockchain/box/unspent/byAddress"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn failed_later_page_preserves_previous_snapshot_without_partial_upserts() {
     let first_page: Vec<Value> = (0..SCAN_PAGE_SIZE)
         .map(|index| indexed_box(index, false))
@@ -468,6 +560,80 @@ async fn failed_later_page_preserves_previous_snapshot_without_partial_upserts()
         .expect_err("later page failure must fail the snapshot");
     assert!(matches!(error, ScannerError::NodeError(_)));
     assert_only_stale_reserve(&state, &stale_box_id);
+}
+
+#[tokio::test]
+async fn tracker_later_page_404_is_error_without_partial_result() {
+    let first_page: Vec<Value> = (0..SCAN_PAGE_SIZE)
+        .map(|index| indexed_box(index, true))
+        .collect();
+    let node = MockNode::start(move |target| {
+        if target.starts_with("/blockchain/indexedHeight") {
+            return indexed_height(500);
+        }
+        match query_offset(target) {
+            Some(0) => MockResponse::json(Value::Array(first_page.clone())),
+            Some(offset) if offset == SCAN_PAGE_SIZE => MockResponse::status(404),
+            _ => MockResponse::status(500),
+        }
+    })
+    .await;
+    let temp_dir = tempfile::tempdir().expect("temporary data dir must open");
+    let state = tracker_state(&node, &temp_dir);
+
+    let error = state
+        .process_tracker_boxes()
+        .await
+        .expect_err("tracker HTTP 404 must fail the complete snapshot");
+
+    assert!(matches!(
+        error,
+        crate::tracker_scanner::TrackerScannerError::NodeError(_)
+    ));
+    assert!(state
+        .tracker_storage
+        .get_all_tracker_boxes()
+        .expect("tracker storage must be readable")
+        .is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abort_during_second_page_preserves_exact_previous_snapshot() {
+    let first_page: Vec<Value> = (0..SCAN_PAGE_SIZE)
+        .map(|index| indexed_box(index, false))
+        .collect();
+    let node = MockNode::start(move |target| {
+        if target.starts_with("/blockchain/indexedHeight") {
+            return indexed_height(500);
+        }
+        match query_offset(target) {
+            Some(0) => MockResponse::json(Value::Array(first_page.clone())),
+            Some(offset) if offset == SCAN_PAGE_SIZE => {
+                MockResponse::json(Value::Array(Vec::new())).delayed(Duration::from_secs(5))
+            }
+            _ => MockResponse::status(500),
+        }
+    })
+    .await;
+    let temp_dir = tempfile::tempdir().expect("temporary data dir must open");
+    let state = reserve_state(&node, &temp_dir);
+    insert_stale_reserve(&state);
+    let before = reserve_state_snapshot(&state);
+
+    let scan_state = state.clone();
+    let scan = tokio::spawn(async move { scan_state.process_scan_boxes().await });
+    wait_for_request_matching(&node, &format!("offset={SCAN_PAGE_SIZE}")).await;
+    scan.abort();
+    assert!(scan
+        .await
+        .expect_err("aborted scanner task must not complete")
+        .is_cancelled());
+
+    assert_eq!(reserve_state_snapshot(&state), before);
+    assert_eq!(
+        state.request_permits.available_permits(),
+        MAX_CONCURRENT_SCANNER_REQUESTS
+    );
 }
 
 #[tokio::test]
@@ -645,4 +811,64 @@ async fn shared_gate_bounds_concurrent_scanner_requests() {
     assert_eq!(rejected, MAX_CONCURRENT_SCANNER_REQUESTS);
     assert!(node.max_active() <= MAX_CONCURRENT_SCANNER_REQUESTS);
     assert!(node.max_active() >= 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abandoned_request_returns_permit_for_exact_gate_capacity() {
+    let response_call = Arc::new(AtomicUsize::new(0));
+    let handler_response_call = Arc::clone(&response_call);
+    let node = MockNode::start(move |_| {
+        let call = handler_response_call.fetch_add(1, Ordering::SeqCst);
+        let delay = if call == 0 {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(250)
+        };
+        MockResponse::json(json!({ "fullHeight": 500u64 })).delayed(delay)
+    })
+    .await;
+    let temp_dir = tempfile::tempdir().expect("temporary data dir must open");
+    let state = reserve_state(&node, &temp_dir);
+
+    let abandoned_state = state.clone();
+    let abandoned = tokio::spawn(async move { abandoned_state.fetch_current_height().await });
+    wait_for_request_count(&node, 1).await;
+    assert_eq!(
+        state.request_permits.available_permits(),
+        MAX_CONCURRENT_SCANNER_REQUESTS - 1
+    );
+
+    abandoned.abort();
+    assert!(abandoned
+        .await
+        .expect_err("abandoned request must be cancelled")
+        .is_cancelled());
+    assert_eq!(
+        state.request_permits.available_permits(),
+        MAX_CONCURRENT_SCANNER_REQUESTS
+    );
+
+    let mut admitted = Vec::new();
+    for _ in 0..MAX_CONCURRENT_SCANNER_REQUESTS {
+        let request_state = state.clone();
+        admitted.push(tokio::spawn(async move {
+            request_state.fetch_current_height().await
+        }));
+    }
+    wait_for_request_count(&node, MAX_CONCURRENT_SCANNER_REQUESTS + 1).await;
+    assert_eq!(state.request_permits.available_permits(), 0);
+
+    for request in admitted {
+        assert_eq!(
+            request
+                .await
+                .expect("admitted request task must not panic")
+                .expect("every post-cancellation capacity slot must succeed"),
+            500
+        );
+    }
+    assert_eq!(
+        state.request_permits.available_permits(),
+        MAX_CONCURRENT_SCANNER_REQUESTS
+    );
 }

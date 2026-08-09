@@ -198,10 +198,10 @@ impl TrackerServerState {
         let (status, body) = self
             .request_bytes(request, "Failed to fetch tracker boxes")
             .await?;
-        if status == StatusCode::NOT_FOUND {
-            return Ok(Vec::new());
-        }
-        if !status.is_success() {
+        // The pinned v6.0.3 route returns a JSON sequence. Only an HTTP 200
+        // carrying that sequence can prove page contents; in particular, a
+        // 404 is an ambiguous source failure rather than an exhausted page.
+        if status != StatusCode::OK {
             return Err(TrackerScannerError::NodeError(format!(
                 "Failed to get tracker boxes with status {}: {}",
                 status,
