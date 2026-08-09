@@ -1,4 +1,10 @@
-# Tracker Box Update Mechanism Specification
+# Historical Tracker Box Update Mechanism Specification
+
+> **Status: partially superseded design reference.** The updater remains a
+> migration input, but the v1 redemption builder and raw completion command
+> shown below have been retired from production APIs. Actor-owned durable state,
+> confirmed-chain reconciliation, and exact v2 generation admission are defined
+> in separate current workstreams. This document is not deployment authority.
 
 ## Overview
 
@@ -407,9 +413,10 @@ impl AvlTreeState {
 
 This ensures that the AVL tree root digest is properly updated after each operation, which is critical for the R5 register value. The AVL tree is now properly initialized with an initial proof to ensure it has a valid root digest even when empty.
 
-### Redemption Transaction Builder
+### Historical Redemption Transaction Builder (retired)
 
-The redemption transaction builder now properly implements the transaction building logic:
+The following v1 builder is retained only as historical documentation and unit
+test material; downstream crates cannot call it.
 
 ```rust
 pub struct RedemptionTransactionBuilder;
@@ -446,7 +453,8 @@ impl RedemptionTransactionBuilder {
 }
 ```
 
-The redemption transaction builder now includes proper validation, transaction structure creation, and serialization of all required components for the Basis redemption process, including R6 register preservation with tracker NFT ID.
+This description does not apply to the active public API. The v2 builder must
+be admitted against its exact contract and register manifest.
 
 ### Integration with Server Startup
 
@@ -465,9 +473,10 @@ The tracker box updater is integrated into the server startup flow:
 The main tracker thread is enhanced to update the shared state:
 
 1. **AddNote Command**: After successfully adding a note to the tracker, update the shared AVL root digest via update_state() call
-2. **Generation Validation Command**: Validate the configured tracker NFT and first observed R5 against the durable generation manifest before publication
-3. **AVL Tree Operations**: Each admitted note update produces a validated durable snapshot before the shared root changes
-4. **State Consistency**: A one-way health gate removes every cached root from the publication path after manager quarantine
+2. **Historical CompleteRedemption Command**: retired; durable settlement must be derived from validated confirmed-chain evidence
+3. **Generation Validation Command**: Validate the configured tracker NFT and first observed R5 against the durable generation manifest before publication
+4. **Durable Note Updates**: Each admitted note update produces a validated durable snapshot before the shared root changes
+5. **State Consistency**: A one-way health gate removes every cached root from the publication path after manager quarantine
 
 ## Logging Specifications
 
