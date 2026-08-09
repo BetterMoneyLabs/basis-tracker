@@ -1,0 +1,14 @@
+{
+  "source_repository": "BetterMoneyLabs/chaincash",
+  "source_commit": "9a274396d5f78f7be5ed76bacee5329c42570317",
+  "normal": {
+    "context_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    "scala_serialization_order": [0, 5, 1, 6, 2, 7, 3, 8, 4],
+    "tracker_data_inputs": 1
+  },
+  "emergency": {
+    "context_ids": [0, 1, 2, 3, 4, 5, 7],
+    "scala_serialization_order": [0, 5, 1, 2, 7, 3, 4],
+    "tracker_data_inputs": 0
+  }
+}
