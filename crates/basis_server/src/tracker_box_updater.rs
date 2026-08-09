@@ -814,7 +814,8 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         tx_id: &str,
     ) -> Result<(String, u64), TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = crate::bounded_http::node_http()
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
         let url = format!(
             "{}/blockchain/transaction/byId/{}",
             config.node_url.trim_end_matches('/'),
@@ -826,8 +827,8 @@ impl TrackerBoxUpdater {
             request = request.header("api_key", api_key);
         }
 
-        let response = request
-            .send()
+        let response = client
+            .execute(request)
             .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
 
@@ -840,7 +841,6 @@ impl TrackerBoxUpdater {
 
         let body: serde_json::Value = response
             .json()
-            .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
 
         // The new tracker box is the first output of the update transaction.
@@ -867,7 +867,8 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         tracker_nft_id: &str,
     ) -> Result<ErgoBoxApi, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = crate::bounded_http::node_http()
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
         let url = format!(
             "{}/blockchain/box/unspent/byTokenId/{}?limit=5",
             config.node_url.trim_end_matches('/'),
@@ -879,14 +880,14 @@ impl TrackerBoxUpdater {
             request = request.header("api_key", api_key);
         }
 
-        let response = request
-            .send()
+        let response = client
+            .execute(request)
             .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text_lossy();
             return Err(TrackerBoxUpdaterError::HttpError(format!(
                 "HTTP {}: {}",
                 status, body
@@ -895,7 +896,6 @@ impl TrackerBoxUpdater {
 
         let boxes: Vec<ErgoBoxApi> = response
             .json()
-            .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
 
         if boxes.is_empty() {
@@ -919,7 +919,8 @@ impl TrackerBoxUpdater {
     async fn get_wallet_boxes(
         config: &TrackerBoxUpdateConfig,
     ) -> Result<Vec<ErgoBoxApi>, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = crate::bounded_http::node_http()
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
         let url = format!(
             "{}/wallet/boxes/unspent?minConfirmations=0&maxConfirmations=-1",
             config.node_url.trim_end_matches('/')
@@ -930,14 +931,14 @@ impl TrackerBoxUpdater {
             request = request.header("api_key", api_key);
         }
 
-        let response = request
-            .send()
+        let response = client
+            .execute(request)
             .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text_lossy();
             return Err(TrackerBoxUpdaterError::HttpError(format!(
                 "HTTP {} fetching wallet boxes: {}",
                 status, body
@@ -946,7 +947,6 @@ impl TrackerBoxUpdater {
 
         let entries: Vec<WalletBoxEntry> = response
             .json()
-            .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
 
         Ok(entries.into_iter().map(|e| e.box_details).collect())
@@ -1017,7 +1017,8 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         box_id: &str,
     ) -> Result<String, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = crate::bounded_http::node_http()
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
         let url = format!(
             "{}/utxo/byIdBinary/{}",
             config.node_url.trim_end_matches('/'),
@@ -1029,14 +1030,14 @@ impl TrackerBoxUpdater {
             request = request.header("api_key", api_key);
         }
 
-        let response = request
-            .send()
+        let response = client
+            .execute(request)
             .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text_lossy();
             return Err(TrackerBoxUpdaterError::HttpError(format!(
                 "HTTP {} fetching box binary {}: {}",
                 status, box_id, body
@@ -1045,7 +1046,6 @@ impl TrackerBoxUpdater {
 
         let binary: BoxBinaryResponse = response
             .json()
-            .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
 
         Ok(binary.bytes)
@@ -1055,7 +1055,8 @@ impl TrackerBoxUpdater {
     async fn get_node_height(
         config: &TrackerBoxUpdateConfig,
     ) -> Result<u32, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = crate::bounded_http::node_http()
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
         let url = format!("{}/info", config.node_url.trim_end_matches('/'));
 
         let mut request = client.get(&url);
@@ -1063,14 +1064,14 @@ impl TrackerBoxUpdater {
             request = request.header("api_key", api_key);
         }
 
-        let response = request
-            .send()
+        let response = client
+            .execute(request)
             .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text_lossy();
             return Err(TrackerBoxUpdaterError::HttpError(format!(
                 "HTTP {} fetching node height: {}",
                 status, body
@@ -1079,7 +1080,6 @@ impl TrackerBoxUpdater {
 
         let body: serde_json::Value = response
             .json()
-            .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
 
         body["fullHeight"]
@@ -1095,7 +1095,8 @@ impl TrackerBoxUpdater {
     ) -> Result<serde_json::Value, TrackerBoxUpdaterError> {
         info!("Requesting node signature for tracker-box update");
 
-        let client = reqwest::Client::new();
+        let client = crate::bounded_http::node_http()
+            .map_err(|e| TrackerBoxUpdaterError::SigningFailed(e.to_string()))?;
         let url = format!(
             "{}/wallet/transaction/sign",
             config.node_url.trim_end_matches('/')
@@ -1106,13 +1107,12 @@ impl TrackerBoxUpdater {
             request = request.header("api_key", api_key);
         }
 
-        let response = request
-            .send()
+        let response = client
+            .execute(request)
             .await
             .map_err(|e| TrackerBoxUpdaterError::SigningFailed(e.to_string()))?;
 
         let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
         info!(status = %status, "Node signing request completed");
 
         if !status.is_success() {
@@ -1122,7 +1122,8 @@ impl TrackerBoxUpdater {
             )));
         }
 
-        serde_json::from_str(&body_text)
+        response
+            .json()
             .map_err(|e| TrackerBoxUpdaterError::SigningFailed(format!("JSON parse error: {}", e)))
     }
 
@@ -1134,7 +1135,8 @@ impl TrackerBoxUpdater {
     ) -> Result<String, TrackerBoxUpdaterError> {
         info!("Broadcasting signed tracker-box update transaction");
 
-        let client = reqwest::Client::new();
+        let client = crate::bounded_http::node_http()
+            .map_err(|e| TrackerBoxUpdaterError::BroadcastOutcomeUnknown(e.to_string()))?;
         let url = format!("{}/transactions", config.node_url.trim_end_matches('/'));
 
         let mut request = client.post(&url).json(signed_tx);
@@ -1142,14 +1144,14 @@ impl TrackerBoxUpdater {
             request = request.header("api_key", api_key);
         }
 
-        let response = request
-            .send()
+        let response = client
+            .execute(request)
             .await
             .map_err(|e| TrackerBoxUpdaterError::BroadcastOutcomeUnknown(e.to_string()))?;
 
         let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
         info!(status = %status, "Transaction broadcast request completed");
+        let body_text = response.text_lossy();
 
         Self::parse_broadcast_response(status, &body_text, expected_tx_id)
     }
@@ -1394,7 +1396,8 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         tx_id: &str,
     ) -> Result<bool, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = crate::bounded_http::node_http()
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
         let url = format!(
             "{}/blockchain/transaction/byId/{}",
             config.node_url.trim_end_matches('/'),
@@ -1406,8 +1409,8 @@ impl TrackerBoxUpdater {
             request = request.header("api_key", api_key);
         }
 
-        let response = request
-            .send()
+        let response = client
+            .execute(request)
             .await
             .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
 
@@ -1415,7 +1418,7 @@ impl TrackerBoxUpdater {
             200 => Ok(true),
             404 => Ok(false),
             status => {
-                let body = response.text().await.unwrap_or_default();
+                let body = response.text_lossy();
                 Err(TrackerBoxUpdaterError::HttpError(format!(
                     "HTTP {} checking transaction: {}",
                     status, body
