@@ -692,6 +692,244 @@ mod confirmation_state_tests {
     }
 
     #[test]
+    fn rollback_of_accepted_a_preserves_newer_pending_b_fail_closed() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1_000, 1))
+            .unwrap();
+        let root_a = manager.validated_state().unwrap().avl_root_digest;
+        let tx_a = "11".repeat(32);
+        manager.mark_notes_pending(root_a, &tx_a, 100).unwrap();
+        let effect_a = crate::chain_reconciliation::validated_tracker_effect_for_test(
+            "22".repeat(32),
+            tx_a.clone(),
+            "33".repeat(32),
+            "44".repeat(32),
+            101,
+            6,
+            root_a,
+        );
+        manager.confirm_validated_publication(&effect_a).unwrap();
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1_200, 2))
+            .unwrap();
+        let root_b = manager.validated_state().unwrap().avl_root_digest;
+        let tx_b = "55".repeat(32);
+        manager.mark_notes_pending(root_b, &tx_b, 108).unwrap();
+        let rollback_a = crate::chain_reconciliation::validated_rollback_for_test(&effect_a);
+        assert_eq!(
+            manager.rollback_validated_publication(&rollback_a).unwrap(),
+            1
+        );
+        assert_eq!(
+            manager.rollback_validated_publication(&rollback_a).unwrap(),
+            0
+        );
+
+        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmation.status, NoteConfirmationStatus::Pending);
+        assert_eq!(confirmation.confirmed_total_debt, None);
+        assert_eq!(confirmation.confirmed_tx_id, None);
+        assert_eq!(confirmation.pending_total_debt, Some(1_200));
+        assert_eq!(confirmation.pending_tx_id.as_deref(), Some(tx_b.as_str()));
+        assert_eq!(
+            manager.pending_publication().unwrap().unwrap().tx_id(),
+            tx_b
+        );
+        assert_eq!(confirmation.redeemable_amount(0), 0);
+    }
+
+    #[test]
+    fn restart_restores_historical_anchor_without_promoting_newer_local_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let unchanged_recipient = [2u8; 33];
+        let changed_recipient = [3u8; 33];
+        let later_recipient = [4u8; 33];
+        let effect_a;
+        let root_a;
+        let root_b;
+
+        {
+            let mut manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &unchanged_recipient, 1_000, 1),
+                )
+                .unwrap();
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &changed_recipient, 1_000, 1),
+                )
+                .unwrap();
+            root_a = manager.validated_state().unwrap().avl_root_digest;
+            let tx_a = "11".repeat(32);
+            manager.mark_notes_pending(root_a, &tx_a, 100).unwrap();
+            effect_a = crate::chain_reconciliation::validated_tracker_effect_for_test(
+                "22".repeat(32),
+                tx_a,
+                "33".repeat(32),
+                "44".repeat(32),
+                101,
+                6,
+                root_a,
+            );
+            manager.confirm_validated_publication(&effect_a).unwrap();
+
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &changed_recipient, 1_200, 2),
+                )
+                .unwrap();
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &later_recipient, 500, 3),
+                )
+                .unwrap();
+            root_b = manager.validated_state().unwrap().avl_root_digest;
+            assert_ne!(root_a, root_b);
+        }
+
+        let mut reopened = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Deny),
+        )
+        .unwrap();
+        assert!(reopened
+            .validated_confirmation_anchor()
+            .unwrap()
+            .unwrap()
+            .matches_validated_effect(&effect_a));
+        assert_eq!(reopened.validated_state().unwrap().avl_root_digest, root_b);
+
+        reopened.confirm_validated_publication(&effect_a).unwrap();
+        assert_eq!(reopened.validated_state().unwrap().avl_root_digest, root_b);
+        assert_eq!(
+            reopened
+                .get_confirmation(&issuer, &unchanged_recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::Confirmed
+        );
+        assert_eq!(
+            reopened
+                .get_confirmation(&issuer, &changed_recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::LocalOnly
+        );
+        assert_eq!(
+            reopened
+                .get_confirmation(&issuer, &later_recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::LocalOnly
+        );
+    }
+
+    #[test]
+    fn historical_confirmation_value_and_root_tampering_fail_independently() {
+        fn confirmed_manager() -> (TrackerStateManager, [u8; 33], [u8; 33], [u8; 33]) {
+            let mut manager = make_manager();
+            let issuer_secret = [1u8; 32];
+            let issuer = issuer_pubkey(&issuer_secret);
+            let recipient = [2u8; 33];
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1_000, 1))
+                .unwrap();
+            let root = manager.validated_state().unwrap().avl_root_digest;
+            let tx = "11".repeat(32);
+            manager.mark_notes_pending(root, &tx, 100).unwrap();
+            let effect = crate::chain_reconciliation::validated_tracker_effect_for_test(
+                "22".repeat(32),
+                tx,
+                "33".repeat(32),
+                "44".repeat(32),
+                101,
+                6,
+                root,
+            );
+            manager.confirm_validated_publication(&effect).unwrap();
+            (manager, issuer, recipient, root)
+        }
+
+        let (mut wrong_value, issuer, recipient, _) = confirmed_manager();
+        let key: [u8; 32] = crate::NoteKey::from_keys(&issuer, &recipient)
+            .to_bytes()
+            .try_into()
+            .unwrap();
+        let mut record = wrong_value.get_confirmation(&issuer, &recipient).unwrap();
+        record.confirmed_total_debt = Some(999);
+        wrong_value
+            .storage
+            .store_confirmation(&key, &record)
+            .unwrap();
+        wrong_value.confirmations.insert(key, record);
+        assert!(matches!(
+            wrong_value.validated_confirmation_anchor(),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("do not reproduce")
+        ));
+
+        let (mut wrong_root, issuer, recipient, root) = confirmed_manager();
+        let key: [u8; 32] = crate::NoteKey::from_keys(&issuer, &recipient)
+            .to_bytes()
+            .try_into()
+            .unwrap();
+        let mut record = wrong_root.get_confirmation(&issuer, &recipient).unwrap();
+        let mut mutated_root = root;
+        mutated_root[0] ^= 0x01;
+        record.confirmed_root = Some(mutated_root.to_vec());
+        wrong_root
+            .storage
+            .store_confirmation(&key, &record)
+            .unwrap();
+        wrong_root.confirmations.insert(key, record);
+        assert!(matches!(
+            wrong_root.validated_confirmation_anchor(),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("does not match the durable projection")
+        ));
+
+        let (mut missing_row, issuer, recipient, _) = confirmed_manager();
+        let key: [u8; 32] = crate::NoteKey::from_keys(&issuer, &recipient)
+            .to_bytes()
+            .try_into()
+            .unwrap();
+        missing_row
+            .storage
+            .remove_confirmation_for_test(&key)
+            .unwrap();
+        missing_row.confirmations.remove(&key);
+        assert!(matches!(
+            missing_row.validated_confirmation_anchor(),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("do not reproduce")
+        ));
+
+        let (orphan_rows, _, _, _) = confirmed_manager();
+        orphan_rows.storage.clear_confirmed_projection().unwrap();
+        assert!(orphan_rows.has_persisted_confirmation_history().unwrap());
+        assert!(orphan_rows
+            .validated_confirmation_anchor()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn revert_pending_notes_returns_to_local_only() {
         let mut manager = make_manager();
         let issuer_secret = [1u8; 32];
@@ -782,8 +1020,13 @@ mod confirmation_state_tests {
             status: NoteConfirmationStatus::Confirmed,
             confirmed_total_debt: Some(1000),
             pending_total_debt: None,
-            confirmed_box_id: None,
-            confirmed_height: None,
+            confirmed_box_id: Some("11".repeat(32)),
+            confirmed_height: Some(100),
+            confirmed_tx_id: Some("22".repeat(32)),
+            confirmed_block_id: Some("33".repeat(32)),
+            confirmed_successor_depth: Some(6),
+            confirmed_intent_id: Some("44".repeat(32)),
+            confirmed_root: Some(vec![0x55; 33]),
             pending_tx_id: None,
         };
 

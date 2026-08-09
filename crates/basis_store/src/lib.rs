@@ -1,6 +1,7 @@
 //! Core data structures for Basis tracker
 
 pub mod avl_tree;
+pub mod chain_reconciliation;
 
 pub mod contract_compiler;
 #[cfg(test)]
@@ -123,6 +124,21 @@ pub struct NoteConfirmation {
     pub confirmed_box_id: Option<String>,
     /// Height at which the confirmed tracker box was observed.
     pub confirmed_height: Option<u64>,
+    /// Exact transaction whose active-chain successor committed the value.
+    #[serde(default)]
+    pub confirmed_tx_id: Option<String>,
+    /// Exact active-chain block containing `confirmed_tx_id`.
+    #[serde(default)]
+    pub confirmed_block_id: Option<String>,
+    /// Successor depth accepted by the versioned application policy.
+    #[serde(default)]
+    pub confirmed_successor_depth: Option<u64>,
+    /// Private reconciliation-intent identity which produced this projection.
+    #[serde(default)]
+    pub confirmed_intent_id: Option<String>,
+    /// Exact tracker AVL root authenticated by the accepted successor.
+    #[serde(default)]
+    pub confirmed_root: Option<Vec<u8>>,
     /// Transaction ID of the in-flight tracker box update that covers this note.
     pub pending_tx_id: Option<String>,
 }
@@ -136,6 +152,11 @@ impl NoteConfirmation {
             pending_total_debt: None,
             confirmed_box_id: None,
             confirmed_height: None,
+            confirmed_tx_id: None,
+            confirmed_block_id: None,
+            confirmed_successor_depth: None,
+            confirmed_intent_id: None,
+            confirmed_root: None,
             pending_tx_id: None,
         }
     }
@@ -143,23 +164,127 @@ impl NoteConfirmation {
     /// Returns true when the note has a confirmed value that exceeds the
     /// `already_redeemed` amount, i.e. there is something left to redeem.
     pub fn is_redeemable(&self, already_redeemed: u64) -> bool {
-        self.confirmed_total_debt
-            .map(|debt| debt > already_redeemed)
-            .unwrap_or(false)
+        self.status == NoteConfirmationStatus::Confirmed
+            && self.confirmed_tx_id.is_some()
+            && self.confirmed_box_id.is_some()
+            && self.confirmed_block_id.is_some()
+            && self.confirmed_height.is_some()
+            && self.confirmed_successor_depth.is_some()
+            && self.confirmed_intent_id.is_some()
+            && self.confirmed_root.is_some()
+            && self
+                .confirmed_total_debt
+                .map(|debt| debt > already_redeemed)
+                .unwrap_or(false)
     }
 
     /// Returns the amount that can be redeemed right now:
     /// `max(0, confirmed_total_debt - already_redeemed)`.
     pub fn redeemable_amount(&self, already_redeemed: u64) -> u64 {
-        self.confirmed_total_debt
-            .map(|debt| debt.saturating_sub(already_redeemed))
-            .unwrap_or(0)
+        if self.is_redeemable(already_redeemed) {
+            self.confirmed_total_debt
+                .map(|debt| debt.saturating_sub(already_redeemed))
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    fn has_confirmed_history(&self) -> bool {
+        self.confirmed_total_debt.is_some()
+            || self.confirmed_box_id.is_some()
+            || self.confirmed_height.is_some()
+            || self.confirmed_tx_id.is_some()
+            || self.confirmed_block_id.is_some()
+            || self.confirmed_successor_depth.is_some()
+            || self.confirmed_intent_id.is_some()
+            || self.confirmed_root.is_some()
     }
 }
 
 impl Default for NoteConfirmation {
     fn default() -> Self {
         Self::local_only()
+    }
+}
+
+/// One complete historical tracker projection reconstructed from persisted
+/// per-note confirmation values and insertion order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedProjectionAnchor {
+    tx_id: String,
+    box_id: String,
+    block_id: String,
+    height: u64,
+    successor_depth: u64,
+    intent_id: String,
+    root: [u8; 33],
+}
+
+impl ConfirmedProjectionAnchor {
+    /// Construct a data-only startup projection. This value is not an
+    /// authorization ticket: the confirmed-chain journal must independently
+    /// contain an exact private validated effect before it is accepted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        tx_id: String,
+        box_id: String,
+        block_id: String,
+        height: u64,
+        successor_depth: u64,
+        intent_id: String,
+        root: [u8; 33],
+    ) -> Self {
+        Self {
+            tx_id,
+            box_id,
+            block_id,
+            height,
+            successor_depth,
+            intent_id,
+            root,
+        }
+    }
+
+    pub fn matches_validated_effect(
+        &self,
+        effect: &chain_reconciliation::ValidatedChainEffect,
+    ) -> bool {
+        effect.tracker_root() == Some(self.root)
+            && effect.tx_id() == self.tx_id
+            && effect.successor_box_id() == self.box_id
+            && effect.block_id() == self.block_id
+            && effect.inclusion_height() == self.height
+            && effect.successor_depth() == self.successor_depth
+            && effect.intent_id() == self.intent_id
+    }
+
+    pub fn root(&self) -> [u8; 33] {
+        self.root
+    }
+
+    pub fn tx_id(&self) -> &str {
+        &self.tx_id
+    }
+
+    pub fn box_id(&self) -> &str {
+        &self.box_id
+    }
+
+    pub fn block_id(&self) -> &str {
+        &self.block_id
+    }
+
+    pub fn height(&self) -> u64 {
+        self.height
+    }
+
+    pub fn successor_depth(&self) -> u64 {
+        self.successor_depth
+    }
+
+    pub fn intent_id(&self) -> &str {
+        &self.intent_id
     }
 }
 
@@ -942,11 +1067,12 @@ impl TrackerStateManager {
             });
             record.status = if durable_pending {
                 NoteConfirmationStatus::Pending
-            } else if Some(local_value) == record.confirmed_total_debt {
-                NoteConfirmationStatus::Confirmed
             } else {
                 record.pending_total_debt = None;
                 record.pending_tx_id = None;
+                // A persisted chain point is historical evidence until the
+                // confirmed-chain watcher revalidates its exact block against
+                // a fresh coherent tip after this restart.
                 NoteConfirmationStatus::LocalOnly
             };
 
@@ -984,6 +1110,96 @@ impl TrackerStateManager {
             );
         }
         self.confirmations.clone()
+    }
+
+    /// Reconstruct the latest historical on-chain projection from the
+    /// persisted confirmed values, never from the newer live AVL root.
+    pub fn validated_confirmation_anchor(
+        &self,
+    ) -> Result<Option<ConfirmedProjectionAnchor>, NoteError> {
+        self.ensure_healthy()?;
+        let persisted_anchor =
+            self.quarantine_on_storage_failure(self.storage.confirmed_projection())?;
+        let pending = self.quarantine_on_storage_failure(self.storage.pending_publication())?;
+
+        // An acceptance-ready replay may have persisted any prefix of the
+        // advisory per-note rows. While the exact BPA1 receipt is still armed,
+        // only the independent global projection receipt is stable enough to
+        // join to the journal; the sealed journal effect will repair the rows.
+        if pending.is_some() {
+            return Ok(persisted_anchor);
+        }
+        let Some(anchor) = persisted_anchor else {
+            // Rollback clears the global receipt before demoting advisory rows.
+            // A crash in that window is completed only by ApplyRollback from
+            // the journal, so stale row fragments are not an anchor by
+            // themselves.
+            return Ok(None);
+        };
+
+        let snapshot = self.validate_complete_snapshot_against_live()?;
+        let mut historical_tree = basis_trees::BasisAvlTree::new().map_err(|error| {
+            NoteError::StorageError(format!(
+                "failed to initialize historical confirmation tree: {error}"
+            ))
+        })?;
+
+        for (issuer_pubkey, note) in &snapshot.notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let Some(record) = self.confirmations.get(&key) else {
+                continue;
+            };
+            if !record.has_confirmed_history() {
+                continue;
+            }
+            let row_matches_anchor = record.confirmed_tx_id.as_deref() == Some(anchor.tx_id())
+                && record.confirmed_box_id.as_deref() == Some(anchor.box_id())
+                && record.confirmed_block_id.as_deref() == Some(anchor.block_id())
+                && record.confirmed_height == Some(anchor.height())
+                && record.confirmed_successor_depth == Some(anchor.successor_depth())
+                && record.confirmed_intent_id.as_deref() == Some(anchor.intent_id())
+                && record.confirmed_root.as_deref() == Some(anchor.root().as_slice());
+            if !row_matches_anchor {
+                return Err(NoteError::StorageError(
+                    "historical confirmation row does not match the durable projection anchor"
+                        .to_string(),
+                ));
+            }
+            let confirmed_total = record.confirmed_total_debt.ok_or_else(|| {
+                NoteError::StorageError("historical confirmation lacks debt value".to_string())
+            })?;
+            historical_tree
+                .update(
+                    NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey).to_bytes(),
+                    confirmed_total.to_be_bytes().to_vec(),
+                )
+                .map_err(|error| {
+                    NoteError::StorageError(format!(
+                        "historical confirmation AVL replay failed: {error}"
+                    ))
+                })?;
+        }
+
+        if historical_tree.root_digest() != anchor.root {
+            return Err(NoteError::StorageError(
+                "historical confirmation values do not reproduce the accepted AVL root".to_string(),
+            ));
+        }
+        Ok(Some(anchor))
+    }
+
+    /// Whether any durable BNS1 chain-accounting artifact exists, including a
+    /// partial crash prefix whose global projection receipt was already
+    /// cleared or not yet written. This is a bootstrap guard, not confirmation
+    /// authority.
+    pub fn has_persisted_confirmation_history(&self) -> Result<bool, NoteError> {
+        self.ensure_healthy()?;
+        let global = self.quarantine_on_storage_failure(self.storage.confirmed_projection())?;
+        Ok(global.is_some()
+            || self
+                .confirmations
+                .values()
+                .any(NoteConfirmation::has_confirmed_history))
     }
 
     /// Mark every note whose local value differs from its confirmed value as
@@ -1064,23 +1280,78 @@ impl TrackerStateManager {
 
     /// Confirm exactly the durable publication receipt observed on the active
     /// chain. A different transaction cannot release the publication fence.
-    pub fn confirm_pending_publication(
+    #[cfg(test)]
+    pub(crate) fn confirm_pending_publication(
         &mut self,
         tx_id: &str,
         box_id: &str,
         height: u64,
     ) -> Result<usize, NoteError> {
+        self.apply_confirmed_tracker_projection(
+            tx_id,
+            &"00".repeat(32),
+            box_id,
+            &"00".repeat(32),
+            height,
+            0,
+            None,
+        )
+    }
+
+    /// Apply only a private ticket which has already bound the signed
+    /// transaction to its exact predecessor, successor, R5 root, active block,
+    /// coherent tip and configured successor depth.
+    pub fn confirm_validated_publication(
+        &mut self,
+        effect: &chain_reconciliation::ValidatedChainEffect,
+    ) -> Result<usize, NoteError> {
+        let root = effect
+            .tracker_root()
+            .ok_or(NoteError::UnsupportedOperation)?;
+        self.apply_confirmed_tracker_projection(
+            effect.tx_id(),
+            effect.intent_id(),
+            effect.successor_box_id(),
+            effect.block_id(),
+            effect.inclusion_height(),
+            effect.successor_depth(),
+            Some(root),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_confirmed_tracker_projection(
+        &mut self,
+        tx_id: &str,
+        intent_id: &str,
+        box_id: &str,
+        block_id: &str,
+        height: u64,
+        successor_depth: u64,
+        expected_root: Option<[u8; 33]>,
+    ) -> Result<usize, NoteError> {
         self.ensure_healthy()?;
         let snapshot = self.validate_complete_snapshot_against_live()?;
-        let pending = self
-            .quarantine_on_storage_failure(self.storage.pending_publication())?
-            .ok_or(NoteError::PublicationLeaseMismatch)?;
-        if !pending.tx_id.eq_ignore_ascii_case(tx_id) {
+        let pending = self.quarantine_on_storage_failure(self.storage.pending_publication())?;
+        let Some(pending) = pending else {
+            let root = expected_root.ok_or(NoteError::PublicationLeaseMismatch)?;
+            return self.restore_confirmed_tracker_projection(
+                tx_id,
+                intent_id,
+                box_id,
+                block_id,
+                height,
+                successor_depth,
+                root,
+            );
+        };
+        if !pending.tx_id.eq_ignore_ascii_case(tx_id)
+            || pending.digest != snapshot.avl_root_digest
+            || expected_root.is_some_and(|root| root != snapshot.avl_root_digest)
+        {
             return Err(NoteError::PublicationLeaseMismatch);
         }
-        if pending.digest != snapshot.avl_root_digest {
-            return Err(NoteError::PublicationLeaseMismatch);
-        }
+        let confirmed_root = expected_root.unwrap_or(snapshot.avl_root_digest);
         let mut count = 0usize;
 
         // The publication receipt is persisted before the per-note advisory
@@ -1100,12 +1371,22 @@ impl TrackerStateManager {
                 || updated.pending_total_debt.is_some()
                 || updated.pending_tx_id.is_some()
                 || updated.confirmed_box_id.as_deref() != Some(box_id)
-                || updated.confirmed_height != Some(height);
+                || updated.confirmed_height != Some(height)
+                || updated.confirmed_tx_id.as_deref() != Some(tx_id)
+                || updated.confirmed_block_id.as_deref() != Some(block_id)
+                || updated.confirmed_successor_depth != Some(successor_depth)
+                || updated.confirmed_intent_id.as_deref() != Some(intent_id)
+                || updated.confirmed_root.as_deref() != Some(confirmed_root.as_slice());
             updated.confirmed_total_debt = Some(note.amount_collected);
             updated.pending_total_debt = None;
             updated.pending_tx_id = None;
             updated.confirmed_box_id = Some(box_id.to_string());
             updated.confirmed_height = Some(height);
+            updated.confirmed_tx_id = Some(tx_id.to_ascii_lowercase());
+            updated.confirmed_block_id = Some(block_id.to_ascii_lowercase());
+            updated.confirmed_successor_depth = Some(successor_depth);
+            updated.confirmed_intent_id = Some(intent_id.to_ascii_lowercase());
+            updated.confirmed_root = Some(confirmed_root.to_vec());
             updated.status = NoteConfirmationStatus::Confirmed;
             let storage_result = self.storage.store_confirmation(&key, &updated);
             self.quarantine_on_storage_failure(storage_result)?;
@@ -1119,8 +1400,138 @@ impl TrackerStateManager {
             box_id,
             height
         );
+        if expected_root.is_some() {
+            let anchor = ConfirmedProjectionAnchor::from_parts(
+                tx_id.to_ascii_lowercase(),
+                box_id.to_ascii_lowercase(),
+                block_id.to_ascii_lowercase(),
+                height,
+                successor_depth,
+                intent_id.to_ascii_lowercase(),
+                confirmed_root,
+            );
+            let storage_result = self.storage.store_confirmed_projection(&anchor);
+            self.quarantine_on_storage_failure(storage_result)?;
+        }
         let clear_result = self.storage.clear_pending_publication(tx_id);
         self.quarantine_on_storage_failure(clear_result)?;
+        Ok(count)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn restore_confirmed_tracker_projection(
+        &mut self,
+        tx_id: &str,
+        intent_id: &str,
+        box_id: &str,
+        block_id: &str,
+        height: u64,
+        successor_depth: u64,
+        root: [u8; 33],
+    ) -> Result<usize, NoteError> {
+        let anchor = self
+            .validated_confirmation_anchor()?
+            .ok_or(NoteError::PublicationLeaseMismatch)?;
+        if anchor.tx_id != tx_id
+            || anchor.intent_id != intent_id
+            || anchor.box_id != box_id
+            || anchor.block_id != block_id
+            || anchor.height != height
+            || anchor.successor_depth != successor_depth
+            || anchor.root != root
+        {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
+        let snapshot = self.validate_complete_snapshot_against_live()?;
+        let mut count = 0usize;
+        for (issuer_pubkey, note) in &snapshot.notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let Some(mut updated) = self.confirmations.get(&key).cloned() else {
+                continue;
+            };
+            if updated.confirmed_tx_id.as_deref() != Some(tx_id)
+                || updated.confirmed_box_id.as_deref() != Some(box_id)
+                || updated.confirmed_block_id.as_deref() != Some(block_id)
+                || updated.confirmed_height != Some(height)
+                || updated.confirmed_successor_depth != Some(successor_depth)
+                || updated.confirmed_intent_id.as_deref() != Some(intent_id)
+                || updated.confirmed_root.as_deref() != Some(root.as_slice())
+            {
+                continue;
+            }
+            let restored_status = if updated.confirmed_total_debt == Some(note.amount_collected) {
+                NoteConfirmationStatus::Confirmed
+            } else {
+                NoteConfirmationStatus::LocalOnly
+            };
+            let changed = updated.status != restored_status
+                || updated.pending_total_debt.is_some()
+                || updated.pending_tx_id.is_some();
+            updated.status = restored_status;
+            updated.pending_total_debt = None;
+            updated.pending_tx_id = None;
+            let storage_result = self.storage.store_confirmation(&key, &updated);
+            self.quarantine_on_storage_failure(storage_result)?;
+            self.confirmations.insert(key, updated);
+            count += usize::from(changed);
+        }
+        Ok(count)
+    }
+
+    /// Demote exactly the application projection whose accepted block has been
+    /// displaced at its original height. Duplicate rollback replay is a no-op.
+    pub fn rollback_validated_publication(
+        &mut self,
+        rollback: &chain_reconciliation::ValidatedRollback,
+    ) -> Result<usize, NoteError> {
+        self.ensure_healthy()?;
+        let projection = self.quarantine_on_storage_failure(self.storage.confirmed_projection())?;
+        if projection.as_ref().is_some_and(|anchor| {
+            anchor.tx_id() != rollback.tx_id()
+                || anchor.block_id() != rollback.removed_block_id()
+                || anchor.intent_id() != rollback.intent_id()
+        }) {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
+        // Remove the authoritative projection receipt before touching the
+        // advisory rows. A crash at any later point restarts with no accepted
+        // projection and the durable ApplyRollback ticket completes the
+        // demotion idempotently.
+        let clear_result = self.storage.clear_confirmed_projection();
+        self.quarantine_on_storage_failure(clear_result)?;
+        let notes = self.validate_complete_snapshot_against_live()?.notes;
+        let mut count = 0usize;
+        for (issuer_pubkey, note) in notes {
+            let key = Self::confirmation_key(&issuer_pubkey, &note.recipient_pubkey);
+            let Some(mut updated) = self.confirmations.get(&key).cloned() else {
+                continue;
+            };
+            let matches_removed_effect = updated.confirmed_tx_id.as_deref()
+                == Some(rollback.tx_id())
+                && updated.confirmed_block_id.as_deref() == Some(rollback.removed_block_id())
+                && updated.confirmed_intent_id.as_deref() == Some(rollback.intent_id());
+            if !matches_removed_effect {
+                continue;
+            }
+            updated.status =
+                if updated.pending_tx_id.is_some() && updated.pending_total_debt.is_some() {
+                    NoteConfirmationStatus::Pending
+                } else {
+                    NoteConfirmationStatus::LocalOnly
+                };
+            updated.confirmed_total_debt = None;
+            updated.confirmed_box_id = None;
+            updated.confirmed_height = None;
+            updated.confirmed_tx_id = None;
+            updated.confirmed_block_id = None;
+            updated.confirmed_successor_depth = None;
+            updated.confirmed_intent_id = None;
+            updated.confirmed_root = None;
+            let storage_result = self.storage.store_confirmation(&key, &updated);
+            self.quarantine_on_storage_failure(storage_result)?;
+            self.confirmations.insert(key, updated);
+            count += 1;
+        }
         Ok(count)
     }
 
@@ -1174,7 +1585,8 @@ impl TrackerStateManager {
     /// confirmed digest equals the current local digest, every note's local value
     /// is the confirmed value, so mark them all as `Confirmed` with the given box
     /// metadata. Returns the number of notes promoted to `Confirmed`.
-    pub fn reconcile_with_confirmed_digest(
+    #[cfg(test)]
+    pub(crate) fn reconcile_with_confirmed_digest(
         &mut self,
         confirmed_digest: &[u8; 33],
         box_id: &str,

@@ -122,7 +122,7 @@ mod integration_tests {
         // Check a non-existent transaction ID (64 hex chars)
         let fake_tx_id = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        let result = TrackerBoxUpdater::check_transaction_confirmation(&config, fake_tx_id).await;
+        let result = TrackerBoxUpdater::probe_transaction_observation(&config, fake_tx_id).await;
 
         // Should return an error since the node is unreachable
         assert!(result.is_err(), "Should error when node is unreachable");

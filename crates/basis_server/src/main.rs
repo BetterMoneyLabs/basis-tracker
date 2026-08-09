@@ -72,6 +72,9 @@ fn reject_while_publication_is_fenced(command: TrackerCommand) {
         | TrackerCommand::ConfirmPublication { response_tx, .. } => {
             let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
         }
+        TrackerCommand::RollbackPublication { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
+        }
         TrackerCommand::AbortPublication { response_tx, .. } => {
             let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
         }
@@ -128,14 +131,12 @@ fn handle_command_while_publication_is_fenced(
             Some(active_lease)
         }
         TrackerCommand::ConfirmPublication {
-            tx_id,
-            box_id,
-            height,
+            effect,
             response_tx,
         } => {
             let result = redemption_manager
                 .tracker
-                .confirm_pending_publication(&tx_id, &box_id, height);
+                .confirm_validated_publication(&effect);
             let confirmed = result.is_ok();
             if result.as_ref().is_err_and(|error| {
                 !matches!(error, basis_store::NoteError::PublicationLeaseMismatch)
@@ -148,6 +149,19 @@ fn handle_command_while_publication_is_fenced(
             } else {
                 Some(active_lease)
             }
+        }
+        TrackerCommand::RollbackPublication {
+            rollback,
+            response_tx,
+        } => {
+            let result = redemption_manager
+                .tracker
+                .rollback_validated_publication(&rollback);
+            if result.is_err() {
+                shared_state.quarantine_publication();
+            }
+            let _ = response_tx.send(result);
+            Some(active_lease)
         }
         TrackerCommand::AbortPublication { lease, response_tx } if lease == active_lease => {
             let result = redemption_manager
@@ -205,6 +219,10 @@ async fn main() {
                         basis_reserve_contract_p2s: "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT".to_string(),
                         tracker_nft_id: None,
                         allow_fresh_tracker_generation: false,
+                        confirmed_chain_min_successor_depth: None,
+                        confirmed_chain_max_evidence_age_ms: None,
+                        confirmed_chain_reorg_monitor_depth: None,
+                        allow_fresh_reconciliation_journal: false,
                         tracker_public_key: None,
                         tracker_secret_key: None,
                     },
@@ -457,6 +475,24 @@ async fn main() {
                 return;
             }
         };
+        let initial_confirmation = match tracker.validated_confirmation_anchor() {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        let confirmation_history_present = match tracker.has_persisted_confirmation_history() {
+            Ok(present) => present,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        shared_state_for_tracker.set_confirmation_history_present(confirmation_history_present);
+        shared_state_for_tracker.set_historical_confirmation(initial_confirmation);
         let mut active_publication =
             restore_pending_publication(initial_pending.as_ref(), &shared_state_for_tracker);
         let _ = init_tx.send(Ok((initial_root, initial_pending.clone())));
@@ -650,21 +686,14 @@ async fn main() {
                 TrackerCommand::BeginPublication {
                     tracker_nft_id,
                     observed_root,
-                    box_id,
-                    height,
+                    box_id: _,
+                    height: _,
                     response_tx,
                 } => {
                     let result = redemption_manager
                         .tracker
                         .validate_observed_generation(&tracker_nft_id, observed_root)
-                        .and_then(|_| {
-                            redemption_manager.tracker.reconcile_with_confirmed_digest(
-                                &observed_root,
-                                &box_id,
-                                height,
-                            )?;
-                            redemption_manager.tracker.validated_state()
-                        })
+                        .and_then(|_| redemption_manager.tracker.validated_state())
                         .and_then(|state| {
                             next_publication_id
                                 .checked_add(1)
@@ -688,9 +717,34 @@ async fn main() {
                         }
                     }
                 }
-                TrackerCommand::RecordPublicationAttempt { response_tx, .. }
-                | TrackerCommand::ConfirmPublication { response_tx, .. } => {
+                TrackerCommand::RecordPublicationAttempt { response_tx, .. } => {
                     let _ = response_tx.send(Err(basis_store::NoteError::PublicationLeaseMismatch));
+                }
+                TrackerCommand::ConfirmPublication {
+                    effect,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .confirm_validated_publication(&effect);
+                    if result.as_ref().is_err_and(|error| {
+                        !matches!(error, basis_store::NoteError::PublicationLeaseMismatch)
+                    }) {
+                        shared_state_for_tracker.quarantine_publication();
+                    }
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::RollbackPublication {
+                    rollback,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .rollback_validated_publication(&rollback);
+                    if result.is_err() {
+                        shared_state_for_tracker.quarantine_publication();
+                    }
+                    let _ = response_tx.send(result);
                 }
                 TrackerCommand::AbortPublication { response_tx, .. } => {
                     let _ = response_tx.send(Err(basis_store::NoteError::PublicationLeaseMismatch));
@@ -742,6 +796,15 @@ async fn main() {
         fee: config.transaction.fee,
         change_address: config.get_change_address().ok(),
         tracker_secret_key: config.tracker_secret_key_bytes(),
+        min_successor_depth: config.ergo.confirmed_chain_min_successor_depth.unwrap_or(6),
+        max_evidence_age_ms: config
+            .ergo
+            .confirmed_chain_max_evidence_age_ms
+            .unwrap_or(60_000),
+        reorg_monitor_depth: config.ergo.confirmed_chain_reorg_monitor_depth,
+        reconciliation_journal_path: data_dir.join("confirmed-chain"),
+        allow_fresh_reconciliation_journal: config.ergo.allow_fresh_reconciliation_journal,
+        ..TrackerBoxUpdateConfig::default()
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
@@ -1222,21 +1285,20 @@ mod publication_fence_tests {
             Ok(Err(basis_store::NoteError::PublicationInProgress))
         ));
 
-        let (wrong_tx, wrong_rx) = tokio::sync::oneshot::channel();
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        let restored_lease = active.unwrap();
         active = handle_command_while_publication_is_fenced(
-            active.unwrap(),
-            TrackerCommand::ConfirmPublication {
-                tx_id: "22".repeat(32),
-                box_id: "wrong-box".to_string(),
-                height: 200,
-                response_tx: wrong_tx,
+            restored_lease,
+            TrackerCommand::AbortPublication {
+                lease: restored_lease,
+                response_tx: abort_tx,
             },
             &mut redemption_manager,
             &restarted_shared,
         );
         assert!(matches!(
-            wrong_rx.await,
-            Ok(Err(basis_store::NoteError::PublicationLeaseMismatch))
+            abort_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
         ));
         assert!(active.is_some());
         assert!(restarted_shared.is_publication_healthy());
@@ -1253,38 +1315,7 @@ mod publication_fence_tests {
             TrackerBoxUpdater::restored_pending_transaction(&restarted_shared).unwrap(),
             Some((tx_id.clone(), digest))
         );
-
-        let (confirm_tx, confirm_rx) = tokio::sync::oneshot::channel();
-        active = handle_command_while_publication_is_fenced(
-            active.unwrap(),
-            TrackerCommand::ConfirmPublication {
-                tx_id: tx_id.clone(),
-                box_id: "confirmed-box".to_string(),
-                height: 201,
-                response_tx: confirm_tx,
-            },
-            &mut redemption_manager,
-            &restarted_shared,
-        );
-        assert!(matches!(confirm_rx.await, Ok(Ok(_))));
-        assert!(active.is_none());
-        assert!(redemption_manager
-            .tracker
-            .pending_publication()
-            .unwrap()
-            .is_none());
-
-        // The updater clears its shared pending cache only after the actor has
-        // durably accepted the exact confirmation.
-        restarted_shared.clear_pending();
-        let updater_pending = restarted_shared.get_pending();
-        assert!(updater_pending.tx_id.is_none());
-        assert!(updater_pending.digest.is_none());
-        assert!(updater_pending.submitted_height.is_none());
-        assert_eq!(
-            TrackerBoxUpdater::restored_pending_transaction(&restarted_shared).unwrap(),
-            None
-        );
+        assert!(active.is_some());
     }
 }
 

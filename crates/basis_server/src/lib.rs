@@ -174,9 +174,13 @@ pub enum TrackerCommand {
     /// Promote the durable attempt after active-chain confirmation and release
     /// the actor fence.
     ConfirmPublication {
-        tx_id: String,
-        box_id: String,
-        height: u64,
+        effect: basis_store::chain_reconciliation::ValidatedChainEffect,
+        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
+    },
+    /// Demote exactly one previously accepted publication after its block is
+    /// proven absent from the selected chain at the original height.
+    RollbackPublication {
+        rollback: basis_store::chain_reconciliation::ValidatedRollback,
         response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
     },
     /// Release an actor fence after a no-op or failed publication attempt.

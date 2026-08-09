@@ -60,6 +60,20 @@ pub struct ErgoConfig {
     /// directory for the configured tracker NFT. Defaults to false.
     #[serde(default)]
     pub allow_fresh_tracker_generation: bool,
+    /// Successor depth required before a tracker publication is accepted.
+    #[serde(default)]
+    pub confirmed_chain_min_successor_depth: Option<u64>,
+    /// Maximum age of one coherent confirmed-chain evidence snapshot.
+    #[serde(default)]
+    pub confirmed_chain_max_evidence_age_ms: Option<u64>,
+    /// Explicit reorg-monitoring horizon. Absence disables publication
+    /// fail-closed; maintainers must ratify this application policy.
+    #[serde(default)]
+    pub confirmed_chain_reorg_monitor_depth: Option<u64>,
+    /// One-shot approval to create the journal manifest only for a genuinely
+    /// history-free BNS1 generation.
+    #[serde(default)]
+    pub allow_fresh_reconciliation_journal: bool,
     /// Tracker server's public key for the Ergo blockchain (hex-encoded, 33 bytes for compressed format)
     pub tracker_public_key: Option<String>,
     /// Tracker server's secret key for local signing (hex-encoded, 32 bytes)
@@ -76,6 +90,22 @@ impl std::fmt::Debug for ErgoConfig {
                 &self.basis_reserve_contract_p2s,
             )
             .field("tracker_nft_id", &self.tracker_nft_id)
+            .field(
+                "confirmed_chain_min_successor_depth",
+                &self.confirmed_chain_min_successor_depth,
+            )
+            .field(
+                "confirmed_chain_max_evidence_age_ms",
+                &self.confirmed_chain_max_evidence_age_ms,
+            )
+            .field(
+                "confirmed_chain_reorg_monitor_depth",
+                &self.confirmed_chain_reorg_monitor_depth,
+            )
+            .field(
+                "allow_fresh_reconciliation_journal",
+                &self.allow_fresh_reconciliation_journal,
+            )
             .field("tracker_public_key", &self.tracker_public_key)
             .field(
                 "tracker_secret_key",
@@ -393,6 +423,10 @@ mod tests {
                 tracker_public_key: None,
                 tracker_secret_key: Some(tracker_sentinel.clone()),
                 allow_fresh_tracker_generation: false,
+                confirmed_chain_min_successor_depth: None,
+                confirmed_chain_max_evidence_age_ms: None,
+                confirmed_chain_reorg_monitor_depth: None,
+                allow_fresh_reconciliation_journal: false,
             },
             transaction: TransactionConfig {
                 fee: 1_000_000,
@@ -424,6 +458,10 @@ mod tests {
                 tracker_public_key: None,
                 tracker_secret_key: None,
                 allow_fresh_tracker_generation: false,
+                confirmed_chain_min_successor_depth: None,
+                confirmed_chain_max_evidence_age_ms: None,
+                confirmed_chain_reorg_monitor_depth: None,
+                allow_fresh_reconciliation_journal: false,
             },
             transaction: TransactionConfig {
                 fee: 1_000_000,
@@ -459,6 +497,10 @@ mod tests {
                 basis_reserve_contract_p2s: "test".to_string(),
                 tracker_nft_id: None,
                 allow_fresh_tracker_generation: false,
+                confirmed_chain_min_successor_depth: None,
+                confirmed_chain_max_evidence_age_ms: None,
+                confirmed_chain_reorg_monitor_depth: None,
+                allow_fresh_reconciliation_journal: false,
                 tracker_public_key: Some(
                     "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
                         .to_string(),
