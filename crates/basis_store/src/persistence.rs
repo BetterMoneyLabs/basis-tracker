@@ -2,7 +2,8 @@
 
 use crate::{
     blake2b256_hash, reserve_tracker::ExtendedReserveInfo, FreshGenerationApproval, IouNote,
-    NoteConfirmation, NoteError, NoteKey, PubKey, TrackerBoxInfo, TrackerGenerationConfig,
+    NoteConfirmation, NoteError, NoteKey, PendingTrackerPublication, PubKey, TrackerBoxInfo,
+    TrackerGenerationConfig,
 };
 use fjall::{Config, Keyspace, PartitionCreateOptions, PersistMode};
 use fs2::FileExt;
@@ -19,14 +20,19 @@ const LEGACY_NOTE_STATE_MAGIC: &[u8; 4] = b"BNS1";
 const NOTE_STATE_KEY: &[u8] = b"note_state_v2";
 const NOTE_SCHEMA_KEY: &[u8] = b"note_schema_v2";
 const NOTE_GENERATION_KEY: &[u8] = b"tracker_generation_v1";
+const PENDING_PUBLICATION_KEY: &[u8] = b"pending_publication_v1";
 const GENERATION_MAGIC: &[u8; 4] = b"BNG1";
+const PENDING_PUBLICATION_MAGIC: &[u8; 4] = b"BPA1";
 const SNAPSHOT_CHECKSUM_DOMAIN: &[u8] = b"basis-note-state-snapshot-v2";
 const GENERATION_CHECKSUM_DOMAIN: &[u8] = b"basis-tracker-generation-v1";
+const PENDING_PUBLICATION_CHECKSUM_DOMAIN: &[u8] = b"basis-pending-publication-v1";
 const NOTE_STATE_HEADER_LEN: usize = 4 + 4 + 33 + 32;
 const NOTE_RECORD_LEN: usize = 33 + 8 + 8 + 8 + 65 + 33;
 const MAX_NOTE_COUNT: usize = 50_000;
 const GENERATION_MANIFEST_BODY_LEN: usize = 4 + 32 + 33 + 1 + 33;
 const GENERATION_MANIFEST_LEN: usize = GENERATION_MANIFEST_BODY_LEN + 32;
+const PENDING_PUBLICATION_BODY_LEN: usize = 4 + 33 + 32 + 8;
+const PENDING_PUBLICATION_LEN: usize = PENDING_PUBLICATION_BODY_LEN + 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredNoteState {
@@ -298,6 +304,18 @@ impl NoteStorage {
             .schema_partition
             .get(NOTE_GENERATION_KEY)
             .map_err(|e| NoteError::StorageError(format!("Failed to read generation: {}", e)))?;
+        let pending_publication =
+            self.schema_partition
+                .get(PENDING_PUBLICATION_KEY)
+                .map_err(|e| {
+                    NoteError::StorageError(format!("Failed to read pending publication: {}", e))
+                })?;
+        if let Some(bytes) = pending_publication.as_ref() {
+            // Validate before any initialization write. A malformed or orphaned
+            // external-effect receipt is never permission to synthesize a new
+            // empty generation over potentially published state.
+            Self::deserialize_pending_publication(bytes.as_ref())?;
+        }
 
         match (schema, state, stored_generation) {
             (Some(schema), Some(_), Some(generation_bytes)) => {
@@ -311,6 +329,12 @@ impl NoteStorage {
                 self.validate_generation_manifest(generation, generation_bytes.as_ref())
             }
             (None, None, None) => {
+                if pending_publication.is_some() {
+                    return Err(NoteError::GenerationMismatch(
+                        "Pending tracker publication exists without a complete authoritative generation"
+                            .to_string(),
+                    ));
+                }
                 if generation.fresh_generation != FreshGenerationApproval::Approve {
                     return Err(NoteError::GenerationBindingRequired(
                         "A new data directory requires explicit fresh tracker generation approval"
@@ -431,6 +455,19 @@ impl NoteStorage {
 
     #[cfg(test)]
     pub(crate) fn persist_for_test(&self) -> Result<(), NoteError> {
+        self.keyspace
+            .persist(PersistMode::SyncData)
+            .map_err(|e| NoteError::StorageError(e.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_confirmation_for_test(
+        &self,
+        key_bytes: &[u8; 32],
+    ) -> Result<(), NoteError> {
+        self.confirmations_partition
+            .remove(key_bytes)
+            .map_err(|e| NoteError::StorageError(e.to_string()))?;
         self.keyspace
             .persist(PersistMode::SyncData)
             .map_err(|e| NoteError::StorageError(e.to_string()))
@@ -772,6 +809,136 @@ impl NoteStorage {
             tracker_nft_id,
             bootstrap_root,
             anchor_root,
+        })
+    }
+
+    fn serialize_pending_publication(
+        publication: &PendingTrackerPublication,
+    ) -> Result<Vec<u8>, NoteError> {
+        let tx_id = hex::decode(&publication.tx_id).map_err(|_| NoteError::InvalidTransactionId)?;
+        if tx_id.len() != 32 {
+            return Err(NoteError::InvalidTransactionId);
+        }
+        let mut bytes = Vec::with_capacity(PENDING_PUBLICATION_LEN);
+        bytes.extend_from_slice(PENDING_PUBLICATION_MAGIC);
+        bytes.extend_from_slice(&publication.digest);
+        bytes.extend_from_slice(&tx_id);
+        bytes.extend_from_slice(&publication.submitted_height.to_be_bytes());
+        let mut checksum_input =
+            Vec::with_capacity(PENDING_PUBLICATION_CHECKSUM_DOMAIN.len() + bytes.len());
+        checksum_input.extend_from_slice(PENDING_PUBLICATION_CHECKSUM_DOMAIN);
+        checksum_input.extend_from_slice(&bytes);
+        bytes.extend_from_slice(&blake2b256_hash(&checksum_input));
+        Ok(bytes)
+    }
+
+    fn deserialize_pending_publication(
+        bytes: &[u8],
+    ) -> Result<PendingTrackerPublication, NoteError> {
+        if bytes.len() != PENDING_PUBLICATION_LEN || &bytes[..4] != PENDING_PUBLICATION_MAGIC {
+            return Err(NoteError::StorageError(
+                "Malformed pending tracker publication".to_string(),
+            ));
+        }
+        let mut checksum_input = Vec::with_capacity(
+            PENDING_PUBLICATION_CHECKSUM_DOMAIN.len() + PENDING_PUBLICATION_BODY_LEN,
+        );
+        checksum_input.extend_from_slice(PENDING_PUBLICATION_CHECKSUM_DOMAIN);
+        checksum_input.extend_from_slice(&bytes[..PENDING_PUBLICATION_BODY_LEN]);
+        if bytes[PENDING_PUBLICATION_BODY_LEN..] != blake2b256_hash(&checksum_input) {
+            return Err(NoteError::StorageError(
+                "Pending tracker publication checksum mismatch".to_string(),
+            ));
+        }
+        let mut digest = [0u8; 33];
+        digest.copy_from_slice(&bytes[4..37]);
+        let tx_id = hex::encode(&bytes[37..69]);
+        let submitted_height =
+            u64::from_be_bytes(bytes[69..77].try_into().map_err(|_| {
+                NoteError::StorageError("Malformed publication height".to_string())
+            })?);
+        Ok(PendingTrackerPublication {
+            digest,
+            tx_id,
+            submitted_height,
+        })
+    }
+
+    pub(crate) fn pending_publication(
+        &self,
+    ) -> Result<Option<PendingTrackerPublication>, NoteError> {
+        self.schema_partition
+            .get(PENDING_PUBLICATION_KEY)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to read pending publication: {}", e))
+            })?
+            .map(|bytes| Self::deserialize_pending_publication(bytes.as_ref()))
+            .transpose()
+    }
+
+    pub(crate) fn store_pending_publication(
+        &self,
+        publication: &PendingTrackerPublication,
+    ) -> Result<(), NoteError> {
+        if publication.tx_id.len() != 64
+            || hex::decode(&publication.tx_id)
+                .map(|bytes| bytes.len() != 32)
+                .unwrap_or(true)
+        {
+            return Err(NoteError::InvalidTransactionId);
+        }
+        let _guard = self.write_lock.lock().map_err(|_| {
+            NoteError::StorageError("Note storage write lock is poisoned".to_string())
+        })?;
+        if let Some(existing) = self.pending_publication()? {
+            return if existing == *publication {
+                Ok(())
+            } else {
+                Err(NoteError::PublicationInProgress)
+            };
+        }
+        self.schema_partition
+            .insert(
+                PENDING_PUBLICATION_KEY,
+                Self::serialize_pending_publication(publication)?,
+            )
+            .map_err(|e| {
+                NoteError::StorageOutcomeUnknown(format!(
+                    "Pending publication write outcome is unknown: {}",
+                    e
+                ))
+            })?;
+        self.keyspace.persist(PersistMode::SyncData).map_err(|e| {
+            NoteError::StorageOutcomeUnknown(format!(
+                "Pending publication durability is unknown: {}",
+                e
+            ))
+        })
+    }
+
+    pub(crate) fn clear_pending_publication(&self, tx_id: &str) -> Result<(), NoteError> {
+        let _guard = self.write_lock.lock().map_err(|_| {
+            NoteError::StorageError("Note storage write lock is poisoned".to_string())
+        })?;
+        let existing = self
+            .pending_publication()?
+            .ok_or(NoteError::PublicationLeaseMismatch)?;
+        if !existing.tx_id.eq_ignore_ascii_case(tx_id) {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
+        self.schema_partition
+            .remove(PENDING_PUBLICATION_KEY)
+            .map_err(|e| {
+                NoteError::StorageOutcomeUnknown(format!(
+                    "Pending publication removal outcome is unknown: {}",
+                    e
+                ))
+            })?;
+        self.keyspace.persist(PersistMode::SyncData).map_err(|e| {
+            NoteError::StorageOutcomeUnknown(format!(
+                "Pending publication removal durability is unknown: {}",
+                e
+            ))
         })
     }
 

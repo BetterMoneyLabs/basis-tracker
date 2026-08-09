@@ -166,6 +166,29 @@ impl Default for NoteConfirmation {
 /// Note key (32 bytes) used to index confirmation records.
 pub type NoteKeyBytes = [u8; 32];
 
+/// Durable identity of one tracker-root publication that may have crossed the
+/// node admission boundary but is not yet confirmed on the active chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTrackerPublication {
+    digest: [u8; 33],
+    tx_id: String,
+    submitted_height: u64,
+}
+
+impl PendingTrackerPublication {
+    pub fn digest(&self) -> [u8; 33] {
+        self.digest
+    }
+
+    pub fn tx_id(&self) -> &str {
+        &self.tx_id
+    }
+
+    pub fn submitted_height(&self) -> u64 {
+        self.submitted_height
+    }
+}
+
 /// Reserve information for a public key
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReserveInfo {
@@ -314,6 +337,8 @@ pub enum NoteError {
     PublicationInProgress,
     /// A publication completion/abort did not present the actor's active lease.
     PublicationLeaseMismatch,
+    /// A node transaction identity is not exactly 32 bytes of hexadecimal.
+    InvalidTransactionId,
     UnsupportedOperation,
 }
 
@@ -890,14 +915,15 @@ impl TrackerStateManager {
 
     /// Rebuild the in-memory confirmation map from storage. Called on startup.
     ///
-    /// On-chain state may have advanced while the server was offline, so we keep
-    /// the persisted `confirmed_total_debt` metadata but recompute the status from
-    /// the current local value and clear any pending in-flight state (pending
-    /// transactions do not survive a restart).
+    /// A pending publication survives restart only when its checksummed durable
+    /// receipt and every per-note pending tx id agree. Stale per-note metadata
+    /// without that receipt is demoted to `LocalOnly`.
     pub fn rebuild_confirmations(&mut self) -> Result<(), NoteError> {
         self.ensure_healthy()?;
         let notes = self.validate_complete_snapshot_against_live()?.notes;
         let stored = self.quarantine_on_storage_failure(self.storage.get_all_confirmations())?;
+        let pending_publication =
+            self.quarantine_on_storage_failure(self.storage.pending_publication())?;
         let stored_map: std::collections::HashMap<NoteKeyBytes, NoteConfirmation> =
             stored.into_iter().collect();
         let mut rebuilt = std::collections::HashMap::with_capacity(notes.len());
@@ -906,14 +932,21 @@ impl TrackerStateManager {
             let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
             let mut record = stored_map.get(&key).cloned().unwrap_or_default();
 
-            // Pending state does not survive a restart.
-            record.pending_total_debt = None;
-            record.pending_tx_id = None;
-
             let local_value = note.amount_collected;
-            record.status = if Some(local_value) == record.confirmed_total_debt {
+            let durable_pending = pending_publication.as_ref().is_some_and(|pending| {
+                record.pending_total_debt == Some(local_value)
+                    && record
+                        .pending_tx_id
+                        .as_deref()
+                        .is_some_and(|tx_id| tx_id.eq_ignore_ascii_case(&pending.tx_id))
+            });
+            record.status = if durable_pending {
+                NoteConfirmationStatus::Pending
+            } else if Some(local_value) == record.confirmed_total_debt {
                 NoteConfirmationStatus::Confirmed
             } else {
+                record.pending_total_debt = None;
+                record.pending_tx_id = None;
                 NoteConfirmationStatus::LocalOnly
             };
 
@@ -963,8 +996,18 @@ impl TrackerStateManager {
         submitted_height: u64,
     ) -> Result<usize, NoteError> {
         self.ensure_healthy()?;
-        let notes = self.validate_complete_snapshot_against_live()?.notes;
-        let _ = (digest, submitted_height);
+        let snapshot = self.validate_complete_snapshot_against_live()?;
+        if snapshot.avl_root_digest != digest {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
+        let publication = PendingTrackerPublication {
+            digest,
+            tx_id: tx_id.to_ascii_lowercase(),
+            submitted_height,
+        };
+        let storage_result = self.storage.store_pending_publication(&publication);
+        self.quarantine_on_storage_failure(storage_result)?;
+        let notes = snapshot.notes;
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
@@ -996,36 +1039,78 @@ impl TrackerStateManager {
         Ok(count)
     }
 
+    /// Return the checksummed external-effect receipt, if a tracker publication
+    /// is still awaiting active-chain reconciliation.
+    pub fn pending_publication(&self) -> Result<Option<PendingTrackerPublication>, NoteError> {
+        self.ensure_healthy()?;
+        self.validate_complete_snapshot_against_live()?;
+        self.quarantine_on_storage_failure(self.storage.pending_publication())
+    }
+
     /// Promote every `Pending` note to `Confirmed`, copying the pending value to
     /// the confirmed value and recording the confirming box metadata. Returns the
     /// number of notes transitioned to `Confirmed`.
-    pub fn confirm_pending_notes(&mut self, box_id: &str, height: u64) -> Result<usize, NoteError> {
+    #[cfg(test)]
+    pub(crate) fn confirm_pending_notes(
+        &mut self,
+        box_id: &str,
+        height: u64,
+    ) -> Result<usize, NoteError> {
+        let pending = self
+            .pending_publication()?
+            .ok_or(NoteError::PublicationLeaseMismatch)?;
+        self.confirm_pending_publication(&pending.tx_id, box_id, height)
+    }
+
+    /// Confirm exactly the durable publication receipt observed on the active
+    /// chain. A different transaction cannot release the publication fence.
+    pub fn confirm_pending_publication(
+        &mut self,
+        tx_id: &str,
+        box_id: &str,
+        height: u64,
+    ) -> Result<usize, NoteError> {
         self.ensure_healthy()?;
-        self.validate_complete_snapshot_against_live()?;
-        let keys: Vec<NoteKeyBytes> = self.confirmations.keys().copied().collect();
+        let snapshot = self.validate_complete_snapshot_against_live()?;
+        let pending = self
+            .quarantine_on_storage_failure(self.storage.pending_publication())?
+            .ok_or(NoteError::PublicationLeaseMismatch)?;
+        if !pending.tx_id.eq_ignore_ascii_case(tx_id) {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
+        if pending.digest != snapshot.avl_root_digest {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
         let mut count = 0usize;
 
-        for key in keys {
-            let should_confirm = self
+        // The publication receipt is persisted before the per-note advisory
+        // records. A crash can therefore leave any prefix of those records on
+        // disk. The confirmed root authenticates the complete current snapshot,
+        // so replay confirmation from that snapshot instead of trusting which
+        // advisory rows happened to reach storage before the crash.
+        for (issuer_pubkey, note) in &snapshot.notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let mut updated = self
                 .confirmations
                 .get(&key)
-                .map(|c| c.status == NoteConfirmationStatus::Pending)
-                .unwrap_or(false);
-
-            if should_confirm {
-                if let Some(mut updated) = self.confirmations.get(&key).cloned() {
-                    updated.confirmed_total_debt = updated.pending_total_debt;
-                    updated.pending_total_debt = None;
-                    updated.pending_tx_id = None;
-                    updated.confirmed_box_id = Some(box_id.to_string());
-                    updated.confirmed_height = Some(height);
-                    updated.status = NoteConfirmationStatus::Confirmed;
-                    let storage_result = self.storage.store_confirmation(&key, &updated);
-                    self.quarantine_on_storage_failure(storage_result)?;
-                    self.confirmations.insert(key, updated);
-                    count += 1;
-                }
-            }
+                .cloned()
+                .unwrap_or_else(NoteConfirmation::local_only);
+            let changed = updated.confirmed_total_debt != Some(note.amount_collected)
+                || updated.status != NoteConfirmationStatus::Confirmed
+                || updated.pending_total_debt.is_some()
+                || updated.pending_tx_id.is_some()
+                || updated.confirmed_box_id.as_deref() != Some(box_id)
+                || updated.confirmed_height != Some(height);
+            updated.confirmed_total_debt = Some(note.amount_collected);
+            updated.pending_total_debt = None;
+            updated.pending_tx_id = None;
+            updated.confirmed_box_id = Some(box_id.to_string());
+            updated.confirmed_height = Some(height);
+            updated.status = NoteConfirmationStatus::Confirmed;
+            let storage_result = self.storage.store_confirmation(&key, &updated);
+            self.quarantine_on_storage_failure(storage_result)?;
+            self.confirmations.insert(key, updated);
+            count += usize::from(changed);
         }
 
         tracing::info!(
@@ -1034,6 +1119,8 @@ impl TrackerStateManager {
             box_id,
             height
         );
+        let clear_result = self.storage.clear_pending_publication(tx_id);
+        self.quarantine_on_storage_failure(clear_result)?;
         Ok(count)
     }
 
@@ -1041,7 +1128,8 @@ impl TrackerStateManager {
     /// transaction is dropped or rejected). Clears pending metadata and recomputes
     /// the status from the local value versus the confirmed value. Returns the
     /// number of notes reverted.
-    pub fn revert_pending_notes(&mut self) -> Result<usize, NoteError> {
+    #[cfg(test)]
+    pub(crate) fn revert_pending_notes(&mut self) -> Result<usize, NoteError> {
         self.ensure_healthy()?;
         let notes = self.validate_complete_snapshot_against_live()?.notes;
         let mut count = 0usize;
@@ -1073,6 +1161,12 @@ impl TrackerStateManager {
         }
 
         tracing::info!("Reverted {} pending notes to local state", count);
+        if let Some(pending) =
+            self.quarantine_on_storage_failure(self.storage.pending_publication())?
+        {
+            let clear_result = self.storage.clear_pending_publication(&pending.tx_id);
+            self.quarantine_on_storage_failure(clear_result)?;
+        }
         Ok(count)
     }
 

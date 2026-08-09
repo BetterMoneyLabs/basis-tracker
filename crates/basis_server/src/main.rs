@@ -65,19 +65,11 @@ fn reject_while_publication_is_fenced(command: TrackerCommand) {
         TrackerCommand::GetAllConfirmations { response_tx } => {
             let _ = response_tx.send(Err(NoteError::PublicationInProgress));
         }
-        TrackerCommand::MarkNotesPending { response_tx, .. }
-        | TrackerCommand::ConfirmPendingNotes { response_tx, .. }
-        | TrackerCommand::RevertPendingNotes { response_tx }
-        | TrackerCommand::ReconcileWithConfirmedDigest { response_tx, .. } => {
-            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
-        }
-        TrackerCommand::ValidateObservedGeneration { response_tx, .. } => {
-            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
-        }
         TrackerCommand::BeginPublication { response_tx, .. } => {
             let _ = response_tx.send(Err(NoteError::PublicationInProgress));
         }
-        TrackerCommand::CompletePublication { response_tx, .. } => {
+        TrackerCommand::RecordPublicationAttempt { response_tx, .. }
+        | TrackerCommand::ConfirmPublication { response_tx, .. } => {
             let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
         }
         TrackerCommand::AbortPublication { response_tx, .. } => {
@@ -360,14 +352,26 @@ async fn main() {
                 return;
             }
         };
-        let _ = init_tx.send(Ok(initial_root));
+        let initial_pending = match tracker.pending_publication() {
+            Ok(pending) => pending,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        let _ = init_tx.send(Ok((initial_root, initial_pending.clone())));
         tracing::info!(
             "Tracker thread initialized with AVL root digest: {}",
             hex::encode(&initial_root)
         );
 
         let mut redemption_manager = RedemptionManager::new(tracker);
-        let mut active_publication: Option<PublicationLease> = None;
+        let mut active_publication: Option<PublicationLease> =
+            initial_pending.as_ref().map(|pending| PublicationLease {
+                id: 0,
+                digest: pending.digest(),
+            });
         let mut next_publication_id = 1u64;
 
         while let Some(cmd) = rx.blocking_recv() {
@@ -375,7 +379,7 @@ async fn main() {
 
             if let Some(active_lease) = active_publication {
                 match cmd {
-                    TrackerCommand::CompletePublication {
+                    TrackerCommand::RecordPublicationAttempt {
                         lease,
                         tx_id,
                         submitted_height,
@@ -400,14 +404,42 @@ async fn main() {
                         if result.is_err() {
                             shared_state_for_tracker.quarantine_publication();
                         }
-                        active_publication = None;
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ConfirmPublication {
+                        tx_id,
+                        box_id,
+                        height,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager
+                            .tracker
+                            .confirm_pending_publication(&tx_id, &box_id, height);
+                        if result.is_ok() {
+                            active_publication = None;
+                        } else {
+                            shared_state_for_tracker.quarantine_publication();
+                        }
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::AbortPublication { lease, response_tx }
                         if lease == active_lease =>
                     {
-                        active_publication = None;
-                        let _ = response_tx.send(Ok(()));
+                        let result =
+                            redemption_manager
+                                .tracker
+                                .pending_publication()
+                                .and_then(|pending| {
+                                    if pending.is_some() {
+                                        Err(basis_store::NoteError::PublicationInProgress)
+                                    } else {
+                                        Ok(())
+                                    }
+                                });
+                        if result.is_ok() {
+                            active_publication = None;
+                        }
+                        let _ = response_tx.send(result);
                     }
                     other => reject_while_publication_is_fenced(other),
                 }
@@ -580,54 +612,6 @@ async fn main() {
                         .map(|_| redemption_manager.tracker.all_confirmations());
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::MarkNotesPending {
-                    digest,
-                    tx_id,
-                    submitted_height,
-                    response_tx,
-                } => {
-                    let result = redemption_manager.tracker.mark_notes_pending(
-                        digest,
-                        &tx_id,
-                        submitted_height,
-                    );
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::ConfirmPendingNotes {
-                    box_id,
-                    height,
-                    response_tx,
-                } => {
-                    let result = redemption_manager
-                        .tracker
-                        .confirm_pending_notes(&box_id, height);
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::RevertPendingNotes { response_tx } => {
-                    let result = redemption_manager.tracker.revert_pending_notes();
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::ReconcileWithConfirmedDigest {
-                    digest,
-                    box_id,
-                    height,
-                    response_tx,
-                } => {
-                    let result = redemption_manager
-                        .tracker
-                        .reconcile_with_confirmed_digest(&digest, &box_id, height);
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::ValidateObservedGeneration {
-                    tracker_nft_id,
-                    observed_root,
-                    response_tx,
-                } => {
-                    let result = redemption_manager
-                        .tracker
-                        .validate_observed_generation(&tracker_nft_id, observed_root);
-                    let _ = response_tx.send(result);
-                }
                 TrackerCommand::BeginPublication {
                     tracker_nft_id,
                     observed_root,
@@ -669,7 +653,8 @@ async fn main() {
                         }
                     }
                 }
-                TrackerCommand::CompletePublication { response_tx, .. } => {
+                TrackerCommand::RecordPublicationAttempt { response_tx, .. }
+                | TrackerCommand::ConfirmPublication { response_tx, .. } => {
                     let _ = response_tx.send(Err(basis_store::NoteError::PublicationLeaseMismatch));
                 }
                 TrackerCommand::AbortPublication { response_tx, .. } => {
@@ -680,7 +665,15 @@ async fn main() {
     });
 
     match init_rx.await {
-        Ok(Ok(_)) => {}
+        Ok(Ok((_root, pending))) => {
+            if let Some(pending) = pending {
+                shared_tracker_state_for_updater.set_pending(
+                    pending.digest(),
+                    pending.tx_id().to_string(),
+                    pending.submitted_height(),
+                );
+            }
+        }
         Ok(Err(error)) => {
             shared_tracker_state_for_updater.quarantine_publication();
             tracing::error!(error, "Tracker state initialization failed closed");

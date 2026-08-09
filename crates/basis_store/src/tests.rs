@@ -567,13 +567,104 @@ mod confirmation_state_tests {
         manager.add_note(&issuer, &note).unwrap();
 
         let digest = manager.get_state().avl_root_digest;
-        let count = manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        let tx_id = "11".repeat(32);
+        let count = manager.mark_notes_pending(digest, &tx_id, 100).unwrap();
         assert_eq!(count, 1);
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::Pending);
         assert_eq!(confirmation.pending_total_debt, Some(1000));
-        assert_eq!(confirmation.pending_tx_id, Some("tx123".to_string()));
+        assert_eq!(confirmation.pending_tx_id, Some(tx_id));
+    }
+
+    #[test]
+    fn invalid_publication_tx_id_is_rejected_without_quarantining_state() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .unwrap();
+        let digest = manager.validated_state().unwrap().avl_root_digest;
+
+        assert!(matches!(
+            manager.mark_notes_pending(digest, "not-a-transaction-id", 100),
+            Err(crate::NoteError::InvalidTransactionId)
+        ));
+        assert!(manager.is_healthy());
+        assert!(manager.pending_publication().unwrap().is_none());
+        assert_eq!(
+            manager
+                .get_confirmation(&issuer, &recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::LocalOnly
+        );
+    }
+
+    #[test]
+    fn pending_publication_survives_restart_and_binds_confirmation_tx_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let tx_id = "11".repeat(32);
+        let digest;
+
+        {
+            let mut manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+                .unwrap();
+            digest = manager.validated_state().unwrap().avl_root_digest;
+            manager.mark_notes_pending(digest, &tx_id, 100).unwrap();
+            let key: [u8; 32] = crate::NoteKey::from_keys(&issuer, &recipient)
+                .to_bytes()
+                .try_into()
+                .unwrap();
+            // Model a crash after the durable external-effect receipt but
+            // before this advisory confirmation row reached storage.
+            manager.storage.remove_confirmation_for_test(&key).unwrap();
+        }
+
+        let mut reopened = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Deny),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.pending_publication().unwrap(),
+            Some(crate::PendingTrackerPublication {
+                digest,
+                tx_id: tx_id.clone(),
+                submitted_height: 100,
+            })
+        );
+        assert_eq!(
+            reopened
+                .get_confirmation(&issuer, &recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::LocalOnly
+        );
+        assert!(matches!(
+            reopened.confirm_pending_publication(&"22".repeat(32), "box123", 200),
+            Err(crate::NoteError::PublicationLeaseMismatch)
+        ));
+        reopened
+            .confirm_pending_publication(&tx_id, "box123", 200)
+            .unwrap();
+        assert!(reopened.pending_publication().unwrap().is_none());
+        let confirmed = reopened.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmed.status, NoteConfirmationStatus::Confirmed);
+        assert_eq!(confirmed.confirmed_total_debt, Some(1000));
+        assert_eq!(confirmed.confirmed_box_id.as_deref(), Some("box123"));
+        assert_eq!(confirmed.confirmed_height, Some(200));
     }
 
     #[test]
@@ -586,7 +677,9 @@ mod confirmation_state_tests {
 
         manager.add_note(&issuer, &note).unwrap();
         let digest = manager.get_state().avl_root_digest;
-        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
         manager.confirm_pending_notes("box123", 200).unwrap();
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
@@ -608,7 +701,9 @@ mod confirmation_state_tests {
 
         manager.add_note(&issuer, &note).unwrap();
         let digest = manager.get_state().avl_root_digest;
-        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
         manager.revert_pending_notes().unwrap();
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
@@ -660,7 +755,7 @@ mod confirmation_state_tests {
     }
 
     #[test]
-    fn rebuild_confirmations_clears_pending_state() {
+    fn rebuild_confirmations_preserves_durable_pending_state() {
         let mut manager = make_manager();
         let issuer_secret = [1u8; 32];
         let issuer = issuer_pubkey(&issuer_secret);
@@ -669,14 +764,16 @@ mod confirmation_state_tests {
 
         manager.add_note(&issuer, &note).unwrap();
         let digest = manager.get_state().avl_root_digest;
-        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
 
         manager.rebuild_confirmations().unwrap();
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
-        assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
-        assert_eq!(confirmation.pending_total_debt, None);
-        assert_eq!(confirmation.pending_tx_id, None);
+        assert_eq!(confirmation.status, NoteConfirmationStatus::Pending);
+        assert_eq!(confirmation.pending_total_debt, Some(1000));
+        assert_eq!(confirmation.pending_tx_id, Some("11".repeat(32)));
     }
 
     #[test]
@@ -754,7 +851,9 @@ mod confirmation_state_tests {
             .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
             .unwrap();
         let digest = manager.get_state().avl_root_digest;
-        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
         manager.confirm_pending_notes("box123", 200).unwrap();
 
         assert_eq!(
@@ -776,7 +875,9 @@ mod confirmation_state_tests {
             .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
             .unwrap();
         let digest = manager.get_state().avl_root_digest;
-        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
         manager.confirm_pending_notes("box123", 200).unwrap();
 
         assert!(matches!(
@@ -1423,6 +1524,63 @@ mod confirmation_state_tests {
                 .unwrap()
                 .map(|value| value.to_vec()),
         )
+    }
+
+    fn raw_pending_publication(path: &std::path::Path) -> Option<Vec<u8>> {
+        let keyspace = fjall::Config::new(path).open().unwrap();
+        let schema = keyspace
+            .open_partition("note_schema", fjall::PartitionCreateOptions::default())
+            .unwrap();
+        schema
+            .get(b"pending_publication_v1")
+            .unwrap()
+            .map(|value| value.to_vec())
+    }
+
+    #[test]
+    fn orphan_pending_publication_cannot_initialize_a_fresh_generation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let mut manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            let issuer_secret = [1u8; 32];
+            let issuer = issuer_pubkey(&issuer_secret);
+            let recipient = [2u8; 33];
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+                .unwrap();
+            let digest = manager.validated_state().unwrap().avl_root_digest;
+            manager
+                .mark_notes_pending(digest, &"11".repeat(32), 100)
+                .unwrap();
+            manager.storage.remove_state_for_test().unwrap();
+            manager.storage.remove_schema_for_test().unwrap();
+            manager.storage.remove_generation_for_test().unwrap();
+            manager.storage.persist_for_test().unwrap();
+        }
+        let storage_path = temp_dir.path().join("notes");
+        let before_layout = raw_note_layout(&storage_path);
+        let before_pending = raw_pending_publication(&storage_path);
+        assert!(
+            before_layout.0.is_none()
+                && before_layout.1.is_none()
+                && before_layout.2.is_none()
+                && before_pending.is_some()
+        );
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve)
+            ),
+            Err(crate::NoteError::GenerationMismatch(message))
+                if message.contains("Pending tracker publication")
+        ));
+        assert_eq!(raw_note_layout(&storage_path), before_layout);
+        assert_eq!(raw_pending_publication(&storage_path), before_pending);
     }
 
     #[test]

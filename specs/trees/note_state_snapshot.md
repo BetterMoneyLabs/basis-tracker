@@ -49,6 +49,28 @@ Quarantine also flips a one-way health signal shared with the tracker-box
 updater. A cached pre-failure root is not publishable after the manager enters
 an unknown or structurally invalid state.
 
+## External publication receipt
+
+Before a signed tracker-box transaction crosses the node broadcast boundary,
+the actor stores a checksummed `BPA1` receipt containing the exact local root,
+the 32-byte transaction id derived from the signed transaction, and the
+submission height. The publication lease remains held after that write. A
+success response releases nothing unless its transaction id exactly matches the
+locally derived id.
+
+An HTTP error, malformed response, mismatched id, process crash, or partial
+per-note confirmation write leaves the receipt durable. Startup restores the
+same fence and polls only that transaction id. Once the exact transaction is
+observed, confirmation is replayed idempotently from the complete authenticated
+snapshot and the receipt is cleared only after every advisory confirmation row
+is durable. An orphaned or malformed receipt blocks fresh-generation
+initialization without rewriting the authoritative records.
+
+This receipt prevents a restart from authorizing a competing tracker
+publication after an indeterminate broadcast. It does not establish active-chain
+lineage, confirmation depth, or reorg safety; those remain gates of the
+confirmed-chain reconciler.
+
 ## Recovery
 
 Startup parses the entire authoritative value with exact length and count

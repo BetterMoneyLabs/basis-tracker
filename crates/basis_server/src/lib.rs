@@ -154,37 +154,6 @@ pub enum TrackerCommand {
             >,
         >,
     },
-    /// Mark all currently-local notes as pending for an in-flight update tx.
-    MarkNotesPending {
-        digest: [u8; 33],
-        tx_id: String,
-        submitted_height: u64,
-        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
-    },
-    /// Promote all pending notes to confirmed after an update tx confirms.
-    ConfirmPendingNotes {
-        box_id: String,
-        height: u64,
-        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
-    },
-    /// Revert all pending notes back to local state (update tx dropped/rejected).
-    RevertPendingNotes {
-        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
-    },
-    /// Reconcile confirmation records with an observed on-chain digest.
-    ReconcileWithConfirmedDigest {
-        digest: [u8; 33],
-        box_id: String,
-        height: u64,
-        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
-    },
-    /// Validate or durably anchor the first observed root for the configured
-    /// tracker NFT before the updater may publish a successor commitment.
-    ValidateObservedGeneration {
-        tracker_nft_id: [u8; 32],
-        observed_root: [u8; 33],
-        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
-    },
     /// Validate and reconcile an observed tracker generation, then freeze the
     /// actor until the external publication attempt is resolved.
     BeginPublication {
@@ -194,12 +163,20 @@ pub enum TrackerCommand {
         height: u64,
         response_tx: tokio::sync::oneshot::Sender<Result<PublicationLease, basis_store::NoteError>>,
     },
-    /// Bind a submitted transaction to the exact leased digest and release the
-    /// actor fence.
-    CompletePublication {
+    /// Durably bind the exact transaction identity before the broadcast request
+    /// crosses the node boundary. The actor fence remains held.
+    RecordPublicationAttempt {
         lease: PublicationLease,
         tx_id: String,
         submitted_height: u64,
+        response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
+    },
+    /// Promote the durable attempt after active-chain confirmation and release
+    /// the actor fence.
+    ConfirmPublication {
+        tx_id: String,
+        box_id: String,
+        height: u64,
         response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
     },
     /// Release an actor fence after a no-op or failed publication attempt.

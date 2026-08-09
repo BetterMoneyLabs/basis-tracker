@@ -392,6 +392,7 @@ mod tests {
                 tracker_nft_id: None,
                 tracker_public_key: None,
                 tracker_secret_key: Some(tracker_sentinel.clone()),
+                allow_fresh_tracker_generation: false,
             },
             transaction: TransactionConfig {
                 fee: 1_000_000,
@@ -422,6 +423,7 @@ mod tests {
                 tracker_nft_id: None,
                 tracker_public_key: None,
                 tracker_secret_key: None,
+                allow_fresh_tracker_generation: false,
             },
             transaction: TransactionConfig {
                 fee: 1_000_000,

@@ -4,6 +4,7 @@
 //! of the tracker box every 10 minutes by submitting transactions to the Ergo blockchain via the
 //! node's /wallet/transaction/sign and /transactions endpoints.
 
+use ergo_lib::chain::transaction::Transaction;
 use std::sync::{Arc, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
@@ -428,6 +429,11 @@ fn vlq_encode(mut value: usize) -> Vec<u8> {
 /// Tracker box updater service
 pub struct TrackerBoxUpdater;
 
+struct PreparedTrackerUpdate {
+    signed_tx: serde_json::Value,
+    tx_id: String,
+}
+
 impl TrackerBoxUpdater {
     /// Start the tracker box updater service as an async background task
     pub async fn start(
@@ -439,7 +445,17 @@ impl TrackerBoxUpdater {
         let mut ticker = interval(Duration::from_secs(config.update_interval_seconds));
 
         let mut last_submitted_digest: Option<[u8; 33]> = None;
-        let mut pending_tx: Option<(String, [u8; 33])> = None;
+        let pending = shared_state.get_pending();
+        let mut pending_tx = match (pending.tx_id, pending.digest, pending.submitted_height) {
+            (Some(tx_id), Some(digest), Some(_)) => Some((tx_id, digest)),
+            (None, None, None) => None,
+            _ => {
+                shared_state.quarantine_publication();
+                return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
+                    "incomplete durable publication receipt at updater startup".to_string(),
+                ));
+            }
+        };
 
         info!(
             "Tracker box updater started with {}s interval",
@@ -467,28 +483,28 @@ impl TrackerBoxUpdater {
                 match Self::check_transaction_confirmation(&config, tx_id).await {
                     Ok(true) => {
                         info!("Transaction {} confirmed on chain. Update complete.", tx_id);
-                        last_submitted_digest = Some(expected_digest);
 
                         // Look up the confirming box to record its height/id.
                         let (box_id, height) = Self::fetch_tracker_box_summary(&config, tx_id)
                             .await
                             .unwrap_or_else(|_| (tx_id.clone(), 0));
-
-                        shared_state.set_confirmed(expected_digest, box_id.clone(), height);
+                        if !Self::confirm_publication(
+                            &cmd_tx,
+                            tx_id.clone(),
+                            box_id.clone(),
+                            height,
+                        )
+                        .await
+                        {
+                            shared_state.quarantine_publication();
+                            return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
+                                "confirmed publication was not durably reconciled".to_string(),
+                            ));
+                        }
+                        last_submitted_digest = Some(expected_digest);
+                        shared_state.set_confirmed(expected_digest, box_id, height);
                         shared_state.clear_pending();
                         pending_tx = None;
-
-                        if let Some(ref tx) = cmd_tx {
-                            let (rtx, rrx) = tokio::sync::oneshot::channel();
-                            let _ = tx
-                                .send(crate::TrackerCommand::ConfirmPendingNotes {
-                                    box_id,
-                                    height,
-                                    response_tx: rtx,
-                                })
-                                .await;
-                            let _ = rrx.await;
-                        }
                     }
                     Ok(false) => {
                         info!(
@@ -643,7 +659,7 @@ impl TrackerBoxUpdater {
                 }
             }
 
-            match Self::submit_tracker_update(
+            let prepared = match Self::prepare_tracker_update(
                 &tracker_nft_id,
                 &config,
                 &tracker_box,
@@ -652,42 +668,66 @@ impl TrackerBoxUpdater {
             )
             .await
             {
-                Ok(tx_id) => {
-                    info!(
-                        "Tracker box update submitted. Transaction ID: {}, Box ID: {}. Waiting for confirmation...",
-                        tx_id, tracker_box.box_id
-                    );
-
-                    let submitted_height = Self::get_node_height(&config).await.unwrap_or(0) as u64;
-                    if !Self::complete_publication(
-                        &cmd_tx,
-                        publication_lease,
-                        tx_id.clone(),
-                        submitted_height,
-                    )
-                    .await
-                    {
-                        shared_state.quarantine_publication();
-                        return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
-                            "broadcast succeeded but actor receipt was not durably accepted"
-                                .to_string(),
-                        ));
-                    }
-                    shared_state.set_pending(current_digest, tx_id.clone(), submitted_height);
-                    pending_tx = Some((tx_id, current_digest));
-                }
+                Ok(prepared) => prepared,
                 Err(e) => {
-                    error!("Failed to submit tracker box update: {}", e);
-                    if matches!(e, TrackerBoxUpdaterError::BroadcastOutcomeUnknown(_)) {
-                        shared_state.quarantine_publication();
-                        return Err(e);
-                    }
+                    error!("Failed to prepare tracker box update: {}", e);
                     if !Self::abort_publication(&cmd_tx, publication_lease).await {
                         shared_state.quarantine_publication();
                         return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
-                            "tracker actor did not release a failed publication fence".to_string(),
+                            "tracker actor did not release an unbroadcast publication fence"
+                                .to_string(),
                         ));
                     }
+                    continue;
+                }
+            };
+
+            let submitted_height = Self::get_node_height(&config)
+                .await
+                .map(|height| height as u64)
+                .unwrap_or(tracker_box.creation_height as u64);
+            if !Self::record_publication_attempt(
+                &cmd_tx,
+                publication_lease,
+                prepared.tx_id.clone(),
+                submitted_height,
+            )
+            .await
+            {
+                shared_state.quarantine_publication();
+                return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
+                    "tracker actor did not durably record the transaction before broadcast"
+                        .to_string(),
+                ));
+            }
+
+            shared_state.set_pending(current_digest, prepared.tx_id.clone(), submitted_height);
+            pending_tx = Some((prepared.tx_id.clone(), current_digest));
+
+            match Self::broadcast_transaction(
+                &config,
+                &prepared.signed_tx,
+                &prepared.tx_id,
+            )
+            .await
+            {
+                Ok(tx_id) => info!(
+                    "Tracker box update submitted. Transaction ID: {}, Box ID: {}. Waiting for confirmation...",
+                    tx_id, tracker_box.box_id
+                ),
+                Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(error)) => {
+                    // The expected tx id was durably recorded before the
+                    // request. Keep the actor fenced and poll that exact id on
+                    // the next cycle (and after restart).
+                    warn!(
+                        error = %error,
+                        tx_id = %prepared.tx_id,
+                        "Tracker broadcast outcome is unknown; retaining durable publication fence"
+                    );
+                }
+                Err(error) => {
+                    shared_state.quarantine_publication();
+                    return Err(error);
                 }
             }
         }
@@ -711,7 +751,7 @@ impl TrackerBoxUpdater {
         matches!(response_rx.await, Ok(Ok(())))
     }
 
-    async fn complete_publication(
+    async fn record_publication_attempt(
         cmd_tx: &Option<tokio::sync::mpsc::Sender<crate::TrackerCommand>>,
         lease: crate::PublicationLease,
         tx_id: String,
@@ -722,10 +762,35 @@ impl TrackerBoxUpdater {
         };
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         if tx
-            .send(crate::TrackerCommand::CompletePublication {
+            .send(crate::TrackerCommand::RecordPublicationAttempt {
                 lease,
                 tx_id,
                 submitted_height,
+                response_tx,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        matches!(response_rx.await, Ok(Ok(_)))
+    }
+
+    async fn confirm_publication(
+        cmd_tx: &Option<tokio::sync::mpsc::Sender<crate::TrackerCommand>>,
+        tx_id: String,
+        box_id: String,
+        height: u64,
+    ) -> bool {
+        let Some(tx) = cmd_tx else {
+            return false;
+        };
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        if tx
+            .send(crate::TrackerCommand::ConfirmPublication {
+                tx_id,
+                box_id,
+                height,
                 response_tx,
             })
             .await
@@ -1058,6 +1123,7 @@ impl TrackerBoxUpdater {
     async fn broadcast_transaction(
         config: &TrackerBoxUpdateConfig,
         signed_tx: &serde_json::Value,
+        expected_tx_id: &str,
     ) -> Result<String, TrackerBoxUpdaterError> {
         info!("Broadcasting signed tracker-box update transaction");
 
@@ -1078,12 +1144,13 @@ impl TrackerBoxUpdater {
         let body_text = response.text().await.unwrap_or_default();
         info!(status = %status, "Transaction broadcast request completed");
 
-        Self::parse_broadcast_response(status, &body_text)
+        Self::parse_broadcast_response(status, &body_text, expected_tx_id)
     }
 
     fn parse_broadcast_response(
         status: reqwest::StatusCode,
         body_text: &str,
+        expected_tx_id: &str,
     ) -> Result<String, TrackerBoxUpdaterError> {
         // Once the request crossed the network boundary, an HTTP error does not
         // prove the node failed before admission. Keep the actor fence intact
@@ -1100,28 +1167,62 @@ impl TrackerBoxUpdater {
             TrackerBoxUpdaterError::BroadcastOutcomeUnknown(format!("JSON parse error: {}", e))
         })?;
 
-        // The Ergo node's /transactions endpoint returns the tx id as a plain
-        // JSON string (e.g. "abc..."), not an object. Handle both forms.
-        match body {
-            serde_json::Value::String(tx_id) => Ok(tx_id),
+        // The Ergo node normally returns a JSON string, while some compatible
+        // nodes wrap the id. Neither shape is authoritative until it exactly
+        // matches the transaction id computed from the signed transaction.
+        let returned = match body {
+            serde_json::Value::String(tx_id) => Some(tx_id),
             _ => body["id"]
                 .as_str()
                 .or_else(|| body["txId"].as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| {
-                    TrackerBoxUpdaterError::BroadcastOutcomeUnknown("Missing tx id".to_string())
-                }),
+                .map(str::to_owned),
         }
+        .ok_or_else(|| {
+            TrackerBoxUpdaterError::BroadcastOutcomeUnknown("Missing tx id".to_string())
+        })?;
+        let returned_is_tx_id = returned.len() == 64
+            && hex::decode(&returned)
+                .map(|bytes| bytes.len() == 32)
+                .unwrap_or(false);
+        if !returned_is_tx_id || !returned.eq_ignore_ascii_case(expected_tx_id) {
+            return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
+                "Node response did not match the locally derived transaction id".to_string(),
+            ));
+        }
+        Ok(expected_tx_id.to_ascii_lowercase())
+    }
+
+    fn signed_transaction_id(
+        signed_tx: &serde_json::Value,
+    ) -> Result<String, TrackerBoxUpdaterError> {
+        let transaction: Transaction =
+            serde_json::from_value(signed_tx.clone()).map_err(|error| {
+                TrackerBoxUpdaterError::SerializationError(format!(
+                    "Signed transaction JSON is invalid: {}",
+                    error
+                ))
+            })?;
+        let tx_id = transaction.id().to_string();
+        if tx_id.len() != 64
+            || hex::decode(&tx_id)
+                .map(|bytes| bytes.len() != 32)
+                .unwrap_or(true)
+        {
+            return Err(TrackerBoxUpdaterError::SerializationError(
+                "Derived transaction id is not 32 bytes".to_string(),
+            ));
+        }
+        Ok(tx_id)
     }
 
     /// Submit a tracker box update transaction via /wallet/transaction/sign
-    async fn submit_tracker_update(
+    async fn prepare_tracker_update(
         tracker_nft_id: &str,
         config: &TrackerBoxUpdateConfig,
         tracker_box: &ErgoBoxApi,
         tracker_pubkey: &[u8; 33],
         avl_root_digest: &[u8; 33],
-    ) -> Result<String, TrackerBoxUpdaterError> {
+    ) -> Result<PreparedTrackerUpdate, TrackerBoxUpdaterError> {
         let mut r4_bytes = vec![0x07u8];
         r4_bytes.extend_from_slice(tracker_pubkey);
         let r4_value = hex::encode(&r4_bytes);
@@ -1255,9 +1356,8 @@ impl TrackerBoxUpdater {
         });
 
         let signed_tx = Self::sign_transaction(config, unsigned_tx).await?;
-        let tx_id = Self::broadcast_transaction(config, &signed_tx).await?;
-
-        Ok(tx_id)
+        let tx_id = Self::signed_transaction_id(&signed_tx)?;
+        Ok(PreparedTrackerUpdate { signed_tx, tx_id })
     }
 
     /// Check if a transaction has been confirmed on-chain by querying the blockchain API
@@ -1354,10 +1454,12 @@ mod publication_health_tests {
 
     #[test]
     fn non_success_broadcast_response_has_unknown_outcome() {
+        let expected = "11".repeat(32);
         assert!(matches!(
             TrackerBoxUpdater::parse_broadcast_response(
                 reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                "node failed"
+                "node failed",
+                &expected,
             ),
             Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(_))
         ));
@@ -1365,9 +1467,40 @@ mod publication_health_tests {
 
     #[test]
     fn success_without_transaction_id_has_unknown_outcome() {
+        let expected = "11".repeat(32);
         assert!(matches!(
-            TrackerBoxUpdater::parse_broadcast_response(reqwest::StatusCode::OK, "{}"),
+            TrackerBoxUpdater::parse_broadcast_response(reqwest::StatusCode::OK, "{}", &expected,),
             Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(_))
         ));
+    }
+
+    #[test]
+    fn empty_or_mismatched_transaction_id_never_releases_publication() {
+        let expected = "11".repeat(32);
+        for response in ["\"\"".to_string(), format!("\"{}\"", "22".repeat(32))] {
+            assert!(matches!(
+                TrackerBoxUpdater::parse_broadcast_response(
+                    reqwest::StatusCode::OK,
+                    &response,
+                    &expected,
+                ),
+                Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn matching_32_byte_transaction_id_is_accepted() {
+        let expected = "11".repeat(32);
+        let response = format!("\"{}\"", expected);
+        assert_eq!(
+            TrackerBoxUpdater::parse_broadcast_response(
+                reqwest::StatusCode::OK,
+                &response,
+                &expected,
+            )
+            .unwrap(),
+            expected
+        );
     }
 }

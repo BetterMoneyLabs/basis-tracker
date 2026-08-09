@@ -327,6 +327,7 @@ pub async fn create_note(
                 NoteError::PublicationLeaseMismatch => {
                     "Tracker publication lease mismatch".to_string()
                 }
+                NoteError::InvalidTransactionId => "Invalid transaction id".to_string(),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -471,6 +472,7 @@ pub async fn get_notes_by_issuer(
                 NoteError::PublicationLeaseMismatch => {
                     "Tracker publication lease mismatch".to_string()
                 }
+                NoteError::InvalidTransactionId => "Invalid transaction id".to_string(),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -601,6 +603,7 @@ pub async fn get_notes_by_recipient(
                 NoteError::PublicationLeaseMismatch => {
                     "Tracker publication lease mismatch".to_string()
                 }
+                NoteError::InvalidTransactionId => "Invalid transaction id".to_string(),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -768,6 +771,7 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::PublicationLeaseMismatch => {
                     "Tracker publication lease mismatch".to_string()
                 }
+                NoteError::InvalidTransactionId => "Invalid transaction id".to_string(),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (
@@ -879,6 +883,7 @@ pub async fn get_all_notes(
                 NoteError::PublicationLeaseMismatch => {
                     "Tracker publication lease mismatch".to_string()
                 }
+                NoteError::InvalidTransactionId => "Invalid transaction id".to_string(),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
             };
             (

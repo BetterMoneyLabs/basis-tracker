@@ -195,33 +195,6 @@ mod cors_tests {
                         let _ =
                             response_tx.send(Ok(redemption_manager.tracker.all_confirmations()));
                     }
-                    TrackerCommand::MarkNotesPending {
-                        digest,
-                        tx_id,
-                        submitted_height,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.tracker.mark_notes_pending(
-                            digest,
-                            &tx_id,
-                            submitted_height,
-                        );
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::ConfirmPendingNotes {
-                        box_id,
-                        height,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager
-                            .tracker
-                            .confirm_pending_notes(&box_id, height);
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::RevertPendingNotes { response_tx } => {
-                        let result = redemption_manager.tracker.revert_pending_notes();
-                        let _ = response_tx.send(result);
-                    }
                     TrackerCommand::GetReserveStateDigest { response_tx } => {
                         let digest = redemption_manager.tracker.reserve_state_digest();
                         let _ = response_tx.send(digest);
@@ -229,31 +202,11 @@ mod cors_tests {
                     TrackerCommand::GetValidatedState { response_tx } => {
                         let _ = response_tx.send(redemption_manager.tracker.validated_state());
                     }
-                    TrackerCommand::ReconcileWithConfirmedDigest {
-                        digest,
-                        box_id,
-                        height,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager
-                            .tracker
-                            .reconcile_with_confirmed_digest(&digest, &box_id, height);
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::ValidateObservedGeneration {
-                        tracker_nft_id,
-                        observed_root,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager
-                            .tracker
-                            .validate_observed_generation(&tracker_nft_id, observed_root);
-                        let _ = response_tx.send(result);
-                    }
                     TrackerCommand::BeginPublication { response_tx, .. } => {
                         let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
                     }
-                    TrackerCommand::CompletePublication { response_tx, .. } => {
+                    TrackerCommand::RecordPublicationAttempt { response_tx, .. }
+                    | TrackerCommand::ConfirmPublication { response_tx, .. } => {
                         let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
                     }
                     TrackerCommand::AbortPublication { response_tx, .. } => {

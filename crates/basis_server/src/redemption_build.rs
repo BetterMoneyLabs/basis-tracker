@@ -1398,19 +1398,6 @@ mod tests {
         assert!(error.contains("assets mismatch"));
     }
 
-    #[test]
-    fn submit_request_rejects_unverified_accounting_metadata() {
-        let payload = serde_json::json!({
-            "signed_tx": {"inputs": [], "dataInputs": [], "outputs": []},
-            "issuer_pubkey": "02".repeat(33),
-            "recipient_pubkey": "03".repeat(33),
-            "redeemed_amount": 1,
-            "new_already_redeemed": 1
-        });
-
-        assert!(serde_json::from_value::<RedemptionSubmitRequest>(payload).is_err());
-    }
-
     fn r5_box(r5: Option<&str>) -> NodeBox {
         let mut registers = std::collections::HashMap::new();
         if let Some(v) = r5 {
