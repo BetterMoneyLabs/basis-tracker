@@ -389,8 +389,6 @@ async fn main() {
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
     tokio::task::spawn_blocking(move || {
-        use basis_store::RedemptionManager;
-
         tracing::debug!("Tracker thread started");
         let tracker = match basis_store::TrackerStateManager::try_new_with_publication_health(
             &data_dir_for_tracker_thread,
@@ -451,7 +449,7 @@ async fn main() {
                     response_tx,
                 } => {
                     // Get mutable access to the tracker for adding a note
-                    let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                    let result = tracker.add_note(&issuer_pubkey, &note);
 
                     // Update shared state for tracker box updater if successful
                     if result.is_ok() {
@@ -466,7 +464,7 @@ async fn main() {
                     issuer_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.get_issuer_notes(&issuer_pubkey);
+                    let result = tracker.get_issuer_notes(&issuer_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetProjectedIssuerGrossDebt {
@@ -486,18 +484,14 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .get_recipient_notes(&recipient_pubkey);
+                    let result = tracker.get_recipient_notes(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNotesByRecipientWithIssuer {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .get_recipient_notes_with_issuer(&recipient_pubkey);
+                    let result = tracker.get_recipient_notes_with_issuer(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -505,14 +499,13 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
+                    let result = tracker
                         .lookup_note(&issuer_pubkey, &recipient_pubkey)
                         .map(Some);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNotes { response_tx } => {
-                    let result = redemption_manager.tracker.get_all_notes_with_issuer();
+                    let result = tracker.get_all_notes_with_issuer();
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GenerateProof {
@@ -587,7 +580,7 @@ async fn main() {
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveStateDigest { response_tx } => {
-                    let digest = redemption_manager.tracker.reserve_state_digest();
+                    let digest = tracker.reserve_state_digest();
                     let _ = response_tx.send(digest);
                 }
                 TrackerCommand::GetValidatedState { response_tx } => {
@@ -598,9 +591,7 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = Ok(redemption_manager
-                        .tracker
-                        .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                    let result = Ok(tracker.get_confirmation(&issuer_pubkey, &recipient_pubkey));
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetAllConfirmations { response_tx } => {

@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod api_tests {
-    use basis_store::{IouNote, RedemptionRequest};
+    use basis_store::IouNote;
 
     #[test]
     fn test_note_creation_validation() {
@@ -12,36 +12,6 @@ mod api_tests {
         assert_eq!(note.amount_collected, 1000);
         assert_eq!(note.amount_redeemed, 0);
         assert_eq!(note.timestamp, 1234567890);
-    }
-
-    #[test]
-    fn test_redemption_request_structure() {
-        let request = RedemptionRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
-            amount: 500,
-            timestamp: 1234567890,
-            reserve_box_id: "test_reserve_box_1".to_string(),
-            tracker_box_id: "test_tracker_box_1".to_string(),
-            tracker_nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
-            current_height: 1000,
-            recipient_address: "test_recipient_address".to_string(),
-            change_address: "test_change_address".to_string(),
-            issuer_signature: "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101".to_string(),
-            emergency: false,
-            tracker_signature: Some("020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202".to_string()),
-            reserve_box_value: 500 + 1000000 + 1000000, // Reserve must cover debt + fee + buffer
-            fee_input_box_ids: vec![],
-            fee_input_total_value: 0,
-            reserve_refund_initiation_height: 0,
-        };
-
-        assert!(!request.issuer_pubkey.is_empty());
-        assert!(!request.recipient_pubkey.is_empty());
-        assert!(request.amount > 0);
-        assert!(!request.reserve_box_id.is_empty());
     }
 
     #[test]

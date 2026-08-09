@@ -47,11 +47,10 @@ mod cors_tests {
 
         // Spawn tracker thread for tests
         tokio::task::spawn_blocking(move || {
-            use basis_store::{RedemptionManager, TrackerStateManager};
+            use basis_store::TrackerStateManager;
 
             tracing::debug!("Test tracker thread started");
-            let tracker = TrackerStateManager::new_with_temp_storage();
-            let mut redemption_manager = RedemptionManager::new(tracker);
+            let mut tracker = TrackerStateManager::new_with_temp_storage();
 
             while let Some(cmd) = rx.blocking_recv() {
                 tracing::debug!("Test tracker thread received command: {:?}", cmd);
@@ -61,14 +60,14 @@ mod cors_tests {
                         note,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                        let result = tracker.add_note(&issuer_pubkey, &note);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByIssuer {
                         issuer_pubkey,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.get_issuer_notes(&issuer_pubkey);
+                        let result = tracker.get_issuer_notes(&issuer_pubkey);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetProjectedIssuerGrossDebt {
@@ -88,9 +87,7 @@ mod cors_tests {
                         recipient_pubkey,
                         response_tx,
                     } => {
-                        let result = redemption_manager
-                            .tracker
-                            .get_recipient_notes(&recipient_pubkey);
+                        let result = tracker.get_recipient_notes(&recipient_pubkey);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -98,8 +95,7 @@ mod cors_tests {
                         recipient_pubkey,
                         response_tx,
                     } => {
-                        let result = redemption_manager
-                            .tracker
+                        let result = tracker
                             .lookup_note(&issuer_pubkey, &recipient_pubkey)
                             .map(Some);
                         let _ = response_tx.send(result);
@@ -189,9 +185,8 @@ mod cors_tests {
                         recipient_pubkey,
                         response_tx,
                     } => {
-                        let result = Ok(redemption_manager
-                            .tracker
-                            .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                        let result =
+                            Ok(tracker.get_confirmation(&issuer_pubkey, &recipient_pubkey));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
@@ -199,7 +194,7 @@ mod cors_tests {
                             response_tx.send(Ok(redemption_manager.tracker.all_confirmations()));
                     }
                     TrackerCommand::GetReserveStateDigest { response_tx } => {
-                        let digest = redemption_manager.tracker.reserve_state_digest();
+                        let digest = tracker.reserve_state_digest();
                         let _ = response_tx.send(digest);
                     }
                     TrackerCommand::GetValidatedState { response_tx } => {
