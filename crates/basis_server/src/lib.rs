@@ -52,6 +52,19 @@ use axum::{
 };
 use tokio::sync::Mutex;
 
+pub const TRACKER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TrackerRequestError {
+    #[error("tracker request queue is full")]
+    QueueFull,
+    #[error("tracker request worker is unavailable")]
+    QueueClosed,
+    #[error("tracker request timed out")]
+    Timeout,
+    #[error("tracker response channel closed")]
+    ResponseClosed,
+}
+
 // Re-export main types for external use
 pub use acceptance::*;
 pub use api::*;
@@ -258,4 +271,130 @@ pub enum TrackerCommand {
         lease: PublicationLease,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
     },
+}
+
+impl TrackerCommand {
+    /// Return true when the HTTP/request-side receiver has already gone away.
+    /// The single worker checks this before starting potentially expensive work,
+    /// so timed-out requests do not build an unbounded stale-work backlog.
+    pub fn response_is_closed(&self) -> bool {
+        match self {
+            Self::AddNote { response_tx, .. } => response_tx.is_closed(),
+            Self::GetNotesByIssuer { response_tx, .. } => response_tx.is_closed(),
+            Self::GetProjectedIssuerGrossDebt { response_tx, .. } => response_tx.is_closed(),
+            Self::GetNotesByRecipient { response_tx, .. } => response_tx.is_closed(),
+            Self::GetNotesByRecipientWithIssuer { response_tx, .. } => response_tx.is_closed(),
+            Self::GetNoteByIssuerAndRecipient { response_tx, .. } => response_tx.is_closed(),
+            Self::GetNotes { response_tx } => response_tx.is_closed(),
+            Self::GetValidatedState { response_tx } => response_tx.is_closed(),
+            Self::GetConfirmation { response_tx, .. } => response_tx.is_closed(),
+            Self::GetAllConfirmations { response_tx } => response_tx.is_closed(),
+            Self::BeginPublication { response_tx, .. } => response_tx.is_closed(),
+            Self::RecordPublicationAttempt { response_tx, .. } => response_tx.is_closed(),
+            Self::ConfirmPublication { response_tx, .. } => response_tx.is_closed(),
+            Self::AbortPublication { response_tx, .. } => response_tx.is_closed(),
+        }
+    }
+}
+
+pub async fn tracker_request<T>(
+    tx: &tokio::sync::mpsc::Sender<TrackerCommand>,
+    make_command: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> TrackerCommand,
+) -> Result<T, TrackerRequestError> {
+    tracker_request_with_timeout(tx, TRACKER_REQUEST_TIMEOUT, make_command).await
+}
+
+async fn tracker_request_with_timeout<T>(
+    tx: &tokio::sync::mpsc::Sender<TrackerCommand>,
+    timeout: std::time::Duration,
+    make_command: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> TrackerCommand,
+) -> Result<T, TrackerRequestError> {
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    match tx.try_send(make_command(response_tx)) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            return Err(TrackerRequestError::QueueFull)
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            return Err(TrackerRequestError::QueueClosed)
+        }
+    }
+
+    match tokio::time::timeout(timeout, response_rx).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => Err(TrackerRequestError::ResponseClosed),
+        Err(_) => Err(TrackerRequestError::Timeout),
+    }
+}
+
+#[cfg(test)]
+mod tracker_request_tests {
+    use super::*;
+
+    fn get_notes(
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>,
+        >,
+    ) -> TrackerCommand {
+        TrackerCommand::GetNotes { response_tx }
+    }
+
+    #[tokio::test]
+    async fn tracker_request_rejects_full_and_closed_queues_without_waiting() {
+        let (full_tx, mut full_rx) = tokio::sync::mpsc::channel(1);
+        let (occupied_tx, _occupied_rx) = tokio::sync::oneshot::channel();
+        full_tx.try_send(get_notes(occupied_tx)).unwrap();
+        assert!(matches!(
+            tracker_request_with_timeout(
+                &full_tx,
+                std::time::Duration::from_millis(10),
+                get_notes,
+            )
+            .await,
+            Err(TrackerRequestError::QueueFull)
+        ));
+        assert!(full_rx.recv().await.is_some());
+
+        let (closed_tx, closed_rx) = tokio::sync::mpsc::channel(1);
+        drop(closed_rx);
+        assert!(matches!(
+            tracker_request_with_timeout(
+                &closed_tx,
+                std::time::Duration::from_millis(10),
+                get_notes,
+            )
+            .await,
+            Err(TrackerRequestError::QueueClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tracker_request_times_out_and_marks_stale_command_closed() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        assert!(matches!(
+            tracker_request_with_timeout(&tx, std::time::Duration::from_millis(1), get_notes,)
+                .await,
+            Err(TrackerRequestError::Timeout)
+        ));
+        let command = rx.recv().await.unwrap();
+        assert!(command.response_is_closed());
+    }
+
+    #[tokio::test]
+    async fn tracker_request_returns_the_worker_response() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let worker = tokio::spawn(async move {
+            let TrackerCommand::GetNotes { response_tx } = rx.recv().await.unwrap() else {
+                panic!("unexpected command")
+            };
+            response_tx.send(Ok(Vec::new())).unwrap();
+        });
+        let response =
+            tracker_request_with_timeout(&tx, std::time::Duration::from_millis(50), get_notes)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(response.is_empty());
+        worker.await.unwrap();
+    }
 }

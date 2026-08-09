@@ -401,6 +401,10 @@ async fn main() {
 
         let mut next_publication_id = 1u64;
         while let Some(cmd) = rx.blocking_recv() {
+            if cmd.response_is_closed() {
+                tracing::debug!("Dropping tracker command whose requester already closed");
+                continue;
+            }
             tracing::debug!("Tracker thread received command: {:?}", cmd);
 
             if let Some(active_lease) = active_publication {

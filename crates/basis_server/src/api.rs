@@ -1,8 +1,5 @@
 use axum::{extract::State, http::StatusCode, Json};
-use std::{
-    collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use serde::Deserialize;
 
 use crate::{
     models::{
@@ -111,29 +108,15 @@ pub async fn create_note(
         signature,
     );
 
-    // Send command to tracker thread
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    if let Err(e) = state
-        .tx
-        .send(crate::TrackerCommand::AddNote {
+    let tracker_response =
+        crate::tracker_request(&state.tx, |response_tx| crate::TrackerCommand::AddNote {
             issuer_pubkey,
             note,
             response_tx,
         })
-        .await
-    {
-        tracing::error!("Failed to send to tracker thread: {:?}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response(
-                "Tracker thread unavailable".to_string(),
-            )),
-        );
-    }
+        .await;
 
-    // Wait for response from tracker thread
-    match response_rx.await {
+    match tracker_response {
         Ok(Ok(())) => {
             tracing::info!(
                 "Successfully created note from {} to {}",
@@ -251,32 +234,17 @@ pub async fn get_notes_by_issuer(
         }
     };
 
-    // Send command to tracker thread
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
     tracing::debug!("Sending GetNotesByIssuer command to tracker thread");
-
-    if let Err(e) = state
-        .tx
-        .send(crate::TrackerCommand::GetNotesByIssuer {
+    let tracker_response = crate::tracker_request(&state.tx, |response_tx| {
+        crate::TrackerCommand::GetNotesByIssuer {
             issuer_pubkey,
             response_tx,
-        })
-        .await
-    {
-        tracing::error!("Failed to send to tracker thread: {:?}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response(
-                "Tracker thread unavailable".to_string(),
-            )),
-        );
-    }
+        }
+    })
+    .await;
 
     tracing::debug!("GetNotesByIssuer command sent successfully");
-
-    // Wait for response from tracker thread
-    match response_rx.await {
+    match tracker_response {
         Ok(Ok(notes)) => {
             tracing::info!(
                 "Successfully retrieved {} notes for issuer {}",
@@ -396,28 +364,15 @@ pub async fn get_notes_by_recipient(
         }
     };
 
-    // Send command to tracker thread
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    if let Err(e) = state
-        .tx
-        .send(crate::TrackerCommand::GetNotesByRecipientWithIssuer {
+    let tracker_response = crate::tracker_request(&state.tx, |response_tx| {
+        crate::TrackerCommand::GetNotesByRecipientWithIssuer {
             recipient_pubkey,
             response_tx,
-        })
-        .await
-    {
-        tracing::error!("Failed to send to tracker thread: {:?}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response(
-                "Tracker thread unavailable".to_string(),
-            )),
-        );
-    }
+        }
+    })
+    .await;
 
-    // Wait for response from tracker thread
-    match response_rx.await {
+    match tracker_response {
         Ok(Ok(notes_with_issuer)) => {
             tracing::info!(
                 "Successfully retrieved {} notes for recipient {}",
@@ -558,28 +513,16 @@ pub async fn get_note_by_issuer_and_recipient(
         }
     };
 
-    // Send command to tracker thread
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    if let Err(_) = state
-        .tx
-        .send(crate::TrackerCommand::GetNoteByIssuerAndRecipient {
+    let tracker_response = crate::tracker_request(&state.tx, |response_tx| {
+        crate::TrackerCommand::GetNoteByIssuerAndRecipient {
             issuer_pubkey,
             recipient_pubkey,
             response_tx,
-        })
-        .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response(
-                "Tracker thread unavailable".to_string(),
-            )),
-        );
-    }
+        }
+    })
+    .await;
 
-    // Wait for response from tracker thread
-    match response_rx.await {
+    match tracker_response {
         Ok(Ok(Some(note))) => {
             tracing::info!(
                 "Successfully retrieved note from {} to {}",
@@ -671,24 +614,12 @@ pub async fn get_all_notes(
 ) {
     tracing::debug!("Getting all notes");
 
-    // Send command to tracker thread
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    let tracker_response = crate::tracker_request(&state.tx, |response_tx| {
+        crate::TrackerCommand::GetNotes { response_tx }
+    })
+    .await;
 
-    if let Err(_) = state
-        .tx
-        .send(crate::TrackerCommand::GetNotes { response_tx })
-        .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response(
-                "Tracker thread unavailable".to_string(),
-            )),
-        );
-    }
-
-    // Wait for response from tracker thread
-    match response_rx.await {
+    match tracker_response {
         Ok(Ok(notes_with_issuer)) => {
             tracing::info!("Successfully retrieved {} notes", notes_with_issuer.len());
 
@@ -1445,27 +1376,15 @@ pub async fn get_key_status(
         }
     };
 
-    // Get total debt from note storage
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    if let Err(e) = state
-        .tx
-        .send(crate::TrackerCommand::GetNotesByIssuer {
+    let tracker_response = crate::tracker_request(&state.tx, |response_tx| {
+        crate::TrackerCommand::GetNotesByIssuer {
             issuer_pubkey,
             response_tx,
-        })
-        .await
-    {
-        tracing::error!("Failed to send to tracker thread: {:?}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response(
-                "Tracker thread unavailable".to_string(),
-            )),
-        );
-    }
+        }
+    })
+    .await;
 
-    let notes = match response_rx.await {
+    let notes = match tracker_response {
         Ok(Ok(notes)) => notes,
         Ok(Err(e)) => {
             tracing::error!("Failed to get notes: {:?}", e);
@@ -2024,22 +1943,16 @@ pub async fn get_note_state(
         }
     };
 
-    // Fetch the note.
-    let (note_tx, note_rx) = tokio::sync::oneshot::channel();
-    if let Err(e) = state
-        .tx
-        .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+    let note_response = crate::tracker_request(&state.tx, |response_tx| {
+        TrackerCommand::GetNoteByIssuerAndRecipient {
             issuer_pubkey,
             recipient_pubkey,
-            response_tx: note_tx,
-        })
-        .await
-    {
-        tracing::error!("Failed to send to tracker thread: {:?}", e);
-        return internal_error("Tracker thread unavailable");
-    }
+            response_tx,
+        }
+    })
+    .await;
 
-    let note = match note_rx.await {
+    let note = match note_response {
         Ok(Ok(Some(n))) => n,
         Ok(Ok(None)) => {
             return (
@@ -2065,22 +1978,15 @@ pub async fn get_note_state(
         Err(_) => return internal_error("Tracker thread response channel closed"),
     };
 
-    // Fetch the confirmation record.
-    let (conf_tx, conf_rx) = tokio::sync::oneshot::channel();
-    if let Err(e) = state
-        .tx
-        .send(TrackerCommand::GetConfirmation {
+    let confirmation_response =
+        crate::tracker_request(&state.tx, |response_tx| TrackerCommand::GetConfirmation {
             issuer_pubkey,
             recipient_pubkey,
-            response_tx: conf_tx,
+            response_tx,
         })
-        .await
-    {
-        tracing::error!("Failed to send to tracker thread: {:?}", e);
-        return internal_error("Tracker thread unavailable");
-    }
+        .await;
 
-    let confirmation = match conf_rx.await {
+    let confirmation = match confirmation_response {
         Ok(Ok(Some(c))) => Some(c),
         Ok(Ok(None)) => None,
         Ok(Err(e)) => {
@@ -2158,20 +2064,13 @@ async fn fetch_confirmation(
     recipient_pubkey: PubKey,
     amount_redeemed: u64,
 ) -> Option<NoteConfirmationSummary> {
-    let (conf_tx, conf_rx) = tokio::sync::oneshot::channel();
-    if tx
-        .send(TrackerCommand::GetConfirmation {
-            issuer_pubkey,
-            recipient_pubkey,
-            response_tx: conf_tx,
-        })
-        .await
-        .is_err()
+    match crate::tracker_request(tx, |response_tx| TrackerCommand::GetConfirmation {
+        issuer_pubkey,
+        recipient_pubkey,
+        response_tx,
+    })
+    .await
     {
-        return None;
-    }
-
-    match conf_rx.await {
         Ok(Ok(Some(c))) => Some(NoteConfirmationSummary::from_confirmation(
             &c,
             amount_redeemed,
