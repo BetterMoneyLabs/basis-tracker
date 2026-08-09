@@ -2,15 +2,8 @@ use crate::acceptance_policy::{
     create_policy, get_blacklist_entries, get_policy_summary, get_whitelist_entries,
     get_whitelist_entries_with_limit, remove_from_blacklist, remove_from_whitelist,
 };
-use crate::app::{App, NoteInfo, Screen, WalletStats};
+use crate::app::{App, Screen, WalletStats};
 use anyhow::Result;
-use basis_offchain::signing::{add_input_proof, redemption_signing_message};
-use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
-use ergo_lib::chain::transaction::Transaction;
-use ergo_lib::ergo_chain_types::{Header, PreHeader};
-use ergo_lib::ergotree_ir::chain::ergo_box::ErgoBox;
-use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-use ergo_lib::wallet::secret_key::SecretKey;
 use std::io::{self, Write};
 
 // ANSI Color codes
@@ -23,6 +16,15 @@ pub const RED: &str = "\x1b[31m";
 pub const _MAGENTA: &str = "\x1b[35m";
 pub const WHITE: &str = "\x1b[37m";
 pub const GRAY: &str = "\x1b[90m";
+
+const V1_REDEMPTION_RETIRED: &str =
+    "Basis v1 redemption is retired; v2 stays disabled until confirmed-chain authority and the validated-manifest signing path are integrated";
+
+fn reject_retired_v1_redemption_before_effects<T>(
+    _effect: impl FnOnce() -> T,
+) -> Result<T, &'static str> {
+    Err(V1_REDEMPTION_RETIRED)
+}
 
 pub async fn run(app: &mut App) -> Result<()> {
     clear_screen();
@@ -906,276 +908,14 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
 }
 
 async fn draw_redeem_note(app: &mut App) -> Result<()> {
-    println!("{}  REDEEM NOTE{}", BOLD, RESET);
-    println!("{}  ───────────{}\n", CYAN, RESET);
-
-    if app.current_account.is_none() {
-        app.set_notification("No account selected".to_string(), true);
-        app.navigate_to(Screen::Notes);
-        return Ok(());
-    }
-
-    // Refresh notes to ensure we have latest data
-    if let Some(ref acc) = app.current_account {
-        match app.client.get_recipient_notes(&acc.pubkey).await {
-            Ok(notes) => {
-                app.received_notes = notes
-                    .into_iter()
-                    .map(|n| NoteInfo {
-                        issuer: n.issuer_pubkey,
-                        recipient: n.recipient_pubkey,
-                        amount: n.amount_collected,
-                        redeemed: n.amount_redeemed,
-                        _timestamp: n.timestamp,
-                    })
-                    .collect();
-            }
-            Err(e) => {
-                println!("{}  Error loading notes: {}{}", RED, e, RESET);
-            }
-        }
-    }
-
-    if app.received_notes.is_empty() {
-        println!("{}  No notes received.{}", GRAY, RESET);
-        println!(
-            "  {}Tip:{} Create a note from another account first.\n",
-            YELLOW, RESET
-        );
-        println!("  Press Enter to go back...\n");
-        read_input("");
-        app.navigate_to(Screen::Notes);
-        return Ok(());
-    }
-
-    // Display received notes list
-    println!("  {}Your Received Notes:{}", BOLD, RESET);
-    for (i, note) in app.received_notes.iter().enumerate() {
-        let outstanding = note.amount.saturating_sub(note.redeemed);
-        println!(
-            "  [{}] From: {}... | {} ERG outstanding",
-            i + 1,
-            &note.issuer[..16],
-            outstanding as f64 / 1_000_000_000.0
-        );
-    }
-    println!();
-    println!("  {}[0]{} Cancel\n", RED, RESET);
-
-    let selection = read_input("Select note to redeem: ");
-    if selection == "0" || selection.is_empty() {
-        app.navigate_to(Screen::Notes);
-        return Ok(());
-    }
-
-    let idx = match selection.parse::<usize>() {
-        Ok(n) if n > 0 && n <= app.received_notes.len() => n - 1,
-        _ => {
-            app.set_notification("Invalid selection".to_string(), true);
-            app.navigate_to(Screen::Notes);
-            return Ok(());
-        }
-    };
-
-    let selected_note = &app.received_notes[idx];
-    let issuer = selected_note.issuer.clone();
-    let recipient = app.current_account.as_ref().unwrap().pubkey.clone();
-    let outstanding = selected_note.amount.saturating_sub(selected_note.redeemed);
-
-    if outstanding == 0 {
-        app.set_notification("Note is fully redeemed".to_string(), true);
-        app.navigate_to(Screen::Notes);
-        return Ok(());
-    }
-
-    // Show selected note details
-    println!("\n  {}Selected Note:{}", BOLD, RESET);
-    println!("  From: {}...", &issuer[..16]);
-    println!("  Amount: {} nanoERG", selected_note.amount);
-    println!("  Redeemed: {} nanoERG", selected_note.redeemed);
-    println!("  Outstanding: {} nanoERG", outstanding);
-    println!();
-
-    // Ask for redemption amount
-    let amount_str = read_input(&format!(
-        "Amount to redeem (default: {} nanoERG, Press Enter for full): ",
-        outstanding
-    ));
-
-    let amount = if amount_str.is_empty() {
-        outstanding
-    } else {
-        match amount_str.parse::<u64>() {
-            Ok(a) if a <= outstanding => a,
-            Ok(_) => {
-                app.set_notification(
-                    format!("Amount exceeds outstanding liability: {}", outstanding),
-                    true,
-                );
-                app.navigate_to(Screen::Notes);
-                return Ok(());
-            }
-            Err(_) => {
-                app.set_notification("Invalid amount".to_string(), true);
-                app.navigate_to(Screen::Notes);
-                return Ok(());
-            }
-        }
-    };
-
-    // Fetch the full note (payment timestamp) from the server.
-    let note = match app.client.get_note(&issuer, &recipient).await {
-        Ok(Some(n)) => n,
-        Ok(None) => {
-            app.set_notification("Note not found".to_string(), true);
-            app.navigate_to(Screen::Notes);
-            return Ok(());
-        }
-        Err(e) => {
-            app.set_notification(format!("Error fetching note: {}", e), true);
-            app.navigate_to(Screen::Notes);
-            return Ok(());
-        }
-    };
-
-    println!("\n  {}Building redemption via tracker...{}", CYAN, RESET);
-    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp).await {
-        Ok(tx_id) => {
-            let short = &tx_id[..16.min(tx_id.len())];
-            app.set_notification(format!("Redeemed {} nanoERG, tx {}", amount, short), false);
-            let _ = app.refresh_data().await;
-        }
-        Err(e) => {
-            app.set_notification(format!("Redemption failed: {}", e), true);
-        }
-    }
-
+    let message = reject_retired_v1_redemption_before_effects::<()>(|| {
+        panic!("retired redemption effect must never run")
+    })
+    .err()
+    .expect("v1 redemption screen must be retired");
+    app.set_notification(message.to_string(), true);
     app.navigate_to(Screen::Notes);
     Ok(())
-}
-
-/// Tracker-assisted redemption. The tracker builds the unsigned transaction and signs the fee
-/// input(s) (`POST /redemption/build`); the TUI signs the issuer message with the local issuer
-/// account, adds the reserve input's `proveDlog(recipient)` proof over the same `bytes_to_sign`,
-/// and submits the fully-signed transaction (`POST /redemption/submit`).
-///
-/// Returns the broadcast transaction id on success.
-async fn tracker_assisted_redeem(
-    app: &App,
-    issuer: &str,
-    recipient: &str,
-    amount: u64,
-    timestamp: u64,
-) -> Result<String, String> {
-    let issuer_pk: [u8; 33] = hex::decode(issuer)
-        .map_err(|e| format!("issuer hex: {}", e))?
-        .try_into()
-        .map_err(|_| "issuer pubkey must be 33 bytes".to_string())?;
-    let recipient_pk: [u8; 33] = hex::decode(recipient)
-        .map_err(|e| format!("recipient hex: {}", e))?
-        .try_into()
-        .map_err(|_| "recipient pubkey must be 33 bytes".to_string())?;
-
-    // Authoritative total debt from the tracker (must match context var #3 exactly).
-    let total_debt = app
-        .client
-        .get_tracker_proof(issuer, recipient)
-        .await
-        .map_err(|e| format!("tracker proof failed: {}", e))?
-        .total_debt;
-
-    // Issuer (reserve owner) signs the redemption message.
-    let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, timestamp);
-    let issuer_account = app
-        .account_manager
-        .accounts
-        .values()
-        .find(|a| a.get_pubkey_hex() == issuer)
-        .ok_or_else(|| {
-            format!(
-                "no local account for issuer {}... (the issuer must co-sign the redemption)",
-                &issuer[..16.min(issuer.len())]
-            )
-        })?;
-    let issuer_sig = issuer_account
-        .sign_message(&message)
-        .map_err(|e| format!("issuer signing failed: {}", e))?;
-
-    // Recipient (receiver) secret for the reserve input's proveDlog(recipient).
-    let cur = app.current_account.as_ref().ok_or("no current account")?;
-    let receiver_account = app
-        .account_manager
-        .get_account(&cur.name)
-        .ok_or("current account not found")?;
-    let receiver_secret: [u8; 32] = hex::decode(receiver_account.get_private_key_hex())
-        .map_err(|e| format!("receiver secret hex: {}", e))?
-        .try_into()
-        .map_err(|_| "receiver secret must be 32 bytes".to_string())?;
-    let receiver_sk = SecretKey::dlog_from_bytes(&receiver_secret)
-        .ok_or("invalid receiver dlog secret".to_string())?;
-
-    // Tracker builds the unsigned tx and signs the fee input(s).
-    let build = app
-        .client
-        .redemption_build(basis_cli_lib::api::RedemptionBuildRequest {
-            issuer_pubkey: issuer.to_string(),
-            recipient_pubkey: recipient.to_string(),
-            amount,
-            timestamp,
-            issuer_signature: hex::encode(issuer_sig),
-            emergency: false,
-            tracker_box_id: None,
-        })
-        .await
-        .map_err(|e| format!("tracker build failed: {}", e))?;
-
-    // Reconstruct the signing material the tracker produced.
-    let unsigned: UnsignedTransaction = serde_json::from_value(build.unsigned_tx)
-        .map_err(|e| format!("parse unsigned tx: {}", e))?;
-    let partial: Transaction =
-        serde_json::from_value(build.partial_tx).map_err(|e| format!("parse partial tx: {}", e))?;
-    let parse_box = |h: &str| -> Result<ErgoBox, String> {
-        let bytes = hex::decode(h).map_err(|e| format!("box hex: {}", e))?;
-        ErgoBox::sigma_parse_bytes(&bytes).map_err(|e| format!("box parse: {:?}", e))
-    };
-    let mut input_boxes = Vec::with_capacity(build.input_box_binaries.len());
-    for h in &build.input_box_binaries {
-        input_boxes.push(parse_box(h)?);
-    }
-    let mut data_boxes = Vec::with_capacity(build.data_box_binaries.len());
-    for h in &build.data_box_binaries {
-        data_boxes.push(parse_box(h)?);
-    }
-    if build.headers.len() < 10 {
-        return Err(format!(
-            "tracker returned {} headers (need 10)",
-            build.headers.len()
-        ));
-    }
-    let pre_header = PreHeader::from(build.headers[0].clone());
-    let headers: [Header; 10] = build.headers[..10]
-        .to_vec()
-        .try_into()
-        .map_err(|_| "headers array".to_string())?;
-
-    // Add the reserve input (index 0) proveDlog(recipient) proof over the same bytes_to_sign.
-    let signed = add_input_proof(
-        &unsigned,
-        Some(&partial),
-        &input_boxes,
-        &data_boxes,
-        &pre_header,
-        &headers,
-        0,
-        &receiver_sk,
-    )
-    .map_err(|e| format!("reserve proof failed: {:?}", e))?;
-
-    let tx_json = serde_json::to_value(&signed).map_err(|e| format!("serialize tx: {}", e))?;
-    app.client
-        .redemption_submit(tx_json)
-        .await
-        .map_err(|e| format!("submit failed: {}", e))
 }
 
 async fn draw_create_reserve(app: &mut App) -> Result<()> {
@@ -1258,244 +998,16 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
 }
 
 async fn draw_generate_transaction(app: &mut App) -> Result<()> {
-    println!("{}  GENERATE REDEMPTION TRANSACTION{}", BOLD, RESET);
-    println!("{}  ───────────────────────────────{}\n", CYAN, RESET);
-    println!(
-        "  {}[Press Enter with empty input to cancel]{}\n",
-        GRAY, RESET
-    );
-
-    if app.current_account.is_none() {
-        app.set_notification("No account selected".to_string(), true);
-        app.navigate_to(Screen::Transactions);
-        return Ok(());
-    }
-
-    let issuer = match select_pubkey_from_address_book(app, "Issuer pubkey (66 hex chars)") {
-        Some(pk) => pk,
-        None => {
-            app.set_notification("Transaction generation cancelled".to_string(), false);
-            app.navigate_to(Screen::Transactions);
-            return Ok(());
-        }
-    };
-
-    let recipient = match select_pubkey_from_address_book(app, "Recipient pubkey (66 hex chars)") {
-        Some(pk) => pk,
-        None => {
-            app.set_notification("Transaction generation cancelled".to_string(), false);
-            app.navigate_to(Screen::Transactions);
-            return Ok(());
-        }
-    };
-
-    let amount_str = read_input("Amount (nanoERG): ");
-    if amount_str.is_empty() {
-        app.set_notification("Transaction generation cancelled".to_string(), false);
-        app.navigate_to(Screen::Transactions);
-        return Ok(());
-    }
-
-    let emergency_str = read_input("Emergency redemption? (y/n): ");
-    let emergency = emergency_str == "y" || emergency_str == "Y";
-
-    if issuer.len() == 66 && recipient.len() == 66 {
-        if let Ok(amount) = amount_str.parse::<u64>() {
-            // Get note info
-            match app.client.get_note(&issuer, &recipient).await {
-                Ok(Some(note)) => {
-                    if note.outstanding_debt() < amount {
-                        app.set_notification(
-                            "Insufficient outstanding liability".to_string(),
-                            true,
-                        );
-                        app.navigate_to(Screen::Transactions);
-                        return Ok(());
-                    }
-
-                    // Get reserve box
-                    match app.client.get_reserves_by_issuer(&issuer).await {
-                        Ok(reserves) => {
-                            if let Some(reserve) = reserves.first() {
-                                let reserve_box_id = reserve.box_id.clone();
-                                let _tracker_nft_id = reserve.base_info.tracker_nft_id.clone();
-
-                                // Get tracker box
-                                match app.client.get_latest_tracker_box_id().await {
-                                    Ok(tracker_box) => {
-                                        let tracker_box_id = tracker_box.tracker_box_id;
-
-                                        // Get proofs
-                                        match app
-                                            .client
-                                            .get_tracker_proof(&issuer, &recipient)
-                                            .await
-                                        {
-                                            Ok(tracker_proof) => {
-                                                let total_debt = tracker_proof.total_debt;
-                                                let _tracker_lookup_proof = tracker_proof.proof;
-                                                let _tracker_state_digest =
-                                                    tracker_proof.tracker_state_digest;
-
-                                                // Get issuer signature
-                                                let issuer_bytes = hex::decode(&issuer)?;
-                                                let recipient_bytes = hex::decode(&recipient)?;
-
-                                                let mut key_hash_input = Vec::new();
-                                                key_hash_input.extend_from_slice(&issuer_bytes);
-                                                key_hash_input.extend_from_slice(&recipient_bytes);
-
-                                                use blake2::{Blake2b, Digest};
-                                                use generic_array::typenum::U32;
-                                                let key_hash = Blake2b::<U32>::new()
-                                                    .chain_update(&key_hash_input)
-                                                    .finalize()
-                                                    .to_vec();
-
-                                                let mut message = Vec::with_capacity(48);
-                                                message.extend_from_slice(&key_hash);
-                                                message
-                                                    .extend_from_slice(&total_debt.to_be_bytes());
-                                                message.extend_from_slice(
-                                                    &note.timestamp.to_be_bytes(),
-                                                );
-
-                                                if let Some(ref acc) = app.current_account {
-                                                    if let Some(account) =
-                                                        app.account_manager.get_account(&acc.name)
-                                                    {
-                                                        match account.sign_message(&message) {
-                                                            Ok(issuer_signature) => {
-                                                                // Get tracker signature
-                                                                match app
-                                                                    .client
-                                                                    .request_tracker_signature(
-                                                                        &issuer,
-                                                                        &recipient,
-                                                                        total_debt,
-                                                                        note.timestamp,
-                                                                        emergency,
-                                                                    )
-                                                                    .await
-                                                                {
-                                                                    Ok(tracker_sig_response) => {
-                                                                        println!("\n{}Transaction generated successfully!{}", GREEN, RESET);
-                                                                        println!(
-                                                                            "\n{}Details:{}",
-                                                                            BOLD, RESET
-                                                                        );
-                                                                        println!(
-                                                                            "  Issuer: {}",
-                                                                            issuer
-                                                                        );
-                                                                        println!(
-                                                                            "  Recipient: {}",
-                                                                            recipient
-                                                                        );
-                                                                        println!(
-                                                                            "  Amount: {} nanoERG",
-                                                                            amount
-                                                                        );
-                                                                        println!("  Total Debt: {} nanoERG", total_debt);
-                                                                        println!(
-                                                                            "  Reserve Box: {}",
-                                                                            reserve_box_id
-                                                                        );
-                                                                        println!(
-                                                                            "  Tracker Box: {}",
-                                                                            tracker_box_id
-                                                                        );
-                                                                        println!(
-                                                                            "  Emergency: {}",
-                                                                            emergency
-                                                                        );
-                                                                        println!(
-                                                                            "\n{}Signature:{}",
-                                                                            BOLD, RESET
-                                                                        );
-                                                                        println!(
-                                                                            "  Issuer: {}...",
-                                                                            hex::encode(
-                                                                                &issuer_signature
-                                                                            )[..32]
-                                                                                .to_string()
-                                                                        );
-                                                                        println!(
-                                                                            "  Tracker: {}...",
-                                                                            tracker_sig_response
-                                                                                .tracker_signature
-                                                                                [..32]
-                                                                                .to_string()
-                                                                        );
-                                                                        println!();
-                                                                        wait_for_enter("Press Enter to continue...");
-                                                                        app.set_notification(
-                                                                            "Transaction generated"
-                                                                                .to_string(),
-                                                                            false,
-                                                                        );
-                                                                    }
-                                                                    Err(e) => {
-                                                                        app.set_notification(format!("Tracker signature error: {}", e), true);
-                                                                    }
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                app.set_notification(
-                                                                    format!("Signing error: {}", e),
-                                                                    true,
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                app.set_notification(
-                                                    format!("Tracker proof error: {}", e),
-                                                    true,
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        app.set_notification(
-                                            format!("Tracker box error: {}", e),
-                                            true,
-                                        );
-                                    }
-                                }
-                            } else {
-                                app.set_notification("No reserve found".to_string(), true);
-                            }
-                        }
-                        Err(e) => {
-                            app.set_notification(format!("Reserve error: {}", e), true);
-                        }
-                    }
-                }
-                Ok(None) => {
-                    app.set_notification("Note not found".to_string(), true);
-                }
-                Err(e) => {
-                    app.set_notification(format!("Note error: {}", e), true);
-                }
-            }
-        } else {
-            app.set_notification("Invalid amount".to_string(), true);
-        }
-    } else {
-        app.set_notification(
-            "Invalid pubkey length (must be 66 hex chars)".to_string(),
-            true,
-        );
-    }
-
+    let message = reject_retired_v1_redemption_before_effects::<()>(|| {
+        panic!("retired transaction-generation effect must never run")
+    })
+    .err()
+    .expect("v1 transaction-generation screen must be retired");
+    app.set_notification(message.to_string(), true);
     app.navigate_to(Screen::Transactions);
     Ok(())
 }
 
-// Address book helper
 fn select_pubkey_from_address_book(app: &App, prompt_prefix: &str) -> Option<String> {
     // Collect address book contacts
     let mut all_contacts: Vec<(String, String)> = Vec::new();
@@ -2066,3 +1578,18 @@ async fn save_and_upload_policy(app: &mut App) -> Result<()> {
 }
 
 // Helper functions are now in crate::acceptance_policy module
+
+#[cfg(test)]
+mod v1_redemption_tombstone_tests {
+    use super::*;
+
+    #[test]
+    fn tui_rejects_v1_redemption_before_the_effect_callback() {
+        let calls = std::cell::Cell::new(0usize);
+        let result = reject_retired_v1_redemption_before_effects(|| {
+            calls.set(calls.get() + 1);
+        });
+        assert_eq!(result, Err(V1_REDEMPTION_RETIRED));
+        assert_eq!(calls.get(), 0);
+    }
+}

@@ -1,8 +1,7 @@
 //! Offchain logic for Basis tracker.
 //!
-//! The placeholder v1 transaction-builder surface is retained only as a
-//! historical unit-test fixture. Production construction resumes with the
-//! versioned v2 builder.
+//! The v1 transaction-builder and signing surfaces are removed. Production
+//! construction resumes only through the exact versioned v2 manifest boundary.
 //!
 //! ```compile_fail
 //! use basis_offchain::transaction_builder::RedemptionTransactionBuilder;
@@ -10,9 +9,6 @@
 
 pub mod ergo_tx;
 pub mod schnorr;
-pub mod signing;
-#[cfg(test)]
-mod transaction_builder;
 
 #[cfg(test)]
 pub mod test_helpers;

@@ -1,8 +1,8 @@
 //! Core data structures for Basis tracker.
 //!
-//! The retired v1 redemption manager and transaction builder are deliberately
-//! test-only historical fixtures. They are not part of the production crate
-//! API while the v2 BNS2/BRS2 builder is being implemented.
+//! The retired v1 redemption manager and transaction builder are removed. They
+//! are not part of either the production or test API; v2 remains fail-closed at
+//! its confirmed-authority boundary.
 //!
 //! ```compile_fail
 //! use basis_store::RedemptionManager;
@@ -38,12 +38,6 @@ pub mod cross_validation_tests;
 pub mod cross_verification;
 pub mod ergo_scanner;
 pub mod persistence;
-#[cfg(test)]
-mod redemption;
-#[cfg(test)]
-pub mod redemption_blockchain_tests;
-#[cfg(test)]
-pub mod redemption_simple_tests;
 pub mod reserve_tracker;
 pub mod scala_test_vectors;
 pub mod schnorr;
@@ -53,8 +47,6 @@ pub mod schnorr_tests;
 pub mod simple_integration_tests;
 pub mod tests;
 pub mod tracker_scanner;
-#[cfg(test)]
-mod transaction_builder;
 
 // Test modules
 #[cfg(test)]
@@ -67,8 +59,6 @@ pub mod property_tests;
 pub mod real_scanner_integration_tests;
 #[cfg(test)]
 pub mod reserve_tracking_test;
-#[cfg(test)]
-pub mod test_helpers;
 #[cfg(test)]
 pub mod tracker_scanner_test;
 
@@ -1892,12 +1882,6 @@ pub use reserve_tracker::{ExtendedReserveInfo, ReserveTracker, ReserveTrackerErr
 pub use ergo_scanner::{
     create_default_scanner, start_scanner, ErgoBox, NodeConfig, ReserveEvent, ScanType,
     ScannerError, ServerState,
-};
-
-// Re-export redemption types
-#[cfg(test)]
-pub(crate) use redemption::{
-    RedemptionData, RedemptionError, RedemptionManager, RedemptionRequest,
 };
 
 // Re-export reqwest for use in dependent crates

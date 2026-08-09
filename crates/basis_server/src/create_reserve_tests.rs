@@ -11,7 +11,7 @@ mod create_reserve_tests {
 
     use crate::{
         api::create_reserve_payload, models::CreateReserveRequest, reserve_construction_routes,
-        AppState, TrackerCommand,
+        retired_v1_redemption_routes, AppState, TrackerCommand,
     };
     use basis_store::ergo_scanner::{NodeConfig, ServerState};
     use tower::ServiceExt;
@@ -208,7 +208,9 @@ mod create_reserve_tests {
                 "owner_pubkey": "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12",
                 "erg_amount": 1_000_000
             });
-            let app = reserve_construction_routes().with_state(state);
+            let app = reserve_construction_routes()
+                .merge(retired_v1_redemption_routes())
+                .with_state(state);
             let requests = [
                 (Method::GET, "/config/reserve-contract-p2s", Body::empty()),
                 (
@@ -235,8 +237,103 @@ mod create_reserve_tests {
                     )
                     .await
                     .unwrap();
-                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+                let expected = if path == "/redemption/build" {
+                    StatusCode::GONE
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                assert_eq!(response.status(), expected, "{path}");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn every_legacy_redemption_route_is_an_unconditional_gone_tombstone() {
+        let app = retired_v1_redemption_routes().with_state(create_test_app_state());
+        let cases = [
+            (
+                Method::POST,
+                "/redeem",
+                serde_json::json!({
+                    "issuer_pubkey": "issuer",
+                    "recipient_pubkey": "receiver",
+                    "amount": 1,
+                    "timestamp": 1,
+                    "issuer_signature": "signature"
+                }),
+            ),
+            (
+                Method::POST,
+                "/redeem/complete",
+                serde_json::json!({
+                    "redemption_id": "id",
+                    "issuer_pubkey": "issuer",
+                    "recipient_pubkey": "receiver",
+                    "redeemed_amount": 1
+                }),
+            ),
+            (Method::GET, "/proof/redemption", serde_json::json!({})),
+            (Method::GET, "/tracker/proof", serde_json::json!({})),
+            (Method::GET, "/reserve/proof", serde_json::json!({})),
+            (
+                Method::POST,
+                "/tracker/signature",
+                serde_json::json!({
+                    "issuer_pubkey": "issuer",
+                    "recipient_pubkey": "receiver",
+                    "total_debt": 1,
+                    "timestamp": 1,
+                    "emergency": true
+                }),
+            ),
+            (
+                Method::POST,
+                "/redemption/prepare",
+                serde_json::json!({
+                    "issuer_pubkey": "issuer",
+                    "recipient_pubkey": "receiver",
+                    "amount": 1,
+                    "timestamp": 1
+                }),
+            ),
+            (
+                Method::POST,
+                "/redemption/submit",
+                serde_json::json!({ "signed_tx": {} }),
+            ),
+            (
+                Method::POST,
+                "/redemption/build",
+                serde_json::json!({
+                    "issuer_pubkey": "issuer",
+                    "recipient_pubkey": "receiver",
+                    "amount": 1,
+                    "timestamp": 1,
+                    "issuer_signature": "signature",
+                    "emergency": false
+                }),
+            ),
+        ];
+
+        for (method, path, payload) in cases {
+            let body = if method == Method::GET {
+                Body::empty()
+            } else {
+                Body::from(serde_json::to_vec(&payload).unwrap())
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::GONE, "{path}");
         }
     }
 

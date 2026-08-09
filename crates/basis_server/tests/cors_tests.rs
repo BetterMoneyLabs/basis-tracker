@@ -76,7 +76,7 @@ mod cors_tests {
                         candidate_total_debt,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.projected_issuer_gross_debt(
+                        let result = tracker.projected_issuer_gross_debt(
                             &issuer_pubkey,
                             candidate_recipient.as_ref(),
                             candidate_total_debt,
@@ -116,10 +116,7 @@ mod cors_tests {
                             avl_proof: vec![1, 2, 3, 4], // Mock proof data
                             operations: vec![],
                         };
-                        let result = redemption_manager
-                            .tracker
-                            .validated_state()
-                            .map(|state| (mock_proof, state));
+                        let result = tracker.validated_state().map(|state| (mock_proof, state));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetTrackerLookupProof {
@@ -133,10 +130,7 @@ mod cors_tests {
                             value: vec![0u8; 8],
                             proof: vec![1, 2, 3, 4],
                         };
-                        let result = redemption_manager
-                            .tracker
-                            .validated_state()
-                            .map(|state| (mock_proof, state));
+                        let result = tracker.validated_state().map(|state| (mock_proof, state));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetReserveLookupProof {
@@ -150,8 +144,7 @@ mod cors_tests {
                             value: vec![0u8; 8],
                             proof: Some(vec![1, 2, 3, 4]),
                         };
-                        let result = redemption_manager
-                            .tracker
+                        let result = tracker
                             .reserve_state_digest()
                             .map(|root| (mock_proof, root));
                         let _ = response_tx.send(result);
@@ -164,13 +157,9 @@ mod cors_tests {
                         response_tx,
                     } => {
                         // Mock reserve insert proof
-                        let result =
-                            redemption_manager
-                                .tracker
-                                .reserve_state_digest()
-                                .map(|current_root| {
-                                    (vec![1, 2, 3, 4], current_root.clone(), current_root)
-                                });
+                        let result = tracker.reserve_state_digest().map(|current_root| {
+                            (vec![1, 2, 3, 4], current_root.clone(), current_root)
+                        });
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByRecipientWithIssuer {
@@ -190,15 +179,14 @@ mod cors_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
-                        let _ =
-                            response_tx.send(Ok(redemption_manager.tracker.all_confirmations()));
+                        let _ = response_tx.send(Ok(tracker.all_confirmations()));
                     }
                     TrackerCommand::GetReserveStateDigest { response_tx } => {
                         let digest = tracker.reserve_state_digest();
                         let _ = response_tx.send(digest);
                     }
                     TrackerCommand::GetValidatedState { response_tx } => {
-                        let _ = response_tx.send(redemption_manager.tracker.validated_state());
+                        let _ = response_tx.send(tracker.validated_state());
                     }
                     TrackerCommand::BeginPublication { response_tx, .. } => {
                         let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));

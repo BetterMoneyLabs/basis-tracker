@@ -3,10 +3,10 @@ use axum::{
     Router,
 };
 use basis_server::{
-    api::*, handle_options, reserve_api::*, reserve_construction_routes, store::EventStore,
-    submit_redemption, AppConfig, AppState, EventType, PublicationLease, SharedTrackerState,
-    TrackerBoxUpdateConfig,
-    TrackerBoxUpdater, TrackerCommand, TrackerEvent,
+    api::*, handle_options, reserve_api::*, reserve_construction_routes,
+    retired_v1_redemption_routes, store::EventStore, AppConfig, AppState, EventType,
+    PublicationLease, SharedTrackerState, TrackerBoxUpdateConfig, TrackerBoxUpdater,
+    TrackerCommand, TrackerEvent,
 };
 use basis_store::{
     ergo_scanner::{start_scanner, ReserveEvent, ServerState},
@@ -99,7 +99,7 @@ fn restore_pending_publication(
 fn handle_command_while_publication_is_fenced(
     active_lease: PublicationLease,
     command: TrackerCommand,
-    redemption_manager: &mut basis_store::RedemptionManager,
+    tracker: &mut basis_store::TrackerStateManager,
     shared_state: &SharedTrackerState,
 ) -> Option<PublicationLease> {
     match command {
@@ -109,19 +109,12 @@ fn handle_command_while_publication_is_fenced(
             submitted_height,
             response_tx,
         } if lease == active_lease => {
-            let result = redemption_manager
-                .tracker
-                .validated_state()
-                .and_then(|state| {
-                    if state.avl_root_digest != lease.digest {
-                        return Err(basis_store::NoteError::PublicationLeaseMismatch);
-                    }
-                    redemption_manager.tracker.mark_notes_pending(
-                        lease.digest,
-                        &tx_id,
-                        submitted_height,
-                    )
-                });
+            let result = tracker.validated_state().and_then(|state| {
+                if state.avl_root_digest != lease.digest {
+                    return Err(basis_store::NoteError::PublicationLeaseMismatch);
+                }
+                tracker.mark_notes_pending(lease.digest, &tx_id, submitted_height)
+            });
             if result.is_err() {
                 shared_state.quarantine_publication();
             }
@@ -134,9 +127,7 @@ fn handle_command_while_publication_is_fenced(
             height,
             response_tx,
         } => {
-            let result = redemption_manager
-                .tracker
-                .confirm_pending_publication(&tx_id, &box_id, height);
+            let result = tracker.confirm_pending_publication(&tx_id, &box_id, height);
             let confirmed = result.is_ok();
             if result.as_ref().is_err_and(|error| {
                 !matches!(error, basis_store::NoteError::PublicationLeaseMismatch)
@@ -151,16 +142,13 @@ fn handle_command_while_publication_is_fenced(
             }
         }
         TrackerCommand::AbortPublication { lease, response_tx } if lease == active_lease => {
-            let result = redemption_manager
-                .tracker
-                .pending_publication()
-                .and_then(|pending| {
-                    if pending.is_some() {
-                        Err(basis_store::NoteError::PublicationInProgress)
-                    } else {
-                        Ok(())
-                    }
-                });
+            let result = tracker.pending_publication().and_then(|pending| {
+                if pending.is_some() {
+                    Err(basis_store::NoteError::PublicationInProgress)
+                } else {
+                    Ok(())
+                }
+            });
             let released = result.is_ok();
             let _ = response_tx.send(result);
             if released {
@@ -390,7 +378,7 @@ async fn main() {
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
     tokio::task::spawn_blocking(move || {
         tracing::debug!("Tracker thread started");
-        let tracker = match basis_store::TrackerStateManager::try_new_with_publication_health(
+        let mut tracker = match basis_store::TrackerStateManager::try_new_with_publication_health(
             &data_dir_for_tracker_thread,
             generation,
             shared_state_for_tracker.publication_health(),
@@ -426,7 +414,6 @@ async fn main() {
             hex::encode(&initial_root)
         );
 
-        let mut redemption_manager = RedemptionManager::new(tracker);
         let mut next_publication_id = 1u64;
 
         while let Some(cmd) = rx.blocking_recv() {
@@ -436,7 +423,7 @@ async fn main() {
                 active_publication = handle_command_while_publication_is_fenced(
                     active_lease,
                     cmd,
-                    &mut redemption_manager,
+                    &mut tracker,
                     &shared_state_for_tracker,
                 );
                 continue;
@@ -473,7 +460,7 @@ async fn main() {
                     candidate_total_debt,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.projected_issuer_gross_debt(
+                    let result = tracker.projected_issuer_gross_debt(
                         &issuer_pubkey,
                         candidate_recipient.as_ref(),
                         candidate_total_debt,
@@ -513,15 +500,9 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
+                    let result = tracker
                         .generate_proof(&issuer_pubkey, &recipient_pubkey)
-                        .and_then(|proof| {
-                            redemption_manager
-                                .tracker
-                                .validated_state()
-                                .map(|state| (proof, state))
-                        });
+                        .and_then(|proof| tracker.validated_state().map(|state| (proof, state)));
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetTrackerLookupProof {
@@ -529,15 +510,9 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
+                    let result = tracker
                         .generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey)
-                        .and_then(|proof| {
-                            redemption_manager
-                                .tracker
-                                .validated_state()
-                                .map(|state| (proof, state))
-                        });
+                        .and_then(|proof| tracker.validated_state().map(|state| (proof, state)));
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveLookupProof {
@@ -545,15 +520,9 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
+                    let result = tracker
                         .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey)
-                        .and_then(|proof| {
-                            redemption_manager
-                                .tracker
-                                .reserve_state_digest()
-                                .map(|root| (proof, root))
-                        });
+                        .and_then(|proof| tracker.reserve_state_digest().map(|root| (proof, root)));
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveInsertProof {
@@ -563,8 +532,7 @@ async fn main() {
                     new_already_redeemed,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
+                    let result = tracker
                         .generate_reserve_insert_proof(
                             &issuer_pubkey,
                             &recipient_pubkey,
@@ -572,8 +540,7 @@ async fn main() {
                             new_already_redeemed,
                         )
                         .and_then(|(proof, updated_root)| {
-                            redemption_manager
-                                .tracker
+                            tracker
                                 .reserve_state_digest()
                                 .map(|current_root| (proof, updated_root, current_root))
                         });
@@ -584,7 +551,7 @@ async fn main() {
                     let _ = response_tx.send(digest);
                 }
                 TrackerCommand::GetValidatedState { response_tx } => {
-                    let _ = response_tx.send(redemption_manager.tracker.validated_state());
+                    let _ = response_tx.send(tracker.validated_state());
                 }
                 TrackerCommand::GetConfirmation {
                     issuer_pubkey,
@@ -595,10 +562,9 @@ async fn main() {
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetAllConfirmations { response_tx } => {
-                    let result = redemption_manager
-                        .tracker
+                    let result = tracker
                         .validated_state()
-                        .map(|_| redemption_manager.tracker.all_confirmations());
+                        .map(|_| tracker.all_confirmations());
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::BeginPublication {
@@ -608,16 +574,15 @@ async fn main() {
                     height,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
+                    let result = tracker
                         .validate_observed_generation(&tracker_nft_id, observed_root)
                         .and_then(|_| {
-                            redemption_manager.tracker.reconcile_with_confirmed_digest(
+                            tracker.reconcile_with_confirmed_digest(
                                 &observed_root,
                                 &box_id,
                                 height,
                             )?;
-                            redemption_manager.tracker.validated_state()
+                            tracker.validated_state()
                         })
                         .and_then(|state| {
                             next_publication_id
@@ -918,28 +883,8 @@ async fn main() {
             "/acceptance/policy/{pubkey}",
             get(get_policy_by_recipient).options(handle_options),
         )
-        .route("/redeem", post(initiate_redemption).options(handle_options))
-        .route(
-            "/redeem/complete",
-            post(complete_redemption).options(handle_options),
-        )
-        .route("/proof/redemption", get(get_redemption_proof))
-        .route("/tracker/proof", get(get_tracker_proof))
         .route("/tracker/state", get(get_tracker_state))
         .route("/tracker/pending-tx", get(get_pending_tx))
-        .route("/reserve/proof", get(get_reserve_proof))
-        .route(
-            "/tracker/signature",
-            post(request_tracker_signature).options(handle_options),
-        )
-        .route(
-            "/redemption/prepare",
-            post(prepare_redemption).options(handle_options),
-        )
-        .route(
-            "/redemption/submit",
-            post(submit_redemption).options(handle_options),
-        )
         .route("/reserves", get(get_all_reserves))
         .route(
             "/reserves/submit",
@@ -959,6 +904,7 @@ async fn main() {
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
+        .merge(retired_v1_redemption_routes())
         .merge(reserve_construction_routes())
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -985,7 +931,7 @@ async fn main() {
     tracing::debug!("  GET /events");
     tracing::debug!("  GET /events/paginated");
     tracing::debug!("  GET /key-status/{{pubkey}}");
-    tracing::debug!("  POST /redeem");
+    tracing::debug!("  Legacy redemption routes return HTTP 410 (v1 retired)");
     tracing::debug!("  POST /acceptance/check");
     tracing::debug!("  POST /acceptance/policy");
     tracing::debug!("  GET /tracker/latest-box-id");
@@ -1133,7 +1079,7 @@ mod publication_fence_tests {
             Some((tx_id.clone(), digest))
         );
 
-        let mut redemption_manager = basis_store::RedemptionManager::new(reopened);
+        let mut tracker = reopened;
 
         let (state_tx, state_rx) = tokio::sync::oneshot::channel();
         active = handle_command_while_publication_is_fenced(
@@ -1141,7 +1087,7 @@ mod publication_fence_tests {
             TrackerCommand::GetValidatedState {
                 response_tx: state_tx,
             },
-            &mut redemption_manager,
+            &mut tracker,
             &restarted_shared,
         );
         assert!(matches!(
@@ -1157,7 +1103,7 @@ mod publication_fence_tests {
                 note: note.clone(),
                 response_tx: add_tx,
             },
-            &mut redemption_manager,
+            &mut tracker,
             &restarted_shared,
         );
         assert!(matches!(
@@ -1174,7 +1120,7 @@ mod publication_fence_tests {
                 height: 200,
                 response_tx: wrong_tx,
             },
-            &mut redemption_manager,
+            &mut tracker,
             &restarted_shared,
         );
         assert!(matches!(
@@ -1184,12 +1130,7 @@ mod publication_fence_tests {
         assert!(active.is_some());
         assert!(restarted_shared.is_publication_healthy());
         assert_eq!(
-            redemption_manager
-                .tracker
-                .pending_publication()
-                .unwrap()
-                .unwrap()
-                .tx_id(),
+            tracker.pending_publication().unwrap().unwrap().tx_id(),
             tx_id
         );
         assert_eq!(
@@ -1206,16 +1147,12 @@ mod publication_fence_tests {
                 height: 201,
                 response_tx: confirm_tx,
             },
-            &mut redemption_manager,
+            &mut tracker,
             &restarted_shared,
         );
         assert!(matches!(confirm_rx.await, Ok(Ok(_))));
         assert!(active.is_none());
-        assert!(redemption_manager
-            .tracker
-            .pending_publication()
-            .unwrap()
-            .is_none());
+        assert!(tracker.pending_publication().unwrap().is_none());
 
         // The updater clears its shared pending cache only after the actor has
         // durably accepted the exact confirmation.

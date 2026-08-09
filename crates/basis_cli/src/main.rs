@@ -54,16 +54,6 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::reserve::ReserveCommands,
     },
-    /// Transaction operations
-    Transaction {
-        #[command(subcommand)]
-        cmd: commands::transaction::TransactionCommands,
-    },
-    /// Test operations
-    Test {
-        #[command(subcommand)]
-        cmd: commands::test_redemption::TestCommands,
-    },
     /// Interactive mode
     Interactive,
     /// Server status
@@ -114,13 +104,6 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Reserve { cmd } => {
             commands::reserve::handle_reserve_command(cmd, &account_manager, &client, json).await
-        }
-        Commands::Transaction { cmd } => {
-            commands::transaction::handle_transaction_command(cmd, &client, &account_manager, json)
-                .await
-        }
-        Commands::Test { cmd } => {
-            commands::test_redemption::handle_test_command(cmd, &client, json).await
         }
         Commands::Interactive => {
             let mut interactive = interactive::InteractiveMode::new(account_manager, client);

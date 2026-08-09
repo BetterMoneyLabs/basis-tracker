@@ -1,11 +1,11 @@
 //! Integration tests for redemption API endpoints
 //!
 //! This module tests the redemption-related HTTP endpoints:
-//! - POST /redeem: Initiate redemption
+//! - POST /redeem: Retired initiation tombstone
 //! - POST /redeem/complete: Retired completion tombstone
-//! - GET /proof/redemption: Get redemption proof
-//! - POST /redemption/prepare: Prepare redemption data
-//! - POST /tracker/signature: Request tracker signature
+//! - GET /proof/redemption: Retired proof tombstone
+//! - POST /redemption/prepare: Retired preparation tombstone
+//! - POST /tracker/signature: Retired signing tombstone
 //!
 //! Tests use the direct handler call pattern (Pattern A) with mock AppState,
 //! reusing the create_mock_app_state helper from http_api_integration_tests.rs.
@@ -24,7 +24,7 @@ mod redemption_api_tests {
             request_tracker_signature,
         },
         models::{
-            CompleteRedemptionRequest, RedeemRequest, RedemptionPreparationRequest,
+            ApiResponse, CompleteRedemptionRequest, RedeemRequest, RedemptionPreparationRequest,
             TrackerSignatureRequest,
         },
         AppState, TrackerCommand,
@@ -39,6 +39,16 @@ mod redemption_api_tests {
     /// concurrently in the same process, leading to intermittent "No such file or
     /// directory" errors. Holding this lock while creating test storage avoids that.
     static STORAGE_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn assert_v1_tombstone<T>(status: StatusCode, body: &axum::Json<ApiResponse<T>>) {
+        assert_eq!(status, StatusCode::GONE);
+        assert!(!body.success);
+        assert!(body
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("v1 redemption is retired"));
+    }
 
     // ============================================================================
     // Test helper: create mock app state with tracker thread handling redemption commands
@@ -96,7 +106,7 @@ mod redemption_api_tests {
                         candidate_total_debt,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.projected_issuer_gross_debt(
+                        let result = tracker.projected_issuer_gross_debt(
                             &issuer_pubkey,
                             candidate_recipient.as_ref(),
                             candidate_total_debt,
@@ -134,10 +144,7 @@ mod redemption_api_tests {
                             avl_proof: vec![1, 2, 3, 4],
                             operations: vec![],
                         };
-                        let result = redemption_manager
-                            .tracker
-                            .validated_state()
-                            .map(|state| (mock_proof, state));
+                        let result = tracker.validated_state().map(|state| (mock_proof, state));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetTrackerLookupProof {
@@ -150,10 +157,7 @@ mod redemption_api_tests {
                             value: vec![0u8; 8],
                             proof: vec![1, 2, 3, 4],
                         };
-                        let result = redemption_manager
-                            .tracker
-                            .validated_state()
-                            .map(|state| (mock_proof, state));
+                        let result = tracker.validated_state().map(|state| (mock_proof, state));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetReserveLookupProof {
@@ -166,8 +170,7 @@ mod redemption_api_tests {
                             value: vec![0u8; 8],
                             proof: Some(vec![1, 2, 3, 4]),
                         };
-                        let result = redemption_manager
-                            .tracker
+                        let result = tracker
                             .reserve_state_digest()
                             .map(|root| (mock_proof, root));
                         let _ = response_tx.send(result);
@@ -179,13 +182,9 @@ mod redemption_api_tests {
                         new_already_redeemed: _,
                         response_tx,
                     } => {
-                        let result =
-                            redemption_manager
-                                .tracker
-                                .reserve_state_digest()
-                                .map(|current_root| {
-                                    (vec![1, 2, 3, 4], current_root.clone(), current_root)
-                                });
+                        let result = tracker.reserve_state_digest().map(|current_root| {
+                            (vec![1, 2, 3, 4], current_root.clone(), current_root)
+                        });
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByRecipientWithIssuer {
@@ -204,15 +203,14 @@ mod redemption_api_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
-                        let _ =
-                            response_tx.send(Ok(redemption_manager.tracker.all_confirmations()));
+                        let _ = response_tx.send(Ok(tracker.all_confirmations()));
                     }
                     TrackerCommand::GetReserveStateDigest { response_tx } => {
                         let digest = tracker.reserve_state_digest();
                         let _ = response_tx.send(digest);
                     }
                     TrackerCommand::GetValidatedState { response_tx } => {
-                        let _ = response_tx.send(redemption_manager.tracker.validated_state());
+                        let _ = response_tx.send(tracker.validated_state());
                     }
                     TrackerCommand::BeginPublication { response_tx, .. } => {
                         let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
@@ -529,10 +527,7 @@ mod redemption_api_tests {
         let response =
             get_redemption_proof(axum::extract::State(state), axum::extract::Query(params)).await;
 
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
+        assert_v1_tombstone(response.0, &response.1);
     }
 
     #[tokio::test]
@@ -554,10 +549,7 @@ mod redemption_api_tests {
         let response =
             get_redemption_proof(axum::extract::State(state), axum::extract::Query(params)).await;
 
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
+        assert_v1_tombstone(response.0, &response.1);
     }
 
     // ============================================================================
@@ -582,10 +574,7 @@ mod redemption_api_tests {
             request_tracker_signature(axum::extract::State(state), axum::extract::Json(request))
                 .await;
 
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
+        assert_v1_tombstone(response.0, &response.1);
     }
 
     #[tokio::test]
@@ -609,10 +598,7 @@ mod redemption_api_tests {
             request_tracker_signature(axum::extract::State(state), axum::extract::Json(request))
                 .await;
 
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
+        assert_v1_tombstone(response.0, &response.1);
     }
 
     #[tokio::test]
@@ -634,21 +620,7 @@ mod redemption_api_tests {
             request_tracker_signature(axum::extract::State(state), axum::extract::Json(request))
                 .await;
 
-        // Without tracker_secret_key configured, it falls back to Ergo node API which will fail
-        // in test environment. The request structure itself should be validated.
-        let body = &response.1;
-        if !body.success {
-            let default_msg = "unknown".to_string();
-            let error_msg = body.error.as_ref().unwrap_or(&default_msg);
-            assert!(
-                error_msg.contains("tracker")
-                    || error_msg.contains("Tracker")
-                    || error_msg.contains("sign")
-                    || error_msg.contains("node"),
-                "Expected tracker/signing-related error for valid request structure, got: {}",
-                error_msg
-            );
-        }
+        assert_v1_tombstone(response.0, &response.1);
     }
 
     #[tokio::test]
@@ -670,20 +642,7 @@ mod redemption_api_tests {
             request_tracker_signature(axum::extract::State(state), axum::extract::Json(request))
                 .await;
 
-        // The emergency flag should be accepted in the request structure
-        let body = &response.1;
-        if !body.success {
-            let default_msg = "unknown".to_string();
-            let error_msg = body.error.as_ref().unwrap_or(&default_msg);
-            assert!(
-                error_msg.contains("tracker")
-                    || error_msg.contains("Tracker")
-                    || error_msg.contains("sign")
-                    || error_msg.contains("node"),
-                "Expected tracker/signing-related error for valid request structure, got: {}",
-                error_msg
-            );
-        }
+        assert_v1_tombstone(response.0, &response.1);
     }
 
     // ============================================================================
@@ -706,10 +665,7 @@ mod redemption_api_tests {
         let response =
             prepare_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
+        assert_v1_tombstone(response.0, &response.1);
     }
 
     #[tokio::test]
@@ -731,13 +687,7 @@ mod redemption_api_tests {
         let response =
             prepare_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        // The handler validates hex first (passes for wrong_length since it's valid hex),
-        // then later validates length which may return 500 (internal error) or 400
-        // depending on where the validation happens. We just assert it doesn't succeed.
-        assert_ne!(response.0, StatusCode::OK);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
+        assert_v1_tombstone(response.0, &response.1);
     }
 
     #[tokio::test]
@@ -757,21 +707,7 @@ mod redemption_api_tests {
         let response =
             prepare_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        // Without Ergo node available, it will fail at the signing stage.
-        // The request structure should be validated correctly.
-        let body = &response.1;
-        if !body.success {
-            let default_msg = "unknown".to_string();
-            let error_msg = body.error.as_ref().unwrap_or(&default_msg);
-            assert!(
-                error_msg.contains("tracker")
-                    || error_msg.contains("Tracker")
-                    || error_msg.contains("sign")
-                    || error_msg.contains("node"),
-                "Expected tracker/signing-related error for valid request structure, got: {}",
-                error_msg
-            );
-        }
+        assert_v1_tombstone(response.0, &response.1);
     }
 
     // ============================================================================

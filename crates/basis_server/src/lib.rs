@@ -13,8 +13,9 @@ pub mod tracker_box_updater;
 mod create_reserve_tests;
 
 use axum::{
+    http::StatusCode,
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use tokio::sync::Mutex;
 
@@ -66,6 +67,16 @@ pub async fn handle_options() -> impl axum::response::IntoResponse {
     )
 }
 
+pub(crate) const V1_REDEMPTION_RETIRED: &str =
+    "Basis v1 redemption is retired; v2 remains disabled until confirmed-chain authority and exact manifest admission are integrated";
+
+pub(crate) fn reject_retired_v1_redemption<T>() -> (StatusCode, Json<ApiResponse<T>>) {
+    (
+        StatusCode::GONE,
+        Json(models::error_response(V1_REDEMPTION_RETIRED.to_string())),
+    )
+}
+
 /// The generation-sensitive construction routes used by the production
 /// server. Keeping their wiring here lets integration tests exercise the same
 /// router that `main` merges into the application.
@@ -76,12 +87,44 @@ pub fn reserve_construction_routes() -> Router<AppState> {
             post(api::create_reserve_payload).options(handle_options),
         )
         .route(
+            "/config/reserve-contract-p2s",
+            get(api::get_basis_reserve_contract_p2s),
+        )
+}
+
+/// Compatibility tombstones for every retired v1 redemption endpoint.
+///
+/// These routes intentionally remain visible as HTTP 410 responses so stale
+/// clients cannot fall through to an older proof, signing, build, or broadcast
+/// path. This router contains no v2 activation path.
+pub fn retired_v1_redemption_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/redeem",
+            post(api::initiate_redemption).options(handle_options),
+        )
+        .route(
+            "/redeem/complete",
+            post(api::complete_redemption).options(handle_options),
+        )
+        .route("/proof/redemption", get(api::get_redemption_proof))
+        .route("/tracker/proof", get(api::get_tracker_proof))
+        .route("/reserve/proof", get(api::get_reserve_proof))
+        .route(
+            "/tracker/signature",
+            post(api::request_tracker_signature).options(handle_options),
+        )
+        .route(
+            "/redemption/prepare",
+            post(api::prepare_redemption).options(handle_options),
+        )
+        .route(
             "/redemption/build",
             post(redemption_build::build_redemption).options(handle_options),
         )
         .route(
-            "/config/reserve-contract-p2s",
-            get(api::get_basis_reserve_contract_p2s),
+            "/redemption/submit",
+            post(redemption_build::submit_redemption).options(handle_options),
         )
 }
 
