@@ -23,8 +23,9 @@ use basis_offchain::ergo_tx::{
     scala_context_extension_order, serialize_coll_bytes, serialize_ergo_byte, serialize_ergo_long,
 };
 use basis_trees::{ReserveAvlTree, TrackerAvlTree};
+use ergo_lib::ergo_chain_types::ADDigest;
 use ergo_lib::ergotree_ir::chain::ergo_box::{ErgoBox, NonMandatoryRegisterId};
-use ergo_lib::ergotree_ir::mir::avl_tree_data::AvlTreeData;
+use ergo_lib::ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
 use ergo_lib::ergotree_ir::mir::constant::{Constant, TryExtractInto};
 use ergo_lib::ergotree_ir::serialization::{SigmaSerializable, SigmaSerializationError};
 use serde::{Deserialize, Serialize};
@@ -433,6 +434,22 @@ impl<'a> ValidatedV2RedemptionManifest<'a> {
     pub fn manifest(&self) -> &'a V2RedemptionManifest {
         self.manifest
     }
+}
+
+/// Enter a proof or signing boundary only after the exact remote manifest has
+/// passed every signer-side v2 check.
+///
+/// The callback cannot be called with an unvalidated manifest: the proof type
+/// is constructed only by [`validate_v2_redemption_manifest`]. Callers that
+/// need a fallible callback can return a `Result` as `T` and flatten it after
+/// this validation result has been handled.
+pub fn with_validated_v2_redemption_manifest<'a, T>(
+    manifest: &'a V2RedemptionManifest,
+    intent: &V2SigningIntent,
+    callback: impl FnOnce(ValidatedV2RedemptionManifest<'a>) -> T,
+) -> Result<T, V2BuilderError> {
+    let validated = validate_v2_redemption_manifest(manifest, intent)?;
+    Ok(callback(validated))
 }
 
 /// Build a v2 manifest from confirmed exact boxes and authoritative BNS2/BRS2
@@ -1188,7 +1205,7 @@ fn expected_outputs_raw<W: ReserveWitnessView>(
     validate_proof_size(witness.update_proof(), "reserve update proof")?;
     let domain = claim.domain();
     let box_id = decode_array::<32>(&reserve.box_id, "reserve box id")?;
-    let successor_r5 = serialize_fixed_avl_register(witness.next_root(), 24);
+    let successor_r5 = serialize_fixed_avl_register(witness.next_root(), 24)?;
     let mut successor_registers = BTreeMap::new();
     successor_registers.insert("R4".to_string(), reserve_view.owner_register.clone());
     successor_registers.insert("R5".to_string(), successor_r5);
@@ -1396,14 +1413,18 @@ fn validate_avl_shape(
     Ok(())
 }
 
-fn serialize_fixed_avl_register(root: [u8; 33], value_length: u32) -> String {
-    let mut bytes = Vec::with_capacity(38);
-    bytes.push(0x64);
-    bytes.extend_from_slice(&root);
-    bytes.push(0x03);
-    bytes.push(32);
-    bytes.push(value_length as u8);
-    hex::encode(bytes)
+fn serialize_fixed_avl_register(
+    root: [u8; 33],
+    value_length: u32,
+) -> Result<String, V2BuilderError> {
+    let constant: Constant = AvlTreeData {
+        digest: ADDigest::from(root),
+        tree_flags: AvlTreeFlags::new(true, true, false),
+        key_length: 32,
+        value_length_opt: Some(Box::new(value_length)),
+    }
+    .into();
+    Ok(hex::encode(constant.sigma_serialize_bytes()?))
 }
 
 fn parse_p2pk_tree(tree: &str) -> Result<[u8; 33], V2BuilderError> {
@@ -1452,14 +1473,13 @@ mod tests {
     use super::*;
     use crate::basis_v2_state::{FreshV2StateApproval, ReserveStoreBindingV2};
     use basis_core::impls::schnorr_sign;
-    use ergo_lib::ergo_chain_types::{ADDigest, Digest32, EcPoint};
+    use ergo_lib::ergo_chain_types::{Digest32, EcPoint};
     use ergo_lib::ergotree_ir::chain::ergo_box::{
         box_value::BoxValue, BoxTokens, NonMandatoryRegisters,
     };
     use ergo_lib::ergotree_ir::chain::token::{Token, TokenAmount, TokenId};
     use ergo_lib::ergotree_ir::chain::tx_id::TxId;
     use ergo_lib::ergotree_ir::ergo_tree::ErgoTree;
-    use ergo_lib::ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
     use secp256k1::{PublicKey, Secp256k1, SecretKey};
     use tempfile::TempDir;
 
@@ -1488,6 +1508,18 @@ mod tests {
             value_length_opt: Some(Box::new(value_length)),
         }
         .into()
+    }
+
+    #[test]
+    fn successor_avl_register_uses_canonical_sigma_option_encoding() {
+        for first_byte in u8::MIN..=u8::MAX {
+            let mut root = [0u8; 33];
+            root[0] = first_byte;
+            root[32] = first_byte.wrapping_add(1);
+            let encoded = serialize_fixed_avl_register(root, 24).unwrap();
+            let parsed = parse_avl_register(&encoded, "successor R5").unwrap();
+            validate_avl_shape(&parsed, root, 24, "successor R5").unwrap();
+        }
     }
 
     fn group_constant(key: [u8; 33]) -> Constant {
@@ -1671,13 +1703,28 @@ mod tests {
     }
 
     fn reject(manifest: &V2RedemptionManifest, intent: &V2SigningIntent) {
-        assert!(validate_v2_redemption_manifest(manifest, intent).is_err());
+        let callback_calls = std::cell::Cell::new(0usize);
+        let result = with_validated_v2_redemption_manifest(manifest, intent, |_| {
+            callback_calls.set(callback_calls.get() + 1);
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            callback_calls.get(),
+            0,
+            "proof/signature callback ran for a rejected manifest"
+        );
     }
 
     #[test]
     fn older_signed_claim_remains_exact_when_tracker_commits_newer_total() {
         let fixture = make_fixture(false, false);
-        validate_v2_redemption_manifest(&fixture.manifest, &fixture.intent).unwrap();
+        let callback_calls = std::cell::Cell::new(0usize);
+        with_validated_v2_redemption_manifest(&fixture.manifest, &fixture.intent, |validated| {
+            callback_calls.set(callback_calls.get() + 1);
+            assert!(std::ptr::eq(validated.manifest(), &fixture.manifest));
+        })
+        .unwrap();
+        assert_eq!(callback_calls.get(), 1);
         assert_eq!(
             fixture.manifest.tracker_committed_total_debt,
             Some(fixture.committed_total)
@@ -1710,6 +1757,25 @@ mod tests {
         let mut change = fixture.manifest.clone();
         change.outputs[3].value += 1;
         reject(&change, &fixture.intent);
+
+        let mut payout_script = fixture.manifest.clone();
+        payout_script.outputs[1].ergo_tree.push_str("00");
+        reject(&payout_script, &fixture.intent);
+
+        let mut fee_script = fixture.manifest.clone();
+        fee_script.outputs[2].ergo_tree.push_str("00");
+        reject(&fee_script, &fixture.intent);
+
+        let mut change_owner = fixture.manifest.clone();
+        change_owner.outputs[3].ergo_tree.push_str("00");
+        reject(&change_owner, &fixture.intent);
+
+        let mut funding_owner = fixture.manifest.clone();
+        funding_owner.funding_inputs[0]
+            .exact_box
+            .ergo_tree
+            .push_str("00");
+        reject(&funding_owner, &fixture.intent);
 
         assert_eq!(
             fixture.manifest.outputs[0].value + fixture.manifest.outputs[1].value,
@@ -1761,6 +1827,10 @@ mod tests {
     #[test]
     fn reserve_domain_nft_tracker_nft_and_tracker_proof_are_individually_bound() {
         let fixture = make_fixture(false, false);
+
+        let mut claim_domain = fixture.manifest.clone();
+        claim_domain.claim.reserve_nft_id = "44".repeat(32);
+        reject(&claim_domain, &fixture.intent);
 
         let mut reserve_nft = fixture.manifest.clone();
         reserve_nft.reserve_input.exact_box.tokens[0].token_id = "55".repeat(32);
@@ -1878,6 +1948,10 @@ mod tests {
         let mut token_amount = fixture.manifest.clone();
         token_amount.outputs[1].tokens[0].amount += 1;
         reject(&token_amount, &fixture.intent);
+
+        let mut token_id = fixture.manifest.clone();
+        token_id.reserve_input.exact_box.tokens[1].token_id = "88".repeat(32);
+        reject(&token_id, &fixture.intent);
     }
 
     #[test]
