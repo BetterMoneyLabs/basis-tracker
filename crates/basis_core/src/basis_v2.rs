@@ -285,26 +285,43 @@ impl ClaimV2 {
 
     pub fn verify(&self) -> Result<(), BasisV2Error> {
         let message = self.signing_message()?;
-        // The contracts accept a wider 64..=66 byte surface and interpret
-        // `e` and `z` as signed big-endian integers. The Rust wire type is the
-        // deliberately narrower 65-byte canonical profile emitted by
-        // `schnorr_sign`: both 32-byte integers must be non-negative under the
-        // ErgoScript interpretation. Without these guards the generic Rust
-        // verifier can accept an unsigned-scalar signature rejected on-chain.
-        if self.signature[33] & 0x80 != 0 {
-            return Err(BasisV2Error::NonCanonicalSignature);
-        }
-        let mut challenge = Blake2b::<U32>::new();
-        challenge.update(&self.signature[..33]);
-        challenge.update(message);
-        challenge.update(self.domain.owner_pubkey);
-        if challenge.finalize()[0] & 0x80 != 0 {
-            return Err(BasisV2Error::NonCanonicalSignature);
-        }
-        SchnorrVerifier
-            .verify_signature(&self.signature, &message, &self.domain.owner_pubkey)
-            .map_err(BasisV2Error::from)
+        verify_basis_v2_signature(&self.signature, &message, &self.domain.owner_pubkey)
     }
+}
+
+/// Verify the canonical 65-byte Schnorr profile emitted by the Basis v2
+/// runtime for either the reserve owner or tracker key.
+///
+/// The contracts accept a wider 64..=66 byte surface and interpret `e` and
+/// `z` as signed big-endian integers. Runtime manifests deliberately use the
+/// single 33-byte commitment plus non-negative 32-byte response profile so a
+/// locally accepted signature cannot be rejected by the ErgoScript signed
+/// integer interpretation.
+pub fn verify_basis_v2_signature(
+    signature: &Signature,
+    message: &[u8],
+    public_key: &PubKey,
+) -> Result<(), BasisV2Error> {
+    validate_public_key(public_key).map_err(|_| BasisV2Error::InvalidPublicKey)?;
+    // The contracts accept a wider 64..=66 byte surface and interpret
+    // `e` and `z` as signed big-endian integers. The Rust wire type is the
+    // deliberately narrower 65-byte canonical profile emitted by
+    // `schnorr_sign`: both 32-byte integers must be non-negative under the
+    // ErgoScript interpretation. Without these guards the generic Rust
+    // verifier can accept an unsigned-scalar signature rejected on-chain.
+    if signature[33] & 0x80 != 0 {
+        return Err(BasisV2Error::NonCanonicalSignature);
+    }
+    let mut challenge = Blake2b::<U32>::new();
+    challenge.update(&signature[..33]);
+    challenge.update(message);
+    challenge.update(public_key);
+    if challenge.finalize()[0] & 0x80 != 0 {
+        return Err(BasisV2Error::NonCanonicalSignature);
+    }
+    SchnorrVerifier
+        .verify_signature(signature, message, public_key)
+        .map_err(BasisV2Error::from)
 }
 
 /// Fixed 24-byte value committed by reserve R5 in ABI v2.

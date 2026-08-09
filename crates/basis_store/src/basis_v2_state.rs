@@ -146,6 +146,25 @@ pub struct TrackerClaimStoreV2 {
     fail_next_persist: bool,
 }
 
+/// Read-only evidence that a cumulative debt is committed by the current
+/// fixed-shape tracker root. Generating this witness never advances durable
+/// state and deliberately returns the tree value, not a replacement ClaimV2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerClaimWitnessV2 {
+    committed_total_debt: u64,
+    proof: Vec<u8>,
+}
+
+impl TrackerClaimWitnessV2 {
+    pub const fn committed_total_debt(&self) -> u64 {
+        self.committed_total_debt
+    }
+
+    pub fn proof(&self) -> &[u8] {
+        &self.proof
+    }
+}
+
 impl TrackerClaimStoreV2 {
     pub fn open<P: AsRef<Path>>(
         path: P,
@@ -223,6 +242,39 @@ impl TrackerClaimStoreV2 {
             .iter()
             .map(|claim| claim.domain().claim_key())
             .collect())
+    }
+
+    /// Produce the mandatory tracker membership proof for a supplied signed
+    /// claim. A newer committed tracker value may cover the older claim, but
+    /// the caller must continue to use the supplied claim's authenticated
+    /// total and timestamp in the transaction context extension.
+    pub fn claim_witness(
+        &mut self,
+        claim: &ClaimV2,
+    ) -> Result<TrackerClaimWitnessV2, V2StateError> {
+        self.ensure_healthy()?;
+        revalidate_claim(claim)?;
+        if claim.domain().tracker_nft_id() != self.tracker_nft_id {
+            return Err(V2StateError::BindingMismatch);
+        }
+        let key = claim.domain().claim_key();
+        let witness = self.tree.lookup_witness(key)?;
+        let encoded = witness.value().ok_or_else(|| {
+            V2StateError::Corrupt("signed claim is absent from the tracker root".to_string())
+        })?;
+        let committed_total_debt = u64::from_be_bytes(encoded);
+        if committed_total_debt > i64::MAX as u64 {
+            return Err(V2StateError::Corrupt(
+                "tracker debt exceeds the Ergo Long domain".to_string(),
+            ));
+        }
+        if committed_total_debt < claim.total_debt() {
+            return Err(V2StateError::Claim(BasisV2Error::ClaimRegression));
+        }
+        Ok(TrackerClaimWitnessV2 {
+            committed_total_debt,
+            proof: witness.proof().to_vec(),
+        })
     }
 
     /// Revalidate the complete signed claim and durably replace the snapshot.
@@ -308,6 +360,41 @@ pub struct ReserveRedeemedStoreV2 {
     capacity_limit: usize,
     #[cfg(test)]
     fail_next_persist: bool,
+}
+
+/// Pure proof preparation for one reserve redemption. Both the prior lookup
+/// proof (membership or non-membership) and the insert-or-update proof are
+/// mandatory contract inputs; durable state remains unchanged until a later
+/// confirmed-chain reconciler commits the observed successor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReserveRedemptionWitnessV2 {
+    prior_state: Option<RedeemedStateV2>,
+    prior_proof: Vec<u8>,
+    next_state: RedeemedStateV2,
+    update_proof: Vec<u8>,
+    next_root: [u8; 33],
+}
+
+impl ReserveRedemptionWitnessV2 {
+    pub const fn prior_state(&self) -> Option<RedeemedStateV2> {
+        self.prior_state
+    }
+
+    pub fn prior_proof(&self) -> &[u8] {
+        &self.prior_proof
+    }
+
+    pub const fn next_state(&self) -> RedeemedStateV2 {
+        self.next_state
+    }
+
+    pub fn update_proof(&self) -> &[u8] {
+        &self.update_proof
+    }
+
+    pub const fn next_root(&self) -> [u8; 33] {
+        self.next_root
+    }
 }
 
 #[allow(dead_code)]
@@ -399,6 +486,49 @@ impl ReserveRedeemedStoreV2 {
             .iter()
             .map(|(claim, _)| claim.domain().claim_key())
             .collect())
+    }
+
+    /// Prepare all reserve proofs against the current root without mutating
+    /// BRS2. Non-membership is represented by `prior_state == None`, but its
+    /// proof bytes remain mandatory.
+    pub fn redemption_witness(
+        &mut self,
+        claim: &ClaimV2,
+        amount: u64,
+    ) -> Result<ReserveRedemptionWitnessV2, V2StateError> {
+        self.ensure_healthy()?;
+        revalidate_claim(claim)?;
+        validate_reserve_binding(claim, self.binding)?;
+
+        let key = claim.domain().claim_key();
+        let lookup = self.tree.lookup_witness(key)?;
+        let prior_state = lookup
+            .value()
+            .as_ref()
+            .map(|encoded| RedeemedStateV2::decode(encoded))
+            .transpose()?;
+        let recorded_state = self
+            .positions
+            .get(&key)
+            .map(|position| self.records[*position].1);
+        if prior_state != recorded_state {
+            return Err(V2StateError::Corrupt(
+                "reserve record and authenticated tree value disagree".to_string(),
+            ));
+        }
+        let next_state = match prior_state {
+            Some(state) => state.advance(claim.timestamp(), claim.total_debt(), amount)?,
+            None => RedeemedStateV2::new(claim.timestamp(), claim.total_debt(), amount)?,
+        };
+        let transition = self.tree.transition_witness(key, next_state.encode())?;
+
+        Ok(ReserveRedemptionWitnessV2 {
+            prior_state,
+            prior_proof: lookup.proof().to_vec(),
+            next_state,
+            update_proof: transition.proof().to_vec(),
+            next_root: transition.new_digest(),
+        })
     }
 
     pub fn is_poisoned(&self) -> bool {
@@ -1228,6 +1358,59 @@ mod tests {
             ClaimDomainV2::token(reserve_nft_id, token_id, tracker_nft_id, owner, receiver)
                 .unwrap();
         ClaimV2::sign(domain, total_debt, timestamp, &owner_secret).unwrap()
+    }
+
+    #[test]
+    fn proof_preparation_keeps_signed_claim_values_and_never_mutates_state() {
+        let tracker_dir = TempDir::new().unwrap();
+        let reserve_dir = TempDir::new().unwrap();
+        let tracker = [0x71u8; 32];
+        let reserve = [0x72u8; 32];
+        let old_claim = erg_claim(tracker, reserve, 1, 2, 100, 10);
+        let newer_claim = erg_claim(tracker, reserve, 1, 2, 150, 11);
+
+        let mut tracker_store =
+            TrackerClaimStoreV2::open(tracker_dir.path(), tracker, FreshV2StateApproval::Approve)
+                .unwrap();
+        tracker_store.record_validated_claim(newer_claim).unwrap();
+        let tracker_root = tracker_store.root_digest().unwrap();
+        let tracker_witness = tracker_store.claim_witness(&old_claim).unwrap();
+        assert_eq!(tracker_witness.committed_total_debt(), 150);
+        assert_eq!(old_claim.total_debt(), 100);
+        assert!(TrackerAvlTree::verify_lookup_bytes(
+            &tracker_root,
+            &old_claim.domain().claim_key(),
+            tracker_witness.proof(),
+            Some(150u64.to_be_bytes()),
+        ));
+        assert_eq!(tracker_store.root_digest().unwrap(), tracker_root);
+
+        let mut reserve_store = ReserveRedeemedStoreV2::open(
+            reserve_dir.path(),
+            ReserveStoreBindingV2::erg(tracker, reserve),
+            FreshV2StateApproval::Approve,
+        )
+        .unwrap();
+        let reserve_root = reserve_store.root_digest().unwrap();
+        let witness = reserve_store.redemption_witness(&old_claim, 25).unwrap();
+        assert_eq!(witness.prior_state(), None);
+        assert!(!witness.prior_proof().is_empty());
+        assert_eq!(witness.next_state().redeemed(), 25);
+        assert!(ReserveAvlTree::verify_lookup_bytes(
+            &reserve_root,
+            &old_claim.domain().claim_key(),
+            witness.prior_proof(),
+            None,
+        ));
+        assert!(ReserveAvlTree::verify_transition_bytes(
+            &reserve_root,
+            &old_claim.domain().claim_key(),
+            &witness.next_state().encode(),
+            witness.update_proof(),
+            &witness.next_root(),
+        ));
+        assert_eq!(reserve_store.root_digest().unwrap(), reserve_root);
+        assert!(reserve_store.is_empty().unwrap());
     }
 
     fn rewrite_checksum(bytes: &mut Vec<u8>, domain: &[u8]) {

@@ -25,20 +25,12 @@ use std::collections::HashMap;
 
 pub const BASIS_V2_KEY_LENGTH: usize = 32;
 
-fn tree_resolver(_digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
-    ergo_avltree_rust::batch_node::Node::Leaf(ergo_avltree_rust::batch_node::LeafNode {
-        hdr: ergo_avltree_rust::batch_node::NodeHeader {
-            visited: false,
-            is_new: false,
-            label: None,
-            key: Some(ergo_avltree_rust::operation::ADKey::from(vec![
-                0u8;
-                BASIS_V2_KEY_LENGTH
-            ])),
-        },
-        value: ergo_avltree_rust::operation::ADValue::from(vec![]),
-        next_node_key: ergo_avltree_rust::operation::ADKey::from(vec![0u8; BASIS_V2_KEY_LENGTH]),
-    })
+fn tree_resolver(digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
+    use ergo_avltree_rust::batch_node::{Node, NodeHeader};
+    // Match Sigma's verifier resolver exactly. Replacing an unresolved label
+    // with a synthetic leaf changes an existing-key update digest even though
+    // first-insertion fixtures may still appear to verify.
+    Node::LabelOnly(NodeHeader::new(Some(*digest), None))
 }
 
 /// ErgoScript metadata authenticated by both Basis v2 reserve families.
@@ -284,6 +276,46 @@ impl<const VALUE_LEN: usize> FixedAvlInner<VALUE_LEN> {
         }
     }
 
+    /// Verify one raw insert-or-update proof and bind the resulting digest.
+    ///
+    /// This is the signer-side counterpart of `transition_witness`: a CLI can
+    /// replay the exact context variable supplied by a remote builder without
+    /// trusting the builder's claimed successor R5.
+    fn verify_transition(
+        starting_digest: &[u8; 33],
+        key: &[u8; BASIS_V2_KEY_LENGTH],
+        value: &[u8; VALUE_LEN],
+        proof: &[u8],
+        expected_digest: &[u8; 33],
+    ) -> bool {
+        if proof.is_empty() {
+            return false;
+        }
+        let mut verifier = match BatchAVLVerifier::new(
+            &Bytes::copy_from_slice(starting_digest),
+            &Bytes::copy_from_slice(proof),
+            AVLTree::new(tree_resolver, BASIS_V2_KEY_LENGTH, Some(VALUE_LEN)),
+            Some(1),
+            Some(0),
+        ) {
+            Ok(verifier) => verifier,
+            Err(_) => return false,
+        };
+        if verifier
+            .perform_one_operation(&Operation::InsertOrUpdate(KeyValue {
+                key: key.to_vec().into(),
+                value: value.to_vec().into(),
+            }))
+            .is_err()
+        {
+            return false;
+        }
+        verifier
+            .digest()
+            .map(|digest| digest.as_ref() == expected_digest)
+            .unwrap_or(false)
+    }
+
     fn empty_prover() -> BatchAVLProver {
         BatchAVLProver::new(
             AVLTree::new(tree_resolver, BASIS_V2_KEY_LENGTH, Some(VALUE_LEN)),
@@ -425,6 +457,39 @@ macro_rules! define_fixed_tree {
                     &witness.inner,
                 )
             }
+
+            /// Verify raw mandatory membership or non-membership evidence.
+            pub fn verify_lookup_bytes(
+                starting_digest: &[u8; 33],
+                key: &[u8; BASIS_V2_KEY_LENGTH],
+                proof: &[u8],
+                value: Option<[u8; $value_len]>,
+            ) -> bool {
+                let witness = $witness {
+                    inner: LookupWitness {
+                        proof: proof.to_vec(),
+                        value,
+                    },
+                };
+                Self::verify_lookup(starting_digest, key, &witness)
+            }
+
+            /// Verify a raw insert-or-update proof and its exact successor root.
+            pub fn verify_transition_bytes(
+                starting_digest: &[u8; 33],
+                key: &[u8; BASIS_V2_KEY_LENGTH],
+                value: &[u8; $value_len],
+                proof: &[u8],
+                expected_digest: &[u8; 33],
+            ) -> bool {
+                FixedAvlInner::<$value_len>::verify_transition(
+                    starting_digest,
+                    key,
+                    value,
+                    proof,
+                    expected_digest,
+                )
+            }
         }
 
         impl Default for $tree {
@@ -551,6 +616,18 @@ mod tests {
             &[9u8; 32],
             &non_membership
         ));
+        assert!(ReserveAvlTree::verify_lookup_bytes(
+            &digest,
+            &[1u8; 32],
+            membership.proof(),
+            membership.value(),
+        ));
+        assert!(ReserveAvlTree::verify_lookup_bytes(
+            &digest,
+            &[9u8; 32],
+            non_membership.proof(),
+            None,
+        ));
 
         let mut wrong = non_membership.clone();
         wrong.inner.value = Some([0u8; 24]);
@@ -591,6 +668,22 @@ mod tests {
 
         tree.update([1u8; 32], [5u8; 8]).unwrap();
         assert_eq!(tree.root_digest().unwrap(), witness.new_digest());
+        assert!(TrackerAvlTree::verify_transition_bytes(
+            &before,
+            &[1u8; 32],
+            &[5u8; 8],
+            witness.proof(),
+            &witness.new_digest(),
+        ));
+        let mut wrong_root = witness.new_digest();
+        wrong_root[0] ^= 1;
+        assert!(!TrackerAvlTree::verify_transition_bytes(
+            &before,
+            &[1u8; 32],
+            &[5u8; 8],
+            witness.proof(),
+            &wrong_root,
+        ));
     }
 
     #[test]
