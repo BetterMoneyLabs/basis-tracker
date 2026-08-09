@@ -62,15 +62,39 @@ For an existing reserve entry, the same signed `(timestamp,totalDebt)` may
 advance `redeemed`. A newer timestamp may increase, but never decrease,
 `totalDebt`. Membership and non-membership proofs are both mandatory.
 
+## Bounded manifest admission
+
+Untrusted manifest JSON enters through one raw-byte parser capped at 2 MiB.
+`V2RedemptionManifest` is serializable but is not directly deserializable, so a
+CLI or future transport cannot bypass that allocation boundary. Every top-level
+field is required; branch-absent evidence is represented by an explicit JSON
+`null`, not by omitting the key.
+
+Before hex decoding, the runtime enforces these limits:
+
+| Field family | Encoded limit |
+| --- | ---: |
+| fixed identifiers, keys, roots, signatures, states | exactly twice the fixed byte width |
+| AVL proof | non-empty, even-length hex; at most 131,072 characters / 65,536 bytes |
+| exact Sigma box | non-empty, even-length hex; at most 8,192 characters / 4,096 bytes |
+
+Funding is limited to 1-16 exact token-free boxes under one P2PK owner. Every
+transaction output, including the reserve successor, creditor payout, miner
+fee, and optional owner change, must be within
+`1,000,000..=Long.MaxValue` nanoERG. Funding and transaction aggregates use
+checked arithmetic; a per-box-valid set whose aggregate overflows is rejected.
+
 ## Activation boundary
 
-This foundation recognizes the exact v2 identity but deliberately rejects its
-activation at server startup. The current scanner and state store are v1-shaped
-and must not interpret v2 registers. The historical strict-insert identity is
-retained only as a temporary compatibility mode, while every construction
-endpoint stays disabled; this does not establish legacy acceptance safety. V2
-activation requires its scanner, BNS2/BRS2 state, and a builder
-that supplies all of the following as one coherent manifest:
+The exact v2 identity, state primitives, manifest builder, and signer-side
+validator exist, but production activation remains deliberately unavailable.
+Confirmed boxes and signer tips have no public production constructor; a test
+height or caller boolean cannot create chain authority. No server, CLI, or TUI
+route can prove, sign, submit, or broadcast a v2 redemption.
+
+Activation requires a sealed header-ancestry reconciler, authoritative
+BNS2/BRS2 state, and a private prover/signer that consumes only the validated
+manifest and supplies all of the following as one coherent transaction:
 
 - R4-R9 reserve registers, including immutable emergency R8 and predecessor R9;
 - fixed-width tracker and reserve AVL trees and mandatory context variables
@@ -82,18 +106,15 @@ that supplies all of the following as one coherent manifest:
 - reserve-NFT-specific proof/root/box lineage and an idempotent confirmed-chain
   settlement record.
 
-Until that join exists, normal server startup rejects the exact v2 P2S and the
-reserve creation, P2S distribution, and HTTP redemption-build endpoints fail
-closed. The v1 scanner constructor also rejects exact v2 and unknown configured
-identities, and its internal parser checks the historical ErgoTree before
-decoding registers. The older public library transaction builder remains a
-separate legacy-quarantine dependency; this foundation does not claim that all
-v1 code has been removed.
+Until that join exists, v2 stays dormant. The nine legacy HTTP compatibility
+routes return `410 Gone`; the global v1 reserve AVL/proof actor surface and the
+v1 transaction builder, signer, navigation, and local-sign fixture are removed.
+The current admission layer implements no prover, wallet integration,
+submission, broadcast, settlement reconciliation, or migration.
 
 ## Coexistence and migration
 
-V1 and v2 records must use separate storage namespaces and APIs. There is no
-implicit conversion of a bilateral v1 note into a reserve-bound v2 claim, and
-the v2 contract cannot mutate existing v1 boxes. Activation therefore requires
-an explicit generation manifest, fresh v2 reserves and a separately approved
-support/sunset policy for attributable v1 state.
+There is no implicit conversion of a bilateral v1 note into a reserve-bound v2
+claim, and the v2 contract cannot mutate existing v1 boxes. Activation
+therefore requires an explicit generation manifest, fresh v2 reserves, and a
+separately approved support/sunset policy for attributable historical state.

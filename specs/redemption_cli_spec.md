@@ -12,8 +12,10 @@
 - The ignored local-sign v1 fixture is removed.
 - The TUI exposes no redemption or transaction navigation.
 
-The v2 client currently validates an exact `V2RedemptionManifest` before an
-opaque callback. It has no concrete prover, signer, wallet adapter, submitter,
+The v2 client accepts either an already constructed exact
+`V2RedemptionManifest` or raw JSON through the 2 MiB bounded parser, then
+validates it before an opaque callback. Direct serde deserialization is not an
+available bypass. It has no concrete prover, signer, wallet adapter, submitter,
 or broadcaster, and production manifest construction remains unavailable until
 confirmed-chain authority is integrated.
 

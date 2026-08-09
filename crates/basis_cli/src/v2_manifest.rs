@@ -20,8 +20,8 @@
 
 use anyhow::Result;
 use basis_store::basis_v2_builder::{
-    with_validated_v2_redemption_manifest, V2RedemptionManifest, V2SigningIntent,
-    ValidatedV2RedemptionManifest,
+    with_validated_v2_redemption_manifest, with_validated_v2_redemption_manifest_bytes,
+    V2RedemptionManifest, V2SigningIntent, ValidatedV2RedemptionManifest,
 };
 
 /// Validate the complete v2 manifest before entering a fallible proof/signing
@@ -35,4 +35,16 @@ pub fn with_validated_v2_manifest<T>(
     callback: impl FnOnce(ValidatedV2RedemptionManifest<'_>) -> Result<T>,
 ) -> Result<T> {
     with_validated_v2_redemption_manifest(manifest, intent, callback).map_err(anyhow::Error::new)?
+}
+
+/// Bounded raw-byte admission seam for a future CLI transport. Raw JSON is
+/// size-checked and parsed before the same opaque validation token can reach a
+/// proof or signing callback.
+pub fn with_validated_v2_manifest_bytes<T>(
+    encoded: &[u8],
+    intent: &V2SigningIntent,
+    callback: impl FnOnce(ValidatedV2RedemptionManifest<'_>) -> Result<T>,
+) -> Result<T> {
+    with_validated_v2_redemption_manifest_bytes(encoded, intent, callback)
+        .map_err(anyhow::Error::new)?
 }

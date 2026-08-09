@@ -9,6 +9,14 @@
 //! use basis_store::basis_v2_builder::VerifiedSigningTipV2;
 //! let _ = VerifiedSigningTipV2 { block_id: [0; 32], height: 1 };
 //! ```
+//!
+//! Raw JSON must enter through the bounded parser; the manifest deliberately
+//! does not implement `Deserialize` directly:
+//!
+//! ```compile_fail
+//! use basis_store::basis_v2_builder::V2RedemptionManifest;
+//! let _: V2RedemptionManifest = serde_json::from_slice(b"{}").unwrap();
+//! ```
 
 use crate::basis_v2_state::{
     ReserveRedeemedStoreV2, ReserveRedemptionWitnessV2, TrackerClaimStoreV2, TrackerClaimWitnessV2,
@@ -24,7 +32,9 @@ use basis_offchain::ergo_tx::{
 };
 use basis_trees::{ReserveAvlTree, TrackerAvlTree};
 use ergo_lib::ergo_chain_types::ADDigest;
-use ergo_lib::ergotree_ir::chain::ergo_box::{ErgoBox, NonMandatoryRegisterId};
+use ergo_lib::ergotree_ir::chain::ergo_box::{
+    box_value::BoxValue, ErgoBox, NonMandatoryRegisterId,
+};
 use ergo_lib::ergotree_ir::mir::avl_tree_data::{AvlTreeData, AvlTreeFlags};
 use ergo_lib::ergotree_ir::mir::constant::{Constant, TryExtractInto};
 use ergo_lib::ergotree_ir::serialization::{SigmaSerializable, SigmaSerializationError};
@@ -37,6 +47,32 @@ pub const BASIS_V2_MANIFEST_SCHEMA: &str = "basis-v2-redemption-manifest/1";
 pub const BASIS_V2_MIN_BOX_VALUE: u64 = 1_000_000;
 pub const BASIS_V2_MAX_FUNDING_INPUTS: usize = 16;
 pub const BASIS_V2_MAX_PROOF_BYTES: usize = 64 * 1024;
+pub const BASIS_V2_MAX_MANIFEST_JSON_BYTES: usize = 2 * 1024 * 1024;
+
+const REQUIRED_V2_MANIFEST_FIELDS: &[&str] = &[
+    "schema",
+    "claim",
+    "amount",
+    "fee",
+    "current_height",
+    "minimum_confirmations",
+    "emergency",
+    "reserve_input",
+    "funding_inputs",
+    "tracker_data_input",
+    "tracker_signature",
+    "reserve_root",
+    "reserve_prior_state",
+    "reserve_prior_proof",
+    "reserve_next_state",
+    "reserve_update_proof",
+    "reserve_next_root",
+    "tracker_root",
+    "tracker_lookup_proof",
+    "tracker_committed_total_debt",
+    "context_extension",
+    "outputs",
+];
 
 /// Miner-fee proposition used by the canonical Scala transaction shape.
 pub const BASIS_V2_FEE_ERGO_TREE: &str = "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304";
@@ -47,6 +83,8 @@ pub enum V2BuilderError {
     State(String),
     #[error("invalid exact box bytes: {0}")]
     BoxBytes(String),
+    #[error("invalid v2 manifest bytes: {0}")]
+    ManifestBytes(String),
     #[error("v2 manifest invariant failed: {0}")]
     Invariant(String),
 }
@@ -281,8 +319,7 @@ impl From<&ConfirmedChainBoxV2> for AuthenticatedInputManifestV2 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct V2RedemptionManifest {
     schema: String,
     claim: ClaimManifestV2,
@@ -308,7 +345,101 @@ pub struct V2RedemptionManifest {
     outputs: Vec<OutputManifestV2>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V2RedemptionManifestWire {
+    schema: String,
+    claim: ClaimManifestV2,
+    amount: u64,
+    fee: u64,
+    current_height: u32,
+    minimum_confirmations: u32,
+    emergency: bool,
+    reserve_input: AuthenticatedInputManifestV2,
+    funding_inputs: Vec<AuthenticatedInputManifestV2>,
+    tracker_data_input: Option<AuthenticatedInputManifestV2>,
+    tracker_signature: Option<String>,
+    reserve_root: String,
+    reserve_prior_state: Option<String>,
+    reserve_prior_proof: String,
+    reserve_next_state: String,
+    reserve_update_proof: String,
+    reserve_next_root: String,
+    tracker_root: Option<String>,
+    tracker_lookup_proof: Option<String>,
+    tracker_committed_total_debt: Option<u64>,
+    context_extension: Vec<ContextVariableManifestV2>,
+    outputs: Vec<OutputManifestV2>,
+}
+
+impl From<V2RedemptionManifestWire> for V2RedemptionManifest {
+    fn from(wire: V2RedemptionManifestWire) -> Self {
+        Self {
+            schema: wire.schema,
+            claim: wire.claim,
+            amount: wire.amount,
+            fee: wire.fee,
+            current_height: wire.current_height,
+            minimum_confirmations: wire.minimum_confirmations,
+            emergency: wire.emergency,
+            reserve_input: wire.reserve_input,
+            funding_inputs: wire.funding_inputs,
+            tracker_data_input: wire.tracker_data_input,
+            tracker_signature: wire.tracker_signature,
+            reserve_root: wire.reserve_root,
+            reserve_prior_state: wire.reserve_prior_state,
+            reserve_prior_proof: wire.reserve_prior_proof,
+            reserve_next_state: wire.reserve_next_state,
+            reserve_update_proof: wire.reserve_update_proof,
+            reserve_next_root: wire.reserve_next_root,
+            tracker_root: wire.tracker_root,
+            tracker_lookup_proof: wire.tracker_lookup_proof,
+            tracker_committed_total_debt: wire.tracker_committed_total_debt,
+            context_extension: wire.context_extension,
+            outputs: wire.outputs,
+        }
+    }
+}
+
 impl V2RedemptionManifest {
+    /// Parse an untrusted manifest under one explicit allocation budget.
+    ///
+    /// Optional evidence fields remain required JSON keys and must be encoded
+    /// as `null` when absent. This keeps omission distinct from the pinned
+    /// emergency ABI while preventing direct unbounded deserialization.
+    pub fn from_json_bytes(encoded: &[u8]) -> Result<Self, V2BuilderError> {
+        if encoded.is_empty() {
+            return Err(V2BuilderError::ManifestBytes(
+                "manifest JSON is empty".to_string(),
+            ));
+        }
+        if encoded.len() > BASIS_V2_MAX_MANIFEST_JSON_BYTES {
+            return Err(V2BuilderError::ManifestBytes(format!(
+                "manifest JSON exceeds {BASIS_V2_MAX_MANIFEST_JSON_BYTES} bytes"
+            )));
+        }
+
+        // Deserialize directly into the wire struct first so serde rejects
+        // duplicate and unknown fields. A second bounded object pass makes
+        // nullable fields presence-sensitive instead of treating omission as
+        // an implicit `None`.
+        let wire: V2RedemptionManifestWire = serde_json::from_slice(encoded)
+            .map_err(|error| V2BuilderError::ManifestBytes(error.to_string()))?;
+        let value: Value = serde_json::from_slice(encoded)
+            .map_err(|error| V2BuilderError::ManifestBytes(error.to_string()))?;
+        let object = value.as_object().ok_or_else(|| {
+            V2BuilderError::ManifestBytes("manifest JSON must be an object".to_string())
+        })?;
+        for field in REQUIRED_V2_MANIFEST_FIELDS {
+            if !object.contains_key(*field) {
+                return Err(V2BuilderError::ManifestBytes(format!(
+                    "manifest JSON omits required field {field}"
+                )));
+            }
+        }
+        Ok(wire.into())
+    }
+
     pub fn claim(&self) -> &ClaimManifestV2 {
         &self.claim
     }
@@ -413,6 +544,10 @@ impl V2SigningIntent {
                 "signing intent amount, fee, and confirmations must be non-zero",
             ));
         }
+        validate_output_box_value(fee, "miner fee output")?;
+        if matches!(claim.domain().asset(), ReserveAssetV2::Erg) {
+            validate_output_box_value(amount, "creditor payout output")?;
+        }
         Ok(Self {
             claim,
             amount,
@@ -449,6 +584,18 @@ pub fn with_validated_v2_redemption_manifest<'a, T>(
     callback: impl FnOnce(ValidatedV2RedemptionManifest<'a>) -> T,
 ) -> Result<T, V2BuilderError> {
     let validated = validate_v2_redemption_manifest(manifest, intent)?;
+    Ok(callback(validated))
+}
+
+/// Parse bounded raw JSON and enter the proof/signing callback only after the
+/// resulting exact manifest passes signer-side validation.
+pub fn with_validated_v2_redemption_manifest_bytes<T>(
+    encoded: &[u8],
+    intent: &V2SigningIntent,
+    callback: impl FnOnce(ValidatedV2RedemptionManifest<'_>) -> T,
+) -> Result<T, V2BuilderError> {
+    let manifest = V2RedemptionManifest::from_json_bytes(encoded)?;
+    let validated = validate_v2_redemption_manifest(&manifest, intent)?;
     Ok(callback(validated))
 }
 
@@ -597,6 +744,14 @@ pub fn validate_v2_redemption_manifest<'a>(
         manifest.minimum_confirmations,
         manifest.funding_inputs.len(),
     )?;
+    if !(3..=4).contains(&manifest.outputs.len()) {
+        return Err(invariant(
+            "manifest output count is outside the exact v2 shape",
+        ));
+    }
+    for (index, output) in manifest.outputs.iter().enumerate() {
+        validate_output_box_value(output.value, output_value_label(index))?;
+    }
     let claim = manifest.claim.to_claim()?;
     if claim != intent.claim
         || manifest.amount != intent.amount
@@ -865,6 +1020,8 @@ impl TrackerWitnessView for ManifestTrackerWitness {
 }
 
 fn parse_exact_box(raw_sigma_hex: &str) -> Result<ExactBoxManifestV2, V2BuilderError> {
+    validate_hex_encoded_length(raw_sigma_hex, "raw Sigma box", ErgoBox::MAX_BOX_SIZE)
+        .map_err(V2BuilderError::BoxBytes)?;
     let bytes = hex::decode(raw_sigma_hex)
         .map_err(|error| V2BuilderError::BoxBytes(format!("invalid hex: {error}")))?;
     let ergo_box = ErgoBox::sigma_parse_bytes(&bytes)
@@ -941,6 +1098,7 @@ fn validate_scalar_request(
     if fee == 0 {
         return Err(invariant("miner fee must be non-zero"));
     }
+    validate_output_box_value(fee, "miner fee output")?;
     if minimum_confirmations == 0 {
         return Err(invariant("minimum confirmations must be non-zero"));
     }
@@ -1301,7 +1459,43 @@ fn expected_outputs_raw<W: ReserveWitnessView>(
             additional_registers: BTreeMap::new(),
         });
     }
+    for (index, output) in outputs.iter().enumerate() {
+        validate_output_box_value(output.value, output_value_label(index))?;
+    }
+    let input_total = reserve
+        .value
+        .checked_add(funding.total)
+        .ok_or_else(|| invariant("aggregate input value overflow"))?;
+    let output_total = outputs.iter().try_fold(0u64, |total, output| {
+        total
+            .checked_add(output.value)
+            .ok_or_else(|| invariant("aggregate output value overflow"))
+    })?;
+    if output_total != input_total {
+        return Err(invariant(
+            "aggregate input and output values do not balance exactly",
+        ));
+    }
     Ok(outputs)
+}
+
+fn validate_output_box_value(value: u64, label: &str) -> Result<(), V2BuilderError> {
+    if !(BASIS_V2_MIN_BOX_VALUE..=BoxValue::MAX_RAW).contains(&value) {
+        return Err(invariant(format!(
+            "{label} value is outside {BASIS_V2_MIN_BOX_VALUE}..={}",
+            BoxValue::MAX_RAW
+        )));
+    }
+    Ok(())
+}
+
+fn output_value_label(index: usize) -> &'static str {
+    match index {
+        0 => "reserve successor output",
+        1 => "creditor payout output",
+        2 => "miner fee output",
+        _ => "change output",
+    }
 }
 
 fn expected_context<W: ReserveWitnessView, T: TrackerWitnessView>(
@@ -1439,6 +1633,21 @@ fn parse_p2pk_tree(tree: &str) -> Result<[u8; 33], V2BuilderError> {
 }
 
 fn decode_array<const N: usize>(encoded: &str, label: &str) -> Result<[u8; N], V2BuilderError> {
+    if encoded.is_empty() {
+        return Err(invariant(format!(
+            "{label} must be non-empty before hex decoding"
+        )));
+    }
+    if encoded.len() & 1 != 0 {
+        return Err(invariant(format!(
+            "{label} must contain an even number of hex characters before hex decoding"
+        )));
+    }
+    if encoded.len() != N * 2 {
+        return Err(invariant(format!(
+            "{label} must encode exactly {N} bytes before hex decoding"
+        )));
+    }
     let bytes = hex::decode(encoded).map_err(|error| invariant(format!("{label} hex: {error}")))?;
     bytes
         .try_into()
@@ -1446,9 +1655,31 @@ fn decode_array<const N: usize>(encoded: &str, label: &str) -> Result<[u8; N], V
 }
 
 fn decode_proof(encoded: &str, label: &str) -> Result<Vec<u8>, V2BuilderError> {
+    validate_hex_encoded_length(encoded, label, BASIS_V2_MAX_PROOF_BYTES).map_err(invariant)?;
     let proof = hex::decode(encoded).map_err(|error| invariant(format!("{label} hex: {error}")))?;
     validate_proof_size(&proof, label)?;
     Ok(proof)
+}
+
+fn validate_hex_encoded_length(
+    encoded: &str,
+    label: &str,
+    maximum_bytes: usize,
+) -> Result<(), String> {
+    if encoded.is_empty() {
+        return Err(format!("{label} must be non-empty before hex decoding"));
+    }
+    if encoded.len() & 1 != 0 {
+        return Err(format!(
+            "{label} must contain an even number of hex characters before hex decoding"
+        ));
+    }
+    if encoded.len() > maximum_bytes * 2 {
+        return Err(format!(
+            "{label} exceeds {maximum_bytes} bytes before hex decoding"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_proof_size(proof: &[u8], label: &str) -> Result<(), V2BuilderError> {
@@ -1703,16 +1934,33 @@ mod tests {
     }
 
     fn reject(manifest: &V2RedemptionManifest, intent: &V2SigningIntent) {
+        let _ = reject_error(manifest, intent);
+    }
+
+    fn reject_error(manifest: &V2RedemptionManifest, intent: &V2SigningIntent) -> V2BuilderError {
         let callback_calls = std::cell::Cell::new(0usize);
         let result = with_validated_v2_redemption_manifest(manifest, intent, |_| {
             callback_calls.set(callback_calls.get() + 1);
         });
-        assert!(result.is_err());
         assert_eq!(
             callback_calls.get(),
             0,
             "proof/signature callback ran for a rejected manifest"
         );
+        result.expect_err("mutant must be rejected")
+    }
+
+    fn reject_bytes(encoded: &[u8], intent: &V2SigningIntent) -> V2BuilderError {
+        let callback_calls = std::cell::Cell::new(0usize);
+        let result = with_validated_v2_redemption_manifest_bytes(encoded, intent, |_| {
+            callback_calls.set(callback_calls.get() + 1);
+        });
+        assert_eq!(
+            callback_calls.get(),
+            0,
+            "proof/signature callback ran for rejected manifest bytes"
+        );
+        result.expect_err("mutant bytes must be rejected")
     }
 
     #[test]
@@ -1865,6 +2113,13 @@ mod tests {
         assert!(emergency.manifest.tracker_data_input.is_none());
         assert!(emergency.manifest.tracker_signature.is_none());
         validate_v2_redemption_manifest(&emergency.manifest, &emergency.intent).unwrap();
+        let encoded = serde_json::to_vec(&emergency.manifest).unwrap();
+        let callback_calls = std::cell::Cell::new(0usize);
+        with_validated_v2_redemption_manifest_bytes(&encoded, &emergency.intent, |_| {
+            callback_calls.set(callback_calls.get() + 1);
+        })
+        .unwrap();
+        assert_eq!(callback_calls.get(), 1);
 
         let mut caller_boolean = normal.manifest.clone();
         caller_boolean.emergency = true;
@@ -1966,5 +2221,281 @@ mod tests {
         shallow.reserve_input.observation.inclusion_height = 100;
         shallow.reserve_input.observation.confirmations = 1;
         reject(&shallow, &fixture.intent);
+    }
+
+    #[test]
+    fn bounded_manifest_bytes_accept_the_exact_cap_and_reject_one_byte_over() {
+        let fixture = make_fixture(false, false);
+        let mut encoded = serde_json::to_vec(&fixture.manifest).unwrap();
+        assert!(encoded.len() < BASIS_V2_MAX_MANIFEST_JSON_BYTES);
+        encoded.resize(BASIS_V2_MAX_MANIFEST_JSON_BYTES, b' ');
+
+        let callback_calls = std::cell::Cell::new(0usize);
+        with_validated_v2_redemption_manifest_bytes(&encoded, &fixture.intent, |validated| {
+            callback_calls.set(callback_calls.get() + 1);
+            assert_eq!(validated.manifest().amount(), fixture.manifest.amount());
+        })
+        .unwrap();
+        assert_eq!(callback_calls.get(), 1);
+
+        encoded.push(b' ');
+        let error = reject_bytes(&encoded, &fixture.intent);
+        assert!(error.to_string().contains("manifest JSON exceeds"));
+    }
+
+    #[test]
+    fn every_top_level_manifest_field_is_required_before_callback_admission() {
+        let fixture = make_fixture(false, false);
+        let value = serde_json::to_value(&fixture.manifest).unwrap();
+        let object = value.as_object().unwrap();
+        let mut actual_fields: Vec<&str> = object.keys().map(String::as_str).collect();
+        actual_fields.sort_unstable();
+        let mut required_fields = REQUIRED_V2_MANIFEST_FIELDS.to_vec();
+        required_fields.sort_unstable();
+        assert_eq!(actual_fields, required_fields);
+
+        for field in REQUIRED_V2_MANIFEST_FIELDS {
+            let mut mutant = value.clone();
+            mutant.as_object_mut().unwrap().remove(*field);
+            let encoded = serde_json::to_vec(&mutant).unwrap();
+            let error = reject_bytes(&encoded, &fixture.intent);
+            assert!(
+                error.to_string().contains(field),
+                "missing {field} was not named by {error}"
+            );
+        }
+
+        let mut unknown = value.clone();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_string(), Value::Null);
+        reject_bytes(&serde_json::to_vec(&unknown).unwrap(), &fixture.intent);
+
+        let valid = serde_json::to_string(&value).unwrap();
+        let duplicate = format!(
+            "{{\"schema\":\"{BASIS_V2_MANIFEST_SCHEMA}\",{}",
+            &valid[1..]
+        );
+        reject_bytes(duplicate.as_bytes(), &fixture.intent);
+    }
+
+    #[test]
+    fn hex_lengths_are_checked_before_decode_with_exact_caps_admitted() {
+        assert!(validate_hex_encoded_length(
+            &"00".repeat(ErgoBox::MAX_BOX_SIZE),
+            "raw Sigma box",
+            ErgoBox::MAX_BOX_SIZE,
+        )
+        .is_ok());
+        assert_eq!(
+            decode_proof(&"00".repeat(BASIS_V2_MAX_PROOF_BYTES), "bounded proof")
+                .unwrap()
+                .len(),
+            BASIS_V2_MAX_PROOF_BYTES
+        );
+        assert_eq!(
+            decode_array::<32>(&"00".repeat(32), "fixed field").unwrap(),
+            [0u8; 32]
+        );
+
+        let fixture = make_fixture(false, false);
+
+        let mut raw_empty = fixture.manifest.clone();
+        raw_empty.reserve_input.exact_box.raw_sigma_hex.clear();
+        assert!(reject_error(&raw_empty, &fixture.intent)
+            .to_string()
+            .contains("non-empty before hex decoding"));
+
+        let mut proof_empty = fixture.manifest.clone();
+        proof_empty.reserve_prior_proof.clear();
+        assert!(reject_error(&proof_empty, &fixture.intent)
+            .to_string()
+            .contains("non-empty before hex decoding"));
+
+        let mut fixed_empty = fixture.manifest.clone();
+        fixed_empty.claim.reserve_nft_id.clear();
+        assert!(reject_error(&fixed_empty, &fixture.intent)
+            .to_string()
+            .contains("non-empty before hex decoding"));
+
+        let mut raw_oversized = fixture.manifest.clone();
+        raw_oversized.reserve_input.exact_box.raw_sigma_hex =
+            "zz".repeat(ErgoBox::MAX_BOX_SIZE + 1);
+        let error = reject_error(&raw_oversized, &fixture.intent);
+        assert!(error
+            .to_string()
+            .contains("exceeds 4096 bytes before hex decoding"));
+
+        let mut proof_oversized = fixture.manifest.clone();
+        proof_oversized.reserve_prior_proof = "zz".repeat(BASIS_V2_MAX_PROOF_BYTES + 1);
+        let error = reject_error(&proof_oversized, &fixture.intent);
+        assert!(error
+            .to_string()
+            .contains("exceeds 65536 bytes before hex decoding"));
+
+        let mut fixed_oversized = fixture.manifest.clone();
+        fixed_oversized.claim.reserve_nft_id = "zz".repeat(33);
+        let error = reject_error(&fixed_oversized, &fixture.intent);
+        assert!(error
+            .to_string()
+            .contains("must encode exactly 32 bytes before hex decoding"));
+
+        let mut raw_odd = fixture.manifest.clone();
+        raw_odd.reserve_input.exact_box.raw_sigma_hex = "0".to_string();
+        assert!(reject_error(&raw_odd, &fixture.intent)
+            .to_string()
+            .contains("even number of hex characters"));
+
+        let mut proof_odd = fixture.manifest.clone();
+        proof_odd.reserve_prior_proof = "0".to_string();
+        assert!(reject_error(&proof_odd, &fixture.intent)
+            .to_string()
+            .contains("even number of hex characters"));
+
+        let mut fixed_odd = fixture.manifest.clone();
+        fixed_odd.claim.reserve_nft_id = "0".to_string();
+        assert!(reject_error(&fixed_odd, &fixture.intent)
+            .to_string()
+            .contains("even number of hex characters"));
+    }
+
+    #[test]
+    fn reserve_update_proof_mutants_and_next_root_never_reach_callback() {
+        let fixture = make_fixture(false, false);
+
+        let mut truncated = fixture.manifest.clone();
+        let mut proof = hex::decode(&truncated.reserve_update_proof).unwrap();
+        proof.pop();
+        truncated.reserve_update_proof = hex::encode(proof);
+        reject(&truncated, &fixture.intent);
+
+        let mut bit_flipped = fixture.manifest.clone();
+        let mut proof = hex::decode(&bit_flipped.reserve_update_proof).unwrap();
+        *proof.last_mut().unwrap() ^= 1;
+        bit_flipped.reserve_update_proof = hex::encode(proof);
+        reject(&bit_flipped, &fixture.intent);
+
+        let mut oversized = fixture.manifest.clone();
+        oversized.reserve_update_proof = "zz".repeat(BASIS_V2_MAX_PROOF_BYTES + 1);
+        let error = reject_error(&oversized, &fixture.intent);
+        assert!(error
+            .to_string()
+            .contains("exceeds 65536 bytes before hex decoding"));
+
+        let mut next_root = fixture.manifest.clone();
+        let mut root = hex::decode(&next_root.reserve_next_root).unwrap();
+        root[0] ^= 1;
+        next_root.reserve_next_root = hex::encode(root);
+        reject(&next_root, &fixture.intent);
+    }
+
+    #[test]
+    fn payout_fee_change_and_aggregate_values_are_bounded() {
+        assert!(validate_output_box_value(BASIS_V2_MIN_BOX_VALUE - 1, "creditor payout").is_err());
+        assert!(validate_output_box_value(BASIS_V2_MIN_BOX_VALUE - 1, "miner fee").is_err());
+        assert!(validate_output_box_value(BASIS_V2_MIN_BOX_VALUE, "exact minimum").is_ok());
+        assert!(validate_output_box_value(BoxValue::MAX_RAW, "exact maximum").is_ok());
+        assert!(validate_output_box_value(BoxValue::MAX_RAW + 1, "over maximum").is_err());
+
+        let admission = make_fixture(false, false);
+        let payout_error = V2SigningIntent::new(
+            admission.intent.claim.clone(),
+            BASIS_V2_MIN_BOX_VALUE - 1,
+            BASIS_V2_MIN_BOX_VALUE,
+            admission.intent.signing_tip.clone(),
+            admission.intent.minimum_confirmations,
+            admission.intent.reserve_box_id,
+            admission.intent.funding_owner_pubkey,
+        )
+        .unwrap_err();
+        assert!(payout_error
+            .to_string()
+            .contains("creditor payout output value"));
+        let fee_error = V2SigningIntent::new(
+            admission.intent.claim.clone(),
+            admission.intent.amount,
+            BASIS_V2_MIN_BOX_VALUE - 1,
+            admission.intent.signing_tip.clone(),
+            admission.intent.minimum_confirmations,
+            admission.intent.reserve_box_id,
+            admission.intent.funding_owner_pubkey,
+        )
+        .unwrap_err();
+        assert!(fee_error.to_string().contains("miner fee output value"));
+
+        let mut exact_maximum = make_fixture(false, false);
+        let owner_tree = exact_maximum.manifest.funding_inputs[0]
+            .exact_box
+            .ergo_tree
+            .clone();
+        let funding = confirmed(
+            &exact_box(&owner_tree, BoxValue::MAX_RAW, Vec::new(), Vec::new(), 20),
+            exact_maximum.manifest.current_height,
+        );
+        exact_maximum.manifest.funding_inputs = vec![AuthenticatedInputManifestV2::from(&funding)];
+        exact_maximum.manifest.fee = BoxValue::MAX_RAW;
+        exact_maximum.intent.fee = BoxValue::MAX_RAW;
+        exact_maximum.manifest.outputs[2].value = BoxValue::MAX_RAW;
+        exact_maximum.manifest.outputs.truncate(3);
+        validate_v2_redemption_manifest(&exact_maximum.manifest, &exact_maximum.intent).unwrap();
+
+        let fixture = make_fixture(false, false);
+        let owner_tree = fixture.manifest.funding_inputs[0]
+            .exact_box
+            .ergo_tree
+            .clone();
+        let first = confirmed(
+            &exact_box(&owner_tree, BoxValue::MAX_RAW, Vec::new(), Vec::new(), 21),
+            fixture.manifest.current_height,
+        );
+        let exact_boundary_second = confirmed(
+            &exact_box(
+                &owner_tree,
+                BASIS_V2_MIN_BOX_VALUE,
+                Vec::new(),
+                Vec::new(),
+                22,
+            ),
+            fixture.manifest.current_height,
+        );
+        let mut exact_change = fixture.manifest.clone();
+        exact_change.funding_inputs = vec![
+            AuthenticatedInputManifestV2::from(&first),
+            AuthenticatedInputManifestV2::from(&exact_boundary_second),
+        ];
+        exact_change.outputs[3].value = BoxValue::MAX_RAW;
+        validate_v2_redemption_manifest(&exact_change, &fixture.intent).unwrap();
+
+        let overlong_second = confirmed(
+            &exact_box(
+                &owner_tree,
+                2 * BASIS_V2_MIN_BOX_VALUE,
+                Vec::new(),
+                Vec::new(),
+                23,
+            ),
+            fixture.manifest.current_height,
+        );
+        let mut overlong_change = fixture.manifest.clone();
+        overlong_change.funding_inputs = vec![
+            AuthenticatedInputManifestV2::from(&first),
+            AuthenticatedInputManifestV2::from(&overlong_second),
+        ];
+        let error = reject_error(&overlong_change, &fixture.intent);
+        assert!(error.to_string().contains("change output value"));
+
+        let third = confirmed(
+            &exact_box(&owner_tree, BoxValue::MAX_RAW, Vec::new(), Vec::new(), 24),
+            fixture.manifest.current_height,
+        );
+        let mut aggregate_overflow = fixture.manifest.clone();
+        aggregate_overflow.funding_inputs = vec![
+            AuthenticatedInputManifestV2::from(&first),
+            AuthenticatedInputManifestV2::from(&third),
+            AuthenticatedInputManifestV2::from(&overlong_second),
+        ];
+        let error = reject_error(&aggregate_overflow, &fixture.intent);
+        assert!(error.to_string().contains("funding value overflow"));
     }
 }
