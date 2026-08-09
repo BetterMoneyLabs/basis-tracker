@@ -3,13 +3,11 @@ use std::collections::HashMap;
 
 use crate::{
     models::{
-        ApiResponse, Asset, CheckAcceptanceRequest, CheckAcceptanceResponse,
-        CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, KeyStatusResponse,
-        NoteConfirmationSummary, NoteStateRequest, NoteStateResponse, PendingTxResponse,
-        ProofResponse, RedeemRequest, RedeemResponse, RedemptionPreparationRequest,
-        RedemptionPreparationResponse, ReserveCreationResponse, ReservePaymentRequest,
-        SerializableIouNote, TrackerEvent, TrackerSignatureRequest, TrackerSignatureResponse,
-        TrackerStateResponse, UploadPolicyRequest, UploadPolicyResponse,
+        ApiResponse, Asset, CheckAcceptanceRequest, CheckAcceptanceResponse, CreateNoteRequest,
+        CreateReserveRequest, KeyStatusResponse, NoteConfirmationSummary, NoteStateRequest,
+        NoteStateResponse, PendingTxResponse, ReserveCreationResponse, ReservePaymentRequest,
+        SerializableIouNote, TrackerEvent, TrackerStateResponse, UploadPolicyRequest,
+        UploadPolicyResponse,
     },
     AppState, TrackerCommand,
 };
@@ -1551,17 +1549,8 @@ pub async fn get_key_status(
 
 /// Retired server-sign redemption endpoint.
 #[axum::debug_handler]
-pub async fn initiate_redemption(
-    State(_state): State<AppState>,
-    Json(_payload): Json<RedeemRequest>,
-) -> (StatusCode, Json<ApiResponse<RedeemResponse>>) {
-    (
-        StatusCode::GONE,
-        Json(crate::models::error_response(
-            "Legacy server-sign redemption is retired; use the reviewed transaction flow with explicit local witnesses and confirmed-chain reconciliation"
-                .to_string(),
-        )),
-    )
+pub async fn initiate_redemption() -> (StatusCode, Json<ApiResponse<()>>) {
+    crate::reject_retired_v1_redemption()
 }
 
 /// Legacy direct-completion endpoint.
@@ -1571,67 +1560,37 @@ pub async fn initiate_redemption(
 /// route as an explicit tombstone so older clients fail closed instead of
 /// silently mutating tracker state.
 #[axum::debug_handler]
-pub async fn complete_redemption(
-    State(_state): State<AppState>,
-    Json(_payload): Json<CompleteRedemptionRequest>,
-) -> (StatusCode, Json<ApiResponse<()>>) {
-    (
-        StatusCode::GONE,
-        Json(crate::models::error_response(
-            "Direct redemption completion is retired; settlement state is advanced only by the confirmed-chain reconciler"
-                .to_string(),
-        )),
-    )
+pub async fn complete_redemption() -> (StatusCode, Json<ApiResponse<()>>) {
+    crate::reject_retired_v1_redemption()
 }
 
 /// Retired v1 tracker-proof endpoint.
 #[axum::debug_handler]
-pub async fn get_tracker_proof(
-    State(_state): State<AppState>,
-    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> (
-    StatusCode,
-    Json<ApiResponse<crate::models::TrackerProofData>>,
-) {
+pub async fn get_tracker_proof() -> (StatusCode, Json<ApiResponse<()>>) {
     crate::reject_retired_v1_redemption()
 }
 
 /// Retired v1 reserve-proof endpoint.
 #[axum::debug_handler]
-pub async fn get_reserve_proof(
-    State(_state): State<AppState>,
-    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> (
-    StatusCode,
-    Json<ApiResponse<crate::models::ReserveProofData>>,
-) {
+pub async fn get_reserve_proof() -> (StatusCode, Json<ApiResponse<()>>) {
     crate::reject_retired_v1_redemption()
 }
 
 /// Retired v1 tracker-signature endpoint.
 #[axum::debug_handler]
-pub async fn request_tracker_signature(
-    State(_state): State<AppState>,
-    Json(_payload): Json<TrackerSignatureRequest>,
-) -> (StatusCode, Json<ApiResponse<TrackerSignatureResponse>>) {
+pub async fn request_tracker_signature() -> (StatusCode, Json<ApiResponse<()>>) {
     crate::reject_retired_v1_redemption()
 }
 
 /// Retired v1 redemption-preparation endpoint.
 #[axum::debug_handler]
-pub async fn prepare_redemption(
-    State(_state): State<AppState>,
-    Json(_payload): Json<RedemptionPreparationRequest>,
-) -> (StatusCode, Json<ApiResponse<RedemptionPreparationResponse>>) {
+pub async fn prepare_redemption() -> (StatusCode, Json<ApiResponse<()>>) {
     crate::reject_retired_v1_redemption()
 }
 
 /// Retired v1 aggregate redemption-proof endpoint.
 #[axum::debug_handler]
-pub async fn get_redemption_proof(
-    State(_state): State<AppState>,
-    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> (StatusCode, Json<ApiResponse<ProofResponse>>) {
+pub async fn get_redemption_proof() -> (StatusCode, Json<ApiResponse<()>>) {
     crate::reject_retired_v1_redemption()
 }
 

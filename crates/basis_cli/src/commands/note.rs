@@ -103,7 +103,7 @@ pub enum NoteCommands {
         #[arg(long)]
         recipient: String,
     },
-    /// Retired: redemption requires the reviewed transaction flow
+    /// Retired: v2 admission has no active proof, signer, or submit path
     Redeem {
         /// Issuer public key (hex)
         #[arg(long)]
@@ -324,8 +324,7 @@ pub async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<De
     eprintln!("  Tracker Sig Valid: ✓");
     eprintln!();
     eprintln!("=== Usage ===");
-    eprintln!("  Redeem:  basis-cli transaction generate-redemption --issuer {} --recipient {} --amount {}",
-              alice.public_key_hex(), bob.public_key_hex(), amount);
+    eprintln!("  Redemption unavailable: v1 is retired and the v2 signer remains disabled");
 
     Ok(note)
 }
@@ -449,7 +448,7 @@ pub async fn get_note(
 }
 
 const NOTE_REDEMPTION_RETIRED: &str =
-    "note redeem is retired; use the reviewed transaction redemption flow with explicit local witnesses and confirmed-chain reconciliation";
+    "note redeem is retired; v2 remains disabled until confirmed-chain authority and a validated-manifest-only prover, signer, and submit path are integrated";
 
 fn reject_retired_note_redemption() -> Result<()> {
     anyhow::bail!(NOTE_REDEMPTION_RETIRED)

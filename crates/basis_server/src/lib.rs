@@ -1,4 +1,37 @@
 //! Basis Server library
+//!
+//! The legacy proof commands are structurally absent from the production
+//! actor rather than hidden behind runtime branches:
+//!
+//! ```compile_fail
+//! fn removed(command: basis_server::TrackerCommand) {
+//!     if let basis_server::TrackerCommand::GenerateProof { .. } = command {}
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(command: basis_server::TrackerCommand) {
+//!     if let basis_server::TrackerCommand::GetTrackerLookupProof { .. } = command {}
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(command: basis_server::TrackerCommand) {
+//!     if let basis_server::TrackerCommand::GetReserveLookupProof { .. } = command {}
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(command: basis_server::TrackerCommand) {
+//!     if let basis_server::TrackerCommand::GetReserveInsertProof { .. } = command {}
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(command: basis_server::TrackerCommand) {
+//!     if let basis_server::TrackerCommand::GetReserveStateDigest { .. } = command {}
+//! }
+//! ```
 
 pub mod acceptance;
 pub mod api;
@@ -97,7 +130,10 @@ pub fn reserve_construction_routes() -> Router<AppState> {
 /// These routes intentionally remain visible as HTTP 410 responses so stale
 /// clients cannot fall through to an older proof, signing, build, or broadcast
 /// path. This router contains no v2 activation path.
-pub fn retired_v1_redemption_routes() -> Router<AppState> {
+pub fn retired_v1_redemption_routes<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     Router::new()
         .route(
             "/redeem",
@@ -169,43 +205,6 @@ pub enum TrackerCommand {
         response_tx: tokio::sync::oneshot::Sender<
             Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>,
         >,
-    },
-    GenerateProof {
-        issuer_pubkey: basis_store::PubKey,
-        recipient_pubkey: basis_store::PubKey,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<(basis_store::NoteProof, basis_store::TrackerState), basis_store::NoteError>,
-        >,
-    },
-    GetTrackerLookupProof {
-        issuer_pubkey: basis_store::PubKey,
-        recipient_pubkey: basis_store::PubKey,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<
-                (basis_store::TrackerLookupProof, basis_store::TrackerState),
-                basis_store::NoteError,
-            >,
-        >,
-    },
-    GetReserveLookupProof {
-        issuer_pubkey: basis_store::PubKey,
-        recipient_pubkey: basis_store::PubKey,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<(basis_store::ReserveLookupProof, Vec<u8>), basis_store::NoteError>,
-        >,
-    },
-    GetReserveInsertProof {
-        issuer_pubkey: basis_store::PubKey,
-        recipient_pubkey: basis_store::PubKey,
-        timestamp: u64,
-        new_already_redeemed: u64,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<(Vec<u8>, Vec<u8>, Vec<u8>), basis_store::NoteError>,
-        >,
-    },
-    /// Get the current reserve AVL tree root digest (33 bytes).
-    GetReserveStateDigest {
-        response_tx: tokio::sync::oneshot::Sender<Result<Vec<u8>, basis_store::NoteError>>,
     },
     /// Get the current BNS2-backed tracker state through its owning actor.
     GetValidatedState {

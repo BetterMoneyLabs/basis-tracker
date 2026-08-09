@@ -27,6 +27,57 @@
 //! ```compile_fail
 //! use basis_store::transaction_builder::RedemptionTransactionBuilder;
 //! ```
+//!
+//! The pre-v2 `TrackerStateManager` proof surface and its process-global
+//! reserve AVL mirror are removed as well:
+//!
+//! ```compile_fail
+//! use basis_store::NoteProof;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::TrackerLookupProof;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::ReserveLookupProof;
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &mut basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.generate_proof(key, key);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &mut basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.generate_tracker_lookup_proof(key, key);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &mut basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.generate_reserve_lookup_proof(key, key);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.generate_reserve_insert_proof(key, key, 0, 0);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &basis_store::TrackerStateManager) {
+//!     let _ = manager.reserve_state_digest();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &mut basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.update_already_redeemed(key, key, 0, 0);
+//! }
+//! ```
 
 pub mod avl_tree;
 pub mod basis_v2_builder;
@@ -246,41 +297,6 @@ pub struct TrackerBoxInfo {
     pub tracker_nft_id: String,
 }
 
-/// Proof for a specific note against tracker state
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoteProof {
-    /// The IOU note being proven
-    pub note: IouNote,
-    /// AVL tree proof bytes
-    pub avl_proof: Vec<u8>,
-    /// Operations performed to generate the proof
-    pub operations: Vec<u8>,
-}
-
-/// Tracker lookup proof for context var #8 in redemption transactions
-/// Proves that totalDebt exists in the tracker's AVL tree at key hash(ownerKey||receiverKey)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrackerLookupProof {
-    /// The AVL tree key: blake2b256(ownerKey || receiverKey) (32 bytes)
-    pub key: Vec<u8>,
-    /// The value: totalDebt as 8-byte big-endian
-    pub value: Vec<u8>,
-    /// AVL proof bytes for the lookup
-    pub proof: Vec<u8>,
-}
-
-/// Reserve lookup proof for context var #7 in redemption transactions
-/// Proves that already_redeemed exists in the reserve's AVL tree at key hash(ownerKey||receiverKey)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReserveLookupProof {
-    /// The AVL tree key: blake2b256(ownerKey || receiverKey) (32 bytes)
-    pub key: Vec<u8>,
-    /// The value: already_redeemed (8 bytes BE)
-    pub value: Vec<u8>,
-    /// AVL proof bytes for the lookup (None for first redemption)
-    pub proof: Option<Vec<u8>>,
-}
-
 /// Key for note lookup: blake2b256(issuer_pubkey || recipient_pubkey)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NoteKey {
@@ -416,8 +432,6 @@ pub struct TrackerStateManager {
     avl_state: basis_trees::BasisAvlTree,
     current_state: TrackerState,
     storage: persistence::NoteStorage,
-    /// Reserve AVL tree tracking hash(ownerKey || receiverKey) -> already_redeemed (8 bytes BE)
-    reserve_avl_state: basis_trees::BasisAvlTree,
     /// Per-note confirmation records, keyed by note key (32 bytes).
     confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,
     poisoned: AtomicBool,
@@ -521,10 +535,6 @@ impl TrackerStateManager {
             NoteError::StorageError(format!("Failed to initialize AVL tree: {:?}", e))
         })?;
 
-        let reserve_avl_state = basis_trees::BasisAvlTree::new().map_err(|e| {
-            NoteError::StorageError(format!("Failed to initialize reserve AVL tree: {:?}", e))
-        })?;
-
         // Rebuild AVL tree from all stored notes to ensure consistency after restart
         let mut manager = Self {
             avl_state,
@@ -534,7 +544,6 @@ impl TrackerStateManager {
                 last_update_timestamp: 0,
             },
             storage,
-            reserve_avl_state,
             confirmations: std::collections::HashMap::new(),
             poisoned: AtomicBool::new(false),
             publication_health,
@@ -759,18 +768,6 @@ impl TrackerStateManager {
             }
         };
 
-        // Create reserve AVL tree for tracking already_redeemed
-        let reserve_avl_state = match basis_trees::BasisAvlTree::new() {
-            Ok(tree) => {
-                tracing::debug!("Reserve AVL tree created successfully");
-                tree
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize reserve AVL tree: {:?}", e);
-                panic!("Failed to initialize reserve AVL tree: {:?}", e);
-            }
-        };
-
         tracing::debug!("TrackerStateManager created successfully");
         let mut manager = Self {
             avl_state,
@@ -780,7 +777,6 @@ impl TrackerStateManager {
                 last_update_timestamp: 0,
             },
             storage,
-            reserve_avl_state,
             confirmations: std::collections::HashMap::new(),
             poisoned: AtomicBool::new(false),
             publication_health: PublicationHealth::new(),
@@ -1336,217 +1332,6 @@ impl TrackerStateManager {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&value_bytes);
         Ok(u64::from_be_bytes(bytes))
-    }
-
-    /// Generate a tracker lookup proof for context var #8
-    /// This proof verifies that totalDebt exists in the tracker's AVL tree
-    pub fn generate_tracker_lookup_proof(
-        &mut self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<TrackerLookupProof, NoteError> {
-        self.ensure_healthy()?;
-        self.validate_complete_snapshot_against_live()?;
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Get the total debt value
-        let total_debt = self.get_total_debt(issuer_pubkey, recipient_pubkey)?;
-
-        // Generate AVL proof for the lookup of this specific key
-        let (avl_proof, _returned_value) = self.avl_state.generate_lookup_proof(key_bytes.to_vec());
-
-        Ok(TrackerLookupProof {
-            key: key_bytes,
-            value: total_debt.to_be_bytes().to_vec(),
-            proof: avl_proof,
-        })
-    }
-
-    /// Get the already_redeemed amount for a specific (issuer, receiver) pair from the reserve AVL tree
-    /// Returns the cumulative redeemed amount stored in the reserve's AVL tree
-    pub fn get_already_redeemed(
-        &self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<u64, NoteError> {
-        self.ensure_healthy()?;
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Lookup value in reserve AVL tree
-        let value_bytes = match self.reserve_avl_state.get(&key_bytes) {
-            Some(bytes) => bytes,
-            None => return Ok(0u64), // First redemption - no already_redeemed amount
-        };
-
-        // Value format: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE) = 16 bytes total
-        if value_bytes.len() != 16 {
-            return Err(NoteError::StorageError(format!(
-                "Invalid reserve tree value format: expected 16 bytes (timestamp || redeemedAmount), got {}",
-                value_bytes.len()
-            )));
-        }
-
-        let mut redeemed_bytes = [0u8; 8];
-        redeemed_bytes.copy_from_slice(&value_bytes[8..16]);
-        Ok(u64::from_be_bytes(redeemed_bytes))
-    }
-
-    /// Generate a reserve lookup proof for context var #7
-    /// This proof verifies that already_redeemed exists in the reserve's AVL tree
-    /// Returns None proof for first redemption (no lookup proof needed)
-    pub fn generate_reserve_lookup_proof(
-        &mut self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<ReserveLookupProof, NoteError> {
-        self.ensure_healthy()?;
-        self.validate_complete_snapshot_against_live()?;
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Get the already_redeemed value
-        let already_redeemed = self.get_already_redeemed(issuer_pubkey, recipient_pubkey)?;
-
-        // For first redemption, no lookup proof is needed (per spec)
-        let is_first_redemption = already_redeemed == 0;
-
-        // Value: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes
-        let mut value_bytes = Vec::with_capacity(16);
-        // For lookup, use the stored timestamp if available; otherwise 0 for first redemption.
-        // The persistent tree stores timestamp || already_redeemed, so retrieve the actual value.
-        let stored_value = self.reserve_avl_state.get(&key_bytes).unwrap_or_else(|| {
-            let mut empty_value = vec![0u8; 8]; // timestamp = 0
-            empty_value.extend_from_slice(&already_redeemed.to_be_bytes());
-            empty_value
-        });
-        if stored_value.len() == 16 {
-            value_bytes.extend_from_slice(&stored_value);
-        } else {
-            // Fallback for old-format entries or first redemption: 0 timestamp
-            value_bytes.extend_from_slice(&0u64.to_be_bytes());
-            value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
-        }
-
-        if is_first_redemption {
-            Ok(ReserveLookupProof {
-                key: key_bytes,
-                value: value_bytes,
-                proof: None, // Omitted for first redemption
-            })
-        } else {
-            // Generate AVL proof for the lookup of this specific key
-            let (avl_proof, _returned_value) = self
-                .reserve_avl_state
-                .generate_lookup_proof(key_bytes.to_vec());
-
-            Ok(ReserveLookupProof {
-                key: key_bytes,
-                value: value_bytes,
-                proof: Some(avl_proof),
-            })
-        }
-    }
-
-    /// Generate a reserve insert proof for context var #5 and return updated tree digest for R5.
-    ///
-    /// This operates on a temporary clone of the reserve AVL tree so that proof generation
-    /// is idempotent and does not mutate the persistent tracker state. The persistent tree
-    /// is only updated when `update_already_redeemed` is called after a successful on-chain
-    /// redemption.
-    ///
-    /// Value format: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes total
-    ///
-    /// # Returns
-    /// * `(insert_proof, updated_tree_digest)` - Proof bytes and serialized tree digest
-    pub fn generate_reserve_insert_proof(
-        &self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-        timestamp: u64,
-        new_already_redeemed: u64,
-    ) -> Result<(Vec<u8>, Vec<u8>), NoteError> {
-        self.ensure_healthy()?;
-        self.validate_complete_snapshot_against_live()?;
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-        // Value: timestamp (8 bytes BE) || already_redeemed (8 bytes BE)
-        let mut value_bytes = Vec::with_capacity(16);
-        value_bytes.extend_from_slice(&timestamp.to_be_bytes());
-        value_bytes.extend_from_slice(&new_already_redeemed.to_be_bytes());
-
-        // Use the non-mutating proof generator so repeated calls return the same proof.
-        let (insert_proof, updated_digest) = self
-            .reserve_avl_state
-            .generate_insert_proof(key_bytes, value_bytes)
-            .map_err(|e| {
-                NoteError::StorageError(format!("Reserve AVL tree insert proof failed: {}", e))
-            })?;
-
-        Ok((insert_proof, updated_digest.to_vec()))
-    }
-
-    /// Current reserve AVL tree root digest (33 bytes). The on-chain reserve box being spent must
-    /// have exactly this R5 digest for the insert proof to verify on-chain.
-    pub fn reserve_state_digest(&self) -> Result<Vec<u8>, NoteError> {
-        self.ensure_healthy()?;
-        self.validate_complete_snapshot_against_live()?;
-        Ok(self.reserve_avl_state.root_digest().to_vec())
-    }
-
-    /// Update the already_redeemed amount in the reserve AVL tree.
-    /// Called after a successful redemption to prevent double-spending.
-    /// Value format: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes total
-    #[cfg(test)]
-    pub(crate) fn update_already_redeemed(
-        &mut self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-        timestamp: u64,
-        already_redeemed: u64,
-    ) -> Result<(), NoteError> {
-        self.ensure_healthy()?;
-        self.validate_complete_snapshot_against_live()?;
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-        let mut value_bytes = Vec::with_capacity(16);
-        value_bytes.extend_from_slice(&timestamp.to_be_bytes());
-        value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
-
-        // Update reserve AVL tree
-        self.reserve_avl_state
-            .update(key_bytes, value_bytes)
-            .map_err(|e| {
-                NoteError::StorageError(format!("Reserve AVL tree update failed: {}", e))
-            })?;
-
-        Ok(())
-    }
-
-    /// Generate proof for a specific note
-    pub fn generate_proof(
-        &mut self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<NoteProof, NoteError> {
-        self.ensure_healthy()?;
-        self.validate_complete_snapshot_against_live()?;
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Generate a lookup proof for the key in the AVL tree
-        // This captures the path to the key, which can be verified against the root digest
-        let (avl_proof, _value) = self.avl_state.generate_lookup_proof(key_bytes.to_vec());
-
-        // Lookup the note to include in proof
-        let note = self.lookup_note(issuer_pubkey, recipient_pubkey)?;
-
-        Ok(NoteProof {
-            note,
-            avl_proof,
-            operations: Vec::new(),
-        })
     }
 
     /// Lookup a note by issuer and recipient

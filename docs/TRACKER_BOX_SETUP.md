@@ -2,7 +2,10 @@
 
 **Document Version:** 1.0  
 **Last Updated:** 2026-03-02  
-**Status:** Production Required
+**Status:** Historical v1 operational reference — superseded
+
+> The proof routes and redemption procedures below are retired and return
+> `410 Gone`. This file is not current deployment or activation authority.
 
 ---
 

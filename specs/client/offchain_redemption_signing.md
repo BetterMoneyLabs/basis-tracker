@@ -1,5 +1,9 @@
 # Off-Chain (Client-Side) Redemption Signing
 
+> **Status: historical v1 signing design — superseded.** The implementation and
+> CLI command below are removed. Current v2 code validates a manifest but has no
+> prover, signer, wallet, submit, or broadcast implementation.
+
 ## Overview
 
 A Basis redemption can be signed **entirely off-chain** and then broadcast to the node for

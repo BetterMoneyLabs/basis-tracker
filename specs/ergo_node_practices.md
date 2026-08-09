@@ -1,5 +1,9 @@
 # Ergo Node Practices for Basis Tracker Testing
 
+> **Status: historical operational notes.** The redemption commands in this
+> document are retired; current v2 runtime admission remains dormant and this
+> file is not deployment authority.
+
 This document collects practical lessons for interacting with a local Ergo node when running Basis protocol tests on mainnet (or testnet). It covers wallet checks, transaction submission formats, token issuance, fee handling, mempool monitoring, and the reserve/note/redemption flow.
 
 ## 1. Node and Wallet Health Checks

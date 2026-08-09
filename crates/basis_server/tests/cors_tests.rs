@@ -105,63 +105,6 @@ mod cors_tests {
                         let result = Ok(Vec::new());
                         let _ = response_tx.send(result);
                     }
-                    TrackerCommand::GenerateProof {
-                        issuer_pubkey: _,
-                        recipient_pubkey: _,
-                        response_tx,
-                    } => {
-                        // For testing purposes, return a mock proof
-                        let mock_proof = basis_store::NoteProof {
-                            note: basis_store::IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]),
-                            avl_proof: vec![1, 2, 3, 4], // Mock proof data
-                            operations: vec![],
-                        };
-                        let result = tracker.validated_state().map(|state| (mock_proof, state));
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::GetTrackerLookupProof {
-                        issuer_pubkey: _,
-                        recipient_pubkey: _,
-                        response_tx,
-                    } => {
-                        // Mock tracker lookup proof
-                        let mock_proof = basis_store::TrackerLookupProof {
-                            key: vec![0u8; 64],
-                            value: vec![0u8; 8],
-                            proof: vec![1, 2, 3, 4],
-                        };
-                        let result = tracker.validated_state().map(|state| (mock_proof, state));
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::GetReserveLookupProof {
-                        issuer_pubkey: _,
-                        recipient_pubkey: _,
-                        response_tx,
-                    } => {
-                        // Mock reserve lookup proof
-                        let mock_proof = basis_store::ReserveLookupProof {
-                            key: vec![0u8; 64],
-                            value: vec![0u8; 8],
-                            proof: Some(vec![1, 2, 3, 4]),
-                        };
-                        let result = tracker
-                            .reserve_state_digest()
-                            .map(|root| (mock_proof, root));
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::GetReserveInsertProof {
-                        issuer_pubkey: _,
-                        recipient_pubkey: _,
-                        timestamp: _,
-                        new_already_redeemed: _,
-                        response_tx,
-                    } => {
-                        // Mock reserve insert proof
-                        let result = tracker.reserve_state_digest().map(|current_root| {
-                            (vec![1, 2, 3, 4], current_root.clone(), current_root)
-                        });
-                        let _ = response_tx.send(result);
-                    }
                     TrackerCommand::GetNotesByRecipientWithIssuer {
                         recipient_pubkey: _,
                         response_tx,
@@ -180,10 +123,6 @@ mod cors_tests {
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
                         let _ = response_tx.send(Ok(tracker.all_confirmations()));
-                    }
-                    TrackerCommand::GetReserveStateDigest { response_tx } => {
-                        let digest = tracker.reserve_state_digest();
-                        let _ = response_tx.send(digest);
                     }
                     TrackerCommand::GetValidatedState { response_tx } => {
                         let _ = response_tx.send(tracker.validated_state());

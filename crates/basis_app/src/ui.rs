@@ -17,15 +17,6 @@ pub const _MAGENTA: &str = "\x1b[35m";
 pub const WHITE: &str = "\x1b[37m";
 pub const GRAY: &str = "\x1b[90m";
 
-const V1_REDEMPTION_RETIRED: &str =
-    "Basis v1 redemption is retired; v2 stays disabled until confirmed-chain authority and the validated-manifest signing path are integrated";
-
-fn reject_retired_v1_redemption_before_effects<T>(
-    _effect: impl FnOnce() -> T,
-) -> Result<T, &'static str> {
-    Err(V1_REDEMPTION_RETIRED)
-}
-
 pub async fn run(app: &mut App) -> Result<()> {
     clear_screen();
     if app.intro_account.is_some() {
@@ -46,12 +37,9 @@ pub async fn run(app: &mut App) -> Result<()> {
             Screen::AddressBook => draw_address_book(app).await?,
             Screen::Notes => draw_notes(app).await?,
             Screen::Reserves => draw_reserves(app).await?,
-            Screen::Transactions => draw_transactions(app).await?,
             Screen::Settings => draw_settings(app).await?,
             Screen::CreateNote => draw_create_note(app).await?,
-            Screen::RedeemNote => draw_redeem_note(app).await?,
             Screen::CreateReserve => draw_create_reserve(app).await?,
-            Screen::GenerateTransaction => draw_generate_transaction(app).await?,
             Screen::AcceptancePolicy => draw_acceptance_policy(app).await?,
         }
     }
@@ -612,7 +600,6 @@ async fn draw_notes(app: &mut App) -> Result<()> {
     );
 
     println!("  {}[c]{} Create Note", CYAN, RESET);
-    println!("  {}[r]{} Redeem Note", CYAN, RESET);
     println!();
     println!("  {}[b]{} Back to Menu\n", YELLOW, RESET);
 
@@ -656,7 +643,6 @@ async fn draw_notes(app: &mut App) -> Result<()> {
             wait_for_enter("Press Enter to continue...");
         }
         "c" => app.navigate_to(Screen::CreateNote),
-        "r" => app.navigate_to(Screen::RedeemNote),
         "b" | "B" => app.navigate_to(Screen::MainMenu),
         _ => {
             app.set_notification("Invalid option".to_string(), true);
@@ -737,25 +723,6 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
             app.refresh_data().await?;
             app.set_notification("Reserve status refreshed".to_string(), false);
         }
-        "b" | "B" => app.navigate_to(Screen::MainMenu),
-        _ => {
-            app.set_notification("Invalid option".to_string(), true);
-        }
-    }
-
-    Ok(())
-}
-
-async fn draw_transactions(app: &mut App) -> Result<()> {
-    println!("{}  TRANSACTIONS & REDEMPTIONS{}", BOLD, RESET);
-    println!("{}  ───────────────────────────{}\n", CYAN, RESET);
-
-    println!("  {}[1]{} Generate Redemption Transaction", CYAN, RESET);
-    println!();
-    println!("  {}[b]{} Back to Menu\n", YELLOW, RESET);
-
-    match read_choice("Select option: ").as_str() {
-        "1" => app.navigate_to(Screen::GenerateTransaction),
         "b" | "B" => app.navigate_to(Screen::MainMenu),
         _ => {
             app.set_notification("Invalid option".to_string(), true);
@@ -907,17 +874,6 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
     Ok(())
 }
 
-async fn draw_redeem_note(app: &mut App) -> Result<()> {
-    let message = reject_retired_v1_redemption_before_effects::<()>(|| {
-        panic!("retired redemption effect must never run")
-    })
-    .err()
-    .expect("v1 redemption screen must be retired");
-    app.set_notification(message.to_string(), true);
-    app.navigate_to(Screen::Notes);
-    Ok(())
-}
-
 async fn draw_create_reserve(app: &mut App) -> Result<()> {
     println!("{}  CREATE RESERVE{}", BOLD, RESET);
     println!("{}  ──────────────{}\n", CYAN, RESET);
@@ -994,17 +950,6 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
     }
 
     app.navigate_to(Screen::Reserves);
-    Ok(())
-}
-
-async fn draw_generate_transaction(app: &mut App) -> Result<()> {
-    let message = reject_retired_v1_redemption_before_effects::<()>(|| {
-        panic!("retired transaction-generation effect must never run")
-    })
-    .err()
-    .expect("v1 transaction-generation screen must be retired");
-    app.set_notification(message.to_string(), true);
-    app.navigate_to(Screen::Transactions);
     Ok(())
 }
 
@@ -1578,18 +1523,3 @@ async fn save_and_upload_policy(app: &mut App) -> Result<()> {
 }
 
 // Helper functions are now in crate::acceptance_policy module
-
-#[cfg(test)]
-mod v1_redemption_tombstone_tests {
-    use super::*;
-
-    #[test]
-    fn tui_rejects_v1_redemption_before_the_effect_callback() {
-        let calls = std::cell::Cell::new(0usize);
-        let result = reject_retired_v1_redemption_before_effects(|| {
-            calls.set(calls.get() + 1);
-        });
-        assert_eq!(result, Err(V1_REDEMPTION_RETIRED));
-        assert_eq!(calls.get(), 0);
-    }
-}

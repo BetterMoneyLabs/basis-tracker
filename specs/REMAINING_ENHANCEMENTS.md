@@ -2,8 +2,8 @@
 
 **Document Version:** 1.0  
 **Date:** 2026-02-28  
-**Status:** Pending Implementation  
-**Priority:** LOW (Enhancements - core protocol is complete)
+**Status:** Superseded v1 planning record
+**Priority:** Historical only; no production-readiness claim
 
 ---
 

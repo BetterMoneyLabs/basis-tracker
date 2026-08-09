@@ -161,18 +161,15 @@ $ basis-cli reserve status --json
 - `reserve collateralization --json` → `{issuer_pubkey, ratio, status}`.
 - `note redeem --json` is a compatibility tombstone and fails before account,
   network, construction, signing, broadcast, or persistence effects.
-- `transaction generate-redemption --json` → `{tx_id}` with `--local-sign`.
-  The historical non-local artifact mode is retired because transaction
-  artifacts must never contain exported private keys.
-- `transaction redeem-assisted --json` → `{tx_id}`.
-- `test test-redemption --json` → `{issuer_pubkey, recipient_pubkey, redemption_amount, output_file, transaction}`.
+- No transaction-generation or redemption-test command is compiled. V2
+  admission has no active prover, signer, submitter, or broadcaster.
 
 ## Typed results for programmatic use
 
 The command logic lives in `basis_cli_lib::commands::*` as `pub` functions
 returning serde-serializable result structs (e.g. `account::create_account`,
-`note::list_notes`, `reserve::get_reserve_status`, `status::get_server_status`,
-`transaction::generate_redemption_transaction`). The `handle_*_command`
+`note::list_notes`, `reserve::get_reserve_status`, and
+`status::get_server_status`). The `handle_*_command`
 functions are thin wrappers that render either human text or JSON. Other
 binaries (TUI, MCP server) can depend on the library and reuse the same cores.
 

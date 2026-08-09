@@ -599,7 +599,7 @@ impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
 }
 
 impl TrackerClient {
-    // New methods for the redemption transaction generation
+    // Reserve discovery remains active; v1 redemption construction methods above are tombstones.
 
     /// Get reserves for a specific issuer
     pub async fn get_reserves_by_issuer(

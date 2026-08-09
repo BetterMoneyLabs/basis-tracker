@@ -1838,7 +1838,7 @@ mod confirmation_state_tests {
         manager.storage.tamper_first_total_debt_for_test().unwrap();
 
         assert!(matches!(
-            manager.reserve_state_digest(),
+            manager.validated_state(),
             Err(crate::NoteError::StorageError(message)) if message.contains("snapshot checksum")
         ));
         assert!(!manager.is_healthy());

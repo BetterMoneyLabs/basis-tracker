@@ -280,67 +280,15 @@ paths:
 
   /redeem:
     post:
-      summary: Retired server-sign redemption route
-      description: |
-        Compatibility tombstone. Server-side redemption is retired because a
-        node-accepted transaction is not confirmed settlement evidence. Use a
-        locally reviewed signing flow and confirmed-chain reconciliation.
+      summary: Retired v1 redemption route
+      description: Compatibility tombstone with no request parsing or runtime effects.
       operationId: initiateRedemption
+      deprecated: true
       tags:
         - Redemption
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RedeemRequest'
       responses:
         '410':
-          description: Legacy server-sign redemption is retired
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-
-  /proof:
-    get:
-      summary: Get proof for a specific note
-      description: Generate and retrieve a proof for a specific IOU note against the current tracker state
-      operationId: getProof
-      tags:
-        - Proofs
-      parameters:
-        - name: issuer_pubkey
-          in: query
-          required: true
-          description: Hex-encoded issuer public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "010101010101010101010101010101010101010101010101010101010101010101"
-        - name: recipient_pubkey
-          in: query
-          required: true
-          description: Hex-encoded recipient public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "020202020202020202020202020202020202020202020202020202020202020202"
-      responses:
-        '200':
-          description: Successfully generated proof
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseProof'
-        '400':
-          description: Bad request - invalid public key format or missing parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
+          description: Basis v1 redemption is retired
           content:
             application/json:
               schema:
@@ -348,45 +296,15 @@ paths:
 
   /tracker/proof:
     get:
-      summary: Get tracker lookup proof
-      description: |
-        Get AVL proof for totalDebt from tracker's AVL tree.
-        Returns proof for context extension variable #8 in redemption transactions.
+      summary: Retired v1 tracker-proof route
+      description: Compatibility tombstone with no query parsing or runtime effects.
       operationId: getTrackerProof
+      deprecated: true
       tags:
         - Proofs
-      parameters:
-        - name: issuer_pubkey
-          in: query
-          required: true
-          description: Hex-encoded issuer public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "010101010101010101010101010101010101010101010101010101010101010101"
-        - name: recipient_pubkey
-          in: query
-          required: true
-          description: Hex-encoded recipient public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "020202020202020202020202020202020202020202020202020202020202020202"
       responses:
-        '200':
-          description: Successfully generated tracker proof
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TrackerProofData'
-        '400':
-          description: Bad request - invalid public key format
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
+        '410':
+          description: Basis v1 redemption is retired
           content:
             application/json:
               schema:
@@ -394,46 +312,15 @@ paths:
 
   /reserve/proof:
     get:
-      summary: Get reserve lookup proof
-      description: |
-        Get AVL proof for already_redeemed from reserve's AVL tree.
-        Returns proof for context extension variable #7 in redemption transactions.
-        For first redemptions, returns proof: null (no lookup proof needed).
+      summary: Retired v1 reserve-proof route
+      description: Compatibility tombstone with no query parsing or runtime effects.
       operationId: getReserveProof
+      deprecated: true
       tags:
         - Proofs
-      parameters:
-        - name: issuer_pubkey
-          in: query
-          required: true
-          description: Hex-encoded issuer public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "010101010101010101010101010101010101010101010101010101010101010101"
-        - name: recipient_pubkey
-          in: query
-          required: true
-          description: Hex-encoded recipient public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "020202020202020202020202020202020202020202020202020202020202020202"
       responses:
-        '200':
-          description: Successfully generated reserve proof
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ReserveProofData'
-        '400':
-          description: Bad request - invalid public key format
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
+        '410':
+          description: Basis v1 redemption is retired
           content:
             application/json:
               schema:
@@ -441,35 +328,15 @@ paths:
 
   /tracker/signature:
     post:
-      summary: Request tracker signature for redemption
-      description: |
-        Request Schnorr signature from tracker for redemption.
-        The tracker signs: key || totalDebt || timestamp
-        where key = blake2b256(ownerKey || receiverKey)
+      summary: Retired v1 tracker-signature route
+      description: Compatibility tombstone with no request parsing or signing effects.
       operationId: requestTrackerSignature
+      deprecated: true
       tags:
         - Redemption
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/TrackerSignatureRequest'
       responses:
-        '200':
-          description: Successfully generated tracker signature
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TrackerSignatureResponse'
-        '400':
-          description: Bad request - invalid public key format
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
+        '410':
+          description: Basis v1 redemption is retired
           content:
             application/json:
               schema:
@@ -477,53 +344,79 @@ paths:
 
   /proof/redemption:
     get:
-      summary: Get comprehensive redemption proof
-      description: |
-        Get all proofs needed for redemption in a single request.
-        Includes tracker lookup proof, reserve lookup proof, and reserve insert proof.
+      summary: Retired v1 aggregate-proof route
+      description: Compatibility tombstone with no query parsing or proof effects.
       operationId: getRedemptionProof
+      deprecated: true
       tags:
         - Proofs
-      parameters:
-        - name: issuer_pubkey
-          in: query
-          required: true
-          description: Hex-encoded issuer public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "010101010101010101010101010101010101010101010101010101010101010101"
-        - name: recipient_pubkey
-          in: query
-          required: true
-          description: Hex-encoded recipient public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "020202020202020202020202020202020202020202020202020202020202020202"
-        - name: amount
-          in: query
-          required: false
-          description: Redemption amount (optional)
-          schema:
-            type: integer
-            format: uint64
-            example: 500000000
       responses:
-        '200':
-          description: Successfully generated redemption proof
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RedemptionProofResponse'
-        '400':
-          description: Bad request - invalid parameters
+        '410':
+          description: Basis v1 redemption is retired
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
+
+  /redeem/complete:
+    post:
+      summary: Retired v1 direct-completion route
+      description: Compatibility tombstone with no request parsing or state effects.
+      operationId: completeRedemption
+      deprecated: true
+      tags:
+        - Redemption
+      responses:
+        '410':
+          description: Basis v1 redemption is retired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /redemption/prepare:
+    post:
+      summary: Retired v1 redemption-preparation route
+      description: Compatibility tombstone with no request parsing, proof, or signing effects.
+      operationId: prepareRedemption
+      deprecated: true
+      tags:
+        - Redemption
+      responses:
+        '410':
+          description: Basis v1 redemption is retired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /redemption/build:
+    post:
+      summary: Retired v1 transaction-build route
+      description: Compatibility tombstone with no request parsing or construction effects.
+      operationId: buildRedemption
+      deprecated: true
+      tags:
+        - Redemption
+      responses:
+        '410':
+          description: Basis v1 redemption is retired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /redemption/submit:
+    post:
+      summary: Retired v1 transaction-submit route
+      description: Compatibility tombstone with no request parsing, node, or broadcast effects.
+      operationId: submitRedemption
+      deprecated: true
+      tags:
+        - Redemption
+      responses:
+        '410':
+          description: Basis v1 redemption is retired
           content:
             application/json:
               schema:
@@ -736,135 +629,6 @@ components:
           description: Hex-encoded issuer public key
           example: "010101010101010101010101010101010101010101010101010101010101010101"
 
-    RedeemRequest:
-      type: object
-      description: Redemption request
-      required:
-        - issuer_pubkey
-        - recipient_pubkey
-        - amount
-        - timestamp
-        - issuer_signature
-      properties:
-        issuer_pubkey:
-          type: string
-          description: Hex-encoded issuer public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "010101010101010101010101010101010101010101010101010101010101010101"
-        recipient_pubkey:
-          type: string
-          description: Hex-encoded recipient public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "020202020202020202020202020202020202020202020202020202020202020202"
-        amount:
-          type: integer
-          format: uint64
-          description: Amount to redeem
-          example: 500000000
-        timestamp:
-          type: integer
-          format: uint64
-          description: Timestamp of the note being redeemed
-          example: 1234567890
-        reserve_box_id:
-          type: string
-          description: Reserve box ID (optional - server will lookup if not provided)
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        tracker_box_id:
-          type: string
-          description: Tracker box ID (optional - server will fetch if not provided)
-          example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-        tracker_nft_id:
-          type: string
-          description: Tracker NFT ID (optional - server will fetch if not provided)
-          example: "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
-        current_height:
-          type: integer
-          format: uint64
-          description: Current blockchain height (optional - server will fetch if not provided)
-          example: 1000000
-        recipient_address:
-          type: string
-          description: Recipient address (optional - server will derive from pubkey if not provided)
-          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
-        change_address:
-          type: string
-          description: Change address (optional - server will derive from tracker pubkey if not provided)
-          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
-        issuer_signature:
-          type: string
-          description: Hex-encoded Schnorr signature from issuer (130 characters = 65 bytes)
-          pattern: '^[0-9a-fA-F]{130}$'
-          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
-        emergency:
-          type: boolean
-          description: Whether this is an emergency redemption (after 3 days tracker unavailability)
-          default: false
-          example: false
-        tracker_signature:
-          type: string
-          description: Hex-encoded Schnorr signature from tracker (optional - server will generate if not provided)
-          pattern: '^[0-9a-fA-F]{130}$'
-          example: "0404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404"
-
-    RedeemResponse:
-      type: object
-      description: Redemption response
-      properties:
-        redemption_id:
-          type: string
-          description: Unique redemption identifier
-          example: "redeem_0101010101010101_0202020202020202"
-        amount:
-          type: integer
-          format: uint64
-          description: Amount being redeemed
-          example: 500000000
-        timestamp:
-          type: integer
-          format: uint64
-          description: Redemption timestamp
-          example: 1672531200
-        proof_available:
-          type: boolean
-          description: Whether proof is available
-          example: true
-        transaction_pending:
-          type: boolean
-          description: Whether redemption transaction is pending
-          example: false
-
-    ProofResponse:
-      type: object
-      description: Proof response
-      properties:
-        issuer_pubkey:
-          type: string
-          description: Hex-encoded issuer public key
-          example: "010101010101010101010101010101010101010101010101010101010101010101"
-        recipient_pubkey:
-          type: string
-          description: Hex-encoded recipient public key
-          example: "020202020202020202020202020202020202020202020202020202020202020202"
-        proof_data:
-          type: string
-          description: Hex-encoded proof data
-          example: "proof_0101010101010101_0202020202020202"
-        tracker_state_digest:
-          type: string
-          description: Tracker state digest at proof generation
-          example: "mock_digest_1234567890abcdef"
-        block_height:
-          type: integer
-          format: uint64
-          description: Blockchain height when proof was generated
-          example: 1500
-        timestamp:
-          type: integer
-          format: uint64
-          description: Proof generation timestamp
-          example: 1672531200
-
     # API Response Wrappers
     ApiResponse:
       type: object
@@ -881,167 +645,6 @@ components:
           type: string
           nullable: true
           description: Error message (null for successful responses)
-
-    # Tracker Signature Request/Response
-    TrackerSignatureRequest:
-      type: object
-      description: Request for tracker signature on redemption
-      required:
-        - issuer_pubkey
-        - recipient_pubkey
-        - total_debt
-      properties:
-        issuer_pubkey:
-          type: string
-          description: Hex-encoded issuer public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "010101010101010101010101010101010101010101010101010101010101010101"
-        recipient_pubkey:
-          type: string
-          description: Hex-encoded recipient public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "020202020202020202020202020202020202020202020202020202020202020202"
-        total_debt:
-          type: integer
-          format: uint64
-          description: Total cumulative debt amount
-          example: 1000000000
-        emergency:
-          type: boolean
-          description: Whether this is an emergency redemption
-          default: false
-          example: false
-
-    TrackerSignatureResponse:
-      type: object
-      description: Tracker signature response
-      properties:
-        success:
-          type: boolean
-          description: Whether signature generation was successful
-          example: true
-        tracker_signature:
-          type: string
-          description: Hex-encoded Schnorr signature (130 characters)
-          example: "0404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404"
-        tracker_pubkey:
-          type: string
-          description: Hex-encoded tracker public key
-          example: "030303030303030303030303030303030303030303030303030303030303030303"
-        message_signed:
-          type: string
-          description: Hex-encoded message that was signed
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        is_emergency:
-          type: boolean
-          description: Whether this was an emergency redemption
-          example: false
-
-    # Proof Data Structures
-    TrackerProofData:
-      type: object
-      description: Tracker lookup proof data
-      properties:
-        key:
-          type: string
-          description: Hex-encoded AVL tree key
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        value:
-          type: string
-          description: 'Hex-encoded value: totalDebt as 8-byte big-endian'
-          example: "000000003b9aca00"
-        proof:
-          type: string
-          description: Hex-encoded AVL proof bytes
-          example: "0102030405060708"
-        total_debt:
-          type: integer
-          format: uint64
-          description: Total debt as integer
-          example: 1000000000
-        tracker_state_digest:
-          type: string
-          description: Current tracker state digest (R5 register value)
-          example: "64abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-
-    ReserveProofData:
-      type: object
-      description: Reserve lookup proof data
-      properties:
-        key:
-          type: string
-          description: Hex-encoded AVL tree key
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        value:
-          type: string
-          description: 'Hex-encoded value: already_redeemed as 8-byte big-endian'
-          example: "000000003b9aca00"
-        proof:
-          type: string
-          nullable: true
-          description: Hex-encoded AVL proof bytes (null for first redemption)
-          example: "0102030405060708"
-        already_redeemed:
-          type: integer
-          format: uint64
-          description: Already redeemed amount as integer
-          example: 500000000
-        is_first_redemption:
-          type: boolean
-          description: Whether this is the first redemption (no lookup proof needed)
-          example: false
-
-    RedemptionProofResponse:
-      type: object
-      description: Comprehensive redemption proof response
-      properties:
-        success:
-          type: boolean
-          description: Whether proof generation was successful
-          example: true
-        data:
-          type: object
-          description: Proof data
-          properties:
-            tracker_lookup_proof:
-              type: string
-              description: Hex-encoded tracker lookup proof
-              example: "0102030405060708"
-            reserve_lookup_proof:
-              type: string
-              nullable: true
-              description: Hex-encoded reserve lookup proof (null for first redemption)
-              example: "0102030405060708"
-            reserve_insert_proof:
-              type: string
-              description: Hex-encoded reserve insert proof
-              example: "0102030405060708"
-            tracker_state_digest:
-              type: string
-              description: Tracker state digest
-              example: "64abcdef"
-            reserve_state_digest:
-              type: string
-              description: Reserve state digest
-              example: "64fedcba"
-            total_debt:
-              type: integer
-              format: uint64
-              description: Total debt amount
-              example: 1000000000
-            already_redeemed:
-              type: integer
-              format: uint64
-              description: Already redeemed amount
-              example: 0
-            proof_valid:
-              type: boolean
-              description: Whether the proof is valid
-              example: true
-            is_first_redemption:
-              type: boolean
-              description: Whether this is the first redemption
-              example: true
 
     ApiResponseEmpty:
       allOf:
@@ -1114,22 +717,6 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/KeyStatusResponse'
-
-    ApiResponseRedeem:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/RedeemResponse'
-
-    ApiResponseProof:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/ProofResponse'
 
   responses:
     BadRequest:

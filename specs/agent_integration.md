@@ -137,9 +137,8 @@ basis_cli --json acceptance check --issuer <66-hex> --recipient <66-hex> --total
 ### Check receipts
 1. `note_list {direction: "received"}` → pick notes with `outstanding > 0`.
 2. `note_get {issuer, recipient: <current pubkey>}` for details.
-3. Do not invoke `note_redeem`; it is retired. Use the separately reviewed
-   transaction flow with explicit local witnesses.
-4. Treat node acceptance as pending until confirmed-chain reconciliation.
+3. Do not invoke `note_redeem`; it is retired. No replacement redemption
+   command is active while v2 proving and signing remain unimplemented.
 
 ### Create a reserve
 1. `reserve_create {nft_id, amount}` (owner = current account) — returns the unsigned
@@ -186,11 +185,10 @@ and `specs/tui_wallet_lets.md` for the design specification.
 - **Never request, store, or echo private keys.** Use `account_import` only when the
   user explicitly provides a key for import. There is deliberately no key-export MCP
   tool; do not work around this via `basis_cli account export`.
-- **Confirm before destructive/irreversible calls**: the separately reviewed
-  transaction redemption flow (broadcasts an on-chain transaction), `policy_set`
-  (overwrites the published policy), and `note_create` (creates real debt). State
-  amount (in ERG and nanoERG) and counterparty pubkey, and get the user's go-ahead.
-  `note_redeem` itself is retired.
+- **Confirm before destructive/irreversible calls**: `policy_set` overwrites the
+  published policy and `note_create` creates real debt. State amount (in ERG and
+  nanoERG) and counterparty pubkey, and get the user's go-ahead. Redemption is
+  not an available agent action.
 - **Validate pubkeys** (66 hex chars) before passing them; a malformed key is a user
   error, not something to retry blindly.
 - **Amounts are nanoERG** — double-check unit conversion when the user says "ERG".

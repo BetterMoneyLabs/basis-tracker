@@ -42,21 +42,6 @@ fn reject_while_publication_is_fenced(command: TrackerCommand) {
         TrackerCommand::GetNotes { response_tx } => {
             let _ = response_tx.send(Err(NoteError::PublicationInProgress));
         }
-        TrackerCommand::GenerateProof { response_tx, .. } => {
-            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
-        }
-        TrackerCommand::GetTrackerLookupProof { response_tx, .. } => {
-            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
-        }
-        TrackerCommand::GetReserveLookupProof { response_tx, .. } => {
-            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
-        }
-        TrackerCommand::GetReserveInsertProof { response_tx, .. } => {
-            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
-        }
-        TrackerCommand::GetReserveStateDigest { response_tx } => {
-            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
-        }
         TrackerCommand::GetValidatedState { response_tx } => {
             let _ = response_tx.send(Err(NoteError::PublicationInProgress));
         }
@@ -415,7 +400,6 @@ async fn main() {
         );
 
         let mut next_publication_id = 1u64;
-
         while let Some(cmd) = rx.blocking_recv() {
             tracing::debug!("Tracker thread received command: {:?}", cmd);
 
@@ -494,61 +478,6 @@ async fn main() {
                 TrackerCommand::GetNotes { response_tx } => {
                     let result = tracker.get_all_notes_with_issuer();
                     let _ = response_tx.send(result);
-                }
-                TrackerCommand::GenerateProof {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    response_tx,
-                } => {
-                    let result = tracker
-                        .generate_proof(&issuer_pubkey, &recipient_pubkey)
-                        .and_then(|proof| tracker.validated_state().map(|state| (proof, state)));
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::GetTrackerLookupProof {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    response_tx,
-                } => {
-                    let result = tracker
-                        .generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey)
-                        .and_then(|proof| tracker.validated_state().map(|state| (proof, state)));
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::GetReserveLookupProof {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    response_tx,
-                } => {
-                    let result = tracker
-                        .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey)
-                        .and_then(|proof| tracker.reserve_state_digest().map(|root| (proof, root)));
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::GetReserveInsertProof {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    timestamp,
-                    new_already_redeemed,
-                    response_tx,
-                } => {
-                    let result = tracker
-                        .generate_reserve_insert_proof(
-                            &issuer_pubkey,
-                            &recipient_pubkey,
-                            timestamp,
-                            new_already_redeemed,
-                        )
-                        .and_then(|(proof, updated_root)| {
-                            tracker
-                                .reserve_state_digest()
-                                .map(|current_root| (proof, updated_root, current_root))
-                        });
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::GetReserveStateDigest { response_tx } => {
-                    let digest = tracker.reserve_state_digest();
-                    let _ = response_tx.send(digest);
                 }
                 TrackerCommand::GetValidatedState { response_tx } => {
                     let _ = response_tx.send(tracker.validated_state());
@@ -1007,17 +936,6 @@ mod publication_fence_tests {
         });
         assert!(matches!(
             state_rx.await,
-            Ok(Err(basis_store::NoteError::PublicationInProgress))
-        ));
-
-        let (proof_tx, proof_rx) = tokio::sync::oneshot::channel();
-        reject_while_publication_is_fenced(TrackerCommand::GenerateProof {
-            issuer_pubkey: [2u8; 33],
-            recipient_pubkey: [3u8; 33],
-            response_tx: proof_tx,
-        });
-        assert!(matches!(
-            proof_rx.await,
             Ok(Err(basis_store::NoteError::PublicationInProgress))
         ));
     }
