@@ -6,6 +6,7 @@
 
 pub mod avl_tree;
 pub mod errors;
+pub mod fixed_avl;
 pub mod proofs;
 pub mod state;
 pub mod storage;
@@ -20,6 +21,7 @@ pub mod avl_tree_tests;
 pub use avl_tree::BasisAvlTree;
 
 pub use errors::TreeError;
+pub use fixed_avl::{FixedAvlTree, FixedTreeShape, LookupWitness, TransitionWitness};
 pub use proofs::{MembershipProof, NonMembershipProof, StateProof};
 pub use state::TrackerState;
 pub use storage::{NodeType, OperationType, TreeCheckpoint, TreeNode, TreeOperation, TreeStorage};
