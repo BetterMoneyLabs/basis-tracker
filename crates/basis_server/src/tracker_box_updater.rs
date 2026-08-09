@@ -435,6 +435,22 @@ struct PreparedTrackerUpdate {
 }
 
 impl TrackerBoxUpdater {
+    pub(crate) fn restored_pending_transaction(
+        shared_state: &SharedTrackerState,
+    ) -> Result<Option<(String, [u8; 33])>, TrackerBoxUpdaterError> {
+        let pending = shared_state.get_pending();
+        match (pending.tx_id, pending.digest, pending.submitted_height) {
+            (Some(tx_id), Some(digest), Some(_)) => Ok(Some((tx_id, digest))),
+            (None, None, None) => Ok(None),
+            _ => {
+                shared_state.quarantine_publication();
+                Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
+                    "incomplete durable publication receipt at updater startup".to_string(),
+                ))
+            }
+        }
+    }
+
     /// Start the tracker box updater service as an async background task
     pub async fn start(
         config: TrackerBoxUpdateConfig,
@@ -445,17 +461,7 @@ impl TrackerBoxUpdater {
         let mut ticker = interval(Duration::from_secs(config.update_interval_seconds));
 
         let mut last_submitted_digest: Option<[u8; 33]> = None;
-        let pending = shared_state.get_pending();
-        let mut pending_tx = match (pending.tx_id, pending.digest, pending.submitted_height) {
-            (Some(tx_id), Some(digest), Some(_)) => Some((tx_id, digest)),
-            (None, None, None) => None,
-            _ => {
-                shared_state.quarantine_publication();
-                return Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(
-                    "incomplete durable publication receipt at updater startup".to_string(),
-                ));
-            }
-        };
+        let mut pending_tx = Self::restored_pending_transaction(&shared_state)?;
 
         info!(
             "Tracker box updater started with {}s interval",
@@ -1195,6 +1201,23 @@ impl TrackerBoxUpdater {
     fn signed_transaction_id(
         signed_tx: &serde_json::Value,
     ) -> Result<String, TrackerBoxUpdaterError> {
+        let declared_tx_id = signed_tx
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::SerializationError(
+                    "Signed transaction JSON is missing its transaction id".to_string(),
+                )
+            })?;
+        if declared_tx_id.len() != 64
+            || hex::decode(declared_tx_id)
+                .map(|bytes| bytes.len() != 32)
+                .unwrap_or(true)
+        {
+            return Err(TrackerBoxUpdaterError::SerializationError(
+                "Signed transaction id is not 32 bytes".to_string(),
+            ));
+        }
         let transaction: Transaction =
             serde_json::from_value(signed_tx.clone()).map_err(|error| {
                 TrackerBoxUpdaterError::SerializationError(format!(
@@ -1210,6 +1233,11 @@ impl TrackerBoxUpdater {
         {
             return Err(TrackerBoxUpdaterError::SerializationError(
                 "Derived transaction id is not 32 bytes".to_string(),
+            ));
+        }
+        if !declared_tx_id.eq_ignore_ascii_case(&tx_id) {
+            return Err(TrackerBoxUpdaterError::SerializationError(
+                "Signed transaction id does not match its serialized body".to_string(),
             ));
         }
         Ok(tx_id)
@@ -1440,6 +1468,34 @@ fn change_address_to_ergo_tree(address_str: &str) -> Result<String, TrackerBoxUp
 mod publication_health_tests {
     use super::{SharedTrackerState, TrackerBoxUpdater, TrackerBoxUpdaterError};
 
+    const SIGNED_TRANSACTION_JSON: &str = r#"{
+      "id": "9148408c04c2e38a6402a7950d6157730fa7d49e9ab3b9cadec481d7769918e9",
+      "inputs": [{
+        "boxId": "9126af0675056b80d1fda7af9bf658464dbfa0b128afca7bf7dae18c27fe8456",
+        "spendingProof": {"proofBytes": "", "extension": {}}
+      }],
+      "dataInputs": [],
+      "outputs": [{
+        "boxId": "b979c439dc698ce5e823b21c722a6e23721af010e4df8c72de0bfd0c3d9ccf6b",
+        "value": 74187765000000000,
+        "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+        "assets": [],
+        "creationHeight": 284761,
+        "additionalRegisters": {},
+        "transactionId": "9148408c04c2e38a6402a7950d6157730fa7d49e9ab3b9cadec481d7769918e9",
+        "index": 0
+      }, {
+        "boxId": "e56847ed19b3dc6b72828fcfb992fdf7310828cf291221269b7ffc72fd66706e",
+        "value": 67500000000,
+        "ergoTree": "100204a00b08cd021dde34603426402615658f1d970cfa7c7bd92ac81a8b16eeebff264d59ce4604ea02d192a39a8cc7a70173007301",
+        "assets": [],
+        "creationHeight": 284761,
+        "additionalRegisters": {},
+        "transactionId": "9148408c04c2e38a6402a7950d6157730fa7d49e9ab3b9cadec481d7769918e9",
+        "index": 1
+      }]
+    }"#;
+
     #[test]
     fn publication_quarantine_is_one_way() {
         let state = SharedTrackerState::new();
@@ -1449,6 +1505,32 @@ mod publication_health_tests {
         assert!(!state.is_publication_healthy());
 
         state.quarantine_publication();
+        assert!(!state.is_publication_healthy());
+    }
+
+    #[test]
+    fn updater_restores_a_complete_durable_publication_receipt() {
+        let state = SharedTrackerState::new();
+        let tx_id = "11".repeat(32);
+        let digest = [0x42; 33];
+        state.set_pending(digest, tx_id.clone(), 100);
+
+        assert_eq!(
+            TrackerBoxUpdater::restored_pending_transaction(&state).unwrap(),
+            Some((tx_id, digest))
+        );
+        assert!(state.is_publication_healthy());
+    }
+
+    #[test]
+    fn updater_quarantines_an_incomplete_publication_receipt() {
+        let state = SharedTrackerState::new();
+        state.pending.write().unwrap().tx_id = Some("11".repeat(32));
+
+        assert!(matches!(
+            TrackerBoxUpdater::restored_pending_transaction(&state),
+            Err(TrackerBoxUpdaterError::BroadcastOutcomeUnknown(_))
+        ));
         assert!(!state.is_publication_healthy());
     }
 
@@ -1502,5 +1584,37 @@ mod publication_health_tests {
             .unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn signed_transaction_id_is_derived_from_the_serialized_body() {
+        let signed_tx: serde_json::Value = serde_json::from_str(SIGNED_TRANSACTION_JSON)
+            .expect("valid signed transaction fixture");
+        assert_eq!(
+            TrackerBoxUpdater::signed_transaction_id(&signed_tx).unwrap(),
+            "9148408c04c2e38a6402a7950d6157730fa7d49e9ab3b9cadec481d7769918e9"
+        );
+    }
+
+    #[test]
+    fn signed_transaction_rejects_a_forged_embedded_id() {
+        let mut signed_tx: serde_json::Value = serde_json::from_str(SIGNED_TRANSACTION_JSON)
+            .expect("valid signed transaction fixture");
+        signed_tx["id"] = serde_json::Value::String("11".repeat(32));
+        assert!(matches!(
+            TrackerBoxUpdater::signed_transaction_id(&signed_tx),
+            Err(TrackerBoxUpdaterError::SerializationError(_))
+        ));
+    }
+
+    #[test]
+    fn signed_transaction_rejects_a_mutated_body_with_the_old_id() {
+        let mut signed_tx: serde_json::Value = serde_json::from_str(SIGNED_TRANSACTION_JSON)
+            .expect("valid signed transaction fixture");
+        signed_tx["outputs"][0]["value"] = serde_json::json!(74187765000000001u64);
+        assert!(matches!(
+            TrackerBoxUpdater::signed_transaction_id(&signed_tx),
+            Err(TrackerBoxUpdaterError::SerializationError(_))
+        ));
     }
 }

@@ -78,6 +78,103 @@ fn reject_while_publication_is_fenced(command: TrackerCommand) {
     }
 }
 
+fn restore_pending_publication(
+    pending: Option<&basis_store::PendingTrackerPublication>,
+    shared_state: &SharedTrackerState,
+) -> Option<PublicationLease> {
+    pending.map(|pending| {
+        shared_state.set_pending(
+            pending.digest(),
+            pending.tx_id().to_string(),
+            pending.submitted_height(),
+        );
+        PublicationLease {
+            id: 0,
+            digest: pending.digest(),
+        }
+    })
+}
+
+fn handle_command_while_publication_is_fenced(
+    active_lease: PublicationLease,
+    command: TrackerCommand,
+    redemption_manager: &mut basis_store::RedemptionManager,
+    shared_state: &SharedTrackerState,
+) -> Option<PublicationLease> {
+    match command {
+        TrackerCommand::RecordPublicationAttempt {
+            lease,
+            tx_id,
+            submitted_height,
+            response_tx,
+        } if lease == active_lease => {
+            let result = redemption_manager
+                .tracker
+                .validated_state()
+                .and_then(|state| {
+                    if state.avl_root_digest != lease.digest {
+                        return Err(basis_store::NoteError::PublicationLeaseMismatch);
+                    }
+                    redemption_manager.tracker.mark_notes_pending(
+                        lease.digest,
+                        &tx_id,
+                        submitted_height,
+                    )
+                });
+            if result.is_err() {
+                shared_state.quarantine_publication();
+            }
+            let _ = response_tx.send(result);
+            Some(active_lease)
+        }
+        TrackerCommand::ConfirmPublication {
+            tx_id,
+            box_id,
+            height,
+            response_tx,
+        } => {
+            let result = redemption_manager
+                .tracker
+                .confirm_pending_publication(&tx_id, &box_id, height);
+            let confirmed = result.is_ok();
+            if result.as_ref().is_err_and(|error| {
+                !matches!(error, basis_store::NoteError::PublicationLeaseMismatch)
+            }) {
+                shared_state.quarantine_publication();
+            }
+            let _ = response_tx.send(result);
+            if confirmed {
+                None
+            } else {
+                Some(active_lease)
+            }
+        }
+        TrackerCommand::AbortPublication { lease, response_tx } if lease == active_lease => {
+            let result = redemption_manager
+                .tracker
+                .pending_publication()
+                .and_then(|pending| {
+                    if pending.is_some() {
+                        Err(basis_store::NoteError::PublicationInProgress)
+                    } else {
+                        Ok(())
+                    }
+                });
+            let released = result.is_ok();
+            let _ = response_tx.send(result);
+            if released {
+                None
+            } else {
+                Some(active_lease)
+            }
+        }
+        other => {
+            reject_while_publication_is_fenced(other);
+            Some(active_lease)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing::info!("Starting basis server...");
@@ -360,6 +457,8 @@ async fn main() {
                 return;
             }
         };
+        let mut active_publication =
+            restore_pending_publication(initial_pending.as_ref(), &shared_state_for_tracker);
         let _ = init_tx.send(Ok((initial_root, initial_pending.clone())));
         tracing::info!(
             "Tracker thread initialized with AVL root digest: {}",
@@ -367,82 +466,18 @@ async fn main() {
         );
 
         let mut redemption_manager = RedemptionManager::new(tracker);
-        let mut active_publication: Option<PublicationLease> =
-            initial_pending.as_ref().map(|pending| PublicationLease {
-                id: 0,
-                digest: pending.digest(),
-            });
         let mut next_publication_id = 1u64;
 
         while let Some(cmd) = rx.blocking_recv() {
             tracing::debug!("Tracker thread received command: {:?}", cmd);
 
             if let Some(active_lease) = active_publication {
-                match cmd {
-                    TrackerCommand::RecordPublicationAttempt {
-                        lease,
-                        tx_id,
-                        submitted_height,
-                        response_tx,
-                    } if lease == active_lease => {
-                        let result =
-                            redemption_manager
-                                .tracker
-                                .validated_state()
-                                .and_then(|state| {
-                                    if state.avl_root_digest != lease.digest {
-                                        return Err(
-                                            basis_store::NoteError::PublicationLeaseMismatch,
-                                        );
-                                    }
-                                    redemption_manager.tracker.mark_notes_pending(
-                                        lease.digest,
-                                        &tx_id,
-                                        submitted_height,
-                                    )
-                                });
-                        if result.is_err() {
-                            shared_state_for_tracker.quarantine_publication();
-                        }
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::ConfirmPublication {
-                        tx_id,
-                        box_id,
-                        height,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager
-                            .tracker
-                            .confirm_pending_publication(&tx_id, &box_id, height);
-                        if result.is_ok() {
-                            active_publication = None;
-                        } else {
-                            shared_state_for_tracker.quarantine_publication();
-                        }
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::AbortPublication { lease, response_tx }
-                        if lease == active_lease =>
-                    {
-                        let result =
-                            redemption_manager
-                                .tracker
-                                .pending_publication()
-                                .and_then(|pending| {
-                                    if pending.is_some() {
-                                        Err(basis_store::NoteError::PublicationInProgress)
-                                    } else {
-                                        Ok(())
-                                    }
-                                });
-                        if result.is_ok() {
-                            active_publication = None;
-                        }
-                        let _ = response_tx.send(result);
-                    }
-                    other => reject_while_publication_is_fenced(other),
-                }
+                active_publication = handle_command_while_publication_is_fenced(
+                    active_lease,
+                    cmd,
+                    &mut redemption_manager,
+                    &shared_state_for_tracker,
+                );
                 continue;
             }
 
@@ -665,15 +700,7 @@ async fn main() {
     });
 
     match init_rx.await {
-        Ok(Ok((_root, pending))) => {
-            if let Some(pending) = pending {
-                shared_tracker_state_for_updater.set_pending(
-                    pending.digest(),
-                    pending.tx_id().to_string(),
-                    pending.submitted_height(),
-                );
-            }
-        }
+        Ok(Ok((_root, _pending))) => {}
         Ok(Err(error)) => {
             shared_tracker_state_for_updater.quarantine_publication();
             tracing::error!(error, "Tracker state initialization failed closed");
@@ -1051,6 +1078,21 @@ async fn main() {
 mod publication_fence_tests {
     use super::*;
 
+    fn generation(
+        fresh_generation: basis_store::FreshGenerationApproval,
+    ) -> basis_store::TrackerGenerationConfig {
+        basis_store::TrackerGenerationConfig {
+            tracker_nft_id: [0x42; 32],
+            fresh_generation,
+        }
+    }
+
+    fn issuer_pubkey(secret: &[u8; 32]) -> [u8; 33] {
+        let secp = secp256k1::Secp256k1::new();
+        let secret = secp256k1::SecretKey::from_slice(secret).expect("valid test secret");
+        secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize()
+    }
+
     #[tokio::test]
     async fn active_publication_rejects_state_mutation_and_root_exposure() {
         let (add_tx, add_rx) = tokio::sync::oneshot::channel();
@@ -1105,6 +1147,132 @@ mod publication_fence_tests {
             response_rx.await,
             Ok(Err(basis_store::NoteError::PublicationLeaseMismatch))
         ));
+    }
+
+    #[tokio::test]
+    async fn durable_receipt_restores_the_actor_and_updater_fences_after_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note =
+            basis_store::IouNote::create_and_sign(recipient, 1_000, 1, &issuer_secret).unwrap();
+        let tx_id = "11".repeat(32);
+        let digest;
+
+        {
+            let mut manager = basis_store::TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(basis_store::FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager.add_note(&issuer, &note).unwrap();
+            digest = manager.validated_state().unwrap().avl_root_digest;
+            manager.mark_notes_pending(digest, &tx_id, 100).unwrap();
+        }
+
+        let restarted_shared = SharedTrackerState::new();
+        let reopened = basis_store::TrackerStateManager::try_new_with_publication_health(
+            temp_dir.path(),
+            generation(basis_store::FreshGenerationApproval::Deny),
+            restarted_shared.publication_health(),
+        )
+        .unwrap();
+        let pending = reopened.pending_publication().unwrap().unwrap();
+        let mut active = restore_pending_publication(Some(&pending), &restarted_shared);
+        assert_eq!(active.unwrap().digest, digest);
+        let updater_pending = restarted_shared.get_pending();
+        assert_eq!(updater_pending.tx_id.as_deref(), Some(tx_id.as_str()));
+        assert_eq!(updater_pending.digest, Some(digest));
+        assert_eq!(updater_pending.submitted_height, Some(100));
+
+        let mut redemption_manager = basis_store::RedemptionManager::new(reopened);
+
+        let (state_tx, state_rx) = tokio::sync::oneshot::channel();
+        active = handle_command_while_publication_is_fenced(
+            active.unwrap(),
+            TrackerCommand::GetValidatedState {
+                response_tx: state_tx,
+            },
+            &mut redemption_manager,
+            &restarted_shared,
+        );
+        assert!(matches!(
+            state_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+
+        let (add_tx, add_rx) = tokio::sync::oneshot::channel();
+        active = handle_command_while_publication_is_fenced(
+            active.unwrap(),
+            TrackerCommand::AddNote {
+                issuer_pubkey: issuer,
+                note: note.clone(),
+                response_tx: add_tx,
+            },
+            &mut redemption_manager,
+            &restarted_shared,
+        );
+        assert!(matches!(
+            add_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+
+        let (wrong_tx, wrong_rx) = tokio::sync::oneshot::channel();
+        active = handle_command_while_publication_is_fenced(
+            active.unwrap(),
+            TrackerCommand::ConfirmPublication {
+                tx_id: "22".repeat(32),
+                box_id: "wrong-box".to_string(),
+                height: 200,
+                response_tx: wrong_tx,
+            },
+            &mut redemption_manager,
+            &restarted_shared,
+        );
+        assert!(matches!(
+            wrong_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationLeaseMismatch))
+        ));
+        assert!(active.is_some());
+        assert!(restarted_shared.is_publication_healthy());
+        assert_eq!(
+            redemption_manager
+                .tracker
+                .pending_publication()
+                .unwrap()
+                .unwrap()
+                .tx_id(),
+            tx_id
+        );
+
+        let (confirm_tx, confirm_rx) = tokio::sync::oneshot::channel();
+        active = handle_command_while_publication_is_fenced(
+            active.unwrap(),
+            TrackerCommand::ConfirmPublication {
+                tx_id: tx_id.clone(),
+                box_id: "confirmed-box".to_string(),
+                height: 201,
+                response_tx: confirm_tx,
+            },
+            &mut redemption_manager,
+            &restarted_shared,
+        );
+        assert!(matches!(confirm_rx.await, Ok(Ok(_))));
+        assert!(active.is_none());
+        assert!(redemption_manager
+            .tracker
+            .pending_publication()
+            .unwrap()
+            .is_none());
+
+        // The updater clears its shared pending cache only after the actor has
+        // durably accepted the exact confirmation.
+        restarted_shared.clear_pending();
+        let updater_pending = restarted_shared.get_pending();
+        assert!(updater_pending.tx_id.is_none());
+        assert!(updater_pending.digest.is_none());
+        assert!(updater_pending.submitted_height.is_none());
     }
 }
 

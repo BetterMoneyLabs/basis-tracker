@@ -1537,6 +1537,87 @@ mod confirmation_state_tests {
             .map(|value| value.to_vec())
     }
 
+    fn replace_raw_pending_publication(path: &std::path::Path, bytes: &[u8]) {
+        let keyspace = fjall::Config::new(path).open().unwrap();
+        let schema = keyspace
+            .open_partition("note_schema", fjall::PartitionCreateOptions::default())
+            .unwrap();
+        schema.insert(b"pending_publication_v1", bytes).unwrap();
+        keyspace.persist(fjall::PersistMode::SyncData).unwrap();
+    }
+
+    #[test]
+    fn corrupted_pending_publication_is_rejected_without_rewriting_state() {
+        let mutation_names = [
+            "magic",
+            "digest",
+            "transaction id",
+            "height",
+            "checksum",
+            "truncation",
+        ];
+
+        for (case, mutation_name) in mutation_names.into_iter().enumerate() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            {
+                let mut manager = TrackerStateManager::try_new(
+                    temp_dir.path(),
+                    generation(FreshGenerationApproval::Approve),
+                )
+                .unwrap();
+                let issuer_secret = [1u8; 32];
+                let issuer = issuer_pubkey(&issuer_secret);
+                let recipient = [2u8; 33];
+                manager
+                    .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+                    .unwrap();
+                let digest = manager.validated_state().unwrap().avl_root_digest;
+                manager
+                    .mark_notes_pending(digest, &"11".repeat(32), 100)
+                    .unwrap();
+            }
+
+            let storage_path = temp_dir.path().join("notes");
+            let mut corrupted = raw_pending_publication(&storage_path).unwrap();
+            assert_eq!(corrupted.len(), 109);
+            match case {
+                0 => corrupted[0] ^= 1,
+                1 => corrupted[4] ^= 1,
+                2 => corrupted[37] ^= 1,
+                3 => corrupted[69] ^= 1,
+                4 => corrupted[108] ^= 1,
+                5 => {
+                    corrupted.pop();
+                }
+                _ => unreachable!(),
+            }
+            replace_raw_pending_publication(&storage_path, &corrupted);
+            let before_layout = raw_note_layout(&storage_path);
+            let before_pending = raw_pending_publication(&storage_path);
+
+            assert!(
+                matches!(
+                    TrackerStateManager::try_new(
+                        temp_dir.path(),
+                        generation(FreshGenerationApproval::Deny)
+                    ),
+                    Err(crate::NoteError::StorageError(_))
+                ),
+                "{mutation_name} corruption must fail closed"
+            );
+            assert_eq!(
+                raw_note_layout(&storage_path),
+                before_layout,
+                "{mutation_name} corruption must not rewrite the state snapshot"
+            );
+            assert_eq!(
+                raw_pending_publication(&storage_path),
+                before_pending,
+                "{mutation_name} corruption must not rewrite the publication receipt"
+            );
+        }
+    }
+
     #[test]
     fn orphan_pending_publication_cannot_initialize_a_fresh_generation() {
         let temp_dir = tempfile::tempdir().unwrap();
