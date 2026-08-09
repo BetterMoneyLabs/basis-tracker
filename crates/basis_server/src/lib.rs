@@ -156,4 +156,11 @@ pub enum TrackerCommand {
         height: u64,
         response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
     },
+    /// Validate or durably anchor the first observed root for the configured
+    /// tracker NFT before the updater may publish a successor commitment.
+    ValidateObservedGeneration {
+        tracker_nft_id: [u8; 32],
+        observed_root: [u8; 33],
+        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
+    },
 }

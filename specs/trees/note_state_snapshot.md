@@ -2,12 +2,14 @@
 
 ## Persistence invariant
 
-The tracker persists one versioned `BNS1` value in the `iou_notes` partition.
+The tracker persists one versioned `BNS2` value in the `iou_notes` partition.
 That value contains:
 
 1. the expected 33-byte AVL root digest;
-2. the ordered live set of issuer-recipient notes; and
-3. each note's tracker-derived redeemed progress.
+2. a Blake2b-256 checksum over the complete snapshot domain, count, root and
+   records;
+3. the ordered live set of issuer-recipient notes; and
+4. each note's tracker-derived redeemed progress.
 
 The vector position is the key's immutable first-insertion order. Updating a
 signed cumulative-debt successor or settlement progress replaces the record in
@@ -20,6 +22,17 @@ replaces the single authoritative value, and calls
 `Keyspace::persist(PersistMode::SyncData)`. No Fjall multi-key batch is used for
 this note-state boundary.
 
+Before every rewrite, the manager rereads and checksums the complete persisted
+snapshot, verifies every issuer signature and redeemed bound, rebuilds every
+physical issuer-recipient AVL key, and requires the rebuilt, persisted and live
+roots to agree. A valid successor cannot launder a malformed predecessor.
+
+The checksum detects accidental corruption and incomplete writes. It is not a
+MAC or adversarial authentication mechanism: a party able to rewrite the data
+directory can recompute it. `amount_redeemed` therefore remains trusted local
+state until the confirmed-chain reconciler replaces it with replayable,
+lineage-bound settlement evidence.
+
 ## Single writer and unknown outcomes
 
 Opening note storage obtains an exclusive file lock for that database path.
@@ -31,6 +44,10 @@ outcome is treated as unknown. The manager becomes quarantined and rejects
 reads, mutations and publication of its root. Recovery requires dropping the
 manager, reopening the store, strictly validating the durable snapshot, and
 rebuilding the AVL tree before any state is exposed.
+
+Quarantine also flips a one-way health signal shared with the tracker-box
+updater. A cached pre-failure root is not publishable after the manager enters
+an unknown or structurally invalid state.
 
 ## Recovery
 
@@ -45,9 +62,25 @@ Unexpected rows, a missing state value, an unsupported schema, malformed
 records, invalid signatures, duplicate edges, order/root mismatch or an
 out-of-range redeemed amount fail closed.
 
+## Generation binding and bootstrap
+
+The note schema partition contains a checksummed, durable `BNG1` manifest
+binding the data directory to exactly one 32-byte tracker NFT, the approved
+empty bootstrap root, and (after first observation) its on-chain anchor root.
+Opening an unbound data directory requires an explicit fresh-generation
+approval. Existing generations open with approval denied, and corruption or a
+different configured NFT is rejected.
+
+Before any tracker-box successor may be submitted, the updater asks the state
+manager to validate the observed NFT and R5. For an unanchored generation, the
+first observed R5 must equal the persisted bootstrap root; otherwise the
+manager and publisher are quarantined. This prevents an empty or wrong data
+directory from overwriting a non-empty generation under the same configured
+NFT.
+
 ## Legacy data
 
-A database containing legacy per-note rows is returned as
+A database containing BNS1 or legacy per-note rows is returned as
 `MigrationRequired`; the runtime does not reorder, rewrite or delete it.
 Operators must choose one of two separately reviewed procedures:
 
@@ -60,8 +93,11 @@ Operators must choose one of two separately reviewed procedures:
 
 `amount_redeemed` is local settlement state and is not covered by the issuer's
 signature. The generic note-ingestion path always initializes it to zero and
-preserves existing progress across signed successors. Only the internal,
-checked settlement transition may advance it; signed fields remain unchanged.
+preserves existing progress across signed successors. No production API or
+store method accepts raw settlement scalars; the historical direct-completion
+route is a `410 Gone` tombstone and broadcast acceptance does not mutate local
+accounting. A future internal transition must consume validated confirmed-chain
+evidence rather than caller metadata; signed fields remain unchanged.
 
 This snapshot establishes local note/root consistency. It does not by itself
 prove transaction inclusion, confirmation depth, active-chain lineage, reserve

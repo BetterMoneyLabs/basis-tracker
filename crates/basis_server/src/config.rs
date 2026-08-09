@@ -56,6 +56,10 @@ pub struct ErgoConfig {
     pub basis_reserve_contract_p2s: String,
     /// Tracker NFT ID (hex-encoded) - identifies the tracker server for reserve contracts
     pub tracker_nft_id: Option<String>,
+    /// One-shot operator approval to initialize a previously unbound, empty data
+    /// directory for the configured tracker NFT. Defaults to false.
+    #[serde(default)]
+    pub allow_fresh_tracker_generation: bool,
     /// Tracker server's public key for the Ergo blockchain (hex-encoded, 33 bytes for compressed format)
     pub tracker_public_key: Option<String>,
     /// Tracker server's secret key for local signing (hex-encoded, 32 bytes)
@@ -121,6 +125,7 @@ impl AppConfig {
             .set_default("ergo.tracker_public_key", "")?
             // Tracker secret key (optional - for local signing)
             .set_default("ergo.tracker_secret_key", "")?
+            .set_default("ergo.allow_fresh_tracker_generation", false)?
             // Acceptance predicate configuration (optional)
             .set_default("acceptance.default", "reject")?
             .set_default("acceptance.predicates", Vec::<String>::new())?
@@ -167,7 +172,14 @@ impl AppConfig {
     /// Get the tracker NFT ID bytes (required - server will fail if not configured)
     pub fn tracker_nft_bytes(&self) -> Result<Vec<u8>, hex::FromHexError> {
         match &self.ergo.tracker_nft_id {
-            Some(nft_id) if !nft_id.is_empty() => hex::decode(nft_id),
+            Some(nft_id) if !nft_id.is_empty() => {
+                let bytes = hex::decode(nft_id)?;
+                if bytes.len() == 32 {
+                    Ok(bytes)
+                } else {
+                    Err(hex::FromHexError::InvalidStringLength)
+                }
+            }
             _ => Err(hex::FromHexError::InvalidStringLength),
         }
     }
@@ -444,6 +456,7 @@ mod tests {
                 },
                 basis_reserve_contract_p2s: "test".to_string(),
                 tracker_nft_id: None,
+                allow_fresh_tracker_generation: false,
                 tracker_public_key: Some(
                     "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
                         .to_string(),

@@ -26,6 +26,14 @@ database_url = "sqlite:data/basis.db"  # Legacy field, kept for compatibility (c
 
 `data_dir` controls where the server writes all persistent state. It defaults to a `data/` directory relative to the working directory from which the server is launched. You can override it with the `BASIS_SERVER_DATA_DIR` environment variable.
 
+The note store is permanently bound by a checksummed generation manifest to
+the configured 32-byte tracker NFT. A new or unbound directory is rejected unless
+`allow_fresh_tracker_generation = true` is supplied explicitly. That approval
+creates only an unanchored empty generation; before publishing any successor,
+the updater requires the first observed on-chain R5 root to equal the persisted
+bootstrap root. Set the option back to `false` after first initialization. A
+different NFT, missing or corrupt manifest, or non-matching first root fails closed.
+
 ### Ergo Blockchain Configuration
 
 ```toml
@@ -40,6 +48,10 @@ start_height = 0
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
 # Example: tracker_nft_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 tracker_nft_id = ""
+
+# One-time approval for a brand-new, empty tracker generation.
+# Leave false for existing generations and ordinary restarts.
+allow_fresh_tracker_generation = false
 
 # Tracker public key - can be either:
 # 1. Hex-encoded compressed public key (33 bytes = 66 hex chars): "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
@@ -97,6 +109,8 @@ export BASIS_SERVER_HOST="0.0.0.0"
 export BASIS_SERVER_PORT=3048
 export BASIS_ERGO_BASIS_RESERVE_CONTRACT_P2S="your_reserve_contract_p2s"
 export BASIS_ERGO_TRACKER_NFT_ID="your_tracker_nft_id"
+# Only for intentional first initialization of a new tracker NFT/data directory:
+export BASIS_ERGO_ALLOW_FRESH_TRACKER_GENERATION="true"
 export BASIS_ERGO_NODE_URL="http://your-node:9053"
 ```
 
@@ -144,6 +158,7 @@ database_url = "sqlite:data/basis.db"
 basis_reserve_contract_p2s = ""
 start_height = 0
 tracker_nft_id = ""
+allow_fresh_tracker_generation = false
 
 [ergo.node]
 url = "http://159.89.116.15:11088"

@@ -310,6 +310,13 @@ pub async fn create_note(
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
+                NoteError::GenerationMismatch(msg) => format!("Generation mismatch: {}", msg),
+                NoteError::GenerationBindingRequired(msg) => {
+                    format!("Generation binding required: {}", msg)
+                }
+                NoteError::CapacityExceeded { limit } => {
+                    format!("Tracker note capacity exceeded ({})", limit)
+                }
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()
@@ -441,6 +448,13 @@ pub async fn get_notes_by_issuer(
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
+                NoteError::GenerationMismatch(msg) => format!("Generation mismatch: {}", msg),
+                NoteError::GenerationBindingRequired(msg) => {
+                    format!("Generation binding required: {}", msg)
+                }
+                NoteError::CapacityExceeded { limit } => {
+                    format!("Tracker note capacity exceeded ({})", limit)
+                }
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()
@@ -558,6 +572,13 @@ pub async fn get_notes_by_recipient(
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
+                NoteError::GenerationMismatch(msg) => format!("Generation mismatch: {}", msg),
+                NoteError::GenerationBindingRequired(msg) => {
+                    format!("Generation binding required: {}", msg)
+                }
+                NoteError::CapacityExceeded { limit } => {
+                    format!("Tracker note capacity exceeded ({})", limit)
+                }
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()
@@ -712,6 +733,13 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
+                NoteError::GenerationMismatch(msg) => format!("Generation mismatch: {}", msg),
+                NoteError::GenerationBindingRequired(msg) => {
+                    format!("Generation binding required: {}", msg)
+                }
+                NoteError::CapacityExceeded { limit } => {
+                    format!("Tracker note capacity exceeded ({})", limit)
+                }
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()
@@ -810,6 +838,13 @@ pub async fn get_all_notes(
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::MigrationRequired(msg) => format!("Migration required: {}", msg),
+                NoteError::GenerationMismatch(msg) => format!("Generation mismatch: {}", msg),
+                NoteError::GenerationBindingRequired(msg) => {
+                    format!("Generation binding required: {}", msg)
+                }
+                NoteError::CapacityExceeded { limit } => {
+                    format!("Tracker note capacity exceeded ({})", limit)
+                }
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::StorageOutcomeUnknown(_) => {
                     "Storage outcome unknown; restart and reconcile".to_string()

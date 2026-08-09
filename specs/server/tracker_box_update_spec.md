@@ -168,25 +168,26 @@ impl SharedTrackerState {
 The background task executes the following algorithm in a continuous loop:
 
 1. **Wait for Interval**: Use tokio::time::interval to wait for the configured update period (10 minutes)
-2. **Check Pending Transaction**: If a transaction was previously submitted but not yet confirmed, check its confirmation status via `/blockchain/transaction/byId`. Only update `last_submitted_digest` after confirmation.
-3. **Access Shared State**: Read the current AVL tree root digest and tracker public key
-4. **Skip Unchanged State**: If the AVL root digest hasn't changed since the last confirmed submission, skip the update cycle
-5. **Find Tracker Box**: Query the blockchain for the tracker box using the tracker NFT ID via `/blockchain/box/unspent/byTokenId`
-6. **Check On-Chain State**: If the on-chain tracker box already has the current AVL root digest in R5, skip the update
-7. **Create Register Constants**:
+2. **Check Publication Health**: Stop all commitment processing, including confirmation handling for an older in-flight transaction, after the shared one-way health signal is quarantined.
+3. **Check Pending Transaction**: If a transaction was previously submitted but not yet confirmed, check its confirmation status via `/blockchain/transaction/byId`. Only update `last_submitted_digest` after confirmation.
+4. **Access Shared State**: Read the current AVL tree root digest and tracker public key only through the health-gated publication accessor.
+5. **Find Tracker Box**: Query the blockchain for the tracker box using the tracker NFT ID via `/blockchain/box/unspent/byTokenId`.
+6. **Validate Generation**: Require the state manager to validate the observed NFT and R5 against the checksummed persistent generation manifest before reconciliation or submission.
+7. **Check On-Chain State**: If the on-chain tracker box already has the current AVL root digest in R5, skip the update.
+8. **Create Register Constants**:
    - R4: Tracker public key as EcPoint constant (33 bytes, compressed secp256k1 point) - identifies the tracker server
    - R5: Serialized `SAvlTree` constant containing the current AVL tree root digest (37 bytes total; see "R5 Register Serialization Format" below)
    - R6: Serialized `Coll[Byte]` constant containing the tracker NFT ID (preserved from the input tracker box)
-8. **Build Unsigned Transaction**:
+9. **Build Unsigned Transaction**:
    - **Inputs**: the current tracker box (spends it) plus one or more wallet-owned P2PK/no-token boxes to pay the configured fee
    - **Outputs**: new tracker box with the same value and updated R4/R5/R6; fee output to the standard fee contract; optional change output to the change address
    - **inputsRaw**: serialized bytes of the tracker box and all fee inputs
    - **secrets.dlog**: the configured tracker secret key (hex) so the node can satisfy `proveDlog(trackerPubkey)`; may be omitted if the tracker key is already in the node wallet
-9. **Submit Transaction**:
+10. **Submit Transaction**:
    - POST the unsigned transaction to `/wallet/transaction/sign` to obtain a signed transaction
    - POST the signed transaction to `/transactions` to broadcast it
    - Log the transaction ID on successful broadcast and mark it as pending confirmation
-10. **Error Handling**:
+11. **Error Handling**:
     - If any step fails, log an appropriate ERROR message
     - Continue with the scheduled interval regardless of failures
 
@@ -464,9 +465,9 @@ The tracker box updater is integrated into the server startup flow:
 The main tracker thread is enhanced to update the shared state:
 
 1. **AddNote Command**: After successfully adding a note to the tracker, update the shared AVL root digest via update_state() call
-2. **CompleteRedemption Command**: After successfully completing a redemption, update the shared AVL root digest via update_state() call
-3. **AVL Tree Operations**: Each AVL tree operation (insert/update/delete) triggers proof generation to update internal tree state
-4. **State Consistency**: Ensure the shared state remains consistent with the main tracker state and AVL tree root
+2. **Generation Validation Command**: Validate the configured tracker NFT and first observed R5 against the durable generation manifest before publication
+3. **AVL Tree Operations**: Each admitted note update produces a validated durable snapshot before the shared root changes
+4. **State Consistency**: A one-way health gate removes every cached root from the publication path after manager quarantine
 
 ## Logging Specifications
 
@@ -566,10 +567,10 @@ The service handles the following error conditions:
 ### Tracker Thread Integration
 
 1. **State Updates**: Update shared AVL root digest after successful `AddNote` operations
-2. **Redemption Handling**: Update shared AVL root digest after successful `CompleteRedemption` operations
-3. **Synchronization**: Use thread-safe access to shared state to prevent data races
-4. **Initialization**: The tracker thread initializes the shared AVL root digest with the empty tree state on startup
-5. **Event Store**: Tracker events (AddNote, CompleteRedemption) are stored in the event store for audit trail
+2. **Settlement Handling**: No raw completion command exists; settlement changes require a future confirmed-chain evidence consumer
+3. **Synchronization**: Use thread-safe access and a shared one-way health signal to prevent stale-root publication
+4. **Initialization**: The tracker thread loads a checksummed snapshot bound to the configured tracker NFT
+5. **Bootstrap Gate**: A new empty generation requires explicit approval and its first observed on-chain R5 must match the persisted bootstrap root
 
 ## Future Extensions
 

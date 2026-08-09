@@ -1189,6 +1189,19 @@ mod tests {
     use ergo_lib::ergotree_ir::chain::tx_id::TxId;
     use ergo_lib::ergotree_ir::ergo_tree::ErgoTree;
 
+    #[test]
+    fn submit_request_rejects_unverified_accounting_metadata() {
+        let payload = serde_json::json!({
+            "signed_tx": {"inputs": [], "dataInputs": [], "outputs": []},
+            "issuer_pubkey": "02".repeat(33),
+            "recipient_pubkey": "03".repeat(33),
+            "redeemed_amount": 1,
+            "new_already_redeemed": 1
+        });
+
+        assert!(serde_json::from_value::<RedemptionSubmitRequest>(payload).is_err());
+    }
+
     fn wallet_box(id: &str, value: u64, with_token: bool) -> NodeBox {
         let assets = if with_token {
             vec![NodeAsset {

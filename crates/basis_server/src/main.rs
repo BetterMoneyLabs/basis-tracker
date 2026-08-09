@@ -45,6 +45,7 @@ async fn main() {
                         },
                         basis_reserve_contract_p2s: "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT".to_string(),
                         tracker_nft_id: None,
+                        allow_fresh_tracker_generation: false,
                         tracker_public_key: None,
                         tracker_secret_key: None,
                     },
@@ -58,11 +59,18 @@ async fn main() {
         }
     };
 
-    // Validate that tracker NFT ID is properly configured
-    if let Err(_) = config.tracker_nft_bytes() {
-        tracing::error!("Tracker NFT ID is not properly configured in the configuration file. The server requires a valid tracker_nft_id value.");
-        std::process::exit(1); // Exit with error code if tracker NFT ID is not configured
-    }
+    // Validate that tracker NFT ID is exactly the token id bound to persistent state.
+    let tracker_nft_bytes: [u8; 32] = match config
+        .tracker_nft_bytes()
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+    {
+        Some(bytes) => bytes,
+        None => {
+            tracing::error!("Tracker NFT ID must be exactly 32 bytes of hex");
+            std::process::exit(1);
+        }
+    };
 
     tracing::info!("Configuration loaded successfully");
 
@@ -242,55 +250,47 @@ async fn main() {
     // Create channel for communicating with tracker thread
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
 
-    // Clone the data directory for the tracker thread before the async move.
+    let generation = basis_store::TrackerGenerationConfig {
+        tracker_nft_id: tracker_nft_bytes,
+        fresh_generation: if config.ergo.allow_fresh_tracker_generation {
+            basis_store::FreshGenerationApproval::Approve
+        } else {
+            basis_store::FreshGenerationApproval::Deny
+        },
+    };
+
+    // Open and validate state in its owning blocking thread, then wait for the
+    // startup result before exposing any API or publisher task.
+    let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
     let data_dir_for_tracker_thread = data_dir.clone();
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel();
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
-    let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
     tokio::task::spawn_blocking(move || {
-        use basis_store::{RedemptionManager, TrackerStateManager};
+        use basis_store::RedemptionManager;
 
         tracing::debug!("Tracker thread started");
-        let tracker = TrackerStateManager::new(&data_dir_for_tracker_thread);
-
-        // Update shared state with the rebuilt AVL root digest after initialization
+        let tracker = match basis_store::TrackerStateManager::try_new_with_publication_health(
+            &data_dir_for_tracker_thread,
+            generation,
+            shared_state_for_tracker.publication_health(),
+        ) {
+            Ok(tracker) => tracker,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
         let initial_root = tracker.get_state().avl_root_digest;
         shared_state_for_tracker.set_avl_root_digest(initial_root);
+        let _ = init_tx.send(Ok(initial_root));
         tracing::info!(
             "Tracker thread initialized with AVL root digest: {}",
             hex::encode(&initial_root)
         );
 
         let mut redemption_manager = RedemptionManager::new(tracker);
-
-        // Temporary startup repair: allow re-inserting a lost reserve AVL tree entry
-        // from the environment so a restarted server can continue a redemption sequence.
-        if let (Ok(issuer_hex), Ok(recipient_hex), Ok(ts_str), Ok(already_str)) = (
-            std::env::var("REPAIR_RESERVE_ISSUER"),
-            std::env::var("REPAIR_RESERVE_RECIPIENT"),
-            std::env::var("REPAIR_RESERVE_TIMESTAMP"),
-            std::env::var("REPAIR_RESERVE_ALREADY_REDEEMED"),
-        ) {
-            if let (Ok(ts), Ok(already)) = (ts_str.parse::<u64>(), already_str.parse::<u64>()) {
-                let issuer = hex::decode(&issuer_hex)
-                    .ok()
-                    .and_then(|v| v.try_into().ok());
-                let recipient = hex::decode(&recipient_hex)
-                    .ok()
-                    .and_then(|v| v.try_into().ok());
-                if let (Some(issuer), Some(recipient)) = (issuer, recipient) {
-                    match redemption_manager
-                        .tracker
-                        .update_already_redeemed(&issuer, &recipient, ts, already)
-                    {
-                        Ok(_) => tracing::info!(
-                            "Reserve tree repaired: ts={ts}, already_redeemed={already}"
-                        ),
-                        Err(e) => tracing::warn!("Failed to repair reserve tree: {e:?}"),
-                    }
-                }
-            }
-        }
 
         while let Some(cmd) = rx.blocking_recv() {
             tracing::debug!("Tracker thread received command: {:?}", cmd);
@@ -468,9 +468,33 @@ async fn main() {
                         .reconcile_with_confirmed_digest(&digest, &box_id, height);
                     let _ = response_tx.send(result);
                 }
+                TrackerCommand::ValidateObservedGeneration {
+                    tracker_nft_id,
+                    observed_root,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .validate_observed_generation(&tracker_nft_id, observed_root);
+                    let _ = response_tx.send(result);
+                }
             }
         }
     });
+
+    match init_rx.await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            shared_tracker_state_for_updater.quarantine_publication();
+            tracing::error!(error, "Tracker state initialization failed closed");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            shared_tracker_state_for_updater.quarantine_publication();
+            tracing::error!("Tracker state thread ended during initialization");
+            std::process::exit(1);
+        }
+    }
 
     // Create tracker box updater
     tracing::info!("Initializing tracker box updater...");

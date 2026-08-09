@@ -218,6 +218,16 @@ mod http_api_tests {
                         let digest = redemption_manager.tracker.reserve_state_digest();
                         let _ = response_tx.send(digest);
                     }
+                    TrackerCommand::ValidateObservedGeneration {
+                        tracker_nft_id,
+                        observed_root,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager
+                            .tracker
+                            .validate_observed_generation(&tracker_nft_id, observed_root);
+                        let _ = response_tx.send(result);
+                    }
                 }
             }
         });
@@ -239,6 +249,7 @@ mod http_api_tests {
                 tracker_nft_id: Some(
                     "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
                 ),
+                allow_fresh_tracker_generation: false,
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),

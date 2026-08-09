@@ -508,11 +508,21 @@ mod test_module {
 
 #[cfg(test)]
 mod confirmation_state_tests {
-    use crate::{IouNote, NoteConfirmationStatus, TrackerStateManager};
+    use crate::{
+        FreshGenerationApproval, IouNote, NoteConfirmationStatus, TrackerGenerationConfig,
+        TrackerStateManager,
+    };
     use secp256k1::{Secp256k1, SecretKey};
 
     fn make_manager() -> TrackerStateManager {
         TrackerStateManager::new_with_temp_storage()
+    }
+
+    fn generation(fresh_generation: FreshGenerationApproval) -> TrackerGenerationConfig {
+        TrackerGenerationConfig {
+            tracker_nft_id: [0x42; 32],
+            fresh_generation,
+        }
     }
 
     fn issuer_pubkey(secret_key: &[u8; 32]) -> [u8; 33] {
@@ -661,7 +671,7 @@ mod confirmation_state_tests {
         let digest = manager.get_state().avl_root_digest;
         manager.mark_notes_pending(digest, "tx123", 100).unwrap();
 
-        manager.rebuild_confirmations();
+        manager.rebuild_confirmations().unwrap();
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
@@ -829,7 +839,7 @@ mod confirmation_state_tests {
         assert!(matches!(
             manager.record_redemption_progress(&issuer, &recipient, 1),
             Err(crate::NoteError::StorageError(message))
-                if message.contains("Debt record not found")
+                if message.contains("live root")
         ));
         assert!(matches!(
             manager.lookup_note(&issuer, &recipient),
@@ -838,7 +848,7 @@ mod confirmation_state_tests {
     }
 
     #[test]
-    fn settlement_progress_quarantines_on_tampered_signed_note() {
+    fn settlement_progress_quarantines_on_tampered_snapshot() {
         let mut manager = make_manager();
         let issuer_secret = [1u8; 32];
         let issuer = issuer_pubkey(&issuer_secret);
@@ -851,7 +861,8 @@ mod confirmation_state_tests {
 
         assert!(matches!(
             manager.record_redemption_progress(&issuer, &recipient, 1),
-            Err(crate::NoteError::InvalidSignature)
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("checksum")
         ));
         assert!(matches!(
             manager.lookup_note(&issuer, &recipient),
@@ -963,13 +974,17 @@ mod confirmation_state_tests {
         let recipient_c = [3u8; 33];
 
         {
-            let mut manager = TrackerStateManager::new(temp_dir.path());
+            let mut manager = TrackerStateManager::new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            );
             manager
                 .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
                 .unwrap();
         }
 
-        let manager = TrackerStateManager::new(temp_dir.path());
+        let manager =
+            TrackerStateManager::new(temp_dir.path(), generation(FreshGenerationApproval::Deny));
         assert_eq!(
             manager
                 .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
@@ -987,7 +1002,10 @@ mod confirmation_state_tests {
         let recipient_c = [3u8; 33];
 
         let root_before_restart = {
-            let mut manager = TrackerStateManager::new(temp_dir.path());
+            let mut manager = TrackerStateManager::new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            );
             manager
                 .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 2))
                 .unwrap();
@@ -997,7 +1015,8 @@ mod confirmation_state_tests {
             manager.get_state().avl_root_digest
         };
 
-        let manager = TrackerStateManager::new(temp_dir.path());
+        let manager =
+            TrackerStateManager::new(temp_dir.path(), generation(FreshGenerationApproval::Deny));
         assert_eq!(manager.get_state().avl_root_digest, root_before_restart);
     }
 
@@ -1124,7 +1143,10 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
 
         let root_before_restart = {
-            let mut manager = TrackerStateManager::new(temp_dir.path());
+            let mut manager = TrackerStateManager::new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            );
             for version in 1..=25u64 {
                 manager
                     .add_note(
@@ -1137,7 +1159,8 @@ mod confirmation_state_tests {
             manager.get_state().avl_root_digest
         };
 
-        let manager = TrackerStateManager::new(temp_dir.path());
+        let manager =
+            TrackerStateManager::new(temp_dir.path(), generation(FreshGenerationApproval::Deny));
         assert_eq!(manager.storage.note_row_count_for_test().unwrap(), 1);
         assert_eq!(manager.get_state().avl_root_digest, root_before_restart);
         assert_eq!(manager.get_total_debt(&issuer, &recipient).unwrap(), 125);
@@ -1177,7 +1200,7 @@ mod confirmation_state_tests {
     }
 
     #[test]
-    fn same_length_debt_tampering_fails_signature_validation_and_quarantines() {
+    fn same_length_debt_tampering_fails_snapshot_integrity_and_quarantines() {
         let mut manager = make_manager();
         let issuer_secret = [1u8; 32];
         let issuer = issuer_pubkey(&issuer_secret);
@@ -1191,7 +1214,8 @@ mod confirmation_state_tests {
 
         assert!(matches!(
             manager.rebuild_avl_tree(),
-            Err(crate::NoteError::InvalidSignature)
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("checksum")
         ));
         assert_eq!(manager.avl_state.root_digest(), root_before);
         assert!(matches!(
@@ -1214,12 +1238,227 @@ mod confirmation_state_tests {
 
         assert!(matches!(
             manager.projected_issuer_gross_debt(&issuer, Some(&recipient), 100),
-            Err(crate::NoteError::InvalidSignature)
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("checksum")
         ));
         assert!(matches!(
             manager.get_all_notes(),
             Err(crate::NoteError::StorageOutcomeUnknown(_))
         ));
+    }
+
+    #[test]
+    fn tampered_snapshot_cannot_be_laundered_by_a_valid_successor() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 101, 1))
+            .unwrap();
+        manager
+            .storage
+            .rewrite_first_total_debt_with_valid_checksum_for_test(100)
+            .unwrap();
+
+        assert!(matches!(
+            manager.add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 2)),
+            Err(crate::NoteError::InvalidSignature)
+        ));
+        assert!(!manager.is_healthy());
+        assert!(matches!(
+            manager.lookup_note(&issuer, &recipient),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn redeemed_progress_tampering_is_detected_even_when_in_range() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        manager
+            .record_redemption_progress(&issuer, &recipient, 40)
+            .unwrap();
+        manager
+            .storage
+            .tamper_first_redeemed_amount_for_test()
+            .unwrap();
+
+        assert!(matches!(
+            manager.add_note(&issuer, &create_note(&issuer_secret, &recipient, 120, 2)),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("checksum")
+        ));
+        assert!(!manager.is_healthy());
+    }
+
+    #[test]
+    fn in_range_redeemed_tampering_is_rejected_after_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        {
+            let mut manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+                .unwrap();
+            manager
+                .record_redemption_progress(&issuer, &recipient, 40)
+                .unwrap();
+            manager
+                .storage
+                .tamper_first_redeemed_amount_for_test()
+                .unwrap();
+        }
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("snapshot checksum")
+        ));
+    }
+
+    #[test]
+    fn capacity_rejection_does_not_quarantine_or_change_the_root() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 100, 1))
+            .unwrap();
+        let root_before = manager.get_state().avl_root_digest;
+        manager.storage.set_capacity_limit_for_test(1);
+
+        assert!(matches!(
+            manager.add_note(&issuer, &create_note(&issuer_secret, &recipient_c, 50, 2)),
+            Err(crate::NoteError::CapacityExceeded { limit: 1 })
+        ));
+        assert!(manager.is_healthy());
+        assert_eq!(manager.get_state().avl_root_digest, root_before);
+        assert_eq!(manager.get_total_debt(&issuer, &recipient_b).unwrap(), 100);
+    }
+
+    #[test]
+    fn generation_requires_explicit_bootstrap_and_binds_nft_and_first_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
+            Err(crate::NoteError::GenerationBindingRequired(_))
+        ));
+
+        let manager = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+        )
+        .unwrap();
+        let empty_root = manager.get_state().avl_root_digest;
+        let (nft, bootstrap_root, anchor_root) = manager.storage.generation_for_test().unwrap();
+        assert_eq!(nft, [0x42; 32]);
+        assert_eq!(bootstrap_root, empty_root);
+        assert_eq!(anchor_root, None);
+        manager
+            .validate_observed_generation(&[0x42; 32], empty_root)
+            .unwrap();
+        assert_eq!(
+            manager.storage.generation_for_test().unwrap().2,
+            Some(empty_root)
+        );
+        drop(manager);
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                TrackerGenerationConfig {
+                    tracker_nft_id: [0x43; 32],
+                    fresh_generation: FreshGenerationApproval::Deny,
+                }
+            ),
+            Err(crate::NoteError::GenerationMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn first_observed_nonbootstrap_root_quarantines_generation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+        )
+        .unwrap();
+        let mut wrong_root = manager.get_state().avl_root_digest;
+        wrong_root[0] ^= 1;
+
+        assert!(matches!(
+            manager.validate_observed_generation(&[0x42; 32], wrong_root),
+            Err(crate::NoteError::GenerationMismatch(_))
+        ));
+        assert!(!manager.is_healthy());
+    }
+
+    #[test]
+    fn corrupted_generation_manifest_is_rejected_after_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager
+                .storage
+                .tamper_generation_manifest_for_test()
+                .unwrap();
+        }
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("generation manifest checksum")
+        ));
+    }
+
+    #[test]
+    fn publication_generation_gate_revalidates_the_complete_snapshot() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let bootstrap_root = manager.storage.generation_for_test().unwrap().1;
+        manager.storage.tamper_first_total_debt_for_test().unwrap();
+
+        assert!(matches!(
+            manager.validate_observed_generation(&[0x42; 32], bootstrap_root),
+            Err(crate::NoteError::StorageError(message)) if message.contains("snapshot checksum")
+        ));
+        assert!(!manager.is_healthy());
     }
 
     #[test]
@@ -1249,7 +1488,13 @@ mod confirmation_state_tests {
         let recipient_b = [2u8; 33];
         let recipient_c = [3u8; 33];
 
-        let mut manager = TrackerStateManager::new(temp_dir.path());
+        let publication_health = crate::PublicationHealth::new();
+        let mut manager = TrackerStateManager::try_new_with_publication_health(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+            publication_health.clone(),
+        )
+        .unwrap();
         manager
             .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 100, 1))
             .unwrap();
@@ -1263,6 +1508,7 @@ mod confirmation_state_tests {
             manager.lookup_note(&issuer, &recipient_b),
             Err(crate::NoteError::StorageOutcomeUnknown(_))
         ));
+        assert!(!publication_health.is_healthy());
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { manager.get_state() }))
                 .is_err()
@@ -1270,7 +1516,11 @@ mod confirmation_state_tests {
 
         drop(manager);
 
-        let reopened = TrackerStateManager::try_new(temp_dir.path()).unwrap();
+        let reopened = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Deny),
+        )
+        .unwrap();
         let persisted = reopened.storage.read_state_strict().unwrap();
         assert_eq!(
             reopened.get_state().avl_root_digest,
@@ -1282,14 +1532,25 @@ mod confirmation_state_tests {
     #[test]
     fn storage_allows_only_one_writer_per_path() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let first = TrackerStateManager::try_new(temp_dir.path()).unwrap();
+        let first = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+        )
+        .unwrap();
         assert!(matches!(
-            TrackerStateManager::try_new(temp_dir.path()),
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
             Err(crate::NoteError::StorageError(message))
                 if message.contains("active writer")
         ));
         drop(first);
-        assert!(TrackerStateManager::try_new(temp_dir.path()).is_ok());
+        assert!(TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Deny)
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1309,7 +1570,10 @@ mod confirmation_state_tests {
         }
 
         assert!(matches!(
-            TrackerStateManager::try_new(temp_dir.path()),
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
             Err(crate::NoteError::MigrationRequired(message))
                 if message.contains("explicit")
         ));

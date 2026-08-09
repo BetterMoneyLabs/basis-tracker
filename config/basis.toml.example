@@ -12,6 +12,9 @@ basis_reserve_contract_p2s = "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99
 # Tracker NFT ID (hex-encoded) - required for reserve creation and redemption
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
 tracker_nft_id = "your_tracker_nft_token_id_here"
+# Set true only once when intentionally creating a new, empty tracker generation.
+# Keep false for every restart and for every existing on-chain tracker NFT.
+allow_fresh_tracker_generation = false
 # Tracker public key - can be hex-encoded public key or P2PK address
 tracker_public_key = "your_tracker_public_key_or_p2pk_address_here"
 # Tracker secret key for local signing (hex-encoded, 32 bytes)

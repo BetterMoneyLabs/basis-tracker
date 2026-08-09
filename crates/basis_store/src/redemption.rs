@@ -341,7 +341,8 @@ impl RedemptionManager {
     /// `new_already_redeemed` optionally overrides the cumulative value written to the
     /// reserve AVL tree; pass the value proven on-chain by the redemption build when it
     /// can diverge from the note's cumulative redeemed amount (e.g. fresh reserves).
-    pub fn complete_redemption(
+    #[cfg(test)]
+    pub(crate) fn complete_redemption(
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,

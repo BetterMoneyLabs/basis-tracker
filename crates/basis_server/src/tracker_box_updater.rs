@@ -48,6 +48,7 @@ pub struct SharedTrackerState {
     pub tracker_nft_id: Arc<RwLock<Option<String>>>,
     pub confirmed: Arc<RwLock<ConfirmedState>>,
     pub pending: Arc<RwLock<PendingState>>,
+    publication_health: basis_store::PublicationHealth,
 }
 
 impl SharedTrackerState {
@@ -61,6 +62,7 @@ impl SharedTrackerState {
             tracker_nft_id: Arc::new(RwLock::new(None)),
             confirmed: Arc::new(RwLock::new(ConfirmedState::default())),
             pending: Arc::new(RwLock::new(PendingState::default())),
+            publication_health: basis_store::PublicationHealth::new(),
         }
     }
 
@@ -72,6 +74,7 @@ impl SharedTrackerState {
             tracker_nft_id: Arc::new(RwLock::new(None)),
             confirmed: Arc::new(RwLock::new(ConfirmedState::default())),
             pending: Arc::new(RwLock::new(PendingState::default())),
+            publication_health: basis_store::PublicationHealth::new(),
         }
     }
 
@@ -105,6 +108,25 @@ impl SharedTrackerState {
         } else {
             [0u8; 33]
         }
+    }
+
+    /// Shared one-way health signal for the state manager and publisher.
+    pub fn publication_health(&self) -> basis_store::PublicationHealth {
+        self.publication_health.clone()
+    }
+
+    pub fn quarantine_publication(&self) {
+        self.publication_health.quarantine();
+    }
+
+    pub fn is_publication_healthy(&self) -> bool {
+        self.publication_health.is_healthy()
+    }
+
+    /// Return the cached root only while the owning manager is healthy.
+    pub fn publication_digest(&self) -> Option<[u8; 33]> {
+        self.is_publication_healthy()
+            .then(|| self.get_avl_root_digest())
     }
 
     pub fn get_tracker_pubkey(&self) -> [u8; 33] {
@@ -456,6 +478,14 @@ impl TrackerBoxUpdater {
                 }
             }
 
+            // Terminal storage quarantine is process-wide for publication. Do
+            // not even reconcile an older in-flight commitment after the state
+            // manager has lost a trustworthy durable outcome.
+            if !shared_state.is_publication_healthy() {
+                error!("Tracker state is quarantined; refusing all commitment processing");
+                continue;
+            }
+
             if let Some((ref tx_id, expected_digest)) = pending_tx {
                 match Self::check_transaction_confirmation(&config, tx_id).await {
                     Ok(true) => {
@@ -508,7 +538,13 @@ impl TrackerBoxUpdater {
                 }
             };
 
-            let current_digest = shared_state.get_avl_root_digest();
+            let current_digest = match shared_state.publication_digest() {
+                Some(digest) => digest,
+                None => {
+                    error!("Tracker state is quarantined; refusing commitment publication");
+                    continue;
+                }
+            };
             let tracker_pubkey = shared_state.get_tracker_pubkey();
 
             if current_digest == [0u8; 33] {
@@ -527,6 +563,7 @@ impl TrackerBoxUpdater {
             // Refresh the confirmed box id in shared state from the live node.
             shared_state.set_tracker_box_id(tracker_box.box_id.clone());
 
+            let mut generation_validated = false;
             if let Some(r5_value) = tracker_box.additional_registers.get("R5") {
                 if let Ok(r5_bytes) = hex::decode(r5_value) {
                     if r5_bytes.len() >= 34 {
@@ -541,6 +578,46 @@ impl TrackerBoxUpdater {
                             tracker_box.box_id.clone(),
                             tracker_box.creation_height as u64,
                         );
+
+                        // The first observed root must match the explicitly
+                        // approved bootstrap root for this NFT. Every update is
+                        // blocked until the state manager durably validates or
+                        // anchors that generation.
+                        let tracker_nft_bytes: [u8; 32] = match hex::decode(&tracker_nft_id)
+                            .ok()
+                            .and_then(|bytes| bytes.try_into().ok())
+                        {
+                            Some(bytes) => bytes,
+                            None => {
+                                shared_state.quarantine_publication();
+                                error!("Configured tracker NFT is not exactly 32 bytes");
+                                continue;
+                            }
+                        };
+                        let generation_valid = if let Some(ref tx) = cmd_tx {
+                            let (rtx, rrx) = tokio::sync::oneshot::channel();
+                            if tx
+                                .send(crate::TrackerCommand::ValidateObservedGeneration {
+                                    tracker_nft_id: tracker_nft_bytes,
+                                    observed_root: onchain_digest_arr,
+                                    response_tx: rtx,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                false
+                            } else {
+                                matches!(rrx.await, Ok(Ok(())))
+                            }
+                        } else {
+                            false
+                        };
+                        if !generation_valid {
+                            shared_state.quarantine_publication();
+                            error!("Tracker generation validation failed; refusing commitment publication");
+                            continue;
+                        }
+                        generation_validated = true;
 
                         // Reconcile per-note confirmation records with the
                         // observed on-chain digest (handles restarts where the
@@ -565,6 +642,14 @@ impl TrackerBoxUpdater {
                         }
                     }
                 }
+            }
+
+            if !generation_validated {
+                shared_state.quarantine_publication();
+                error!(
+                    "Tracker box has no valid R5 generation root; refusing commitment publication"
+                );
+                continue;
             }
 
             // If a previous submission for a different digest is still pending
@@ -1203,4 +1288,26 @@ fn change_address_to_ergo_tree(address_str: &str) -> Result<String, TrackerBoxUp
     Ok(hex::encode(tree.sigma_serialize_bytes().map_err(|e| {
         TrackerBoxUpdaterError::SerializationError(format!("Failed to serialize ergoTree: {:?}", e))
     })?))
+}
+
+#[cfg(test)]
+mod publication_health_tests {
+    use super::SharedTrackerState;
+
+    #[test]
+    fn cached_root_is_not_publishable_after_one_way_quarantine() {
+        let state = SharedTrackerState::new();
+        let prior_root = [0x11; 33];
+        state.set_avl_root_digest(prior_root);
+        assert_eq!(state.publication_digest(), Some(prior_root));
+
+        state.quarantine_publication();
+        assert_eq!(state.publication_digest(), None);
+        assert!(!state.is_publication_healthy());
+
+        // The signal is intentionally one-way; replacing the cached value does
+        // not make any root publishable again in this process.
+        state.set_avl_root_digest([0x22; 33]);
+        assert_eq!(state.publication_digest(), None);
+    }
 }

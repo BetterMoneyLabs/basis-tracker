@@ -1,30 +1,44 @@
 //! Persistence layer for a bounded, versioned IOU-note state snapshot.
 
 use crate::{
-    reserve_tracker::ExtendedReserveInfo, IouNote, NoteConfirmation, NoteError, NoteKey, PubKey,
-    TrackerBoxInfo,
+    blake2b256_hash, reserve_tracker::ExtendedReserveInfo, FreshGenerationApproval, IouNote,
+    NoteConfirmation, NoteError, NoteKey, PubKey, TrackerBoxInfo, TrackerGenerationConfig,
 };
 use fjall::{Config, Keyspace, PartitionCreateOptions, PersistMode};
 use fs2::FileExt;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
     fs::{File, OpenOptions},
     path::Path,
     sync::Mutex,
 };
 
-const NOTE_STATE_MAGIC: &[u8; 4] = b"BNS1";
-const NOTE_STATE_KEY: &[u8] = b"note_state_v1";
-const NOTE_SCHEMA_KEY: &[u8] = b"note_schema_v1";
-const NOTE_STATE_HEADER_LEN: usize = 4 + 4 + 33;
+const NOTE_STATE_MAGIC: &[u8; 4] = b"BNS2";
+const LEGACY_NOTE_STATE_MAGIC: &[u8; 4] = b"BNS1";
+const NOTE_STATE_KEY: &[u8] = b"note_state_v2";
+const NOTE_SCHEMA_KEY: &[u8] = b"note_schema_v2";
+const NOTE_GENERATION_KEY: &[u8] = b"tracker_generation_v1";
+const GENERATION_MAGIC: &[u8; 4] = b"BNG1";
+const SNAPSHOT_CHECKSUM_DOMAIN: &[u8] = b"basis-note-state-snapshot-v2";
+const GENERATION_CHECKSUM_DOMAIN: &[u8] = b"basis-tracker-generation-v1";
+const NOTE_STATE_HEADER_LEN: usize = 4 + 4 + 33 + 32;
 const NOTE_RECORD_LEN: usize = 33 + 8 + 8 + 8 + 65 + 33;
 const MAX_NOTE_COUNT: usize = 50_000;
+const GENERATION_MANIFEST_BODY_LEN: usize = 4 + 32 + 33 + 1 + 33;
+const GENERATION_MANIFEST_LEN: usize = GENERATION_MANIFEST_BODY_LEN + 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredNoteState {
     pub avl_root_digest: [u8; 33],
     pub notes: Vec<(PubKey, IouNote)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredGeneration {
+    tracker_nft_id: [u8; 32],
+    bootstrap_root: [u8; 33],
+    anchor_root: Option<[u8; 33]>,
 }
 
 /// Database storage for versioned IOU note snapshots.
@@ -41,6 +55,8 @@ pub(crate) struct NoteStorage {
     _writer_file_lock: File,
     #[cfg(test)]
     fail_next_persist: AtomicBool,
+    #[cfg(test)]
+    capacity_limit: AtomicUsize,
 }
 
 /// Database storage for scanner metadata
@@ -172,8 +188,22 @@ impl ScannerMetadataStorage {
 }
 
 impl NoteStorage {
+    fn capacity_limit(&self) -> usize {
+        #[cfg(test)]
+        {
+            return self.capacity_limit.load(Ordering::SeqCst);
+        }
+        #[cfg(not(test))]
+        {
+            MAX_NOTE_COUNT
+        }
+    }
+
     /// Open or create a new note storage database with extra indices
-    pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Self, NoteError> {
+    pub(crate) fn open<P: AsRef<Path>>(
+        path: P,
+        generation: TrackerGenerationConfig,
+    ) -> Result<Self, NoteError> {
         let path = path.as_ref();
         std::fs::create_dir_all(path).map_err(|e| {
             NoteError::StorageError(format!("Failed to create note storage directory: {}", e))
@@ -240,12 +270,17 @@ impl NoteStorage {
             _writer_file_lock: writer_file_lock,
             #[cfg(test)]
             fail_next_persist: AtomicBool::new(false),
+            #[cfg(test)]
+            capacity_limit: AtomicUsize::new(MAX_NOTE_COUNT),
         };
-        storage.ensure_state_initialized()?;
+        storage.ensure_state_initialized(generation)?;
         Ok(storage)
     }
 
-    fn ensure_state_initialized(&self) -> Result<(), NoteError> {
+    fn ensure_state_initialized(
+        &self,
+        generation: TrackerGenerationConfig,
+    ) -> Result<(), NoteError> {
         let schema = self
             .schema_partition
             .get(NOTE_SCHEMA_KEY)
@@ -263,7 +298,8 @@ impl NoteStorage {
                             .to_string(),
                     ));
                 }
-                self.read_state_strict().map(|_| ())
+                let state = self.read_state_strict()?;
+                self.ensure_generation_manifest(generation, &state)
             }
             (Some(_), None) => Err(NoteError::StorageError(
                 "Note schema exists without authoritative state".to_string(),
@@ -285,9 +321,17 @@ impl NoteStorage {
                         "Note schema initialization durability is unknown: {}",
                         e
                     ))
-                })
+                })?;
+                let state = self.read_state_strict()?;
+                self.ensure_generation_manifest(generation, &state)
             }
             (None, None) => {
+                if generation.fresh_generation != FreshGenerationApproval::Approve {
+                    return Err(NoteError::GenerationBindingRequired(
+                        "A new data directory requires explicit fresh tracker generation approval"
+                            .to_string(),
+                    ));
+                }
                 if !self.notes_partition.is_empty().map_err(|e| {
                     NoteError::StorageError(format!("Failed to inspect legacy note state: {}", e))
                 })? {
@@ -330,9 +374,65 @@ impl NoteStorage {
                         "Note schema initialization durability is unknown: {}",
                         e
                     ))
-                })
+                })?;
+                self.ensure_generation_manifest(generation, &empty)
             }
         }
+    }
+
+    fn ensure_generation_manifest(
+        &self,
+        generation: TrackerGenerationConfig,
+        state: &StoredNoteState,
+    ) -> Result<(), NoteError> {
+        let stored = self
+            .schema_partition
+            .get(NOTE_GENERATION_KEY)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read generation: {}", e)))?;
+
+        if let Some(bytes) = stored {
+            let manifest = Self::deserialize_generation(bytes.as_ref())?;
+            if manifest.tracker_nft_id != generation.tracker_nft_id {
+                return Err(NoteError::GenerationMismatch(
+                    "Configured tracker NFT does not match the generation bound to this data directory"
+                        .to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
+        if generation.fresh_generation != FreshGenerationApproval::Approve {
+            return Err(NoteError::GenerationBindingRequired(
+                "Tracker generation manifest is missing; explicit fresh-generation approval is required"
+                    .to_string(),
+            ));
+        }
+        if !state.notes.is_empty() {
+            return Err(NoteError::MigrationRequired(
+                "A non-empty note snapshot without a generation manifest requires explicit migration"
+                    .to_string(),
+            ));
+        }
+
+        let manifest = StoredGeneration {
+            tracker_nft_id: generation.tracker_nft_id,
+            bootstrap_root: state.avl_root_digest,
+            anchor_root: None,
+        };
+        self.schema_partition
+            .insert(NOTE_GENERATION_KEY, Self::serialize_generation(&manifest))
+            .map_err(|e| {
+                NoteError::StorageOutcomeUnknown(format!(
+                    "Tracker generation binding outcome is unknown: {}",
+                    e
+                ))
+            })?;
+        self.keyspace.persist(PersistMode::SyncData).map_err(|e| {
+            NoteError::StorageOutcomeUnknown(format!(
+                "Tracker generation binding durability is unknown: {}",
+                e
+            ))
+        })
     }
 
     #[cfg(test)]
@@ -370,6 +470,25 @@ impl NoteStorage {
     }
 
     #[cfg(test)]
+    pub(crate) fn rewrite_first_total_debt_with_valid_checksum_for_test(
+        &self,
+        amount_collected: u64,
+    ) -> Result<(), NoteError> {
+        let mut state = self.read_state_strict()?;
+        let (_, note) = state
+            .notes
+            .first_mut()
+            .ok_or_else(|| NoteError::StorageError("Note state has no record".to_string()))?;
+        note.amount_collected = amount_collected;
+        self.notes_partition
+            .insert(NOTE_STATE_KEY, Self::serialize_note_state(&state)?)
+            .map_err(|e| NoteError::StorageError(e.to_string()))?;
+        self.keyspace
+            .persist(PersistMode::SyncData)
+            .map_err(|e| NoteError::StorageError(e.to_string()))
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_declared_note_count_for_test(&self, count: u32) -> Result<(), NoteError> {
         let mut bytes = self
             .notes_partition
@@ -400,7 +519,74 @@ impl NoteStorage {
         self.fail_next_persist.store(true, Ordering::SeqCst);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_capacity_limit_for_test(&self, limit: usize) {
+        self.capacity_limit.store(limit, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tamper_first_redeemed_amount_for_test(&self) -> Result<(), NoteError> {
+        let mut bytes = self
+            .notes_partition
+            .get(NOTE_STATE_KEY)
+            .map_err(|e| NoteError::StorageError(e.to_string()))?
+            .ok_or_else(|| NoteError::StorageError("Note state missing".to_string()))?
+            .to_vec();
+        let amount_last_byte = NOTE_STATE_HEADER_LEN + 33 + 8 + 7;
+        if bytes.len() <= amount_last_byte {
+            return Err(NoteError::StorageError(
+                "Note state has no redeemed amount to tamper".to_string(),
+            ));
+        }
+        bytes[amount_last_byte] ^= 1;
+        self.notes_partition
+            .insert(NOTE_STATE_KEY, bytes)
+            .map_err(|e| NoteError::StorageError(e.to_string()))?;
+        self.keyspace
+            .persist(PersistMode::SyncData)
+            .map_err(|e| NoteError::StorageError(e.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tamper_generation_manifest_for_test(&self) -> Result<(), NoteError> {
+        let mut bytes = self
+            .schema_partition
+            .get(NOTE_GENERATION_KEY)
+            .map_err(|e| NoteError::StorageError(e.to_string()))?
+            .ok_or_else(|| NoteError::StorageError("Generation missing".to_string()))?
+            .to_vec();
+        bytes[4] ^= 1;
+        self.schema_partition
+            .insert(NOTE_GENERATION_KEY, bytes)
+            .map_err(|e| NoteError::StorageError(e.to_string()))?;
+        self.keyspace
+            .persist(PersistMode::SyncData)
+            .map_err(|e| NoteError::StorageError(e.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generation_for_test(
+        &self,
+    ) -> Result<([u8; 32], [u8; 33], Option<[u8; 33]>), NoteError> {
+        let bytes = self
+            .schema_partition
+            .get(NOTE_GENERATION_KEY)
+            .map_err(|e| NoteError::StorageError(e.to_string()))?
+            .ok_or_else(|| NoteError::StorageError("Generation missing".to_string()))?;
+        let generation = Self::deserialize_generation(bytes.as_ref())?;
+        Ok((
+            generation.tracker_nft_id,
+            generation.bootstrap_root,
+            generation.anchor_root,
+        ))
+    }
+
     fn deserialize_note_state(value_bytes: &[u8]) -> Result<StoredNoteState, NoteError> {
+        if value_bytes.len() >= 4 && &value_bytes[..4] == LEGACY_NOTE_STATE_MAGIC {
+            return Err(NoteError::MigrationRequired(
+                "BNS1 note state requires explicit migration to checksummed BNS2".to_string(),
+            ));
+        }
         if value_bytes.len() < NOTE_STATE_HEADER_LEN || &value_bytes[..4] != NOTE_STATE_MAGIC {
             return Err(NoteError::StorageError(
                 "Unsupported or malformed note state; explicit migration is required".to_string(),
@@ -429,6 +615,17 @@ impl NoteStorage {
 
         let mut avl_root_digest = [0u8; 33];
         avl_root_digest.copy_from_slice(&value_bytes[8..41]);
+        let stored_checksum = &value_bytes[41..73];
+        let calculated_checksum = Self::snapshot_checksum(
+            count,
+            &avl_root_digest,
+            &value_bytes[NOTE_STATE_HEADER_LEN..],
+        );
+        if stored_checksum != calculated_checksum {
+            return Err(NoteError::StorageError(
+                "Authoritative note snapshot checksum mismatch".to_string(),
+            ));
+        }
         let mut notes = Vec::with_capacity(count);
         let mut seen_keys = std::collections::HashSet::with_capacity(count);
         let mut offset = NOTE_STATE_HEADER_LEN;
@@ -473,9 +670,9 @@ impl NoteStorage {
 
     fn serialize_note_state(state: &StoredNoteState) -> Result<Vec<u8>, NoteError> {
         if state.notes.len() > MAX_NOTE_COUNT {
-            return Err(NoteError::StorageError(
-                "Note count exceeds configured bound".to_string(),
-            ));
+            return Err(NoteError::CapacityExceeded {
+                limit: MAX_NOTE_COUNT,
+            });
         }
         let count = u32::try_from(state.notes.len())
             .map_err(|_| NoteError::StorageError("Note count overflow".to_string()))?;
@@ -490,19 +687,98 @@ impl NoteStorage {
                     })?,
             )
             .ok_or_else(|| NoteError::StorageError("Note state length overflow".to_string()))?;
+        let mut records = Vec::with_capacity(state.notes.len() * NOTE_RECORD_LEN);
+        for (issuer_pubkey, note) in &state.notes {
+            records.extend_from_slice(issuer_pubkey);
+            records.extend_from_slice(&note.amount_collected.to_be_bytes());
+            records.extend_from_slice(&note.amount_redeemed.to_be_bytes());
+            records.extend_from_slice(&note.timestamp.to_be_bytes());
+            records.extend_from_slice(&note.signature);
+            records.extend_from_slice(&note.recipient_pubkey);
+        }
+        let checksum = Self::snapshot_checksum(state.notes.len(), &state.avl_root_digest, &records);
         let mut bytes = Vec::with_capacity(capacity);
         bytes.extend_from_slice(NOTE_STATE_MAGIC);
         bytes.extend_from_slice(&count.to_be_bytes());
         bytes.extend_from_slice(&state.avl_root_digest);
-        for (issuer_pubkey, note) in &state.notes {
-            bytes.extend_from_slice(issuer_pubkey);
-            bytes.extend_from_slice(&note.amount_collected.to_be_bytes());
-            bytes.extend_from_slice(&note.amount_redeemed.to_be_bytes());
-            bytes.extend_from_slice(&note.timestamp.to_be_bytes());
-            bytes.extend_from_slice(&note.signature);
-            bytes.extend_from_slice(&note.recipient_pubkey);
-        }
+        bytes.extend_from_slice(&checksum);
+        bytes.extend_from_slice(&records);
         Ok(bytes)
+    }
+
+    fn snapshot_checksum(count: usize, root: &[u8; 33], records: &[u8]) -> [u8; 32] {
+        let mut bytes = Vec::with_capacity(
+            SNAPSHOT_CHECKSUM_DOMAIN.len()
+                + std::mem::size_of::<u32>()
+                + root.len()
+                + records.len(),
+        );
+        bytes.extend_from_slice(SNAPSHOT_CHECKSUM_DOMAIN);
+        bytes.extend_from_slice(&(count as u32).to_be_bytes());
+        bytes.extend_from_slice(root);
+        bytes.extend_from_slice(records);
+        blake2b256_hash(&bytes)
+    }
+
+    fn serialize_generation(generation: &StoredGeneration) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(GENERATION_MANIFEST_LEN);
+        bytes.extend_from_slice(GENERATION_MAGIC);
+        bytes.extend_from_slice(&generation.tracker_nft_id);
+        bytes.extend_from_slice(&generation.bootstrap_root);
+        match generation.anchor_root {
+            Some(root) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&root);
+            }
+            None => {
+                bytes.push(0);
+                bytes.extend_from_slice(&[0u8; 33]);
+            }
+        }
+        let mut checksum_input = Vec::with_capacity(GENERATION_CHECKSUM_DOMAIN.len() + bytes.len());
+        checksum_input.extend_from_slice(GENERATION_CHECKSUM_DOMAIN);
+        checksum_input.extend_from_slice(&bytes);
+        bytes.extend_from_slice(&blake2b256_hash(&checksum_input));
+        bytes
+    }
+
+    fn deserialize_generation(bytes: &[u8]) -> Result<StoredGeneration, NoteError> {
+        if bytes.len() != GENERATION_MANIFEST_LEN || &bytes[..4] != GENERATION_MAGIC {
+            return Err(NoteError::StorageError(
+                "Malformed tracker generation manifest".to_string(),
+            ));
+        }
+        let mut checksum_input =
+            Vec::with_capacity(GENERATION_CHECKSUM_DOMAIN.len() + GENERATION_MANIFEST_BODY_LEN);
+        checksum_input.extend_from_slice(GENERATION_CHECKSUM_DOMAIN);
+        checksum_input.extend_from_slice(&bytes[..GENERATION_MANIFEST_BODY_LEN]);
+        if bytes[GENERATION_MANIFEST_BODY_LEN..] != blake2b256_hash(&checksum_input) {
+            return Err(NoteError::StorageError(
+                "Tracker generation manifest checksum mismatch".to_string(),
+            ));
+        }
+        let mut tracker_nft_id = [0u8; 32];
+        tracker_nft_id.copy_from_slice(&bytes[4..36]);
+        let mut bootstrap_root = [0u8; 33];
+        bootstrap_root.copy_from_slice(&bytes[36..69]);
+        let anchor_root = match bytes[69] {
+            0 if bytes[70..103].iter().all(|byte| *byte == 0) => None,
+            1 => {
+                let mut root = [0u8; 33];
+                root.copy_from_slice(&bytes[70..103]);
+                Some(root)
+            }
+            _ => {
+                return Err(NoteError::StorageError(
+                    "Malformed tracker generation anchor".to_string(),
+                ))
+            }
+        };
+        Ok(StoredGeneration {
+            tracker_nft_id,
+            bootstrap_root,
+            anchor_root,
+        })
     }
 
     /// Store an IOU note with its issuer public key
@@ -524,10 +800,10 @@ impl NoteStorage {
         {
             *stored_note = note.clone();
         } else {
-            if state.notes.len() == MAX_NOTE_COUNT {
-                return Err(NoteError::StorageError(
-                    "Note count exceeds configured bound".to_string(),
-                ));
+            if state.notes.len() >= self.capacity_limit() {
+                return Err(NoteError::CapacityExceeded {
+                    limit: self.capacity_limit(),
+                });
             }
             state.notes.push((*issuer_pubkey, note.clone()));
         }
@@ -555,6 +831,69 @@ impl NoteStorage {
         })?;
 
         Ok(())
+    }
+
+    pub(crate) fn ensure_capacity_for_validated_state(
+        &self,
+        note_count: usize,
+        is_new_edge: bool,
+    ) -> Result<(), NoteError> {
+        if is_new_edge && note_count >= self.capacity_limit() {
+            return Err(NoteError::CapacityExceeded {
+                limit: self.capacity_limit(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_or_anchor_generation(
+        &self,
+        tracker_nft_id: &[u8; 32],
+        observed_root: [u8; 33],
+    ) -> Result<(), NoteError> {
+        let _guard = self.write_lock.lock().map_err(|_| {
+            NoteError::StorageError("Note storage write lock is poisoned".to_string())
+        })?;
+        let bytes = self
+            .schema_partition
+            .get(NOTE_GENERATION_KEY)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read generation: {}", e)))?
+            .ok_or_else(|| {
+                NoteError::GenerationBindingRequired(
+                    "Tracker generation manifest is missing".to_string(),
+                )
+            })?;
+        let mut generation = Self::deserialize_generation(bytes.as_ref())?;
+        if &generation.tracker_nft_id != tracker_nft_id {
+            return Err(NoteError::GenerationMismatch(
+                "Observed tracker NFT does not match the persisted generation".to_string(),
+            ));
+        }
+        if let Some(_anchor_root) = generation.anchor_root {
+            return Ok(());
+        }
+        if observed_root != generation.bootstrap_root {
+            return Err(NoteError::GenerationMismatch(
+                "First observed on-chain root does not match the explicitly approved fresh generation root"
+                    .to_string(),
+            ));
+        }
+
+        generation.anchor_root = Some(observed_root);
+        self.schema_partition
+            .insert(NOTE_GENERATION_KEY, Self::serialize_generation(&generation))
+            .map_err(|e| {
+                NoteError::StorageOutcomeUnknown(format!(
+                    "Tracker generation anchor outcome is unknown: {}",
+                    e
+                ))
+            })?;
+        self.keyspace.persist(PersistMode::SyncData).map_err(|e| {
+            NoteError::StorageOutcomeUnknown(format!(
+                "Tracker generation anchor durability is unknown: {}",
+                e
+            ))
+        })
     }
 
     pub(crate) fn read_state_strict(&self) -> Result<StoredNoteState, NoteError> {
