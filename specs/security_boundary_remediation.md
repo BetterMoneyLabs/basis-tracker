@@ -22,6 +22,22 @@ construction, and settlement boundaries.
 7. Exact Basis v2 contract identities can be recognized while runtime
    construction remains disabled. Recognition does not activate a scanner,
    builder, signer, or migration path.
+8. The legacy redemption fee-input/change builder is structurally retired. No
+   reachable redemption path signs fee inputs or derives change from
+   caller-supplied box metadata; the reviewed interim implementation also
+   rejected any mismatch between node JSON and the exact Sigma-parsed input ID,
+   tree, value or assets. The separately active tracker-box publisher is bound
+   by the same exact-input and owner-derived-change rule.
+9. Node API keys and tracker signing material are redacted from every loggable
+   configuration `Debug` representation, including both reserve and tracker
+   scanner configs. Signing and broadcast failures expose status/category only,
+   never node response bodies or secret-bearing request payloads.
+10. Compiled CLI and MCP artifacts do not export dlog secrets, query node-wallet
+    key-export endpoints, or serialize private keys into redemption artifacts.
+    The corresponding legacy commands are removed or fail before network I/O.
+11. `reserve create --submit` is a retired compatibility flag that fails before
+    requesting a payload; user-facing output directs the owner to an external
+    wallet and never advertises tracker-side broadcast.
 
 ## HTTP compatibility changes
 

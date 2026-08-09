@@ -65,7 +65,7 @@ pub enum TrackerScannerError {
 }
 
 /// Configuration for tracker scanner
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackerNodeConfig {
     /// Starting block height for scanning
     pub start_height: Option<u64>,
@@ -77,6 +77,18 @@ pub struct TrackerNodeConfig {
     pub scan_name: Option<String>,
     /// API key for Ergo node authentication
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for TrackerNodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrackerNodeConfig")
+            .field("start_height", &self.start_height)
+            .field("tracker_nft_id", &self.tracker_nft_id)
+            .field("node_url", &self.node_url)
+            .field("scan_name", &self.scan_name)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Inner state for tracker scanner that requires synchronization

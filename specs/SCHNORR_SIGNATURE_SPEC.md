@@ -1,5 +1,11 @@
 # Schnorr Signature Specification for Basis Tracker
 
+> **Status: cryptographic primitive reference only.** The legacy tracker
+> signature HTTP route and delegation to the node's `/utils/schnorrSign`
+> endpoint are retired. Current v2 code validates the canonical signature
+> subset during bounded manifest admission but does not provide a signing
+> service, wallet integration, submission or broadcast path.
+
 ## Overview
 
 This specification defines the Schnorr signature algorithm implementation for the Basis Tracker system. It follows the chaincash-rs approach with secp256k1 elliptic curve cryptography and is designed to be compatible with Ergo blockchain requirements.

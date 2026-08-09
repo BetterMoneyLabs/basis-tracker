@@ -12,6 +12,22 @@ mod tests {
     use std::path::Path;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[test]
+    fn tracker_node_config_debug_redacts_api_key() {
+        let sentinel = "tracker-node-api-key-sentinel";
+        let config = TrackerNodeConfig {
+            start_height: Some(42),
+            tracker_nft_id: Some("11".repeat(32)),
+            node_url: "http://127.0.0.1:9053".to_string(),
+            scan_name: Some("redaction-test".to_string()),
+            api_key: Some(sentinel.to_string()),
+        };
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains(sentinel));
+        assert!(rendered.contains("<redacted>"));
+    }
+
     async fn oversized_declared_response_server() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
