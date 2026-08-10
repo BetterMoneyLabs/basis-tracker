@@ -91,14 +91,14 @@ pub enum Screen {
     Accounts,
     Notes,
     Reserves,
-    Transactions,
     AddressBook,
     Settings,
     CreateNote,
     RedeemNote,
     CreateReserve,
-    GenerateTransaction,
     AcceptancePolicy,
+    TrackerHealth,
+    EmergencyRedeem,
 }
 
 pub struct App {
@@ -193,8 +193,14 @@ pub fn compute_wallet_stats(
     received_notes: &[NoteInfo],
     reserve_status: Option<&ReserveInfo>,
 ) -> WalletStats {
-    let total_assets: u64 = received_notes.iter().map(|n| n.amount).sum();
-    let total_liabilities: u64 = issued_notes.iter().map(|n| n.amount).sum();
+    let total_assets: u64 = received_notes
+        .iter()
+        .map(|n| n.amount.saturating_sub(n.redeemed))
+        .sum();
+    let total_liabilities: u64 = issued_notes
+        .iter()
+        .map(|n| n.amount.saturating_sub(n.redeemed))
+        .sum();
     let net_position = total_assets as i64 - total_liabilities as i64;
     let coverage_ratio = reserve_status.map(|r| r.ratio);
 
@@ -421,5 +427,42 @@ mod tests {
         let stats = compute_wallet_stats(&[], &[], Some(&r));
         assert_eq!(stats.total_liabilities, 0);
         assert!((stats.coverage_ratio.unwrap() - 1.5).abs() < 1e-6);
+    }
+
+    fn note_with_redeemed(amount: u64, redeemed: u64) -> NoteInfo {
+        NoteInfo {
+            issuer: "issuer".to_string(),
+            recipient: "recipient".to_string(),
+            amount,
+            redeemed,
+            _timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn stats_use_outstanding_amounts() {
+        // 5 ERG issued, 2 ERG redeemed = 3 ERG liability
+        // 4 ERG received, 1 ERG redeemed = 3 ERG asset
+        let issued = vec![note_with_redeemed(5_000_000_000, 2_000_000_000)];
+        let received = vec![note_with_redeemed(4_000_000_000, 1_000_000_000)];
+        let stats = compute_wallet_stats(&issued, &received, None);
+
+        assert_eq!(stats.total_liabilities, 3_000_000_000);
+        assert_eq!(stats.total_assets, 3_000_000_000);
+        assert_eq!(stats.net_position, 0);
+        // Note counts still reflect total notes, not outstanding notes.
+        assert_eq!(stats.liability_note_count, 1);
+        assert_eq!(stats.asset_note_count, 1);
+    }
+
+    #[test]
+    fn stats_fully_redeemed_note_contributes_zero() {
+        let issued = vec![note_with_redeemed(3_000_000_000, 3_000_000_000)];
+        let received = vec![note_with_redeemed(2_000_000_000, 2_000_000_000)];
+        let stats = compute_wallet_stats(&issued, &received, None);
+
+        assert_eq!(stats.total_liabilities, 0);
+        assert_eq!(stats.total_assets, 0);
+        assert_eq!(stats.net_position, 0);
     }
 }

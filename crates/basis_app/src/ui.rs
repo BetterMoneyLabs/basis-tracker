@@ -44,13 +44,13 @@ pub async fn run(app: &mut App) -> Result<()> {
             Screen::AddressBook => draw_address_book(app).await?,
             Screen::Notes => draw_notes(app).await?,
             Screen::Reserves => draw_reserves(app).await?,
-            Screen::Transactions => draw_transactions(app).await?,
             Screen::Settings => draw_settings(app).await?,
             Screen::CreateNote => draw_create_note(app).await?,
             Screen::RedeemNote => draw_redeem_note(app).await?,
             Screen::CreateReserve => draw_create_reserve(app).await?,
-            Screen::GenerateTransaction => draw_generate_transaction(app).await?,
             Screen::AcceptancePolicy => draw_acceptance_policy(app).await?,
+            Screen::TrackerHealth => draw_tracker_health(app).await?,
+            Screen::EmergencyRedeem => draw_emergency_redeem(app).await?,
         }
     }
 
@@ -123,6 +123,10 @@ fn draw_header(app: &App) {
         print!("{}● connected", GREEN);
     } else {
         print!("{}○ disconnected", RED);
+    }
+
+    if app.server_connected && !app.policy_uploaded {
+        print!("{} | {}⚠ policy not uploaded{}", GRAY, YELLOW, RESET);
     }
 
     println!("{}", RESET);
@@ -589,10 +593,18 @@ async fn draw_notes(app: &mut App) -> Result<()> {
     println!("{}  NOTES (IOU Assets & Liabilities){}", BOLD, RESET);
     println!("{}  ─────────────────────────────{}\n", CYAN, RESET);
 
-    let issued_total_erg: f64 =
-        app.issued_notes.iter().map(|n| n.amount).sum::<u64>() as f64 / 1_000_000_000.0;
-    let received_total_erg: f64 =
-        app.received_notes.iter().map(|n| n.amount).sum::<u64>() as f64 / 1_000_000_000.0;
+    let issued_total_erg: f64 = app
+        .issued_notes
+        .iter()
+        .map(|n| n.amount.saturating_sub(n.redeemed))
+        .sum::<u64>() as f64
+        / 1_000_000_000.0;
+    let received_total_erg: f64 = app
+        .received_notes
+        .iter()
+        .map(|n| n.amount.saturating_sub(n.redeemed))
+        .sum::<u64>() as f64
+        / 1_000_000_000.0;
 
     println!(
         "  {}[1]{} Notes Issued ({} notes, {:.6} ERG total liabilities)",
@@ -665,8 +677,8 @@ async fn draw_notes(app: &mut App) -> Result<()> {
 }
 
 async fn draw_reserves(app: &mut App) -> Result<()> {
-    println!("{}  RESERVES & COLLATERAL{}", BOLD, RESET);
-    println!("{}  ───────────────────────{}\n", CYAN, RESET);
+    println!("{}  MY RESERVES{}", BOLD, RESET);
+    println!("{}  ───────────{}\n", CYAN, RESET);
 
     if let Some(ref reserve) = app.reserve_status {
         let ratio_color = ratio_color(reserve.ratio);
@@ -744,25 +756,6 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
     Ok(())
 }
 
-async fn draw_transactions(app: &mut App) -> Result<()> {
-    println!("{}  TRANSACTIONS & REDEMPTIONS{}", BOLD, RESET);
-    println!("{}  ───────────────────────────{}\n", CYAN, RESET);
-
-    println!("  {}[1]{} Generate Redemption Transaction", CYAN, RESET);
-    println!();
-    println!("  {}[b]{} Back to Menu\n", YELLOW, RESET);
-
-    match read_choice("Select option: ").as_str() {
-        "1" => app.navigate_to(Screen::GenerateTransaction),
-        "b" | "B" => app.navigate_to(Screen::MainMenu),
-        _ => {
-            app.set_notification("Invalid option".to_string(), true);
-        }
-    }
-
-    Ok(())
-}
-
 async fn draw_settings(app: &mut App) -> Result<()> {
     println!("{}  SETTINGS{}", BOLD, RESET);
     println!("{}  ─────────{}\n", CYAN, RESET);
@@ -772,6 +765,7 @@ async fn draw_settings(app: &mut App) -> Result<()> {
 
     println!("  {}[1]{} Change Tracker URL", CYAN, RESET);
     println!("  {}[2]{} Accounts Management", CYAN, RESET);
+    println!("  {}[3]{} Tracker Health", CYAN, RESET);
     println!();
     println!("  {}[b]{} Back to Menu\n", YELLOW, RESET);
 
@@ -791,7 +785,141 @@ async fn draw_settings(app: &mut App) -> Result<()> {
             }
         }
         "2" => app.navigate_to(Screen::Accounts),
+        "3" => app.navigate_to(Screen::TrackerHealth),
         "b" | "B" => app.navigate_to(Screen::MainMenu),
+        _ => {
+            app.set_notification("Invalid option".to_string(), true);
+        }
+    }
+
+    Ok(())
+}
+
+async fn draw_tracker_health(app: &mut App) -> Result<()> {
+    println!("{}  TRACKER HEALTH{}", BOLD, RESET);
+    println!("{}  ─────────────{}", CYAN, RESET);
+    println!();
+
+    if !app.server_connected {
+        println!(
+            "  {}⚠ Server disconnected — tracker health data unavailable.{}",
+            YELLOW, RESET
+        );
+        println!();
+        println!("  {}[b]{} Back to Settings\n", YELLOW, RESET);
+        if read_choice("Select option: ").to_lowercase() == "b" {
+            app.navigate_to(Screen::Settings);
+        }
+        return Ok(());
+    }
+
+    println!(
+        "  {}Server status:{} {}● connected{}",
+        BOLD, RESET, GREEN, RESET
+    );
+    println!();
+
+    // Latest confirmed tracker box
+    match app.client.get_latest_tracker_box_id().await {
+        Ok(box_info) => {
+            println!("  {}Latest tracker box:{}", BOLD, RESET);
+            println!(
+                "    ID:     {}...{}",
+                &box_info.tracker_box_id[..16.min(box_info.tracker_box_id.len())],
+                &box_info.tracker_box_id[box_info.tracker_box_id.len().saturating_sub(16)..]
+            );
+            println!("    Height: {}", box_info.height);
+            println!();
+        }
+        Err(e) => {
+            println!(
+                "  {}⚠ Could not fetch latest tracker box: {}{}",
+                YELLOW, e, RESET
+            );
+            println!();
+        }
+    }
+
+    // Tracker state: local / confirmed / pending
+    match app.client.get_tracker_state().await {
+        Ok(state) => {
+            println!("  {}Tracker state:{}", BOLD, RESET);
+            println!(
+                "    Local digest:     {}...{}",
+                &state.local_digest[..16.min(state.local_digest.len())],
+                &state.local_digest[state.local_digest.len().saturating_sub(16)..]
+            );
+            if let Some(ref digest) = state.confirmed_digest {
+                println!(
+                    "    Confirmed digest: {}...{}",
+                    &digest[..16.min(digest.len())],
+                    &digest[digest.len().saturating_sub(16)..]
+                );
+            }
+            if let Some(height) = state.confirmed_height {
+                println!("    Confirmed height: {}", height);
+            }
+            if let Some(ref box_id) = state.confirmed_box_id {
+                println!(
+                    "    Confirmed box:    {}...{}",
+                    &box_id[..16.min(box_id.len())],
+                    &box_id[box_id.len().saturating_sub(16)..]
+                );
+            }
+            if let Some(ref tx_id) = state.pending_tx_id {
+                println!(
+                    "    Pending update:   {}...{}",
+                    &tx_id[..16.min(tx_id.len())],
+                    &tx_id[tx_id.len().saturating_sub(16)..]
+                );
+                if let Some(height) = state.pending_submitted_height {
+                    println!("    Submitted height: {}", height);
+                }
+            } else {
+                println!("    Pending update:   none");
+            }
+            println!();
+        }
+        Err(e) => {
+            println!(
+                "  {}⚠ Could not fetch tracker state: {}{}",
+                YELLOW, e, RESET
+            );
+            println!();
+        }
+    }
+
+    // Most recent event
+    match app.client.get_recent_events().await {
+        Ok(events) if !events.is_empty() => {
+            let ev = &events[0];
+            println!("  {}Most recent event:{}", BOLD, RESET);
+            println!("    Type:      {}", ev.event_type);
+            if let Some(height) = ev.height {
+                println!("    Height:    {}", height);
+            }
+            println!("    Timestamp: {}", ev.timestamp);
+            println!();
+        }
+        Ok(_) => {
+            println!("  {}No recent events found.{}", GRAY, RESET);
+            println!();
+        }
+        Err(e) => {
+            println!(
+                "  {}⚠ Could not fetch recent events: {}{}",
+                YELLOW, e, RESET
+            );
+            println!();
+        }
+    }
+
+    println!("  {}[r]{} Emergency Redemption", RED, RESET);
+    println!("  {}[b]{} Back to Settings\n", YELLOW, RESET);
+
+    match read_choice("Select option: ").as_str() {
+        "r" => app.navigate_to(Screen::EmergencyRedeem),
+        "b" | "B" => app.navigate_to(Screen::Settings),
         _ => {
             app.set_notification("Invalid option".to_string(), true);
         }
@@ -1039,7 +1167,7 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
     };
 
     println!("\n  {}Building redemption via tracker...{}", CYAN, RESET);
-    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp).await {
+    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp, false).await {
         Ok(tx_id) => {
             let short = &tx_id[..16.min(tx_id.len())];
             app.set_notification(format!("Redeemed {} nanoERG, tx {}", amount, short), false);
@@ -1066,6 +1194,7 @@ async fn tracker_assisted_redeem(
     recipient: &str,
     amount: u64,
     timestamp: u64,
+    emergency: bool,
 ) -> Result<String, String> {
     let issuer_pk: [u8; 33] = hex::decode(issuer)
         .map_err(|e| format!("issuer hex: {}", e))?
@@ -1123,7 +1252,7 @@ async fn tracker_assisted_redeem(
             amount,
             timestamp,
             issuer_signature: hex::encode(issuer_sig),
-            emergency: false,
+            emergency,
             tracker_box_id: None,
             change_address: None,
         })
@@ -1183,6 +1312,177 @@ async fn tracker_assisted_redeem(
         )
         .await
         .map_err(|e| format!("submit failed: {}", e))
+}
+
+async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
+    println!("{}  EMERGENCY REDEMPTION{}", BOLD, RESET);
+    println!("{}  ───────────────────{}", CYAN, RESET);
+    println!();
+
+    if app.current_account.is_none() {
+        app.set_notification("No account selected".to_string(), true);
+        app.navigate_to(Screen::TrackerHealth);
+        return Ok(());
+    }
+
+    // Refresh notes to ensure we have latest data
+    if let Some(ref acc) = app.current_account {
+        match app.client.get_recipient_notes(&acc.pubkey).await {
+            Ok(notes) => {
+                app.received_notes = notes
+                    .into_iter()
+                    .map(|n| NoteInfo {
+                        issuer: n.issuer_pubkey,
+                        recipient: n.recipient_pubkey,
+                        amount: n.amount_collected,
+                        redeemed: n.amount_redeemed,
+                        _timestamp: n.timestamp,
+                    })
+                    .collect();
+            }
+            Err(e) => {
+                println!("{}  Error loading notes: {}{}", RED, e, RESET);
+            }
+        }
+    }
+
+    if app.received_notes.is_empty() {
+        println!("{}  No notes received.{}", GRAY, RESET);
+        println!(
+            "  {}Tip:{} Create a note from another account first.\n",
+            YELLOW, RESET
+        );
+        println!("  Press Enter to go back...\n");
+        read_input("");
+        app.navigate_to(Screen::TrackerHealth);
+        return Ok(());
+    }
+
+    // Display received notes list
+    println!("  {}Your Received Notes:{}", BOLD, RESET);
+    for (i, note) in app.received_notes.iter().enumerate() {
+        let outstanding = note.amount.saturating_sub(note.redeemed);
+        println!(
+            "  [{}] From: {}... | {} ERG outstanding",
+            i + 1,
+            &note.issuer[..16],
+            outstanding as f64 / 1_000_000_000.0
+        );
+    }
+    println!();
+    println!("  {}[0]{} Cancel\n", RED, RESET);
+
+    let selection = read_input("Select note to redeem: ");
+    if selection == "0" || selection.is_empty() {
+        app.navigate_to(Screen::TrackerHealth);
+        return Ok(());
+    }
+
+    let idx = match selection.parse::<usize>() {
+        Ok(n) if n > 0 && n <= app.received_notes.len() => n - 1,
+        _ => {
+            app.set_notification("Invalid selection".to_string(), true);
+            app.navigate_to(Screen::TrackerHealth);
+            return Ok(());
+        }
+    };
+
+    let selected_note = &app.received_notes[idx];
+    let issuer = selected_note.issuer.clone();
+    let recipient = app.current_account.as_ref().unwrap().pubkey.clone();
+    let outstanding = selected_note.amount.saturating_sub(selected_note.redeemed);
+
+    if outstanding == 0 {
+        app.set_notification("Note is fully redeemed".to_string(), true);
+        app.navigate_to(Screen::TrackerHealth);
+        return Ok(());
+    }
+
+    // Show selected note details
+    println!("\n  {}Selected Note:{}", BOLD, RESET);
+    println!("  From: {}...", &issuer[..16]);
+    println!("  Amount: {} nanoERG", selected_note.amount);
+    println!("  Redeemed: {} nanoERG", selected_note.redeemed);
+    println!("  Outstanding: {} nanoERG", outstanding);
+    println!();
+
+    // Ask for redemption amount
+    let amount_str = read_input(&format!(
+        "Amount to redeem (default: {} nanoERG, Press Enter for full): ",
+        outstanding
+    ));
+
+    let amount = if amount_str.is_empty() {
+        outstanding
+    } else {
+        match amount_str.parse::<u64>() {
+            Ok(a) if a <= outstanding => a,
+            Ok(_) => {
+                app.set_notification(
+                    format!("Amount exceeds outstanding liability: {}", outstanding),
+                    true,
+                );
+                app.navigate_to(Screen::TrackerHealth);
+                return Ok(());
+            }
+            Err(_) => {
+                app.set_notification("Invalid amount".to_string(), true);
+                app.navigate_to(Screen::TrackerHealth);
+                return Ok(());
+            }
+        }
+    };
+
+    println!(
+        "\n  {}⚠ WARNING: Emergency mode bypasses the tracker signature.{}",
+        RED, RESET
+    );
+    println!(
+        "  {}Only use this when the tracker is unresponsive or unavailable.{}\n",
+        YELLOW, RESET
+    );
+    let confirm = read_input("Type 'yes' to confirm emergency redemption: ");
+    if confirm != "yes" {
+        app.set_notification("Emergency redemption cancelled".to_string(), false);
+        app.navigate_to(Screen::TrackerHealth);
+        return Ok(());
+    }
+
+    // Fetch the full note (payment timestamp) from the server.
+    let note = match app.client.get_note(&issuer, &recipient).await {
+        Ok(Some(n)) => n,
+        Ok(None) => {
+            app.set_notification("Note not found".to_string(), true);
+            app.navigate_to(Screen::TrackerHealth);
+            return Ok(());
+        }
+        Err(e) => {
+            app.set_notification(format!("Error fetching note: {}", e), true);
+            app.navigate_to(Screen::TrackerHealth);
+            return Ok(());
+        }
+    };
+
+    println!(
+        "\n  {}Building emergency redemption via tracker...{}",
+        CYAN, RESET
+    );
+    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp, true).await {
+        Ok(tx_id) => {
+            let short = &tx_id[..16.min(tx_id.len())];
+            app.set_notification(
+                format!("Emergency redeemed {} nanoERG, tx {}", amount, short),
+                false,
+            );
+            let _ = app.refresh_data().await;
+        }
+        Err(e) => {
+            app.set_notification(format!("Emergency redemption failed: {}", e), true);
+        }
+    }
+
+    app.navigate_to(Screen::TrackerHealth);
+    Ok(())
 }
 
 async fn draw_create_reserve(app: &mut App) -> Result<()> {
@@ -1280,244 +1580,6 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
     }
 
     app.navigate_to(Screen::Reserves);
-    Ok(())
-}
-
-async fn draw_generate_transaction(app: &mut App) -> Result<()> {
-    println!("{}  GENERATE REDEMPTION TRANSACTION{}", BOLD, RESET);
-    println!("{}  ───────────────────────────────{}\n", CYAN, RESET);
-    println!(
-        "  {}[Press Enter with empty input to cancel]{}\n",
-        GRAY, RESET
-    );
-
-    if app.current_account.is_none() {
-        app.set_notification("No account selected".to_string(), true);
-        app.navigate_to(Screen::Transactions);
-        return Ok(());
-    }
-
-    let issuer = match select_pubkey_from_address_book(app, "Issuer pubkey (66 hex chars)") {
-        Some(pk) => pk,
-        None => {
-            app.set_notification("Transaction generation cancelled".to_string(), false);
-            app.navigate_to(Screen::Transactions);
-            return Ok(());
-        }
-    };
-
-    let recipient = match select_pubkey_from_address_book(app, "Recipient pubkey (66 hex chars)") {
-        Some(pk) => pk,
-        None => {
-            app.set_notification("Transaction generation cancelled".to_string(), false);
-            app.navigate_to(Screen::Transactions);
-            return Ok(());
-        }
-    };
-
-    let amount_str = read_input("Amount (nanoERG): ");
-    if amount_str.is_empty() {
-        app.set_notification("Transaction generation cancelled".to_string(), false);
-        app.navigate_to(Screen::Transactions);
-        return Ok(());
-    }
-
-    let emergency_str = read_input("Emergency redemption? (y/n): ");
-    let emergency = emergency_str == "y" || emergency_str == "Y";
-
-    if issuer.len() == 66 && recipient.len() == 66 {
-        if let Ok(amount) = amount_str.parse::<u64>() {
-            // Get note info
-            match app.client.get_note(&issuer, &recipient).await {
-                Ok(Some(note)) => {
-                    if note.outstanding_debt() < amount {
-                        app.set_notification(
-                            "Insufficient outstanding liability".to_string(),
-                            true,
-                        );
-                        app.navigate_to(Screen::Transactions);
-                        return Ok(());
-                    }
-
-                    // Get reserve box
-                    match app.client.get_reserves_by_issuer(&issuer).await {
-                        Ok(reserves) => {
-                            if let Some(reserve) = reserves.first() {
-                                let reserve_box_id = reserve.box_id.clone();
-                                let _tracker_nft_id = reserve.base_info.tracker_nft_id.clone();
-
-                                // Get tracker box
-                                match app.client.get_latest_tracker_box_id().await {
-                                    Ok(tracker_box) => {
-                                        let tracker_box_id = tracker_box.tracker_box_id;
-
-                                        // Get proofs
-                                        match app
-                                            .client
-                                            .get_tracker_proof(&issuer, &recipient)
-                                            .await
-                                        {
-                                            Ok(tracker_proof) => {
-                                                let total_debt = tracker_proof.total_debt;
-                                                let _tracker_lookup_proof = tracker_proof.proof;
-                                                let _tracker_state_digest =
-                                                    tracker_proof.tracker_state_digest;
-
-                                                // Get issuer signature
-                                                let issuer_bytes = hex::decode(&issuer)?;
-                                                let recipient_bytes = hex::decode(&recipient)?;
-
-                                                let mut key_hash_input = Vec::new();
-                                                key_hash_input.extend_from_slice(&issuer_bytes);
-                                                key_hash_input.extend_from_slice(&recipient_bytes);
-
-                                                use blake2::{Blake2b, Digest};
-                                                use generic_array::typenum::U32;
-                                                let key_hash = Blake2b::<U32>::new()
-                                                    .chain_update(&key_hash_input)
-                                                    .finalize()
-                                                    .to_vec();
-
-                                                let mut message = Vec::with_capacity(48);
-                                                message.extend_from_slice(&key_hash);
-                                                message
-                                                    .extend_from_slice(&total_debt.to_be_bytes());
-                                                message.extend_from_slice(
-                                                    &note.timestamp.to_be_bytes(),
-                                                );
-
-                                                if let Some(ref acc) = app.current_account {
-                                                    if let Some(account) =
-                                                        app.account_manager.get_account(&acc.name)
-                                                    {
-                                                        match account.sign_message(&message) {
-                                                            Ok(issuer_signature) => {
-                                                                // Get tracker signature
-                                                                match app
-                                                                    .client
-                                                                    .request_tracker_signature(
-                                                                        &issuer,
-                                                                        &recipient,
-                                                                        total_debt,
-                                                                        note.timestamp,
-                                                                        emergency,
-                                                                    )
-                                                                    .await
-                                                                {
-                                                                    Ok(tracker_sig_response) => {
-                                                                        println!("\n{}Transaction generated successfully!{}", GREEN, RESET);
-                                                                        println!(
-                                                                            "\n{}Details:{}",
-                                                                            BOLD, RESET
-                                                                        );
-                                                                        println!(
-                                                                            "  Issuer: {}",
-                                                                            issuer
-                                                                        );
-                                                                        println!(
-                                                                            "  Recipient: {}",
-                                                                            recipient
-                                                                        );
-                                                                        println!(
-                                                                            "  Amount: {} nanoERG",
-                                                                            amount
-                                                                        );
-                                                                        println!("  Total Debt: {} nanoERG", total_debt);
-                                                                        println!(
-                                                                            "  Reserve Box: {}",
-                                                                            reserve_box_id
-                                                                        );
-                                                                        println!(
-                                                                            "  Tracker Box: {}",
-                                                                            tracker_box_id
-                                                                        );
-                                                                        println!(
-                                                                            "  Emergency: {}",
-                                                                            emergency
-                                                                        );
-                                                                        println!(
-                                                                            "\n{}Signature:{}",
-                                                                            BOLD, RESET
-                                                                        );
-                                                                        println!(
-                                                                            "  Issuer: {}...",
-                                                                            hex::encode(
-                                                                                &issuer_signature
-                                                                            )[..32]
-                                                                                .to_string()
-                                                                        );
-                                                                        println!(
-                                                                            "  Tracker: {}...",
-                                                                            tracker_sig_response
-                                                                                .tracker_signature
-                                                                                [..32]
-                                                                                .to_string()
-                                                                        );
-                                                                        println!();
-                                                                        wait_for_enter("Press Enter to continue...");
-                                                                        app.set_notification(
-                                                                            "Transaction generated"
-                                                                                .to_string(),
-                                                                            false,
-                                                                        );
-                                                                    }
-                                                                    Err(e) => {
-                                                                        app.set_notification(format!("Tracker signature error: {}", e), true);
-                                                                    }
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                app.set_notification(
-                                                                    format!("Signing error: {}", e),
-                                                                    true,
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                app.set_notification(
-                                                    format!("Tracker proof error: {}", e),
-                                                    true,
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        app.set_notification(
-                                            format!("Tracker box error: {}", e),
-                                            true,
-                                        );
-                                    }
-                                }
-                            } else {
-                                app.set_notification("No reserve found".to_string(), true);
-                            }
-                        }
-                        Err(e) => {
-                            app.set_notification(format!("Reserve error: {}", e), true);
-                        }
-                    }
-                }
-                Ok(None) => {
-                    app.set_notification("Note not found".to_string(), true);
-                }
-                Err(e) => {
-                    app.set_notification(format!("Note error: {}", e), true);
-                }
-            }
-        } else {
-            app.set_notification("Invalid amount".to_string(), true);
-        }
-    } else {
-        app.set_notification(
-            "Invalid pubkey length (must be 66 hex chars)".to_string(),
-            true,
-        );
-    }
-
-    app.navigate_to(Screen::Transactions);
     Ok(())
 }
 
@@ -1684,6 +1746,16 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
     );
     println!("  Whitelist: {} entries", whitelist_count);
     println!("  Blacklist: {} entries", blacklist_count);
+    if app.server_connected {
+        if app.policy_uploaded {
+            println!("  {}Policy: {}synced with server{}", GRAY, GREEN, RESET);
+        } else {
+            println!(
+                "  {}Policy: {}⚠ not uploaded to server{}",
+                GRAY, YELLOW, RESET
+            );
+        }
+    }
     println!();
 
     println!("  {}[1]{} Set Collateral Level (0-1000%)", CYAN, RESET);
@@ -2001,37 +2073,77 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
         }
         "8" => {
             // Test policy against issuer
-            let input = read_input("Enter issuer pubkey (or contact name): ");
-            let pubkey = if let Some(pk) = app.address_book.get(&input) {
-                pk.clone()
+            if app.current_account.is_none() {
+                app.set_notification("No account selected".to_string(), true);
             } else {
-                input
-            };
-
-            if pubkey.len() == 66 {
-                // Simple test - just check whitelist/blacklist for now
-                let whitelist = get_whitelist_entries(&app.acceptance_config);
-                let blacklist = get_blacklist_entries(&app.acceptance_config);
-
-                let is_blacklisted = blacklist.contains(&pubkey);
-                let is_whitelisted = whitelist.iter().any(|(_, pk)| pk == &pubkey);
-
-                if is_blacklisted {
-                    println!("\n  {}❌ REJECTED{}", RED, RESET);
-                    println!("  Reason: Blacklisted (blacklist takes precedence)");
-                } else if is_whitelisted {
-                    println!("\n  {}✅ ACCEPTED{}", GREEN, RESET);
-                    println!("  Reason: In whitelist");
+                let input = read_input("Enter issuer pubkey (or contact name): ");
+                let pubkey = if let Some(pk) = app.address_book.get(&input) {
+                    pk.clone()
                 } else {
-                    println!("\n  {}❌ REJECTED{}", RED, RESET);
-                    println!("  Reason: Not in whitelist, collateral insufficient");
+                    input
+                };
+
+                if pubkey.len() == 66 {
+                    let debt_input = read_input("Test total debt (nanoERG, default 0): ");
+                    let total_debt = if debt_input.is_empty() {
+                        0
+                    } else {
+                        debt_input.parse::<u64>().unwrap_or(0)
+                    };
+
+                    if app.server_connected {
+                        let recipient = app.current_account.as_ref().unwrap().pubkey.clone();
+                        match app
+                            .client
+                            .check_acceptance(&pubkey, total_debt, Some(&recipient))
+                            .await
+                        {
+                            Ok(result) => {
+                                if result.acceptable {
+                                    println!("\n  {}✅ ACCEPTED{}", GREEN, RESET);
+                                } else {
+                                    println!("\n  {}❌ REJECTED{}", RED, RESET);
+                                }
+                                if let Some(reason) = result.reason {
+                                    println!("  Reason: {}", reason);
+                                }
+                                wait_for_enter("\nPress Enter to continue...");
+                            }
+                            Err(e) => {
+                                app.set_notification(
+                                    format!("Server policy check failed: {}", e),
+                                    true,
+                                );
+                            }
+                        }
+                    } else {
+                        // Fallback to local whitelist/blacklist check
+                        let whitelist = get_whitelist_entries(&app.acceptance_config);
+                        let blacklist = get_blacklist_entries(&app.acceptance_config);
+
+                        let is_blacklisted = blacklist.contains(&pubkey);
+                        let is_whitelisted = whitelist.iter().any(|(_, pk)| pk == &pubkey);
+
+                        if is_blacklisted {
+                            println!("\n  {}❌ REJECTED{}", RED, RESET);
+                            println!("  Reason: Blacklisted (blacklist takes precedence)");
+                        } else if is_whitelisted {
+                            println!("\n  {}✅ ACCEPTED{}", GREEN, RESET);
+                            println!("  Reason: In whitelist");
+                        } else {
+                            println!("\n  {}❌ REJECTED{}", RED, RESET);
+                            println!(
+                                "  Reason: Not in whitelist (server offline; collateral/max_debt not evaluated)"
+                            );
+                        }
+                        wait_for_enter("\nPress Enter to continue...");
+                    }
+                } else {
+                    app.set_notification(
+                        "Invalid pubkey length (must be 66 hex chars)".to_string(),
+                        true,
+                    );
                 }
-                wait_for_enter("\nPress Enter to continue...");
-            } else {
-                app.set_notification(
-                    "Invalid pubkey length (must be 66 hex chars)".to_string(),
-                    true,
-                );
             }
         }
         "b" | "B" => app.navigate_to(Screen::MainMenu),

@@ -888,6 +888,20 @@ pub struct TrackerBoxIdResponse {
     pub height: u64,
 }
 
+/// Response from `GET /tracker/state`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerStateResponse {
+    pub local_digest: String,
+    pub confirmed_digest: Option<String>,
+    pub confirmed_box_id: Option<String>,
+    pub confirmed_height: Option<u64>,
+    pub pending_digest: Option<String>,
+    pub pending_tx_id: Option<String>,
+    pub pending_submitted_height: Option<u64>,
+    pub tracker_box_id: Option<String>,
+}
+
 // Define helper structs for API response handling
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FlattenedReserveInfo {
@@ -1003,6 +1017,29 @@ impl TrackerClient {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!(
                 "Failed to get latest tracker box ID: {}",
+                error_text
+            ))
+        }
+    }
+
+    /// Get the current tracker state: local digest, confirmed on-chain digest/box/height,
+    /// and any in-flight pending update transaction.
+    #[allow(dead_code)]
+    pub async fn get_tracker_state(&self) -> Result<TrackerStateResponse> {
+        let url = format!("{}/tracker/state", self.base_url);
+        let response = ureq::get(&url).call()?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<TrackerStateResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get tracker state: {}",
                 error_text
             ))
         }
