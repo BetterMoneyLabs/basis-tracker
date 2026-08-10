@@ -1,4 +1,8 @@
-# Resolver Implementation for In-Memory Trees
+# Historical Resolver Implementation for In-Memory Trees (Superseded)
+
+> This design note predates the versioned bounded snapshot and generation
+> manifest. It does not describe the current persistence authority and is not a
+> production-readiness assessment.
 
 ## Problem Statement
 
@@ -100,4 +104,5 @@ The resolver limitation is a fundamental architectural constraint, but our curre
 - ✅ Supports efficient recovery through checkpoints
 - ✅ Allows for future optimizations and enhancements
 
-The system is production-ready with the current implementation, addressing the resolver limitation by avoiding node-level persistence entirely.
+This historical approach was later superseded; no current production-readiness
+claim is made here.

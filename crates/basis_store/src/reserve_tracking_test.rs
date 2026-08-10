@@ -7,6 +7,14 @@ mod tests {
     use crate::{ExtendedReserveInfo, ReserveTracker};
     use tempfile::TempDir;
 
+    fn historical_p2s() -> String {
+        crate::contract_compiler::get_basis_reserve_contract_p2s().unwrap()
+    }
+
+    fn historical_tree() -> String {
+        crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap()
+    }
+
     /// Test that verifies the reserve tracking functionality
     /// This test simulates the process of scanning reserve boxes and updating the tracker
     #[tokio::test]
@@ -22,7 +30,7 @@ mod tests {
         // Create a test configuration
         let config = NodeConfig {
             start_height: Some(0),
-            reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
+            reserve_contract_p2s: Some(historical_p2s()),
             node_url: "http://test-node:9053".to_string(),
             scan_name: Some("Test Reserve Scanner".to_string()),
             api_key: None,
@@ -42,7 +50,7 @@ mod tests {
             ScanBox {
                 box_id: "box1".to_string(), // Use plain text box_id
                 value: 1000000000,          // 1 ERG
-                ergo_tree: "test_ergo_tree_1".to_string(),
+                ergo_tree: historical_tree(),
                 creation_height: 1000,
                 transaction_id: "tx1".to_string(),
                 assets: vec![], // Empty assets for reserve boxes
@@ -65,7 +73,7 @@ mod tests {
             ScanBox {
                 box_id: "box2".to_string(), // Use plain text box_id
                 value: 2000000000,          // 2 ERG
-                ergo_tree: "test_ergo_tree_2".to_string(),
+                ergo_tree: historical_tree(),
                 creation_height: 1001,
                 transaction_id: "tx2".to_string(),
                 assets: vec![], // Empty assets for reserve boxes
@@ -274,7 +282,7 @@ mod tests {
 
         let config = NodeConfig {
             start_height: Some(0),
-            reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
+            reserve_contract_p2s: Some(historical_p2s()),
             node_url: "http://test:9053".to_string(),
             scan_name: Some("Test Scanner".to_string()),
             api_key: None,
@@ -299,7 +307,7 @@ mod tests {
             let scan_box = ScanBox {
                 box_id: box_id.to_string(),
                 value: collateral,
-                ergo_tree: "test_tree".to_string(),
+                ergo_tree: historical_tree(),
                 creation_height: 1000,
                 transaction_id: "test_tx".to_string(),
                 assets: vec![], // Empty assets for reserve boxes

@@ -1,5 +1,8 @@
 # Basis Protocol Interactive Tutorial - Alice to Bob Payment & Redemption
 
+> **Status: historical v1 tutorial — superseded.** Its redemption commands and
+> server proof routes are no longer compiled or are unconditional tombstones.
+
 A hands-on tutorial demonstrating the complete Basis protocol flow: reserve deployment, IOU note issuance (Alice → Bob), and on-chain redemption with a real tracker.
 
 ## Overview
@@ -33,7 +36,7 @@ Run it from the project root directory:
 ./target/debug/basis_cli --help
 
 # Or add to your PATH
-export PATH="$PATH:/home/kushti/chaincash/basis-tracker/target/debug"
+export PATH="$PATH:$PWD/target/debug"
 ./target/debug/basis_cli --help
 ```
 

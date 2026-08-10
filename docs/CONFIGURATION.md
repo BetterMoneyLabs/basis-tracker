@@ -6,11 +6,11 @@ This document describes the configuration options for the Basis Tracker server a
 
 ## Configuration File
 
-The main configuration file is `config/basis.toml`. The server will look for this file in the following locations:
+The main configuration file is `config/basis.toml`. Configuration precedence is:
 
-1. Current working directory: `config/basis.toml`
-2. Environment variables with `BASIS_` prefix
-3. Default values
+1. Environment variables with the `BASIS_` prefix
+2. `config/basis.toml` in the current working directory
+3. Built-in default values
 
 ## Configuration Sections
 
@@ -24,14 +24,24 @@ data_dir = "data"       # Base directory for all on-disk storage (databases, ind
 database_url = "sqlite:data/basis.db"  # Legacy field, kept for compatibility (currently unused)
 ```
 
-`data_dir` controls where the server writes all persistent state. It defaults to a `data/` directory relative to the working directory from which the server is launched. You can override it with the `BASIS_SERVER_DATA_DIR` environment variable.
+`data_dir` controls where the server writes all persistent state. It defaults to a `data/` directory relative to the working directory from which the server is launched. You can override it with the `BASIS_SERVER__DATA_DIR` environment variable.
+
+The note store is permanently bound by a checksummed generation manifest to
+the configured 32-byte tracker NFT. A new or unbound directory is rejected unless
+`allow_fresh_tracker_generation = true` is supplied explicitly. That approval
+creates only an unanchored empty generation; before publishing any successor,
+the updater requires the first observed on-chain R5 root to equal the persisted
+bootstrap root. Set the option back to `false` after first initialization. A
+different NFT, missing or corrupt manifest, or non-matching first root fails closed.
 
 ### Ergo Blockchain Configuration
 
 ```toml
 [ergo]
 # Basis reserve contract P2S address
-basis_reserve_contract_p2s = "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT"
+# Omit basis_reserve_contract_p2s for temporary legacy compatibility mode.
+# The exact Basis v2 tree is recognized, but startup rejects v2 activation
+# until the v2 scanner and BNS2/BRS2 state runtime are installed.
 
 # Starting block height for scanning (legacy)
 start_height = 0
@@ -40,6 +50,10 @@ start_height = 0
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
 # Example: tracker_nft_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 tracker_nft_id = ""
+
+# One-time approval for a brand-new, empty tracker generation.
+# Leave false for existing generations and ordinary restarts.
+allow_fresh_tracker_generation = false
 
 # Tracker public key - can be either:
 # 1. Hex-encoded compressed public key (33 bytes = 66 hex chars): "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
@@ -90,14 +104,16 @@ When creating a reserve contract box, you must set these registers:
 
 ## Environment Variables
 
-All configuration options can also be set via environment variables with the `BASIS_` prefix:
+All configuration options can also be set via environment variables with the `BASIS_` prefix. Use two underscores (`__`) between nested TOML sections; underscores inside a field name remain literal:
 
 ```bash
-export BASIS_SERVER_HOST="0.0.0.0"
-export BASIS_SERVER_PORT=3048
-export BASIS_ERGO_BASIS_RESERVE_CONTRACT_P2S="your_reserve_contract_p2s"
-export BASIS_ERGO_TRACKER_NFT_ID="your_tracker_nft_id"
-export BASIS_ERGO_NODE_URL="http://your-node:9053"
+export BASIS_SERVER__HOST="0.0.0.0"
+export BASIS_SERVER__PORT=3048
+export BASIS_ERGO__BASIS_RESERVE_CONTRACT_P2S="your_reserve_contract_p2s"
+export BASIS_ERGO__TRACKER_NFT_ID="your_tracker_nft_id"
+# Only for intentional first initialization of a new tracker NFT/data directory:
+export BASIS_ERGO__ALLOW_FRESH_TRACKER_GENERATION="true"
+export BASIS_ERGO__NODE__NODE_URL="http://your-node:9053"
 ```
 
 ## Tracker Public Key Configuration
@@ -141,9 +157,10 @@ data_dir = "data"
 database_url = "sqlite:data/basis.db"
 
 [ergo]
-basis_reserve_contract_p2s = ""
+# omit for temporary legacy compatibility mode; construction stays disabled
 start_height = 0
 tracker_nft_id = ""
+allow_fresh_tracker_generation = false
 
 [ergo.node]
 url = "http://159.89.116.15:11088"

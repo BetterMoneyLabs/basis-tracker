@@ -176,7 +176,8 @@ cp config/basis.toml.example config/basis.toml  # if available
 [ergo]
 # This NFT identifies your tracker server - required for reserve operations
 tracker_nft_id = "your_tracker_nft_token_id_here"
-basis_reserve_contract_p2s = "your_reserve_contract_p2s_address"
+# Omit this key while running the temporary legacy compatibility mode.
+# Basis v2 activation remains disabled until its scanner/state runtime exists.
 ```
 
 3. **Set Ergo Node Configuration**:
@@ -201,7 +202,7 @@ The client stores configuration in `~/.basis/cli.toml` and creates it automatica
 ./target/release/basis_server --config /path/to/config.toml
 
 # Run with custom port
-BASIS_SERVER_PORT=8080 ./target/release/basis_server
+BASIS_SERVER__PORT=8080 ./target/release/basis_server
 ```
 
 ### Using Run Scripts (Recommended)

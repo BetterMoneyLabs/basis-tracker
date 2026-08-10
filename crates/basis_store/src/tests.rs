@@ -508,11 +508,21 @@ mod test_module {
 
 #[cfg(test)]
 mod confirmation_state_tests {
-    use crate::{IouNote, NoteConfirmationStatus, TrackerStateManager};
+    use crate::{
+        FreshGenerationApproval, IouNote, NoteConfirmationStatus, NoteError,
+        TrackerGenerationConfig, TrackerStateManager,
+    };
     use secp256k1::{Secp256k1, SecretKey};
 
     fn make_manager() -> TrackerStateManager {
         TrackerStateManager::new_with_temp_storage()
+    }
+
+    fn generation(fresh_generation: FreshGenerationApproval) -> TrackerGenerationConfig {
+        TrackerGenerationConfig {
+            tracker_nft_id: [0x42; 32],
+            fresh_generation,
+        }
     }
 
     fn issuer_pubkey(secret_key: &[u8; 32]) -> [u8; 33] {
@@ -557,13 +567,104 @@ mod confirmation_state_tests {
         manager.add_note(&issuer, &note).unwrap();
 
         let digest = manager.get_state().avl_root_digest;
-        let count = manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        let tx_id = "11".repeat(32);
+        let count = manager.mark_notes_pending(digest, &tx_id, 100).unwrap();
         assert_eq!(count, 1);
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::Pending);
         assert_eq!(confirmation.pending_total_debt, Some(1000));
-        assert_eq!(confirmation.pending_tx_id, Some("tx123".to_string()));
+        assert_eq!(confirmation.pending_tx_id, Some(tx_id));
+    }
+
+    #[test]
+    fn invalid_publication_tx_id_is_rejected_without_quarantining_state() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .unwrap();
+        let digest = manager.validated_state().unwrap().avl_root_digest;
+
+        assert!(matches!(
+            manager.mark_notes_pending(digest, "not-a-transaction-id", 100),
+            Err(crate::NoteError::InvalidTransactionId)
+        ));
+        assert!(manager.is_healthy());
+        assert!(manager.pending_publication().unwrap().is_none());
+        assert_eq!(
+            manager
+                .get_confirmation(&issuer, &recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::LocalOnly
+        );
+    }
+
+    #[test]
+    fn pending_publication_survives_restart_and_binds_confirmation_tx_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let tx_id = "11".repeat(32);
+        let digest;
+
+        {
+            let mut manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+                .unwrap();
+            digest = manager.validated_state().unwrap().avl_root_digest;
+            manager.mark_notes_pending(digest, &tx_id, 100).unwrap();
+            let key: [u8; 32] = crate::NoteKey::from_keys(&issuer, &recipient)
+                .to_bytes()
+                .try_into()
+                .unwrap();
+            // Model a crash after the durable external-effect receipt but
+            // before this advisory confirmation row reached storage.
+            manager.storage.remove_confirmation_for_test(&key).unwrap();
+        }
+
+        let mut reopened = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Deny),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.pending_publication().unwrap(),
+            Some(crate::PendingTrackerPublication {
+                digest,
+                tx_id: tx_id.clone(),
+                submitted_height: 100,
+            })
+        );
+        assert_eq!(
+            reopened
+                .get_confirmation(&issuer, &recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::LocalOnly
+        );
+        assert!(matches!(
+            reopened.confirm_pending_publication(&"22".repeat(32), "box123", 200),
+            Err(crate::NoteError::PublicationLeaseMismatch)
+        ));
+        reopened
+            .confirm_pending_publication(&tx_id, "box123", 200)
+            .unwrap();
+        assert!(reopened.pending_publication().unwrap().is_none());
+        let confirmed = reopened.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmed.status, NoteConfirmationStatus::Confirmed);
+        assert_eq!(confirmed.confirmed_total_debt, Some(1000));
+        assert_eq!(confirmed.confirmed_box_id.as_deref(), Some("box123"));
+        assert_eq!(confirmed.confirmed_height, Some(200));
     }
 
     #[test]
@@ -576,7 +677,9 @@ mod confirmation_state_tests {
 
         manager.add_note(&issuer, &note).unwrap();
         let digest = manager.get_state().avl_root_digest;
-        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
         manager.confirm_pending_notes("box123", 200).unwrap();
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
@@ -589,6 +692,292 @@ mod confirmation_state_tests {
     }
 
     #[test]
+    fn rollback_of_accepted_a_preserves_newer_pending_b_fail_closed() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1_000, 1))
+            .unwrap();
+        let root_a = manager.validated_state().unwrap().avl_root_digest;
+        let tx_a = "11".repeat(32);
+        manager.mark_notes_pending(root_a, &tx_a, 100).unwrap();
+        let effect_a = crate::chain_reconciliation::validated_tracker_effect_for_test(
+            "22".repeat(32),
+            tx_a.clone(),
+            "33".repeat(32),
+            "44".repeat(32),
+            101,
+            6,
+            root_a,
+        );
+        manager.confirm_validated_publication(&effect_a).unwrap();
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1_200, 2))
+            .unwrap();
+        let root_b = manager.validated_state().unwrap().avl_root_digest;
+        let tx_b = "55".repeat(32);
+        manager.mark_notes_pending(root_b, &tx_b, 108).unwrap();
+        let rollback_a = crate::chain_reconciliation::validated_rollback_for_test(&effect_a);
+        assert_eq!(
+            manager.rollback_validated_publication(&rollback_a).unwrap(),
+            1
+        );
+        assert_eq!(
+            manager.rollback_validated_publication(&rollback_a).unwrap(),
+            0
+        );
+
+        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        assert_eq!(confirmation.status, NoteConfirmationStatus::Pending);
+        assert_eq!(confirmation.confirmed_total_debt, None);
+        assert_eq!(confirmation.confirmed_tx_id, None);
+        assert_eq!(confirmation.pending_total_debt, Some(1_200));
+        assert_eq!(confirmation.pending_tx_id.as_deref(), Some(tx_b.as_str()));
+        assert_eq!(
+            manager.pending_publication().unwrap().unwrap().tx_id(),
+            tx_b
+        );
+        assert_eq!(confirmation.redeemable_amount(0), 0);
+    }
+
+    #[test]
+    fn shared_publication_quarantine_hides_a_previously_confirmed_effect() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let publication_health = crate::PublicationHealth::new();
+        let mut manager = TrackerStateManager::try_new_with_publication_health(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+            publication_health.clone(),
+        )
+        .unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1_000, 1))
+            .unwrap();
+        let root = manager.validated_state().unwrap().avl_root_digest;
+        let tx_id = "11".repeat(32);
+        manager.mark_notes_pending(root, &tx_id, 100).unwrap();
+        let effect = crate::chain_reconciliation::validated_tracker_effect_for_test(
+            "22".repeat(32),
+            tx_id,
+            "33".repeat(32),
+            "44".repeat(32),
+            101,
+            6,
+            root,
+        );
+        manager.confirm_validated_publication(&effect).unwrap();
+        assert_eq!(
+            manager
+                .get_confirmation(&issuer, &recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::Confirmed
+        );
+
+        publication_health.quarantine();
+        assert!(matches!(
+            manager.try_get_confirmation(&issuer, &recipient),
+            Err(NoteError::StorageOutcomeUnknown(_))
+        ));
+        assert!(matches!(
+            manager.validated_state(),
+            Err(NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn restart_restores_historical_anchor_without_promoting_newer_local_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let unchanged_recipient = [2u8; 33];
+        let changed_recipient = [3u8; 33];
+        let later_recipient = [4u8; 33];
+        let effect_a;
+        let root_a;
+        let root_b;
+
+        {
+            let mut manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &unchanged_recipient, 1_000, 1),
+                )
+                .unwrap();
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &changed_recipient, 1_000, 1),
+                )
+                .unwrap();
+            root_a = manager.validated_state().unwrap().avl_root_digest;
+            let tx_a = "11".repeat(32);
+            manager.mark_notes_pending(root_a, &tx_a, 100).unwrap();
+            effect_a = crate::chain_reconciliation::validated_tracker_effect_for_test(
+                "22".repeat(32),
+                tx_a,
+                "33".repeat(32),
+                "44".repeat(32),
+                101,
+                6,
+                root_a,
+            );
+            manager.confirm_validated_publication(&effect_a).unwrap();
+
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &changed_recipient, 1_200, 2),
+                )
+                .unwrap();
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &later_recipient, 500, 3),
+                )
+                .unwrap();
+            root_b = manager.validated_state().unwrap().avl_root_digest;
+            assert_ne!(root_a, root_b);
+        }
+
+        let mut reopened = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Deny),
+        )
+        .unwrap();
+        assert!(reopened
+            .validated_confirmation_anchor()
+            .unwrap()
+            .unwrap()
+            .matches_validated_effect(&effect_a));
+        assert_eq!(reopened.validated_state().unwrap().avl_root_digest, root_b);
+
+        reopened.confirm_validated_publication(&effect_a).unwrap();
+        assert_eq!(reopened.validated_state().unwrap().avl_root_digest, root_b);
+        assert_eq!(
+            reopened
+                .get_confirmation(&issuer, &unchanged_recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::Confirmed
+        );
+        assert_eq!(
+            reopened
+                .get_confirmation(&issuer, &changed_recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::LocalOnly
+        );
+        assert_eq!(
+            reopened
+                .get_confirmation(&issuer, &later_recipient)
+                .unwrap()
+                .status,
+            NoteConfirmationStatus::LocalOnly
+        );
+    }
+
+    #[test]
+    fn historical_confirmation_value_and_root_tampering_fail_independently() {
+        fn confirmed_manager() -> (TrackerStateManager, [u8; 33], [u8; 33], [u8; 33]) {
+            let mut manager = make_manager();
+            let issuer_secret = [1u8; 32];
+            let issuer = issuer_pubkey(&issuer_secret);
+            let recipient = [2u8; 33];
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1_000, 1))
+                .unwrap();
+            let root = manager.validated_state().unwrap().avl_root_digest;
+            let tx = "11".repeat(32);
+            manager.mark_notes_pending(root, &tx, 100).unwrap();
+            let effect = crate::chain_reconciliation::validated_tracker_effect_for_test(
+                "22".repeat(32),
+                tx,
+                "33".repeat(32),
+                "44".repeat(32),
+                101,
+                6,
+                root,
+            );
+            manager.confirm_validated_publication(&effect).unwrap();
+            (manager, issuer, recipient, root)
+        }
+
+        let (mut wrong_value, issuer, recipient, _) = confirmed_manager();
+        let key: [u8; 32] = crate::NoteKey::from_keys(&issuer, &recipient)
+            .to_bytes()
+            .try_into()
+            .unwrap();
+        let mut record = wrong_value.get_confirmation(&issuer, &recipient).unwrap();
+        record.confirmed_total_debt = Some(999);
+        wrong_value
+            .storage
+            .store_confirmation(&key, &record)
+            .unwrap();
+        wrong_value.confirmations.insert(key, record);
+        assert!(matches!(
+            wrong_value.validated_confirmation_anchor(),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("do not reproduce")
+        ));
+
+        let (mut wrong_root, issuer, recipient, root) = confirmed_manager();
+        let key: [u8; 32] = crate::NoteKey::from_keys(&issuer, &recipient)
+            .to_bytes()
+            .try_into()
+            .unwrap();
+        let mut record = wrong_root.get_confirmation(&issuer, &recipient).unwrap();
+        let mut mutated_root = root;
+        mutated_root[0] ^= 0x01;
+        record.confirmed_root = Some(mutated_root.to_vec());
+        wrong_root
+            .storage
+            .store_confirmation(&key, &record)
+            .unwrap();
+        wrong_root.confirmations.insert(key, record);
+        assert!(matches!(
+            wrong_root.validated_confirmation_anchor(),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("does not match the durable projection")
+        ));
+
+        let (mut missing_row, issuer, recipient, _) = confirmed_manager();
+        let key: [u8; 32] = crate::NoteKey::from_keys(&issuer, &recipient)
+            .to_bytes()
+            .try_into()
+            .unwrap();
+        missing_row
+            .storage
+            .remove_confirmation_for_test(&key)
+            .unwrap();
+        missing_row.confirmations.remove(&key);
+        assert!(matches!(
+            missing_row.validated_confirmation_anchor(),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("do not reproduce")
+        ));
+
+        let (orphan_rows, _, _, _) = confirmed_manager();
+        orphan_rows.storage.clear_confirmed_projection().unwrap();
+        assert!(orphan_rows.has_persisted_confirmation_history().unwrap());
+        assert!(orphan_rows
+            .validated_confirmation_anchor()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn revert_pending_notes_returns_to_local_only() {
         let mut manager = make_manager();
         let issuer_secret = [1u8; 32];
@@ -598,7 +987,9 @@ mod confirmation_state_tests {
 
         manager.add_note(&issuer, &note).unwrap();
         let digest = manager.get_state().avl_root_digest;
-        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
         manager.revert_pending_notes().unwrap();
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
@@ -650,7 +1041,7 @@ mod confirmation_state_tests {
     }
 
     #[test]
-    fn rebuild_confirmations_clears_pending_state() {
+    fn rebuild_confirmations_preserves_durable_pending_state() {
         let mut manager = make_manager();
         let issuer_secret = [1u8; 32];
         let issuer = issuer_pubkey(&issuer_secret);
@@ -659,14 +1050,16 @@ mod confirmation_state_tests {
 
         manager.add_note(&issuer, &note).unwrap();
         let digest = manager.get_state().avl_root_digest;
-        manager.mark_notes_pending(digest, "tx123", 100).unwrap();
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
 
-        manager.rebuild_confirmations();
+        manager.rebuild_confirmations().unwrap();
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
-        assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
-        assert_eq!(confirmation.pending_total_debt, None);
-        assert_eq!(confirmation.pending_tx_id, None);
+        assert_eq!(confirmation.status, NoteConfirmationStatus::Pending);
+        assert_eq!(confirmation.pending_total_debt, Some(1000));
+        assert_eq!(confirmation.pending_tx_id, Some("11".repeat(32)));
     }
 
     #[test]
@@ -675,8 +1068,13 @@ mod confirmation_state_tests {
             status: NoteConfirmationStatus::Confirmed,
             confirmed_total_debt: Some(1000),
             pending_total_debt: None,
-            confirmed_box_id: None,
-            confirmed_height: None,
+            confirmed_box_id: Some("11".repeat(32)),
+            confirmed_height: Some(100),
+            confirmed_tx_id: Some("22".repeat(32)),
+            confirmed_block_id: Some("33".repeat(32)),
+            confirmed_successor_depth: Some(6),
+            confirmed_intent_id: Some("44".repeat(32)),
+            confirmed_root: Some(vec![0x55; 33]),
             pending_tx_id: None,
         };
 
@@ -688,5 +1086,1185 @@ mod confirmation_state_tests {
         assert_eq!(confirmation.redeemable_amount(1000), 0);
         assert!(!confirmation.is_redeemable(1500));
         assert_eq!(confirmation.redeemable_amount(1500), 0);
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_aggregates_and_replaces_once() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 40, 1))
+            .unwrap();
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_c, 40, 1))
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient_b), 70)
+                .unwrap(),
+            110
+        );
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_counts_a_new_recipient() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+                .unwrap(),
+            110
+        );
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_never_drops_confirmed_value() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
+        manager.confirm_pending_notes("box123", 200).unwrap();
+
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient), 50)
+                .unwrap(),
+            100
+        );
+    }
+
+    #[test]
+    fn cumulative_debt_regression_is_rejected_after_confirmation() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager
+            .mark_notes_pending(digest, &"11".repeat(32), 100)
+            .unwrap();
+        manager.confirm_pending_notes("box123", 200).unwrap();
+
+        assert!(matches!(
+            manager.add_note(&issuer, &create_note(&issuer_secret, &recipient, 40, 2)),
+            Err(crate::NoteError::DebtRegression)
+        ));
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient), 50)
+                .unwrap(),
+            100
+        );
+    }
+
+    #[test]
+    fn settlement_progress_preserves_signed_note_and_is_bounded() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+
+        let before = manager.lookup_note(&issuer, &recipient).unwrap();
+        let after = manager
+            .record_redemption_progress(&issuer, &recipient, 40)
+            .unwrap();
+        assert_eq!(after.timestamp, before.timestamp);
+        assert_eq!(after.signature, before.signature);
+        assert_eq!(after.amount_collected, before.amount_collected);
+        assert_eq!(after.amount_redeemed, 40);
+        after.verify_signature(&issuer).unwrap();
+
+        assert!(manager
+            .record_redemption_progress(&issuer, &recipient, 61)
+            .is_err());
+        assert_eq!(
+            manager
+                .lookup_note(&issuer, &recipient)
+                .unwrap()
+                .amount_redeemed,
+            40
+        );
+    }
+
+    #[test]
+    fn settlement_progress_quarantines_on_snapshot_avl_divergence() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        manager.avl_state = basis_trees::BasisAvlTree::new().unwrap();
+
+        assert!(matches!(
+            manager.record_redemption_progress(&issuer, &recipient, 1),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("live root")
+        ));
+        assert!(matches!(
+            manager.lookup_note(&issuer, &recipient),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn settlement_progress_quarantines_on_tampered_snapshot() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        manager.storage.tamper_first_total_debt_for_test().unwrap();
+
+        assert!(matches!(
+            manager.record_redemption_progress(&issuer, &recipient, 1),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("checksum")
+        ));
+        assert!(matches!(
+            manager.lookup_note(&issuer, &recipient),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_reads_authoritative_snapshot() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+            .unwrap();
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+                .unwrap(),
+            110
+        );
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_rejects_missing_authoritative_state() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+            .unwrap();
+        manager.storage.remove_state_for_test().unwrap();
+
+        assert!(manager
+            .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+            .is_err());
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_rejects_corrupt_authoritative_state() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+            .unwrap();
+        manager.storage.corrupt_state_for_test().unwrap();
+
+        assert!(manager
+            .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+            .is_err());
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_without_recipient_is_conservative() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 60, 1))
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, None, 50)
+                .unwrap(),
+            110
+        );
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_rejects_overflow() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient_b, u64::MAX, 1),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            manager.projected_issuer_gross_debt(&issuer, Some(&recipient_c), 1),
+            Err(crate::NoteError::AmountOverflow)
+        ));
+    }
+
+    #[test]
+    fn projected_issuer_gross_debt_survives_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        {
+            let mut manager = TrackerStateManager::new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            );
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 1))
+                .unwrap();
+        }
+
+        let manager =
+            TrackerStateManager::new(temp_dir.path(), generation(FreshGenerationApproval::Deny));
+        assert_eq!(
+            manager
+                .projected_issuer_gross_debt(&issuer, Some(&recipient_c), 50)
+                .unwrap(),
+            110
+        );
+    }
+
+    #[test]
+    fn avl_root_survives_restart_when_arrival_order_differs_from_timestamps() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        let root_before_restart = {
+            let mut manager = TrackerStateManager::new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            );
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 60, 2))
+                .unwrap();
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient_c, 50, 1))
+                .unwrap();
+            manager.get_state().avl_root_digest
+        };
+
+        let manager =
+            TrackerStateManager::new(temp_dir.path(), generation(FreshGenerationApproval::Deny));
+        assert_eq!(manager.get_state().avl_root_digest, root_before_restart);
+    }
+
+    #[test]
+    fn signed_note_successor_preserves_redeemed_progress() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        let initial = create_note(&issuer_secret, &recipient, 100, 1);
+        manager.add_note(&issuer, &initial).unwrap();
+        manager
+            .record_redemption_progress(&issuer, &recipient, 40)
+            .unwrap();
+
+        let successor = create_note(&issuer_secret, &recipient, 120, 2);
+        manager.add_note(&issuer, &successor).unwrap();
+
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_collected, 120);
+        assert_eq!(stored.amount_redeemed, 40);
+        assert_eq!(stored.outstanding_debt(), 80);
+    }
+
+    #[test]
+    fn initial_note_cannot_inject_redeemed_progress() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        let mut note = create_note(&issuer_secret, &recipient, 100, 1);
+        note.amount_redeemed = 99;
+        manager.add_note(&issuer, &note).unwrap();
+
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_redeemed, 0);
+        assert_eq!(stored.outstanding_debt(), 100);
+    }
+
+    #[test]
+    fn missing_authoritative_state_fails_closed_without_mutating_live_tree() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let root_before = manager.get_state().avl_root_digest;
+        manager.storage.remove_state_for_test().unwrap();
+
+        assert!(manager.rebuild_avl_tree().is_err());
+        assert_eq!(manager.avl_state.root_digest(), root_before);
+        assert!(matches!(
+            manager.get_total_debt(&issuer, &recipient),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn reordered_snapshot_fails_root_validation_without_mutating_live_tree() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 100, 1))
+            .unwrap();
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_c, 50, 2))
+            .unwrap();
+        let root_before = manager.get_state().avl_root_digest;
+        manager.storage.reverse_note_order_for_test().unwrap();
+
+        assert!(matches!(
+            manager.rebuild_avl_tree(),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("does not reproduce")
+        ));
+        assert_eq!(manager.avl_state.root_digest(), root_before);
+        assert!(matches!(
+            manager.get_total_debt(&issuer, &recipient_b),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn unexpected_partition_row_rejects_new_note_before_state_change() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 100, 1))
+            .unwrap();
+        let root_before = manager.get_state().avl_root_digest;
+        manager
+            .storage
+            .insert_unexpected_note_row_for_test()
+            .unwrap();
+
+        assert!(manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_c, 50, 2))
+            .is_err());
+        assert_eq!(manager.avl_state.root_digest(), root_before);
+        assert!(matches!(
+            manager.get_total_debt(&issuer, &recipient_b),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn repeated_updates_keep_bounded_first_insertion_order() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        let root_before_restart = {
+            let mut manager = TrackerStateManager::new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            );
+            for version in 1..=25u64 {
+                manager
+                    .add_note(
+                        &issuer,
+                        &create_note(&issuer_secret, &recipient, 100 + version, version),
+                    )
+                    .unwrap();
+            }
+            assert_eq!(manager.storage.note_row_count_for_test().unwrap(), 1);
+            manager.get_state().avl_root_digest
+        };
+
+        let manager =
+            TrackerStateManager::new(temp_dir.path(), generation(FreshGenerationApproval::Deny));
+        assert_eq!(manager.storage.note_row_count_for_test().unwrap(), 1);
+        assert_eq!(manager.get_state().avl_root_digest, root_before_restart);
+        assert_eq!(manager.get_total_debt(&issuer, &recipient).unwrap(), 125);
+    }
+
+    #[test]
+    fn malformed_or_extra_authoritative_rows_fail_rebuild_without_clobbering_live_tree() {
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        let mut malformed = make_manager();
+        malformed
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let root_before = malformed.get_state().avl_root_digest;
+        malformed.storage.corrupt_state_for_test().unwrap();
+        assert!(malformed.rebuild_avl_tree().is_err());
+        assert_eq!(malformed.avl_state.root_digest(), root_before);
+        assert!(matches!(
+            malformed.lookup_note(&issuer, &recipient),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+
+        let mut extra = make_manager();
+        extra
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let root_before = extra.get_state().avl_root_digest;
+        extra.storage.insert_unexpected_note_row_for_test().unwrap();
+        assert!(extra.rebuild_avl_tree().is_err());
+        assert_eq!(extra.avl_state.root_digest(), root_before);
+        assert!(matches!(
+            extra.lookup_note(&issuer, &recipient),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn same_length_debt_tampering_fails_snapshot_integrity_and_quarantines() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let root_before = manager.get_state().avl_root_digest;
+        manager.storage.tamper_first_total_debt_for_test().unwrap();
+
+        assert!(matches!(
+            manager.rebuild_avl_tree(),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("checksum")
+        ));
+        assert_eq!(manager.avl_state.root_digest(), root_before);
+        assert!(matches!(
+            manager.lookup_note(&issuer, &recipient),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn liability_projection_revalidates_signatures_and_quarantines_tampering() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        manager.storage.tamper_first_total_debt_for_test().unwrap();
+
+        assert!(matches!(
+            manager.projected_issuer_gross_debt(&issuer, Some(&recipient), 100),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("checksum")
+        ));
+        assert!(matches!(
+            manager.get_all_notes(),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn tampered_snapshot_cannot_be_laundered_by_a_valid_successor() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 101, 1))
+            .unwrap();
+        manager
+            .storage
+            .rewrite_first_total_debt_with_valid_checksum_for_test(100)
+            .unwrap();
+
+        assert!(matches!(
+            manager.add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 2)),
+            Err(crate::NoteError::InvalidSignature)
+        ));
+        assert!(!manager.is_healthy());
+        assert!(matches!(
+            manager.lookup_note(&issuer, &recipient),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn redeemed_progress_tampering_is_detected_even_when_in_range() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        manager
+            .record_redemption_progress(&issuer, &recipient, 40)
+            .unwrap();
+        manager
+            .storage
+            .tamper_first_redeemed_amount_for_test()
+            .unwrap();
+
+        assert!(matches!(
+            manager.add_note(&issuer, &create_note(&issuer_secret, &recipient, 120, 2)),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("checksum")
+        ));
+        assert!(!manager.is_healthy());
+    }
+
+    #[test]
+    fn in_range_redeemed_tampering_is_rejected_after_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        {
+            let mut manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+                .unwrap();
+            manager
+                .record_redemption_progress(&issuer, &recipient, 40)
+                .unwrap();
+            manager
+                .storage
+                .tamper_first_redeemed_amount_for_test()
+                .unwrap();
+        }
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("snapshot checksum")
+        ));
+    }
+
+    #[test]
+    fn capacity_rejection_does_not_quarantine_or_change_the_root() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 100, 1))
+            .unwrap();
+        let root_before = manager.get_state().avl_root_digest;
+        manager.storage.set_capacity_limit_for_test(1);
+
+        assert!(matches!(
+            manager.add_note(&issuer, &create_note(&issuer_secret, &recipient_c, 50, 2)),
+            Err(crate::NoteError::CapacityExceeded { limit: 1 })
+        ));
+        assert!(manager.is_healthy());
+        assert_eq!(manager.get_state().avl_root_digest, root_before);
+        assert_eq!(manager.get_total_debt(&issuer, &recipient_b).unwrap(), 100);
+    }
+
+    #[test]
+    fn generation_requires_explicit_bootstrap_and_binds_nft_and_first_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
+            Err(crate::NoteError::GenerationBindingRequired(_))
+        ));
+
+        let manager = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+        )
+        .unwrap();
+        let empty_root = manager.get_state().avl_root_digest;
+        let (nft, bootstrap_root, anchor_root) = manager.storage.generation_for_test().unwrap();
+        assert_eq!(nft, [0x42; 32]);
+        assert_eq!(bootstrap_root, empty_root);
+        assert_eq!(anchor_root, None);
+        manager
+            .validate_observed_generation(&[0x42; 32], empty_root)
+            .unwrap();
+        assert_eq!(
+            manager.storage.generation_for_test().unwrap().2,
+            Some(empty_root)
+        );
+        drop(manager);
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                TrackerGenerationConfig {
+                    tracker_nft_id: [0x43; 32],
+                    fresh_generation: FreshGenerationApproval::Deny,
+                }
+            ),
+            Err(crate::NoteError::GenerationMismatch(_))
+        ));
+    }
+
+    fn raw_note_layout(
+        path: &std::path::Path,
+    ) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+        let keyspace = fjall::Config::new(path).open().unwrap();
+        let notes = keyspace
+            .open_partition("iou_notes", fjall::PartitionCreateOptions::default())
+            .unwrap();
+        let schema = keyspace
+            .open_partition("note_schema", fjall::PartitionCreateOptions::default())
+            .unwrap();
+        (
+            notes
+                .get(b"note_state_v2")
+                .unwrap()
+                .map(|value| value.to_vec()),
+            schema
+                .get(b"note_schema_v2")
+                .unwrap()
+                .map(|value| value.to_vec()),
+            schema
+                .get(b"tracker_generation_v1")
+                .unwrap()
+                .map(|value| value.to_vec()),
+        )
+    }
+
+    fn raw_pending_publication(path: &std::path::Path) -> Option<Vec<u8>> {
+        let keyspace = fjall::Config::new(path).open().unwrap();
+        let schema = keyspace
+            .open_partition("note_schema", fjall::PartitionCreateOptions::default())
+            .unwrap();
+        schema
+            .get(b"pending_publication_v1")
+            .unwrap()
+            .map(|value| value.to_vec())
+    }
+
+    fn replace_raw_pending_publication(path: &std::path::Path, bytes: &[u8]) {
+        let keyspace = fjall::Config::new(path).open().unwrap();
+        let schema = keyspace
+            .open_partition("note_schema", fjall::PartitionCreateOptions::default())
+            .unwrap();
+        schema.insert(b"pending_publication_v1", bytes).unwrap();
+        keyspace.persist(fjall::PersistMode::SyncData).unwrap();
+    }
+
+    #[test]
+    fn corrupted_pending_publication_is_rejected_without_rewriting_state() {
+        let mutation_names = [
+            "magic",
+            "digest",
+            "transaction id",
+            "height",
+            "checksum",
+            "truncation",
+        ];
+
+        for (case, mutation_name) in mutation_names.into_iter().enumerate() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            {
+                let mut manager = TrackerStateManager::try_new(
+                    temp_dir.path(),
+                    generation(FreshGenerationApproval::Approve),
+                )
+                .unwrap();
+                let issuer_secret = [1u8; 32];
+                let issuer = issuer_pubkey(&issuer_secret);
+                let recipient = [2u8; 33];
+                manager
+                    .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+                    .unwrap();
+                let digest = manager.validated_state().unwrap().avl_root_digest;
+                manager
+                    .mark_notes_pending(digest, &"11".repeat(32), 100)
+                    .unwrap();
+            }
+
+            let storage_path = temp_dir.path().join("notes");
+            let mut corrupted = raw_pending_publication(&storage_path).unwrap();
+            assert_eq!(corrupted.len(), 109);
+            match case {
+                0 => corrupted[0] ^= 1,
+                1 => corrupted[4] ^= 1,
+                2 => corrupted[37] ^= 1,
+                3 => corrupted[69] ^= 1,
+                4 => corrupted[108] ^= 1,
+                5 => {
+                    corrupted.pop();
+                }
+                _ => unreachable!(),
+            }
+            replace_raw_pending_publication(&storage_path, &corrupted);
+            let before_layout = raw_note_layout(&storage_path);
+            let before_pending = raw_pending_publication(&storage_path);
+
+            assert!(
+                matches!(
+                    TrackerStateManager::try_new(
+                        temp_dir.path(),
+                        generation(FreshGenerationApproval::Deny)
+                    ),
+                    Err(crate::NoteError::StorageError(_))
+                ),
+                "{mutation_name} corruption must fail closed"
+            );
+            assert_eq!(
+                raw_note_layout(&storage_path),
+                before_layout,
+                "{mutation_name} corruption must not rewrite the state snapshot"
+            );
+            assert_eq!(
+                raw_pending_publication(&storage_path),
+                before_pending,
+                "{mutation_name} corruption must not rewrite the publication receipt"
+            );
+        }
+    }
+
+    #[test]
+    fn orphan_pending_publication_cannot_initialize_a_fresh_generation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let mut manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            let issuer_secret = [1u8; 32];
+            let issuer = issuer_pubkey(&issuer_secret);
+            let recipient = [2u8; 33];
+            manager
+                .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+                .unwrap();
+            let digest = manager.validated_state().unwrap().avl_root_digest;
+            manager
+                .mark_notes_pending(digest, &"11".repeat(32), 100)
+                .unwrap();
+            manager.storage.remove_state_for_test().unwrap();
+            manager.storage.remove_schema_for_test().unwrap();
+            manager.storage.remove_generation_for_test().unwrap();
+            manager.storage.persist_for_test().unwrap();
+        }
+        let storage_path = temp_dir.path().join("notes");
+        let before_layout = raw_note_layout(&storage_path);
+        let before_pending = raw_pending_publication(&storage_path);
+        assert!(
+            before_layout.0.is_none()
+                && before_layout.1.is_none()
+                && before_layout.2.is_none()
+                && before_pending.is_some()
+        );
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve)
+            ),
+            Err(crate::NoteError::GenerationMismatch(message))
+                if message.contains("Pending tracker publication")
+        ));
+        assert_eq!(raw_note_layout(&storage_path), before_layout);
+        assert_eq!(raw_pending_publication(&storage_path), before_pending);
+    }
+
+    #[test]
+    fn orphan_generation_manifest_is_not_reset_or_completed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager.storage.remove_state_for_test().unwrap();
+            manager.storage.remove_schema_for_test().unwrap();
+            manager.storage.persist_for_test().unwrap();
+        }
+        let storage_path = temp_dir.path().join("notes");
+        let before = raw_note_layout(&storage_path);
+        assert!(before.0.is_none() && before.1.is_none() && before.2.is_some());
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve)
+            ),
+            Err(crate::NoteError::GenerationMismatch(message))
+                if message.contains("complete authoritative")
+        ));
+        assert_eq!(raw_note_layout(&storage_path), before);
+    }
+
+    #[test]
+    fn state_without_schema_or_generation_is_not_completed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager.storage.remove_schema_for_test().unwrap();
+            manager.storage.remove_generation_for_test().unwrap();
+            manager.storage.persist_for_test().unwrap();
+        }
+        let storage_path = temp_dir.path().join("notes");
+        let before = raw_note_layout(&storage_path);
+        assert!(before.0.is_some() && before.1.is_none() && before.2.is_none());
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve)
+            ),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("without its schema and generation")
+        ));
+        assert_eq!(raw_note_layout(&storage_path), before);
+    }
+
+    #[test]
+    fn wrong_generation_open_does_not_rewrite_any_authoritative_record() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let _manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+        }
+        let storage_path = temp_dir.path().join("notes");
+        let before = raw_note_layout(&storage_path);
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                TrackerGenerationConfig {
+                    tracker_nft_id: [0x43; 32],
+                    fresh_generation: FreshGenerationApproval::Approve,
+                }
+            ),
+            Err(crate::NoteError::GenerationMismatch(_))
+        ));
+        assert_eq!(raw_note_layout(&storage_path), before);
+    }
+
+    #[test]
+    fn first_observed_nonbootstrap_root_quarantines_generation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+        )
+        .unwrap();
+        let mut wrong_root = manager.get_state().avl_root_digest;
+        wrong_root[0] ^= 1;
+
+        assert!(matches!(
+            manager.validate_observed_generation(&[0x42; 32], wrong_root),
+            Err(crate::NoteError::GenerationMismatch(_))
+        ));
+        assert!(!manager.is_healthy());
+    }
+
+    #[test]
+    fn corrupted_generation_manifest_is_rejected_after_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let manager = TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager
+                .storage
+                .tamper_generation_manifest_for_test()
+                .unwrap();
+        }
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("generation manifest checksum")
+        ));
+    }
+
+    #[test]
+    fn publication_generation_gate_revalidates_the_complete_snapshot() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let bootstrap_root = manager.storage.generation_for_test().unwrap().1;
+        manager.storage.tamper_first_total_debt_for_test().unwrap();
+
+        assert!(matches!(
+            manager.validate_observed_generation(&[0x42; 32], bootstrap_root),
+            Err(crate::NoteError::StorageError(message)) if message.contains("snapshot checksum")
+        ));
+        assert!(!manager.is_healthy());
+    }
+
+    #[test]
+    fn reserve_root_exposure_revalidates_the_complete_snapshot() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        manager.storage.tamper_first_total_debt_for_test().unwrap();
+
+        assert!(matches!(
+            manager.validated_state(),
+            Err(crate::NoteError::StorageError(message)) if message.contains("snapshot checksum")
+        ));
+        assert!(!manager.is_healthy());
+    }
+
+    #[test]
+    fn declared_note_count_above_bound_fails_closed() {
+        let mut manager = make_manager();
+        manager
+            .storage
+            .set_declared_note_count_for_test(50_001)
+            .unwrap();
+
+        assert!(matches!(
+            manager.rebuild_avl_tree(),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("exceeds configured bound")
+        ));
+        assert!(matches!(
+            manager.get_all_notes(),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_durable_outcome_quarantines_manager_until_validated_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient_b = [2u8; 33];
+        let recipient_c = [3u8; 33];
+
+        let publication_health = crate::PublicationHealth::new();
+        let mut manager = TrackerStateManager::try_new_with_publication_health(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+            publication_health.clone(),
+        )
+        .unwrap();
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient_b, 100, 1))
+            .unwrap();
+        manager.storage.fail_next_persist_for_test();
+
+        assert!(matches!(
+            manager.add_note(&issuer, &create_note(&issuer_secret, &recipient_c, 50, 2)),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+        assert!(matches!(
+            manager.lookup_note(&issuer, &recipient_b),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+        assert!(!publication_health.is_healthy());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { manager.get_state() }))
+                .is_err()
+        );
+
+        drop(manager);
+
+        let reopened = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Deny),
+        )
+        .unwrap();
+        let persisted = reopened.storage.read_state_strict().unwrap();
+        assert_eq!(
+            reopened.get_state().avl_root_digest,
+            persisted.avl_root_digest
+        );
+        assert_eq!(reopened.get_total_debt(&issuer, &recipient_b).unwrap(), 100);
+    }
+
+    #[test]
+    fn confirmation_durability_uncertainty_blocks_publication() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 100, 1))
+            .unwrap();
+        let digest = manager.validated_state().unwrap().avl_root_digest;
+        manager.storage.fail_next_persist_for_test();
+
+        assert!(matches!(
+            manager.reconcile_with_confirmed_digest(&digest, "box-1", 100),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+        assert!(!manager.is_healthy());
+        assert!(matches!(
+            manager.validated_state(),
+            Err(crate::NoteError::StorageOutcomeUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn storage_allows_only_one_writer_per_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let first = TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Approve),
+        )
+        .unwrap();
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
+            Err(crate::NoteError::StorageError(message))
+                if message.contains("active writer")
+        ));
+        drop(first);
+        assert!(TrackerStateManager::try_new(
+            temp_dir.path(),
+            generation(FreshGenerationApproval::Deny)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn legacy_note_rows_require_explicit_migration_without_rewrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let notes_path = temp_dir.path().join("notes");
+        let legacy_key = [7u8; 32];
+        let legacy_value = [9u8; 155];
+
+        {
+            let keyspace = fjall::Config::new(&notes_path).open().unwrap();
+            let partition = keyspace
+                .open_partition("iou_notes", fjall::PartitionCreateOptions::default())
+                .unwrap();
+            partition.insert(legacy_key, legacy_value).unwrap();
+            keyspace.persist(fjall::PersistMode::SyncData).unwrap();
+        }
+
+        assert!(matches!(
+            TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(FreshGenerationApproval::Deny)
+            ),
+            Err(crate::NoteError::MigrationRequired(message))
+                if message.contains("explicit")
+        ));
+
+        let keyspace = fjall::Config::new(&notes_path).open().unwrap();
+        let partition = keyspace
+            .open_partition("iou_notes", fjall::PartitionCreateOptions::default())
+            .unwrap();
+        assert_eq!(
+            partition.get(legacy_key).unwrap().unwrap().as_ref(),
+            legacy_value
+        );
+        assert_eq!(partition.len().unwrap(), 1);
     }
 }

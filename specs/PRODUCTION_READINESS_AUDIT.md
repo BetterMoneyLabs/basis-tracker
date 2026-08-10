@@ -1,8 +1,14 @@
-# Basis Tracker - Production Readiness Audit
+# Historical Basis Tracker Readiness Review (Superseded)
+
+> **Status: historical automated review, not a current security or production
+> readiness assessment.** Later protocol review retired the v1 redemption
+> manager and transaction builders from production APIs and identified broader
+> contract, settlement, scanner, and signing boundaries. Statements below are
+> retained only as dated project history.
 
 **Audit Date:** 2026-02-28  
 **Auditor:** Automated Code Review  
-**Status:** ✅ **PRODUCTION READY** (single redemption) - All critical placeholders resolved
+**Historical Status:** Superseded; do not use for deployment approval
 
 ---
 
@@ -412,7 +418,7 @@ Various test files contain placeholder implementations that don't affect product
 
 ## Conclusion
 
-**Current Status:** ✅ **PRODUCTION READY** (single and sequential multiple redemptions)
+**Historical conclusion:** Superseded; no current readiness claim
 
 The Basis Tracker has a complete core protocol implementation. All critical placeholders have been resolved:
 

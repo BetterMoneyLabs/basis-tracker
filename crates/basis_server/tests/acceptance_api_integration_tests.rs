@@ -120,6 +120,69 @@ async fn test_check_acceptance_whitelist() {
 }
 
 #[tokio::test]
+async fn test_check_acceptance_rejects_aggregate_debt_above_reserve() {
+    use basis_server::acceptance::{CollateralizationPredicate, NotePredicate};
+    use basis_store::reserve_tracker::ExtendedReserveInfo;
+    use basis_store::{IouNote, ReserveInfo};
+    use std::sync::Arc;
+
+    let mut issuer = [0u8; 33];
+    issuer[0] = 0x02;
+    issuer[1] = 1;
+    let mut existing_recipient = [0u8; 33];
+    existing_recipient[0] = 0x02;
+    existing_recipient[1] = 2;
+    let mut candidate_recipient = [0u8; 33];
+    candidate_recipient[0] = 0x02;
+    candidate_recipient[1] = 3;
+
+    let existing_note = IouNote::new(existing_recipient, 60, 0, 1, [0u8; 65]);
+    let reserve = ExtendedReserveInfo {
+        base_info: ReserveInfo {
+            collateral_amount: 100,
+            last_updated_height: 0,
+            contract_address: "test".to_string(),
+            tracker_nft_id: "test".to_string(),
+            refund_initiation_height: 0,
+        },
+        // Scanner-created reserves currently carry this zero placeholder.
+        total_debt: 0,
+        box_id: "box1".to_string(),
+        owner_pubkey: hex::encode(issuer),
+        last_updated_timestamp: 0,
+    };
+    let predicate: Arc<dyn NotePredicate> =
+        Arc::new(CollateralizationPredicate::new("full_collateral", 1.0));
+    let app =
+        create_test_app_with_liability_state(Some(predicate), vec![existing_note], Some(reserve))
+            .await;
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/acceptance/check")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "issuer_pubkey": hex::encode(issuer),
+                "recipient_pubkey": hex::encode(candidate_recipient),
+                "total_debt": 50
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["acceptable"], false);
+}
+
+#[tokio::test]
 async fn test_check_acceptance_invalid_pubkey() {
     let app = create_test_app(None).await;
 
@@ -673,12 +736,59 @@ static STORAGE_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 async fn create_test_app(
     acceptance_predicate: Option<std::sync::Arc<dyn basis_server::acceptance::NotePredicate>>,
 ) -> axum::Router {
+    create_test_app_with_liability_state(acceptance_predicate, Vec::new(), None).await
+}
+
+/// Helper with an explicit tracker-note snapshot and scanned reserve.
+async fn create_test_app_with_liability_state(
+    acceptance_predicate: Option<std::sync::Arc<dyn basis_server::acceptance::NotePredicate>>,
+    tracker_notes: Vec<basis_store::IouNote>,
+    reserve: Option<basis_store::reserve_tracker::ExtendedReserveInfo>,
+) -> axum::Router {
     use basis_server::*;
     use basis_store::ergo_scanner::NodeConfig;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    let (tx, _rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
+    tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            match command {
+                TrackerCommand::GetNotesByIssuer { response_tx, .. } => {
+                    let _ = response_tx.send(Ok(tracker_notes.clone()));
+                }
+                TrackerCommand::GetProjectedIssuerGrossDebt {
+                    candidate_recipient,
+                    candidate_total_debt,
+                    response_tx,
+                    ..
+                } => {
+                    let result = (|| {
+                        let mut total = 0u64;
+                        let mut replaced = false;
+                        for note in &tracker_notes {
+                            let mut edge_debt = note.amount_collected;
+                            if candidate_recipient.as_ref() == Some(&note.recipient_pubkey) {
+                                edge_debt = edge_debt.max(candidate_total_debt);
+                                replaced = true;
+                            }
+                            total = total
+                                .checked_add(edge_debt)
+                                .ok_or(basis_store::NoteError::AmountOverflow)?;
+                        }
+                        if candidate_recipient.is_none() || !replaced {
+                            total = total
+                                .checked_add(candidate_total_debt)
+                                .ok_or(basis_store::NoteError::AmountOverflow)?;
+                        }
+                        Ok(total)
+                    })();
+                    let _ = response_tx.send(result);
+                }
+                _ => {}
+            }
+        }
+    });
     let event_store = Arc::new(store::EventStore::new_in_memory());
 
     let server_temp_dir = tempfile::tempdir().unwrap();
@@ -697,6 +807,11 @@ async fn create_test_app(
             },
             basis_reserve_contract_p2s: "test".to_string(),
             tracker_nft_id: Some("test".to_string()),
+            allow_fresh_tracker_generation: false,
+            confirmed_chain_min_successor_depth: None,
+            confirmed_chain_max_evidence_age_ms: None,
+            confirmed_chain_reorg_monitor_depth: None,
+            allow_fresh_reconciliation_journal: false,
             tracker_public_key: None,
             tracker_secret_key: None,
         },
@@ -712,6 +827,9 @@ async fn create_test_app(
     let scanner = basis_store::ergo_scanner::ServerState::new(
         NodeConfig {
             node_url: "http://example.com".to_string(),
+            reserve_contract_p2s: Some(
+                basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
             ..Default::default()
         },
         scanner_data_dir,
@@ -734,11 +852,16 @@ async fn create_test_app(
         (tracker_storage, policy_storage)
     };
 
+    let reserve_tracker = basis_store::ReserveTracker::new();
+    if let Some(reserve) = reserve {
+        reserve_tracker.update_reserve(reserve).unwrap();
+    }
+
     let app_state = AppState {
         tx,
         event_store,
         ergo_scanner: Arc::new(Mutex::new(scanner)),
-        reserve_tracker: Arc::new(Mutex::new(basis_store::ReserveTracker::new())),
+        reserve_tracker: Arc::new(Mutex::new(reserve_tracker)),
         config,
         shared_tracker_state: Arc::new(tokio::sync::Mutex::new(
             tracker_box_updater::SharedTrackerState::new(),
@@ -784,6 +907,11 @@ async fn create_test_app_with_policy_routes(
             },
             basis_reserve_contract_p2s: "test".to_string(),
             tracker_nft_id: Some("test".to_string()),
+            allow_fresh_tracker_generation: false,
+            confirmed_chain_min_successor_depth: None,
+            confirmed_chain_max_evidence_age_ms: None,
+            confirmed_chain_reorg_monitor_depth: None,
+            allow_fresh_reconciliation_journal: false,
             tracker_public_key: None,
             tracker_secret_key: None,
         },
@@ -799,6 +927,9 @@ async fn create_test_app_with_policy_routes(
     let scanner = basis_store::ergo_scanner::ServerState::new(
         NodeConfig {
             node_url: "http://example.com".to_string(),
+            reserve_contract_p2s: Some(
+                basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
             ..Default::default()
         },
         scanner_data_dir,
@@ -877,6 +1008,11 @@ async fn create_test_app_with_all_routes(
             },
             basis_reserve_contract_p2s: "test".to_string(),
             tracker_nft_id: Some("test".to_string()),
+            allow_fresh_tracker_generation: false,
+            confirmed_chain_min_successor_depth: None,
+            confirmed_chain_max_evidence_age_ms: None,
+            confirmed_chain_reorg_monitor_depth: None,
+            allow_fresh_reconciliation_journal: false,
             tracker_public_key: None,
             tracker_secret_key: None,
         },
@@ -892,6 +1028,9 @@ async fn create_test_app_with_all_routes(
     let scanner = basis_store::ergo_scanner::ServerState::new(
         NodeConfig {
             node_url: "http://example.com".to_string(),
+            reserve_contract_p2s: Some(
+                basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
             ..Default::default()
         },
         scanner_data_dir,

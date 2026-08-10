@@ -1,5 +1,9 @@
 # Basis Redemption Execution Report
 
+> **Status: historical v1 execution record.** It documents past transactions
+> and retired commands; it is not a current runbook, exposure statement, or
+> deployment/readiness claim.
+
 ## Summary
 
 This report documents successful end-to-end Basis protocol redemptions, beginning on a local Ergo testnet node and culminating in mainnet multi-redemption runs against a wallet-owned tracker. The flows covered:

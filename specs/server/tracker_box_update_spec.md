@@ -1,4 +1,10 @@
-# Tracker Box Update Mechanism Specification
+# Historical Tracker Box Update Mechanism Specification
+
+> **Status: mixed current/historical reference.** The local-signing boundary in
+> this document describes the active tracker publisher. The v1 redemption
+> builder and raw completion command shown below are retired from production
+> APIs. Actor-owned durable state, confirmed-chain reconciliation, and exact v2
+> generation admission are defined separately.
 
 ## Overview
 
@@ -63,9 +69,7 @@ pub struct TrackerBoxUpdateConfig {
     pub api_key: Option<String>,
     /// Transaction fee in nanoERG paid by wallet inputs for each tracker update
     pub fee: u64,
-    /// Optional change address for the fee-input change output
-    pub change_address: Option<String>,
-    /// Optional tracker secret key (32 bytes) used as a dlog secret when signing
+    /// Tracker secret key (32 bytes), required when the publisher signs an update
     pub tracker_secret_key: Option<[u8; 32]>,
 }
 ```
@@ -168,25 +172,31 @@ impl SharedTrackerState {
 The background task executes the following algorithm in a continuous loop:
 
 1. **Wait for Interval**: Use tokio::time::interval to wait for the configured update period (10 minutes)
-2. **Check Pending Transaction**: If a transaction was previously submitted but not yet confirmed, check its confirmation status via `/blockchain/transaction/byId`. Only update `last_submitted_digest` after confirmation.
-3. **Access Shared State**: Read the current AVL tree root digest and tracker public key
-4. **Skip Unchanged State**: If the AVL root digest hasn't changed since the last confirmed submission, skip the update cycle
-5. **Find Tracker Box**: Query the blockchain for the tracker box using the tracker NFT ID via `/blockchain/box/unspent/byTokenId`
-6. **Check On-Chain State**: If the on-chain tracker box already has the current AVL root digest in R5, skip the update
-7. **Create Register Constants**:
+2. **Check Publication Health**: Stop all commitment processing, including confirmation handling for an older in-flight transaction, after the shared one-way health signal is quarantined.
+3. **Check Pending Transaction**: If a transaction was previously submitted but not yet confirmed, check its confirmation status via `/blockchain/transaction/byId`. Only update `last_submitted_digest` after confirmation.
+4. **Access Shared State**: Read the current AVL tree root digest and tracker public key only through the health-gated publication accessor.
+5. **Find Tracker Box**: Query the blockchain for the tracker box using the tracker NFT ID via `/blockchain/box/unspent/byTokenId`.
+6. **Validate Generation**: Require the state manager to validate the observed NFT and R5 against the checksummed persistent generation manifest before reconciliation or submission.
+7. **Check On-Chain State**: If the on-chain tracker box already has the current AVL root digest in R5, skip the update.
+8. **Create Register Constants**:
    - R4: Tracker public key as EcPoint constant (33 bytes, compressed secp256k1 point) - identifies the tracker server
    - R5: Serialized `SAvlTree` constant containing the current AVL tree root digest (37 bytes total; see "R5 Register Serialization Format" below)
    - R6: Serialized `Coll[Byte]` constant containing the tracker NFT ID (preserved from the input tracker box)
-8. **Build Unsigned Transaction**:
-   - **Inputs**: the current tracker box (spends it) plus one or more wallet-owned P2PK/no-token boxes to pay the configured fee
-   - **Outputs**: new tracker box with the same value and updated R4/R5/R6; fee output to the standard fee contract; optional change output to the change address
-   - **inputsRaw**: serialized bytes of the tracker box and all fee inputs
-   - **secrets.dlog**: the configured tracker secret key (hex) so the node can satisfy `proveDlog(trackerPubkey)`; may be omitted if the tracker key is already in the node wallet
-9. **Submit Transaction**:
-   - POST the unsigned transaction to `/wallet/transaction/sign` to obtain a signed transaction
-   - POST the signed transaction to `/transactions` to broadcast it
+9. **Bind Inputs and State Context**:
+   - Fetch each selected input through both the node JSON view and `/utxo/byIdBinary/{boxId}`.
+   - Parse the binary with Sigma serialization and require exact equality for box ID, value, ErgoTree bytes, ordered assets, R4-R9 bytes/key set, and creation height.
+   - Require one ordered, duplicate-free input list containing the tracker box followed by the same exact boxes supplied to the signer.
+   - Fetch exactly 10 newest-first headers from `/blocks/lastHeaders/10`; require a descending parent-linked chain and bind `fullHeight`, `bestFullHeaderId`, block version, and the complete nested signing parameter set from `/info` to the same tip.
+10. **Authorize and Build**:
+   - Require the configured secret to derive the configured tracker public key and require the exact tracker input R4 to be that key as a `GroupElement`.
+   - Select only token-free fee inputs whose exact ErgoTree is the P2PK tree derived from that same key.
+   - Preserve the tracker value, ErgoTree, ordered tokens, and R6-R9; replace only R4/R5. Pay the miner fee and send any checked, non-dust change to the derived P2PK tree. There is no configurable publisher change address.
+11. **Sign and Submit**:
+   - Build a typed ergo-lib unsigned transaction using checked value arithmetic and current dust parameters.
+   - Sign locally with `Wallet`, then validate the signed transaction again against the same exact inputs and `ErgoStateContext`.
+   - POST only the signed transaction to `/transactions`; the secret and raw-input signing bundle never cross the HTTP boundary.
    - Log the transaction ID on successful broadcast and mark it as pending confirmation
-10. **Error Handling**:
+12. **Error Handling**:
     - If any step fails, log an appropriate ERROR message
     - Continue with the scheduled interval regardless of failures
 
@@ -288,7 +298,7 @@ impl TrackerBoxUpdater {
         // Logs warning if multiple boxes found (indicates inconsistent state)
     }
 
-    /// Submit a tracker box update transaction via /wallet/transaction/sign and broadcast via /transactions
+    /// Bind exact inputs, sign locally, and broadcast via /transactions
     async fn submit_tracker_update(
         config: &TrackerBoxUpdateConfig,
         tracker_box: &ErgoBoxApi,
@@ -297,22 +307,14 @@ impl TrackerBoxUpdater {
     ) -> Result<String, TrackerBoxUpdaterError> {
         // Build R4 (GroupElement), R5 (SAvlTree), and R6 (Coll[Byte]) registers
         // Select wallet fee inputs covering config.fee
-        // Fetch raw bytes for the tracker box and all fee inputs
-        // Assemble UnsignedErgoTransaction and sign with /wallet/transaction/sign
+        // Fetch and bind raw bytes for the tracker box and all fee inputs
+        // Build a typed UnsignedTransaction and sign it locally with ergo-lib Wallet
+        // Validate the signed transaction against the same exact inputs/context
         // Broadcast signed transaction with /transactions
         // Returns transaction ID
     }
 
-    /// Check if a transaction has been confirmed on-chain
-    pub async fn check_transaction_confirmation(
-        config: &TrackerBoxUpdateConfig,
-        tx_id: &str,
-    ) -> Result<bool, TrackerBoxUpdaterError> {
-        // Query /blockchain/transaction/byId/{tx_id}
-        // Returns true if found (200), false if not yet confirmed (404)
-    }
 }
-```
 ```
 
 ### AVL Tree State Management
@@ -406,9 +408,10 @@ impl AvlTreeState {
 
 This ensures that the AVL tree root digest is properly updated after each operation, which is critical for the R5 register value. The AVL tree is now properly initialized with an initial proof to ensure it has a valid root digest even when empty.
 
-### Redemption Transaction Builder
+### Historical Redemption Transaction Builder (retired)
 
-The redemption transaction builder now properly implements the transaction building logic:
+The following v1 builder is retained only as historical documentation and unit
+test material; downstream crates cannot call it.
 
 ```rust
 pub struct RedemptionTransactionBuilder;
@@ -445,7 +448,8 @@ impl RedemptionTransactionBuilder {
 }
 ```
 
-The redemption transaction builder now includes proper validation, transaction structure creation, and serialization of all required components for the Basis redemption process, including R6 register preservation with tracker NFT ID.
+This description does not apply to the active public API. The v2 builder must
+be admitted against its exact contract and register manifest.
 
 ### Integration with Server Startup
 
@@ -464,9 +468,10 @@ The tracker box updater is integrated into the server startup flow:
 The main tracker thread is enhanced to update the shared state:
 
 1. **AddNote Command**: After successfully adding a note to the tracker, update the shared AVL root digest via update_state() call
-2. **CompleteRedemption Command**: After successfully completing a redemption, update the shared AVL root digest via update_state() call
-3. **AVL Tree Operations**: Each AVL tree operation (insert/update/delete) triggers proof generation to update internal tree state
-4. **State Consistency**: Ensure the shared state remains consistent with the main tracker state and AVL tree root
+2. **Historical CompleteRedemption Command**: retired; durable settlement must be derived from validated confirmed-chain evidence
+3. **Generation Validation Command**: Validate the configured tracker NFT and first observed R5 against the durable generation manifest before publication
+4. **Durable Note Updates**: Each admitted note update produces a validated durable snapshot before the shared root changes
+5. **State Consistency**: A one-way health gate removes every cached root from the publication path after manager quarantine
 
 ## Logging Specifications
 
@@ -518,7 +523,7 @@ The service handles the following error conditions:
 4. **No Tracker Box Found**: Tracker NFT ID not found on chain
 5. **No Fee Inputs**: Wallet has no suitable P2PK/no-token boxes to pay the update fee
 6. **Insufficient Fee Inputs**: Wallet boxes don't cover the configured fee
-7. **Signing Failed**: `/wallet/transaction/sign` rejected the unsigned transaction (bad inputs, missing secrets, etc.)
+7. **Signing Failed**: local authorization, proof generation, or post-sign validation failed
 8. **Broadcast Failed**: `/transactions` rejected the signed transaction
 9. **Transaction Not Found**: Submitted transaction ID not found on chain after extended waiting
 10. **Serialization Errors**: Failed to decode ergoTree hex, parse ergoTree bytes, or encode addresses
@@ -536,8 +541,10 @@ The service handles the following error conditions:
 2. **Resource Management**: Proper handling of async resources and channels
 3. **Log Security**: No sensitive cryptographic information exposed in logs
 4. **Rate Limiting**: Built-in 10-minute interval prevents excessive resource usage
-5. **Secret Handling**: The configured `tracker_secret_key` is passed only to the node's `/wallet/transaction/sign` endpoint as a `dlog` secret; it is never logged or broadcast
-6. **Pending Transaction State**: Prevents duplicate submissions while waiting for confirmation
+5. **Secret Handling**: The configured `tracker_secret_key` is consumed only by the in-process ergo-lib wallet. It is redacted from `Debug`, never placed in a JSON artifact, and never sent to the node.
+6. **Exact Fee Authority**: Every fee input is token-free and protected by the exact P2PK tree derived from the tracker key; change returns only to that same tree.
+7. **Pinned Validation Context**: Header order, links, height, version, and current `/info` parameters are validated once and reused for construction, signing, and post-sign validation.
+8. **Pending Transaction State**: Prevents duplicate submissions while waiting for confirmation
 
 ## Performance Characteristics
 
@@ -566,10 +573,10 @@ The service handles the following error conditions:
 ### Tracker Thread Integration
 
 1. **State Updates**: Update shared AVL root digest after successful `AddNote` operations
-2. **Redemption Handling**: Update shared AVL root digest after successful `CompleteRedemption` operations
-3. **Synchronization**: Use thread-safe access to shared state to prevent data races
-4. **Initialization**: The tracker thread initializes the shared AVL root digest with the empty tree state on startup
-5. **Event Store**: Tracker events (AddNote, CompleteRedemption) are stored in the event store for audit trail
+2. **Settlement Handling**: No raw completion command exists; settlement changes require a future confirmed-chain evidence consumer
+3. **Synchronization**: Use thread-safe access and a shared one-way health signal to prevent stale-root publication
+4. **Initialization**: The tracker thread loads a checksummed snapshot bound to the configured tracker NFT
+5. **Bootstrap Gate**: A new empty generation requires explicit approval and its first observed on-chain R5 must match the persisted bootstrap root
 
 ## Future Extensions
 

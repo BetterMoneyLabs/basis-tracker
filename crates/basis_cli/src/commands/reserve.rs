@@ -21,7 +21,7 @@ pub enum ReserveCommands {
         #[arg(long)]
         amount: u64,
 
-        /// Submit the generated payload to the tracker's Ergo node for broadcast
+        /// Retired compatibility flag; tracker-side wallet submission is rejected
         #[arg(long)]
         submit: bool,
     },
@@ -84,6 +84,12 @@ pub async fn create_reserve(
     amount: u64,
     submit: bool,
 ) -> Result<ReserveCreateResult> {
+    if submit {
+        anyhow::bail!(
+            "Tracker-side reserve submission is retired; generate the payload and sign it with the reserve owner's wallet"
+        );
+    }
+
     // Get the owner public key from either the command line argument or current account
     let owner_pubkey = resolve_pubkey(account_manager, owner, "owner")?;
 
@@ -110,11 +116,7 @@ pub async fn create_reserve(
     // Call the API to create the reserve payload
     let payload = client.create_reserve(request).await?;
 
-    let tx_id = if submit {
-        Some(client.submit_reserve(payload.clone()).await?.tx_id)
-    } else {
-        None
-    };
+    let tx_id = None;
 
     Ok(ReserveCreateResult {
         nft_id,
@@ -209,8 +211,6 @@ pub async fn handle_reserve_command(
                     println!("        -H \"Content-Type: application/json\" \\");
                     println!("        -H \"api_key: your-api-key\" \\");
                     println!("        -d '...' # (replace with the full payload above)");
-                    println!();
-                    println!("   Or re-run with --submit to broadcast via the tracker node.");
                 }
             }
         }
@@ -266,5 +266,42 @@ fn get_collateralization_status(ratio: f64) -> &'static str {
         r if r < 2.0 => "ADEQUATE",
         r if r < 3.0 => "GOOD",
         _ => "EXCELLENT",
+    }
+}
+
+#[cfg(test)]
+mod security_boundary_tests {
+    use super::*;
+    use crate::config::ConfigManager;
+
+    #[tokio::test]
+    async fn submit_flag_fails_before_account_resolution_or_network_io() {
+        let config_path = std::env::temp_dir().join(format!(
+            "basis-cli-retired-submit-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock must follow Unix epoch")
+                .as_nanos()
+        ));
+        let config =
+            ConfigManager::new(Some(config_path)).expect("empty isolated config must load");
+        let accounts = AccountManager::new(config).expect("empty account manager must initialize");
+        let client = TrackerClient::new("http://127.0.0.1:1".to_string());
+
+        let error = create_reserve(
+            &accounts,
+            &client,
+            "not-a-token-id".to_string(),
+            None,
+            0,
+            true,
+        )
+        .await
+        .expect_err("retired submit flag must be rejected before any other work");
+
+        assert!(error
+            .to_string()
+            .contains("Tracker-side reserve submission is retired"));
     }
 }

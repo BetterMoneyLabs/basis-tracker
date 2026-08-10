@@ -159,19 +159,17 @@ $ basis-cli reserve status --json
 - `reserve create --json` → the reserve-creation payload
   (`{nft_id, owner_pubkey, amount, payload: {requests, fee, change_address}}`).
 - `reserve collateralization --json` → `{issuer_pubkey, ratio, status}`.
-- `note redeem --json` → `{amount, server_sign, redemption_id?, proof_available?, tx_id?}`.
-- `transaction generate-redemption --json` → `{tx_id}` with `--local-sign`,
-  otherwise `{transaction, issuer_pubkey, ..., output_file?}` (the unsigned
-  transaction plus build metadata).
-- `transaction redeem-assisted --json` → `{tx_id}`.
-- `test test-redemption --json` → `{issuer_pubkey, recipient_pubkey, redemption_amount, output_file, transaction}`.
+- `note redeem --json` is a compatibility tombstone and fails before account,
+  network, construction, signing, broadcast, or persistence effects.
+- No transaction-generation or redemption-test command is compiled. V2
+  admission has no active prover, signer, submitter, or broadcaster.
 
 ## Typed results for programmatic use
 
 The command logic lives in `basis_cli_lib::commands::*` as `pub` functions
 returning serde-serializable result structs (e.g. `account::create_account`,
-`note::list_notes`, `reserve::get_reserve_status`, `status::get_server_status`,
-`transaction::generate_redemption_transaction`). The `handle_*_command`
+`note::list_notes`, `reserve::get_reserve_status`, and
+`status::get_server_status`). The `handle_*_command`
 functions are thin wrappers that render either human text or JSON. Other
 binaries (TUI, MCP server) can depend on the library and reuse the same cores.
 
@@ -212,7 +210,7 @@ Write tools:
 | `account_switch` | Switch current account (`name`) |
 | `account_import` | Import from `private_key_hex` (stored locally, never echoed back) |
 | `note_create` | Create note to `recipient` for `amount` nanoERG, signed with the current account |
-| `note_redeem` | Redeem `amount` nanoERG from `issuer` (local-signing path; `destructiveHint: true`) |
+| `note_redeem` | Retired compatibility tombstone; returns an error before effects |
 | `reserve_create` | Build reserve-creation payload (`nft_id`, `amount`; owner = current account) |
 | `policy_set` | Replace acceptance policy (`policy` object matching `AcceptanceConfig`); saves to `~/.basis/ui.toml` and uploads signed with the current account (`destructiveHint: true`) |
 
@@ -225,8 +223,9 @@ error message — the server never exits on a tool error.
 - **No private-key export**: there is deliberately no key-export tool, and no
   tool response contains key material. `account_import` takes a key as input
   but only returns the account name and public key.
-- **Signing stays in-process**: note creation, redemption, and policy upload
-  are signed locally by the wallet; keys never leave the `basis-mcp` process.
+- **Signing stays in-process**: note creation and policy upload are signed
+  locally by the wallet; keys never leave the `basis-mcp` process. Redemption
+  is not exposed through MCP while the reviewed transaction flow is separate.
 
 ### Client configuration
 

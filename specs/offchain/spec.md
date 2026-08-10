@@ -1,14 +1,22 @@
-# Basis Offchain Crate Specification
+# Historical Basis v1 Offchain Crate Specification
+
+> **Status: superseded design reference.** The v1 transaction-builder module
+> described below is compiled only for its crate's unit tests and is not a
+> public or production API. Current construction must use the separately
+> reviewed v2 runtime and exact generation admission; this document must not be
+> used as a readiness statement.
 
 ## Overview
 
-The `basis_offchain` crate implements the off-chain logic for the Basis protocol, which enables off-chain payments with on-chain redemption capabilities. This crate handles transaction building, Schnorr signature operations, AVL tree proof generation, and all off-chain functionality required for the Basis system.
+The following sections document the retired v1 off-chain implementation kept
+for historical tests. They do not describe the current production API surface.
 
 ## Core Components
 
 ### 1. Transaction Builder Module
 
-The `transaction_builder` module contains the core logic for creating redemption transactions that interact with the Basis reserve contract on the Ergo blockchain.
+The historical `transaction_builder` module contained the v1 redemption logic;
+it is now test-only.
 
 #### Key Structures
 

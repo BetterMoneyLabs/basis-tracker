@@ -546,6 +546,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 4000000000,
+            projected_issuer_gross_debt: None,
             reserve_tracker: None,
         };
         assert!(pred.acceptable(&ctx));
@@ -560,6 +561,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: u64::MAX,
+            projected_issuer_gross_debt: None,
             reserve_tracker: None,
         };
         assert!(pred.acceptable(&ctx2));
@@ -574,6 +576,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: None,
             reserve_tracker: None,
         };
         assert!(!pred.acceptable(&ctx3));
@@ -624,6 +627,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: Some(100),
             reserve_tracker: Some(tracker),
         };
 
@@ -675,6 +679,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: Some(100),
             reserve_tracker: Some(tracker),
         };
 
@@ -727,6 +732,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: Some(100),
             reserve_tracker: Some(tracker),
         };
 
@@ -779,6 +785,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: Some(100),
             reserve_tracker: Some(tracker),
         };
 
@@ -831,6 +838,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 0,
+            projected_issuer_gross_debt: Some(0),
             reserve_tracker: Some(tracker),
         };
 
@@ -865,6 +873,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: Some(100),
             reserve_tracker: Some(tracker),
         };
 
@@ -919,6 +928,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: Some(100),
             reserve_tracker: Some(tracker.clone()),
         };
         assert!(pred.acceptable(&ctx1));
@@ -933,6 +943,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: Some(100),
             reserve_tracker: Some(tracker),
         };
         assert!(!pred.acceptable(&ctx2));
@@ -983,6 +994,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: Some(100),
             reserve_tracker: Some(tracker),
         };
 
@@ -1050,6 +1062,7 @@ mod tests {
             },
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
+            projected_issuer_gross_debt: None,
             reserve_tracker: None,
         };
         assert!(pred.acceptable(&ctx));

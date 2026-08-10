@@ -1,231 +1,51 @@
 # Basis Tracker OpenAPI Documentation
 
-This directory contains the OpenAPI 3.0 specification for the Basis Tracker HTTP API.
+The root `openapi.yaml` describes the current HTTP compatibility surface.
 
-## Files
+## Active API families
 
-- `openapi.yaml` - Complete OpenAPI specification in YAML format
-- `openapi.json` - Basic OpenAPI specification in JSON format (currently minimal)
+- Note creation and lookup.
+- Reserve observation and owner-wallet reserve-payload admission.
+- Event, status, acceptance-policy, and tracker-state observation.
 
-## API Overview
+Reserve construction remains fail-closed for v2 until its confirmed scanner,
+BNS2/BRS2 state, and exact builder inputs are integrated. The tracker is not a
+wallet proxy.
 
-The Basis Tracker API provides RESTful endpoints for managing decentralized debt issuance and tracking. The API supports:
+## Retired v1 redemption routes
 
-- **IOU Note Management**: Create and retrieve debt notes between issuers and recipients
-- **Reserve Tracking**: Monitor collateral reserves for debt issuance
-- **Event Monitoring**: Track system events including note updates and reserve changes
-- **Health Checks**: Basic API status verification
+The following compatibility routes are deprecated and always return
+`410 Gone` before request-body or query parsing:
 
-## Endpoints
+- `POST /redeem`
+- `POST /redeem/complete`
+- `GET /proof/redemption`
+- `GET /tracker/proof`
+- `GET /reserve/proof`
+- `POST /tracker/signature`
+- `POST /redemption/prepare`
+- `POST /redemption/build`
+- `POST /redemption/submit`
 
-### Health Check
-- `GET /` - Returns "Hello, Basis Tracker API!"
+The generic `GET /proof` route does not exist. The tombstones expose no proof,
+signer, transaction-construction, node-submission, broadcast, or settlement
+state effect. V2 manifest admission is a separate dormant Rust boundary and is
+not an HTTP route.
 
-### Notes Management
-- `POST /notes` - Create a new IOU note
-- `GET /notes/issuer/{pubkey}` - Get all notes for an issuer
-- `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get specific note
+All tombstones return the standard error envelope:
 
-### Reserve Management
-- `GET /reserves/issuer/{pubkey}` - Get reserves for an issuer
-
-### Event Monitoring
-- `GET /events` - Get recent tracker events (50 most recent)
-- `GET /events/paginated` - Get paginated tracker events
-
-### Status and Monitoring
-- `GET /key-status/{pubkey}` - Get comprehensive key status information
-
-### Redemption Operations
-- `POST /redeem` - Initiate redemption of an IOU note
-
-### Proof Generation
-- `GET /proof` - Generate proof for a specific note
-
-## Data Formats
-
-### Public Keys and Signatures
-All public keys and signatures are hex-encoded strings:
-- **Public Keys**: 33 bytes (66 hex characters)
-- **Signatures**: 65 bytes (130 hex characters) - Schnorr format
-
-### API Response Format
-All endpoints return a standardized response format:
 ```json
 {
-  "success": boolean,
-  "data": object | array | null,
-  "error": string | null
+  "success": false,
+  "data": null,
+  "error": "Basis v1 redemption is retired; ..."
 }
 ```
 
-### Error Handling
-- **400 Bad Request**: Invalid input parameters
-- **404 Not Found**: Resource not found
-- **500 Internal Server Error**: Server-side error
+## Data conventions
 
-## Usage Examples
-
-### Create a Note
-```bash
-curl -X POST http://localhost:3048/notes \
-  -H "Content-Type: application/json" \
-  -d '{
-    "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
-    "amount": 1000,
-    "timestamp": 1234567890,
-    "signature": "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303",
-    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101"
-  }'
-```
-
-### Get Notes by Issuer
-```bash
-curl http://localhost:3048/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101
-```
-
-### Get Events
-```bash
-# Get recent events
-curl http://localhost:3048/events
-
-# Get paginated events
-curl "http://localhost:3048/events/paginated?page=0&page_size=10"
-```
-
-### Get Key Status
-```bash
-curl http://localhost:3048/key-status/010101010101010101010101010101010101010101010101010101010101010101
-```
-
-### Initiate Redemption
-```bash
-curl -X POST http://localhost:3048/redeem \
-  -H "Content-Type: application/json" \
-  -d '{
-    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
-    "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
-    "amount": 500000000,
-    "timestamp": 1234567890
-  }'
-```
-
-### Get Proof
-```bash
-curl "http://localhost:3048/proof?issuer_pubkey=010101010101010101010101010101010101010101010101010101010101010101&recipient_pubkey=020202020202020202020202020202020202020202020202020202020202020202"
-```
-
-## Validation
-
-The OpenAPI specification includes validation rules:
-- Public keys must match pattern: `^[0-9a-fA-F]{66}$`
-- Signatures must match pattern: `^[0-9a-fA-F]{130}$`
-- Amounts must be positive integers
-- Timestamps must be valid Unix timestamps (tracked for record-keeping, not used in signing message)
-
-### Signing Message Format
-
-Note that the signature in note creation requests signs the following message format:
-- **All redemptions**: `key || totalDebt || timestamp` (48 bytes)
-- Emergency redemption uses the same message format; tracker signature becomes optional
-- Where `key = blake2b256(ownerKey || receiverKey)` (32 bytes)
-
-### Context Extension Variables
-
-Redemption transactions use context extension variables to pass data to the Basis contract:
-
-| Variable | Register | Purpose | Source |
-|----------|----------|---------|--------|
-| **#0** | - | Action byte (0x00 = redemption) | Constant |
-| **#1** | - | Receiver's public key (33 bytes) | From request |
-| **#2** | - | Reserve owner's Schnorr signature (65 bytes) | From issuer wallet |
-| **#3** | - | Total debt amount (8 bytes) | From tracker AVL proof |
-| **#5** | - | Reserve insert proof | From `/reserve/proof` endpoint |
-| **#6** | - | Tracker's Schnorr signature (65 bytes) | From `/tracker/signature` endpoint |
-| **#7** | - | Reserve lookup proof (optional) | From `/reserve/proof` endpoint |
-| **#8** | - | Tracker lookup proof | From `/tracker/proof` endpoint |
-
-**Note:** Context variable #7 (reserve lookup proof) is omitted for first redemptions when `already_redeemed = 0`.
-
-### AVL Proof Endpoints
-
-The API provides three proof endpoints for redemption transactions:
-
-1. **`GET /tracker/proof`** - Tracker lookup proof (context var #8)
-   - Proves `totalDebt` exists in tracker's AVL tree
-   - Returns: `key`, `value`, `proof`, `total_debt`, `tracker_state_digest`
-
-2. **`GET /reserve/proof`** - Reserve proofs (context var #5 and #7)
-   - Provides both insert proof (#5) and lookup proof (#7)
-   - Returns: `key`, `value`, `proof` (lookup), `insert_proof`, `already_redeemed`, `is_first_redemption`
-
-3. **`GET /proof/redemption`** - Comprehensive redemption proof
-   - Combines all proofs in single request
-   - Returns: `tracker_lookup_proof`, `reserve_lookup_proof`, `reserve_insert_proof`, state digests, amounts
-
-### Tracker Signature Endpoint
-
-**`POST /tracker/signature`** - Request tracker signature for redemption
-
-The tracker signs the same message as the issuer:
-- All redemptions: `key || totalDebt || timestamp` (48 bytes)
-- Emergency redemption uses the same format; tracker signature becomes optional
-
-Request body:
-```json
-{
-  "issuer_pubkey": "hex...",
-  "recipient_pubkey": "hex...",
-  "total_debt": 1000000000,
-  "emergency": false
-}
-```
-
-Response:
-```json
-{
-  "success": true,
-  "tracker_signature": "hex...",
-  "tracker_pubkey": "hex...",
-  "message_signed": "hex...",
-  "is_emergency": false
-}
-```
-
-## Tools
-
-You can use the OpenAPI specification with various tools:
-
-### Swagger UI
-```bash
-# Install swagger-ui
-npm install -g swagger-ui
-
-# Serve the specification
-swagger-ui openapi.yaml
-```
-
-### Redoc
-```bash
-# Install redoc
-npm install -g redoc-cli
-
-# Generate documentation
-redoc-cli serve openapi.yaml
-```
-
-### OpenAPI Generator
-```bash
-# Generate client libraries
-openapi-generator generate -i openapi.yaml -g typescript-axios -o ./client
-```
-
-## Development
-
-The OpenAPI specification is automatically generated from the Rust codebase. When adding new endpoints or modifying existing ones, update both the Rust implementation and the OpenAPI specification.
-
-## Related Documentation
-
-- [HTTP_API.md](../HTTP_API.md) - Detailed API usage instructions
-- [CRUSH.md](../CRUSH.md) - Development guidelines and commands
-- [README.md](../README.md) - Project overview
+- Public keys and signatures used by active note APIs are hex encoded.
+- API responses use the `success`, `data`, and `error` envelope documented in
+  `openapi.yaml`.
+- The specification must be updated with route changes; it is not generated
+  automatically from the Rust source.

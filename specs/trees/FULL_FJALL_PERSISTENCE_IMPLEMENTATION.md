@@ -1,4 +1,8 @@
-# In-Memory Tree Implementation - Session Summary
+# Historical In-Memory Tree Session Summary (Superseded)
+
+> This November 2025 session note predates the versioned bounded snapshot and
+> generation-manifest design. It is retained as history, not as current
+> persistence, recovery, or production-readiness authority.
 
 ## Overview
 
@@ -8,7 +12,7 @@ This document summarizes the implementation approach for the Basis tracker AVL t
 
 **Session Date**: November 24, 2025
 **Duration**: Comprehensive implementation session
-**Status**: ✅ **COMPLETED** - Production Ready
+**Historical Status**: Superseded
 
 ## Key Achievements
 
@@ -214,9 +218,9 @@ The in-memory tree implementation successfully addresses the resolver limitation
 1. **High Performance**: Direct in-memory operations without I/O overhead
 2. **Reliable Recovery**: Operation-based recovery with checkpoint optimization
 3. **Simplified Architecture**: No complex resolver-based node persistence
-4. **Production Readiness**: Comprehensive test coverage and validation
+4. **Historical validation**: test coverage recorded for the superseded design
 5. **Maintainable Code**: Simpler implementation without external dependencies
 
 The implementation successfully addresses the resolver limitation by using an in-memory approach that maintains compatibility with the existing `ergo_avltree_rust` library while providing superior performance.
 
-**Status**: ✅ **PRODUCTION READY**
+**Historical Status**: Superseded; no current readiness claim

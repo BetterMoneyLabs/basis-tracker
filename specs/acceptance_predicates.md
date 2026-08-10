@@ -25,6 +25,8 @@ pub struct PredicateContext {
     pub recipient_pubkey: PubKey,
     /// Total cumulative debt amount in the note
     pub total_debt: u64,
+    /// Conservative issuer-wide gross debt after applying the candidate note
+    pub projected_issuer_gross_debt: Option<u64>,
     /// Optional cloned reserve tracker for collateralization checks
     pub reserve_tracker: Option<ReserveTracker>,
 }
@@ -33,6 +35,11 @@ pub struct PredicateContext {
 pub trait NotePredicate: Send + Sync + std::fmt::Debug {
     /// Evaluate whether a note is acceptable given the context
     fn acceptable(&self, ctx: &PredicateContext) -> bool;
+
+    /// Whether this predicate tree needs the issuer-wide liability snapshot
+    fn requires_liability_snapshot(&self) -> bool {
+        false
+    }
     
     /// Get the predicate name
     fn name(&self) -> &str;
@@ -72,10 +79,27 @@ For a given note, compute:
 ```
 owner_reserve     = reserve associated with note owner (issuer)
 assets            = owner_reserve.value (in nanoERG)
-liabilities       = owner_reserve.total_issued_debt (in nanoERG)
+liabilities       = projected issuer-wide gross debt (in nanoERG)
 
 accept if: assets >= liabilities * min_ratio
 ```
+
+The tracker calculates liabilities across every current issuer-to-recipient
+edge. The candidate replaces its recipient edge exactly once. For each edge,
+the greatest local, pending, or confirmed cumulative `totalDebt` is used, so a
+lower candidate cannot reduce already observed debt. If the recipient is
+omitted, the candidate is conservatively treated as a new edge. The snapshot
+uses gross debt because redeemed amounts are not yet reconstructed safely
+across chain reorganizations. If the snapshot is unavailable or overflows,
+collateralization rejects the note.
+
+The snapshot is read strictly from the primary note partition. Secondary
+indices are validated but are not trusted for completeness. A malformed or
+key-mismatched primary record, or an index reference whose primary record is
+missing, therefore makes the collateral check reject instead of treating the
+record as zero debt. The tracker database remains the local authority after note
+ingestion; this scan does not re-authenticate stored note signatures or detect a
+same-length mutation of a stored amount.
 
 **Variants**:
 - **Full collateralization** (ratio = 1.0): Assets ≥ Liabilities
@@ -256,7 +280,10 @@ fn check_collateralization(ctx: &PredicateContext, min_ratio: f64) -> bool {
     };
     
     let assets = reserve.base_info.collateral_amount;
-    let liabilities = reserve.total_debt;
+    let liabilities = match ctx.projected_issuer_gross_debt {
+        Some(value) => value,
+        None => return false,
+    };
     
     if liabilities == 0 {
         return true;  // No debt means fully collateralized
@@ -530,12 +557,16 @@ Acceptance predicates are:
 
 - Predicates are loaded at server startup from TOML configuration
 - Public keys in whitelists/blacklists are stored as 33-byte compressed secp256k1 keys
-- Collateralization state is derived from tracked reserves in real-time via `ReserveTracker`
+- Collateral assets are derived from tracked reserves; gross liabilities are
+  calculated from the serialized tracker-note and confirmation snapshot
 
 ### Performance
 
 - Whitelist/blacklist checks: O(1) with HashSet
-- Collateralization checks: O(1) - single reserve lookup for note owner
+- Collateralization checks: O(N) in all stored notes plus one reserve lookup.
+  Only predicate trees containing a collateralization check request this snapshot;
+  tracker requests are bounded by a two-second timeout and reject on timeout or
+  channel saturation.
 - Composite predicates: Depth-first evaluation with short-circuiting
 - Predicate tree built once at startup, not per-request
 
@@ -544,8 +575,15 @@ Acceptance predicates are:
 - Predicate configuration is server-local and not shared on-chain
 - Acceptance decisions are client-side; no central authority enforces rules
 - A note rejected by B may still be accepted by C
-- Collateralization ratios depend on accurate reserve tracking
-- Fail-safe: missing reserve → reject note
+- Collateralization ratios depend on accurate reserve and tracker-note state
+- The local tracker database is a trusted runtime boundary after note ingestion
+- Collateralization fail-safe: missing reserve, unavailable liability snapshot,
+  or arithmetic overflow → reject note
+- `POST /acceptance/check` is a point-in-time advisory decision. It does not
+  reserve collateral capacity, and concurrent checks can observe the same
+  capacity. `POST /notes` does not atomically re-run the acceptance policy, so
+  callers that use acceptance as an issuance limit must serialize admission and
+  note insertion or add an atomic server-side admission command.
 
 ## Future Extensions
 

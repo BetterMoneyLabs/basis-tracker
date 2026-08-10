@@ -91,13 +91,10 @@ pub enum Screen {
     Accounts,
     Notes,
     Reserves,
-    Transactions,
     AddressBook,
     Settings,
     CreateNote,
-    RedeemNote,
     CreateReserve,
-    GenerateTransaction,
     AcceptancePolicy,
 }
 

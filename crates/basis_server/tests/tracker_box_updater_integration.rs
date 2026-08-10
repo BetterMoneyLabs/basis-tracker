@@ -7,14 +7,12 @@ mod integration_tests {
         // Create shared state with some test values
         let shared_state = SharedTrackerState::new();
 
-        // Set some test values
-        let test_root = [0x11u8; 33]; // Test AVL root digest (33 bytes)
+        // Set a test publisher identity.
         let test_pubkey = [0x02u8; 33]; // Test compressed public key (33 bytes)
-        shared_state.set_avl_root_digest(test_root);
         shared_state.set_tracker_pubkey(test_pubkey);
 
-        // Verify the values were set correctly
-        assert_eq!(shared_state.get_avl_root_digest(), test_root);
+        // Roots are intentionally not cached in SharedTrackerState: only the
+        // tracker actor owns and validates them.
         assert_eq!(shared_state.get_tracker_pubkey(), test_pubkey);
 
         // Test creating and starting the updater
@@ -44,12 +42,9 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_tracker_box_updates_avl_digest() {
+    async fn test_tracker_manager_exposes_validated_digest() {
         use basis_store::{IouNote, TrackerStateManager};
         use secp256k1::{Secp256k1, SecretKey};
-
-        // Create shared state
-        let shared_state = SharedTrackerState::new();
 
         // Create a test tracker and add a note to update the AVL tree
         let mut tracker = TrackerStateManager::new_with_temp_storage();
@@ -81,14 +76,8 @@ mod integration_tests {
         );
 
         // Get the new AVL root digest after the update
-        let new_root = tracker.get_state().avl_root_digest;
-
-        // Update the shared state to match
-        shared_state.set_avl_root_digest(new_root);
-
-        // Verify that the shared state was updated
-        assert_eq!(shared_state.get_avl_root_digest(), new_root);
-        assert_ne!(shared_state.get_avl_root_digest(), [0u8; 33]); // Should not be all zeros
+        let new_root = tracker.validated_state().unwrap().avl_root_digest;
+        assert_ne!(new_root, [0u8; 33]);
     }
 
     #[tokio::test]
@@ -122,18 +111,17 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_transaction_confirmation_check_not_found() {
-        // Test that check_transaction_confirmation handles a non-existent tx gracefully
-        // Using a local/mock URL that will definitely timeout/fail
+    async fn test_transaction_observation_rejects_an_unreachable_node() {
+        // A transport failure cannot be interpreted as confirmation evidence.
         let config = TrackerBoxUpdateConfig {
             node_url: "http://localhost:99999".to_string(), // Invalid port - will fail fast
             ..Default::default()
         };
 
-        // Check a non-existent transaction ID (64 hex chars)
+        // Probe one syntactically valid transaction ID (64 hex chars).
         let fake_tx_id = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        let result = TrackerBoxUpdater::check_transaction_confirmation(&config, fake_tx_id).await;
+        let result = TrackerBoxUpdater::probe_transaction_observation(&config, fake_tx_id).await;
 
         // Should return an error since the node is unreachable
         assert!(result.is_err(), "Should error when node is unreachable");

@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod api_avl_integration_tests {
-    use basis_store::{IouNote, PubKey, Signature, TrackerStateManager};
+    use basis_store::{IouNote, PubKey, TrackerStateManager};
     use secp256k1;
-    use std::sync::Arc;
 
     /// Helper to generate a test public key
     fn generate_test_pubkey(seed: u8) -> PubKey {
@@ -236,49 +235,6 @@ mod api_avl_integration_tests {
 
         // Verify AVL tree root is properly formatted (33 bytes)
         assert_eq!(root_after_update.len(), 33, "AVL root should be 33 bytes");
-    }
-
-    #[tokio::test]
-    async fn test_avl_tree_proof_generation_integration() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
-
-        // Generate test keys
-        let issuer_secret_key = [5u8; 32]; // Use a different secret key for this test
-        let secp = secp256k1::Secp256k1::new();
-        let secret_key = secp256k1::SecretKey::from_slice(&issuer_secret_key).unwrap();
-        let issuer_pubkey_obj = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
-        let issuer_pubkey = issuer_pubkey_obj.serialize();
-
-        let recipient_pubkey = generate_test_pubkey(2);
-
-        // Create and store a note
-        let note = create_signed_note(recipient_pubkey, 1000, 1000000, &issuer_secret_key);
-
-        let add_result = tracker.add_note(&issuer_pubkey, &note);
-        assert!(add_result.is_ok(), "Should be able to add note");
-
-        // Generate a proof for this note
-        let proof_result = tracker.generate_proof(&issuer_pubkey, &recipient_pubkey);
-        assert!(
-            proof_result.is_ok(),
-            "Should be able to generate proof for stored note"
-        );
-
-        let proof = proof_result.unwrap();
-
-        // Verify that the proof contains the expected note
-        assert_eq!(proof.note.amount_collected, 1000);
-        assert_eq!(proof.note.recipient_pubkey, recipient_pubkey);
-
-        // Verify that the proof contains AVL proof data (not empty)
-        assert!(!proof.avl_proof.is_empty(), "AVL proof should not be empty");
-
-        // Verify AVL tree state commitment exists
-        let state = tracker.get_state();
-        assert_ne!(
-            state.avl_root_digest, [0u8; 33],
-            "Tracker state should have valid AVL root"
-        );
     }
 
     #[tokio::test]

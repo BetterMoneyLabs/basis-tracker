@@ -1,6 +1,88 @@
-//! Core data structures for Basis tracker
+//! Core data structures for Basis tracker.
+//!
+//! The retired v1 redemption manager and transaction builder are removed. They
+//! are not part of either the production or test API; v2 remains fail-closed at
+//! its confirmed-authority boundary.
+//!
+//! ```compile_fail
+//! use basis_store::RedemptionManager;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::redemption::RedemptionManager;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::RedemptionRequest;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::RedemptionData;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::RedemptionError;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::transaction_builder::RedemptionTransactionBuilder;
+//! ```
+//!
+//! The pre-v2 `TrackerStateManager` proof surface and its process-global
+//! reserve AVL mirror are removed as well:
+//!
+//! ```compile_fail
+//! use basis_store::NoteProof;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::TrackerLookupProof;
+//! ```
+//!
+//! ```compile_fail
+//! use basis_store::ReserveLookupProof;
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &mut basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.generate_proof(key, key);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &mut basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.generate_tracker_lookup_proof(key, key);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &mut basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.generate_reserve_lookup_proof(key, key);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.generate_reserve_insert_proof(key, key, 0, 0);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &basis_store::TrackerStateManager) {
+//!     let _ = manager.reserve_state_digest();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn removed(manager: &mut basis_store::TrackerStateManager, key: &[u8; 33]) {
+//!     let _ = manager.update_already_redeemed(key, key, 0, 0);
+//! }
+//! ```
 
 pub mod avl_tree;
+pub mod basis_v2_builder;
+pub mod basis_v2_state;
+pub mod chain_reconciliation;
 
 pub mod contract_compiler;
 #[cfg(test)]
@@ -8,11 +90,6 @@ pub mod cross_validation_tests;
 pub mod cross_verification;
 pub mod ergo_scanner;
 pub mod persistence;
-pub mod redemption;
-#[cfg(test)]
-pub mod redemption_blockchain_tests;
-#[cfg(test)]
-pub mod redemption_simple_tests;
 pub mod reserve_tracker;
 pub mod scala_test_vectors;
 pub mod schnorr;
@@ -22,7 +99,6 @@ pub mod schnorr_tests;
 pub mod simple_integration_tests;
 pub mod tests;
 pub mod tracker_scanner;
-pub mod transaction_builder;
 
 // Test modules
 #[cfg(test)]
@@ -36,7 +112,7 @@ pub mod real_scanner_integration_tests;
 #[cfg(test)]
 pub mod reserve_tracking_test;
 #[cfg(test)]
-pub mod test_helpers;
+mod scanner_hardening_tests;
 #[cfg(test)]
 pub mod tracker_scanner_test;
 
@@ -44,7 +120,13 @@ use basis_core;
 use basis_core::impls::SchnorrVerifier;
 use basis_core::traits::SignatureVerifier;
 use secp256k1;
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 /// Public key type (Secp256k1)
 pub type PubKey = [u8; 33];
@@ -117,6 +199,21 @@ pub struct NoteConfirmation {
     pub confirmed_box_id: Option<String>,
     /// Height at which the confirmed tracker box was observed.
     pub confirmed_height: Option<u64>,
+    /// Exact transaction whose active-chain successor committed the value.
+    #[serde(default)]
+    pub confirmed_tx_id: Option<String>,
+    /// Exact active-chain block containing `confirmed_tx_id`.
+    #[serde(default)]
+    pub confirmed_block_id: Option<String>,
+    /// Successor depth accepted by the versioned application policy.
+    #[serde(default)]
+    pub confirmed_successor_depth: Option<u64>,
+    /// Private reconciliation-intent identity which produced this projection.
+    #[serde(default)]
+    pub confirmed_intent_id: Option<String>,
+    /// Exact tracker AVL root authenticated by the accepted successor.
+    #[serde(default)]
+    pub confirmed_root: Option<Vec<u8>>,
     /// Transaction ID of the in-flight tracker box update that covers this note.
     pub pending_tx_id: Option<String>,
 }
@@ -130,6 +227,11 @@ impl NoteConfirmation {
             pending_total_debt: None,
             confirmed_box_id: None,
             confirmed_height: None,
+            confirmed_tx_id: None,
+            confirmed_block_id: None,
+            confirmed_successor_depth: None,
+            confirmed_intent_id: None,
+            confirmed_root: None,
             pending_tx_id: None,
         }
     }
@@ -137,17 +239,41 @@ impl NoteConfirmation {
     /// Returns true when the note has a confirmed value that exceeds the
     /// `already_redeemed` amount, i.e. there is something left to redeem.
     pub fn is_redeemable(&self, already_redeemed: u64) -> bool {
-        self.confirmed_total_debt
-            .map(|debt| debt > already_redeemed)
-            .unwrap_or(false)
+        self.status == NoteConfirmationStatus::Confirmed
+            && self.confirmed_tx_id.is_some()
+            && self.confirmed_box_id.is_some()
+            && self.confirmed_block_id.is_some()
+            && self.confirmed_height.is_some()
+            && self.confirmed_successor_depth.is_some()
+            && self.confirmed_intent_id.is_some()
+            && self.confirmed_root.is_some()
+            && self
+                .confirmed_total_debt
+                .map(|debt| debt > already_redeemed)
+                .unwrap_or(false)
     }
 
     /// Returns the amount that can be redeemed right now:
     /// `max(0, confirmed_total_debt - already_redeemed)`.
     pub fn redeemable_amount(&self, already_redeemed: u64) -> u64 {
-        self.confirmed_total_debt
-            .map(|debt| debt.saturating_sub(already_redeemed))
-            .unwrap_or(0)
+        if self.is_redeemable(already_redeemed) {
+            self.confirmed_total_debt
+                .map(|debt| debt.saturating_sub(already_redeemed))
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    fn has_confirmed_history(&self) -> bool {
+        self.confirmed_total_debt.is_some()
+            || self.confirmed_box_id.is_some()
+            || self.confirmed_height.is_some()
+            || self.confirmed_tx_id.is_some()
+            || self.confirmed_block_id.is_some()
+            || self.confirmed_successor_depth.is_some()
+            || self.confirmed_intent_id.is_some()
+            || self.confirmed_root.is_some()
     }
 }
 
@@ -157,8 +283,111 @@ impl Default for NoteConfirmation {
     }
 }
 
+/// One complete historical tracker projection reconstructed from persisted
+/// per-note confirmation values and insertion order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedProjectionAnchor {
+    tx_id: String,
+    box_id: String,
+    block_id: String,
+    height: u64,
+    successor_depth: u64,
+    intent_id: String,
+    root: [u8; 33],
+}
+
+impl ConfirmedProjectionAnchor {
+    /// Construct a data-only startup projection. This value is not an
+    /// authorization ticket: the confirmed-chain journal must independently
+    /// contain an exact private validated effect before it is accepted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        tx_id: String,
+        box_id: String,
+        block_id: String,
+        height: u64,
+        successor_depth: u64,
+        intent_id: String,
+        root: [u8; 33],
+    ) -> Self {
+        Self {
+            tx_id,
+            box_id,
+            block_id,
+            height,
+            successor_depth,
+            intent_id,
+            root,
+        }
+    }
+
+    pub fn matches_validated_effect(
+        &self,
+        effect: &chain_reconciliation::ValidatedChainEffect,
+    ) -> bool {
+        effect.tracker_root() == Some(self.root)
+            && effect.tx_id() == self.tx_id
+            && effect.successor_box_id() == self.box_id
+            && effect.block_id() == self.block_id
+            && effect.inclusion_height() == self.height
+            && effect.successor_depth() == self.successor_depth
+            && effect.intent_id() == self.intent_id
+    }
+
+    pub fn root(&self) -> [u8; 33] {
+        self.root
+    }
+
+    pub fn tx_id(&self) -> &str {
+        &self.tx_id
+    }
+
+    pub fn box_id(&self) -> &str {
+        &self.box_id
+    }
+
+    pub fn block_id(&self) -> &str {
+        &self.block_id
+    }
+
+    pub fn height(&self) -> u64 {
+        self.height
+    }
+
+    pub fn successor_depth(&self) -> u64 {
+        self.successor_depth
+    }
+
+    pub fn intent_id(&self) -> &str {
+        &self.intent_id
+    }
+}
+
 /// Note key (32 bytes) used to index confirmation records.
 pub type NoteKeyBytes = [u8; 32];
+
+/// Durable identity of one tracker-root publication that may have crossed the
+/// node admission boundary but is not yet confirmed on the active chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTrackerPublication {
+    digest: [u8; 33],
+    tx_id: String,
+    submitted_height: u64,
+}
+
+impl PendingTrackerPublication {
+    pub fn digest(&self) -> [u8; 33] {
+        self.digest
+    }
+
+    pub fn tx_id(&self) -> &str {
+        &self.tx_id
+    }
+
+    pub fn submitted_height(&self) -> u64 {
+        self.submitted_height
+    }
+}
 
 /// Reserve information for a public key
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -193,41 +422,6 @@ pub struct TrackerBoxInfo {
     pub creation_height: u64,
     /// Tracker NFT ID (hex encoded)
     pub tracker_nft_id: String,
-}
-
-/// Proof for a specific note against tracker state
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoteProof {
-    /// The IOU note being proven
-    pub note: IouNote,
-    /// AVL tree proof bytes
-    pub avl_proof: Vec<u8>,
-    /// Operations performed to generate the proof
-    pub operations: Vec<u8>,
-}
-
-/// Tracker lookup proof for context var #8 in redemption transactions
-/// Proves that totalDebt exists in the tracker's AVL tree at key hash(ownerKey||receiverKey)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrackerLookupProof {
-    /// The AVL tree key: blake2b256(ownerKey || receiverKey) (32 bytes)
-    pub key: Vec<u8>,
-    /// The value: totalDebt as 8-byte big-endian
-    pub value: Vec<u8>,
-    /// AVL proof bytes for the lookup
-    pub proof: Vec<u8>,
-}
-
-/// Reserve lookup proof for context var #7 in redemption transactions
-/// Proves that already_redeemed exists in the reserve's AVL tree at key hash(ownerKey||receiverKey)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReserveLookupProof {
-    /// The AVL tree key: blake2b256(ownerKey || receiverKey) (32 bytes)
-    pub key: Vec<u8>,
-    /// The value: already_redeemed (8 bytes BE)
-    pub value: Vec<u8>,
-    /// AVL proof bytes for the lookup (None for first redemption)
-    pub proof: Option<Vec<u8>>,
 }
 
 /// Key for note lookup: blake2b256(issuer_pubkey || recipient_pubkey)
@@ -281,10 +475,77 @@ pub enum NoteError {
     AmountOverflow,
     FutureTimestamp,
     PastTimestamp,
+    DebtRegression,
     RedemptionTooEarly,
     InsufficientCollateral,
+    /// Existing note data uses a persistence schema that this binary will not
+    /// rewrite implicitly. An explicit export/migration or approved reset is required.
+    MigrationRequired(String),
+    /// The configured tracker NFT does not match the generation bound to this
+    /// data directory, or the first observed on-chain root does not match the
+    /// explicitly approved fresh-generation root.
+    GenerationMismatch(String),
+    /// A new data directory cannot be initialized until the operator explicitly
+    /// approves creation of a fresh tracker generation.
+    GenerationBindingRequired(String),
+    /// The bounded live-note set is full. No state was mutated and the manager
+    /// remains healthy.
+    CapacityExceeded {
+        limit: usize,
+    },
     StorageError(String),
+    /// The storage engine reported a durability failure after beginning a WAL
+    /// commit. The operation may become visible after restart, so the current
+    /// manager must be quarantined rather than treating this as a rollback.
+    StorageOutcomeUnknown(String),
+    /// The sole tracker actor is fenced across an external commitment effect.
+    PublicationInProgress,
+    /// A publication completion/abort did not present the actor's active lease.
+    PublicationLeaseMismatch,
+    /// A node transaction identity is not exactly 32 bytes of hexadecimal.
+    InvalidTransactionId,
     UnsupportedOperation,
+}
+
+/// Explicit startup policy for a tracker generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreshGenerationApproval {
+    /// Open only an already-bound generation.
+    Deny,
+    /// Permit creation of a new, empty generation manifest for this NFT.
+    Approve,
+}
+
+/// Persistent tracker-generation identity supplied by the server at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackerGenerationConfig {
+    pub tracker_nft_id: [u8; 32],
+    pub fresh_generation: FreshGenerationApproval,
+}
+
+/// One-way health signal shared with every component capable of publishing a
+/// tracker root. Once quarantined it cannot be reset in-process.
+#[derive(Debug, Clone)]
+pub struct PublicationHealth(Arc<AtomicBool>);
+
+impl PublicationHealth {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    pub fn quarantine(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Default for PublicationHealth {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl From<secp256k1::Error> for NoteError {
@@ -298,62 +559,108 @@ pub struct TrackerStateManager {
     avl_state: basis_trees::BasisAvlTree,
     current_state: TrackerState,
     storage: persistence::NoteStorage,
-    /// Reserve AVL tree tracking hash(ownerKey || receiverKey) -> already_redeemed (8 bytes BE)
-    reserve_avl_state: basis_trees::BasisAvlTree,
     /// Per-note confirmation records, keyed by note key (32 bytes).
     confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,
+    poisoned: AtomicBool,
+    publication_health: PublicationHealth,
 }
 
 impl TrackerStateManager {
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::SeqCst);
+        self.publication_health.quarantine();
+    }
+
+    fn ensure_healthy(&self) -> Result<(), NoteError> {
+        if self.poisoned.load(Ordering::SeqCst) || !self.publication_health.is_healthy() {
+            Err(NoteError::StorageOutcomeUnknown(
+                "Tracker state manager or confirmed-chain publisher is quarantined; restart and reconcile before exposing commitment effects"
+                    .to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn quarantine_on_storage_failure<T>(
+        &self,
+        result: Result<T, NoteError>,
+    ) -> Result<T, NoteError> {
+        if matches!(
+            result,
+            Err(NoteError::InvalidSignature)
+                | Err(NoteError::StorageError(_))
+                | Err(NoteError::StorageOutcomeUnknown(_))
+                | Err(NoteError::MigrationRequired(_))
+                | Err(NoteError::GenerationMismatch(_))
+                | Err(NoteError::GenerationBindingRequired(_))
+        ) {
+            self.poison();
+        }
+        result
+    }
+
+    /// Returns whether this manager and every publisher sharing its one-way
+    /// health signal may still expose a tracker commitment.
+    pub fn is_healthy(&self) -> bool {
+        !self.poisoned.load(Ordering::SeqCst) && self.publication_health.is_healthy()
+    }
+
+    /// Validate the configured NFT and first observed on-chain root against the
+    /// persisted generation manifest. A mismatch permanently quarantines this
+    /// process so a wrong data directory can never publish over that NFT.
+    pub fn validate_observed_generation(
+        &self,
+        tracker_nft_id: &[u8; 32],
+        observed_root: [u8; 33],
+    ) -> Result<(), NoteError> {
+        self.ensure_healthy()?;
+        // Publication is itself a state transition. Revalidate the complete
+        // durable snapshot against the live tree before authorizing the updater
+        // to spend the tracker box, even when no new note was admitted in this
+        // process cycle.
+        self.validate_complete_snapshot_against_live()?;
+        self.quarantine_on_storage_failure(
+            self.storage
+                .validate_or_anchor_generation(tracker_nft_id, observed_root),
+        )
+    }
+
     /// Create a new tracker state manager with the configured storage location.
-    pub fn new(data_dir: impl AsRef<Path>) -> Self {
+    pub fn new(data_dir: impl AsRef<Path>, generation: TrackerGenerationConfig) -> Self {
+        Self::try_new(data_dir, generation)
+            .unwrap_or_else(|e| panic!("Failed to initialize tracker state manager: {:?}", e))
+    }
+
+    /// Try to create the sole writer for a tracker state directory.
+    ///
+    /// A second in-process or cross-process writer is rejected by the storage
+    /// lock, and any legacy/malformed persistence state is returned as a typed
+    /// error instead of being silently reordered or repaired.
+    pub fn try_new(
+        data_dir: impl AsRef<Path>,
+        generation: TrackerGenerationConfig,
+    ) -> Result<Self, NoteError> {
+        Self::try_new_with_publication_health(data_dir, generation, PublicationHealth::new())
+    }
+
+    /// Open a generation while sharing its terminal health state with the
+    /// component that can publish tracker commitments.
+    pub fn try_new_with_publication_health(
+        data_dir: impl AsRef<Path>,
+        generation: TrackerGenerationConfig,
+        publication_health: PublicationHealth,
+    ) -> Result<Self, NoteError> {
         tracing::debug!("Creating TrackerStateManager...");
 
-        // Use the configured storage location
         tracing::debug!("Opening note storage...");
         let storage_path = data_dir.as_ref().join("notes");
-        let storage = match persistence::NoteStorage::open(&storage_path) {
-            Ok(storage) => {
-                tracing::debug!("Note storage opened successfully at: {:?}", storage_path);
-                // Rebuild indices to ensure all existing notes are indexed
-                // (especially important after upgrading to indexed storage)
-                match storage.rebuild_indices() {
-                    Ok(count) => tracing::info!("Note indices rebuilt: {} notes indexed", count),
-                    Err(e) => tracing::warn!("Failed to rebuild note indices: {:?}", e),
-                }
-                storage
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize note storage: {:?}", e);
-                // Fallback to in-memory storage if file storage fails
-                // In production, this should handle errors properly
-                panic!("Failed to initialize note storage: {:?}", e);
-            }
-        };
+        let storage = persistence::NoteStorage::open(&storage_path, generation)?;
+        tracing::debug!("Note storage opened successfully at: {:?}", storage_path);
 
-        // Create in-memory AVL tree
-        let avl_state = match basis_trees::BasisAvlTree::new() {
-            Ok(tree) => {
-                tracing::debug!("In-memory AVL tree created successfully");
-                tree
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize AVL tree: {:?}", e);
-                panic!("Failed to initialize AVL tree: {:?}", e);
-            }
-        };
-
-        // Create reserve AVL tree for tracking already_redeemed
-        let reserve_avl_state = match basis_trees::BasisAvlTree::new() {
-            Ok(tree) => {
-                tracing::debug!("Reserve AVL tree created successfully");
-                tree
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize reserve AVL tree: {:?}", e);
-                panic!("Failed to initialize reserve AVL tree: {:?}", e);
-            }
-        };
+        let avl_state = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to initialize AVL tree: {:?}", e))
+        })?;
 
         // Rebuild AVL tree from all stored notes to ensure consistency after restart
         let mut manager = Self {
@@ -364,59 +671,42 @@ impl TrackerStateManager {
                 last_update_timestamp: 0,
             },
             storage,
-            reserve_avl_state,
             confirmations: std::collections::HashMap::new(),
+            poisoned: AtomicBool::new(false),
+            publication_health,
         };
 
-        if let Err(e) = manager.rebuild_avl_tree() {
-            tracing::warn!("Failed to rebuild AVL tree from storage: {:?}", e);
-        }
+        manager.rebuild_avl_tree()?;
 
         // Rebuild confirmation records from storage and mark every stored note as
         // LocalOnly until the updater confirms otherwise.
-        manager.rebuild_confirmations();
+        manager.rebuild_confirmations()?;
 
         tracing::debug!("TrackerStateManager created successfully");
-        manager
+        Ok(manager)
     }
 
-    /// Rebuild the AVL tree from all notes stored in the database.
-    /// This is critical after server restart to ensure the AVL tree matches
-    /// the on-chain commitment. AVL trees are insertion-order sensitive,
-    /// so notes must be inserted in chronological order (by timestamp).
+    /// Rebuild the AVL tree from the authoritative first-insertion order.
+    ///
+    /// AVL tree roots are insertion-order sensitive. A final note snapshot or
+    /// business timestamp cannot reproduce the original key insertion order, so
+    /// a non-empty legacy store without that order is rejected rather than
+    /// synthesizing a potentially different root. Repeated value updates do not
+    /// append history: only the final snapshot and each key's first position are
+    /// required to rebuild the same bounded tree state.
     pub fn rebuild_avl_tree(&mut self) -> Result<(), NoteError> {
-        tracing::info!("Rebuilding AVL tree from stored notes...");
+        self.ensure_healthy()?;
+        tracing::info!("Rebuilding AVL tree from persistent note insertion order...");
 
-        let mut notes_with_issuer = self
-            .storage
-            .get_all_notes_with_issuer()
-            .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
+        let rebuilt_tree = match self.build_validated_avl_tree() {
+            Ok(tree) => tree,
+            Err(error) => {
+                self.poison();
+                return Err(error);
+            }
+        };
 
-        if notes_with_issuer.is_empty() {
-            tracing::info!("No stored notes found, AVL tree remains empty");
-            return Ok(());
-        }
-
-        // Sort notes by timestamp ascending to ensure deterministic insertion order
-        // AVL tree structure depends on insertion order, so we must insert in the
-        // same order as when notes were originally created
-        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
-
-        tracing::info!(
-            "Inserting {} notes into AVL tree in chronological order...",
-            notes_with_issuer.len()
-        );
-
-        for (issuer_pubkey, note) in &notes_with_issuer {
-            let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
-            let key_bytes = key.to_bytes();
-            let value_bytes = note.amount_collected.to_be_bytes().to_vec();
-
-            self.avl_state.update(key_bytes, value_bytes).map_err(|e| {
-                NoteError::StorageError(format!("AVL tree update failed during rebuild: {:?}", e))
-            })?;
-        }
-
+        self.avl_state = rebuilt_tree;
         self.update_state();
         let root_digest = self.current_state.avl_root_digest;
         tracing::info!(
@@ -425,6 +715,103 @@ impl TrackerStateManager {
         );
 
         Ok(())
+    }
+
+    fn build_validated_avl_tree(&self) -> Result<basis_trees::BasisAvlTree, NoteError> {
+        // Build in isolation. The live tree and its published digest remain
+        // untouched if any storage, signature, ordering, or AVL validation fails.
+        let mut rebuilt_tree = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to initialize rebuilt AVL tree: {:?}", e))
+        })?;
+
+        let persisted_state = self.storage.read_state_strict()?;
+        let expected_root = persisted_state.avl_root_digest;
+        let ordered_notes = persisted_state.notes;
+
+        tracing::info!(
+            "Replaying {} ordered live note keys...",
+            ordered_notes.len()
+        );
+
+        for (issuer_pubkey, note) in ordered_notes {
+            note.verify_signature(&issuer_pubkey)
+                .map_err(|_| NoteError::InvalidSignature)?;
+            if note.amount_redeemed > note.amount_collected {
+                return Err(NoteError::StorageError(
+                    "Stored redeemed amount exceeds cumulative debt".to_string(),
+                ));
+            }
+
+            let key = NoteKey::from_keys(&issuer_pubkey, &note.recipient_pubkey);
+            let key_bytes = key.to_bytes();
+            let value_bytes = note.amount_collected.to_be_bytes().to_vec();
+
+            rebuilt_tree
+                .update(key_bytes.clone(), value_bytes)
+                .map_err(|e| {
+                    NoteError::StorageError(format!(
+                        "AVL tree update failed during rebuild: {:?}",
+                        e
+                    ))
+                })?;
+        }
+
+        if rebuilt_tree.root_digest() != expected_root {
+            return Err(NoteError::StorageError(
+                "Persisted note snapshot does not reproduce its committed AVL root".to_string(),
+            ));
+        }
+
+        Ok(rebuilt_tree)
+    }
+
+    fn validate_complete_snapshot_against_live(
+        &self,
+    ) -> Result<persistence::StoredNoteState, NoteError> {
+        self.ensure_healthy()?;
+        let state = match self.storage.read_state_strict() {
+            Ok(state) => state,
+            Err(error) => {
+                self.poison();
+                return Err(error);
+            }
+        };
+        let mut rebuilt = basis_trees::BasisAvlTree::new().map_err(|error| {
+            self.poison();
+            NoteError::StorageError(format!("Failed to initialize validation tree: {error}"))
+        })?;
+
+        for (issuer_pubkey, note) in &state.notes {
+            if note.verify_signature(issuer_pubkey).is_err() {
+                self.poison();
+                return Err(NoteError::InvalidSignature);
+            }
+            if note.amount_redeemed > note.amount_collected {
+                self.poison();
+                return Err(NoteError::StorageError(
+                    "Stored redeemed amount exceeds cumulative debt".to_string(),
+                ));
+            }
+            let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey).to_bytes();
+            if let Err(error) = rebuilt.update(key, note.amount_collected.to_be_bytes().to_vec()) {
+                self.poison();
+                return Err(NoteError::StorageError(format!(
+                    "AVL validation update failed: {error}"
+                )));
+            }
+        }
+
+        let rebuilt_root = rebuilt.root_digest();
+        if rebuilt_root != state.avl_root_digest
+            || rebuilt_root != self.avl_state.root_digest()
+            || rebuilt_root != self.current_state.avl_root_digest
+        {
+            self.poison();
+            return Err(NoteError::StorageError(
+                "Persisted snapshot, physical AVL keys, and live root do not agree".to_string(),
+            ));
+        }
+        Ok(state)
     }
 
     /// Create a new tracker state manager with temporary storage (used in tests only)
@@ -447,7 +834,11 @@ impl TrackerStateManager {
         // Try to clean up any existing storage at this path first
         let _ = std::fs::remove_dir_all(&storage_path);
 
-        let storage = match persistence::NoteStorage::open(&storage_path) {
+        let generation = TrackerGenerationConfig {
+            tracker_nft_id: [0x55; 32],
+            fresh_generation: FreshGenerationApproval::Approve,
+        };
+        let storage = match persistence::NoteStorage::open(&storage_path, generation) {
             Ok(storage) => {
                 tracing::debug!("Note storage opened successfully at: {:?}", storage_path);
                 storage
@@ -474,7 +865,7 @@ impl TrackerStateManager {
                 // Try to clean up the retry path as well
                 let _ = std::fs::remove_dir_all(&storage_path_retry);
 
-                match persistence::NoteStorage::open(&storage_path_retry) {
+                match persistence::NoteStorage::open(&storage_path_retry, generation) {
                     Ok(storage) => {
                         tracing::debug!(
                             "Note storage opened successfully at retry path: {:?}",
@@ -504,18 +895,6 @@ impl TrackerStateManager {
             }
         };
 
-        // Create reserve AVL tree for tracking already_redeemed
-        let reserve_avl_state = match basis_trees::BasisAvlTree::new() {
-            Ok(tree) => {
-                tracing::debug!("Reserve AVL tree created successfully");
-                tree
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize reserve AVL tree: {:?}", e);
-                panic!("Failed to initialize reserve AVL tree: {:?}", e);
-            }
-        };
-
         tracing::debug!("TrackerStateManager created successfully");
         let mut manager = Self {
             avl_state,
@@ -525,15 +904,21 @@ impl TrackerStateManager {
                 last_update_timestamp: 0,
             },
             storage,
-            reserve_avl_state,
             confirmations: std::collections::HashMap::new(),
+            poisoned: AtomicBool::new(false),
+            publication_health: PublicationHealth::new(),
         };
 
         // Rebuild AVL tree and confirmations so test instances mirror production.
         if let Err(e) = manager.rebuild_avl_tree() {
-            tracing::warn!("Failed to rebuild AVL tree in test instance: {:?}", e);
+            panic!(
+                "Failed to rebuild AVL tree in test instance from authoritative snapshot: {:?}",
+                e
+            );
         }
-        manager.rebuild_confirmations();
+        if let Err(e) = manager.rebuild_confirmations() {
+            panic!("Failed to rebuild confirmations in test instance: {:?}", e);
+        }
 
         manager
     }
@@ -541,6 +926,9 @@ impl TrackerStateManager {
     /// Add a new note to the tracker state
     /// Updates the AVL tree with hash(issuer||receiver) -> totalDebt mapping
     pub fn add_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+        self.ensure_healthy()?;
+        let persisted_state = self.validate_complete_snapshot_against_live()?;
+
         // Validate that timestamp is not in the future
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -551,11 +939,24 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
-        // Check if there is an existing note with the same issuer-recipient pair
-        // and ensure the new timestamp is greater than the existing one (ever increasing)
-        if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
+        // A note is a cumulative debt record. Both its timestamp and totalDebt
+        // must be monotone for a given issuer-recipient edge.
+        let target_key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey).to_bytes();
+        let existing_note =
+            persisted_state
+                .notes
+                .iter()
+                .find_map(|(stored_issuer, stored_note)| {
+                    (NoteKey::from_keys(stored_issuer, &stored_note.recipient_pubkey).to_bytes()
+                        == target_key)
+                        .then_some(stored_note.clone())
+                });
+        if let Some(existing_note) = &existing_note {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
+            }
+            if note.amount_collected < existing_note.amount_collected {
+                return Err(NoteError::DebtRegression);
             }
         }
 
@@ -565,6 +966,21 @@ impl TrackerStateManager {
             NoteError::InvalidSignature
         })?;
 
+        // Capacity is an expected admission failure, not a durability or
+        // structural failure. Preflight it before cloning or mutating a tree.
+        self.storage.ensure_capacity_for_validated_state(
+            persisted_state.notes.len(),
+            existing_note.is_none(),
+        )?;
+
+        // Settlement progress is tracker-derived local state and is not part of
+        // the issuer-signed cumulative-debt message. A newer signed successor
+        // must therefore preserve, rather than reset, existing redemptions.
+        let mut stored_note = note.clone();
+        stored_note.amount_redeemed = existing_note
+            .map(|existing| existing.amount_redeemed)
+            .unwrap_or(0);
+
         // Prepare AVL tree key: hash(issuer_pubkey || receiver_pubkey)
         let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
         let key_bytes = key.to_bytes();
@@ -573,28 +989,38 @@ impl TrackerStateManager {
         // This matches the contract spec: hash(A||B) -> totalDebt
         let value_bytes = note.amount_collected.to_be_bytes().to_vec();
 
-        // Update AVL tree state first to ensure consistency
-        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
-
-        // Only proceed with database storage if AVL tree update succeeded
-        match avl_result {
-            Ok(()) => {
-                // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
-                self.update_state();
-
-                // Recompute the confirmation status for this note based on the
-                // new local value versus the confirmed/pending values. The local
-                // value has just changed, so the note is only Confirmed/Pending
-                // if the new value matches what is already on-chain / in-flight.
-                let mut key32 = [0u8; 32];
-                key32.copy_from_slice(&key_bytes);
-                self.recompute_confirmation_status(&key32, note.amount_collected);
-
-                Ok(())
+        // Prepare a fully isolated tree candidate. Storage failure leaves the
+        // published in-memory root untouched; successful durable storage is
+        // followed only by an infallible ownership swap.
+        let mut candidate = match self.avl_state.try_clone() {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.poison();
+                return Err(NoteError::StorageError(error.to_string()));
             }
-            Err(e) => Err(NoteError::StorageError(e.to_string())),
+        };
+        if let Err(error) = candidate.update(key_bytes.clone(), value_bytes) {
+            self.poison();
+            return Err(NoteError::StorageError(error.to_string()));
         }
+
+        let storage_result =
+            self.storage
+                .store_note(issuer_pubkey, &stored_note, candidate.root_digest());
+        self.quarantine_on_storage_failure(storage_result)?;
+
+        self.avl_state = candidate;
+        self.update_state();
+
+        // Recompute the confirmation status for this note based on the
+        // new local value versus the confirmed/pending values. The local
+        // value has just changed, so the note is only Confirmed/Pending
+        // if the new value matches what is already on-chain / in-flight.
+        let mut key32 = [0u8; 32];
+        key32.copy_from_slice(&key_bytes);
+        self.recompute_confirmation_status(&key32, note.amount_collected)?;
+
+        Ok(())
     }
 
     /// Convert an issuer/recipient pair into the fixed-size confirmation key.
@@ -606,86 +1032,208 @@ impl TrackerStateManager {
         out
     }
 
-    /// Recompute a single note's confirmation status from its local value versus
-    /// the cached confirmed/pending values. Persists the result best-effort.
-    fn recompute_confirmation_status(&mut self, key: &NoteKeyBytes, local_value: u64) {
-        let entry = self
+    /// Recompute and durably persist one note's confirmation status.
+    fn recompute_confirmation_status(
+        &mut self,
+        key: &NoteKeyBytes,
+        local_value: u64,
+    ) -> Result<(), NoteError> {
+        let mut updated = self
             .confirmations
-            .entry(*key)
-            .or_insert_with(NoteConfirmation::local_only);
+            .get(key)
+            .cloned()
+            .unwrap_or_else(NoteConfirmation::local_only);
 
-        let confirmed = entry.confirmed_total_debt;
-        let pending = entry.pending_total_debt;
-
-        entry.status = if Some(local_value) == confirmed {
+        updated.status = if Some(local_value) == updated.confirmed_total_debt {
             NoteConfirmationStatus::Confirmed
-        } else if Some(local_value) == pending {
+        } else if Some(local_value) == updated.pending_total_debt {
             NoteConfirmationStatus::Pending
         } else {
             NoteConfirmationStatus::LocalOnly
         };
 
-        let _ = self.storage.store_confirmation(key, entry);
+        let storage_result = self.storage.store_confirmation(key, &updated);
+        self.quarantine_on_storage_failure(storage_result)?;
+        self.confirmations.insert(*key, updated);
+        Ok(())
     }
 
     /// Rebuild the in-memory confirmation map from storage. Called on startup.
     ///
-    /// On-chain state may have advanced while the server was offline, so we keep
-    /// the persisted `confirmed_total_debt` metadata but recompute the status from
-    /// the current local value and clear any pending in-flight state (pending
-    /// transactions do not survive a restart).
-    pub fn rebuild_confirmations(&mut self) {
-        self.confirmations.clear();
-
-        let notes = match self.storage.get_all_notes_with_issuer() {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!("Failed to load notes for confirmation rebuild: {:?}", e);
-                return;
-            }
-        };
-
-        let stored = self.storage.get_all_confirmations().unwrap_or_default();
+    /// A pending publication survives restart only when its checksummed durable
+    /// receipt and every per-note pending tx id agree. Stale per-note metadata
+    /// without that receipt is demoted to `LocalOnly`.
+    pub fn rebuild_confirmations(&mut self) -> Result<(), NoteError> {
+        self.ensure_healthy()?;
+        let notes = self.validate_complete_snapshot_against_live()?.notes;
+        let stored = self.quarantine_on_storage_failure(self.storage.get_all_confirmations())?;
+        let pending_publication =
+            self.quarantine_on_storage_failure(self.storage.pending_publication())?;
         let stored_map: std::collections::HashMap<NoteKeyBytes, NoteConfirmation> =
             stored.into_iter().collect();
+        let mut rebuilt = std::collections::HashMap::with_capacity(notes.len());
 
         for (issuer_pubkey, note) in &notes {
             let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
             let mut record = stored_map.get(&key).cloned().unwrap_or_default();
 
-            // Pending state does not survive a restart.
-            record.pending_total_debt = None;
-            record.pending_tx_id = None;
-
             let local_value = note.amount_collected;
-            record.status = if Some(local_value) == record.confirmed_total_debt {
-                NoteConfirmationStatus::Confirmed
+            let durable_pending = pending_publication.as_ref().is_some_and(|pending| {
+                record.pending_total_debt == Some(local_value)
+                    && record
+                        .pending_tx_id
+                        .as_deref()
+                        .is_some_and(|tx_id| tx_id.eq_ignore_ascii_case(&pending.tx_id))
+            });
+            record.status = if durable_pending {
+                NoteConfirmationStatus::Pending
             } else {
+                record.pending_total_debt = None;
+                record.pending_tx_id = None;
+                // A persisted chain point is historical evidence until the
+                // confirmed-chain watcher revalidates its exact block against
+                // a fresh coherent tip after this restart.
                 NoteConfirmationStatus::LocalOnly
             };
 
-            self.confirmations.insert(key, record);
+            rebuilt.insert(key, record);
         }
+
+        self.confirmations = rebuilt;
 
         tracing::info!(
             "Rebuilt confirmation records for {} notes",
             self.confirmations.len()
         );
+        Ok(())
     }
 
     /// Get a clone of the confirmation record for a note, if one exists.
+    pub fn try_get_confirmation(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<Option<NoteConfirmation>, NoteError> {
+        self.ensure_healthy()?;
+        let key = Self::confirmation_key(issuer_pubkey, recipient_pubkey);
+        Ok(self.confirmations.get(&key).cloned())
+    }
+
+    /// Compatibility accessor for process-internal callers. A quarantined
+    /// publisher is service-fatal and must never yield a stale confirmation.
     pub fn get_confirmation(
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Option<NoteConfirmation> {
-        let key = Self::confirmation_key(issuer_pubkey, recipient_pubkey);
-        self.confirmations.get(&key).cloned()
+        self.try_get_confirmation(issuer_pubkey, recipient_pubkey)
+            .unwrap_or_else(|error| {
+                panic!("Cannot read confirmation from quarantined tracker: {error:?}")
+            })
     }
 
     /// Get a snapshot of all confirmation records keyed by note key.
+    pub fn try_all_confirmations(
+        &self,
+    ) -> Result<std::collections::HashMap<NoteKeyBytes, NoteConfirmation>, NoteError> {
+        self.ensure_healthy()?;
+        Ok(self.confirmations.clone())
+    }
+
     pub fn all_confirmations(&self) -> std::collections::HashMap<NoteKeyBytes, NoteConfirmation> {
-        self.confirmations.clone()
+        self.try_all_confirmations().unwrap_or_else(|error| {
+            panic!("Cannot read confirmations from quarantined tracker: {error:?}")
+        })
+    }
+
+    /// Reconstruct the latest historical on-chain projection from the
+    /// persisted confirmed values, never from the newer live AVL root.
+    pub fn validated_confirmation_anchor(
+        &self,
+    ) -> Result<Option<ConfirmedProjectionAnchor>, NoteError> {
+        self.ensure_healthy()?;
+        let persisted_anchor =
+            self.quarantine_on_storage_failure(self.storage.confirmed_projection())?;
+        let pending = self.quarantine_on_storage_failure(self.storage.pending_publication())?;
+
+        // An acceptance-ready replay may have persisted any prefix of the
+        // advisory per-note rows. While the exact BPA1 receipt is still armed,
+        // only the independent global projection receipt is stable enough to
+        // join to the journal; the sealed journal effect will repair the rows.
+        if pending.is_some() {
+            return Ok(persisted_anchor);
+        }
+        let Some(anchor) = persisted_anchor else {
+            // Rollback clears the global receipt before demoting advisory rows.
+            // A crash in that window is completed only by ApplyRollback from
+            // the journal, so stale row fragments are not an anchor by
+            // themselves.
+            return Ok(None);
+        };
+
+        let snapshot = self.validate_complete_snapshot_against_live()?;
+        let mut historical_tree = basis_trees::BasisAvlTree::new().map_err(|error| {
+            NoteError::StorageError(format!(
+                "failed to initialize historical confirmation tree: {error}"
+            ))
+        })?;
+
+        for (issuer_pubkey, note) in &snapshot.notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let Some(record) = self.confirmations.get(&key) else {
+                continue;
+            };
+            if !record.has_confirmed_history() {
+                continue;
+            }
+            let row_matches_anchor = record.confirmed_tx_id.as_deref() == Some(anchor.tx_id())
+                && record.confirmed_box_id.as_deref() == Some(anchor.box_id())
+                && record.confirmed_block_id.as_deref() == Some(anchor.block_id())
+                && record.confirmed_height == Some(anchor.height())
+                && record.confirmed_successor_depth == Some(anchor.successor_depth())
+                && record.confirmed_intent_id.as_deref() == Some(anchor.intent_id())
+                && record.confirmed_root.as_deref() == Some(anchor.root().as_slice());
+            if !row_matches_anchor {
+                return Err(NoteError::StorageError(
+                    "historical confirmation row does not match the durable projection anchor"
+                        .to_string(),
+                ));
+            }
+            let confirmed_total = record.confirmed_total_debt.ok_or_else(|| {
+                NoteError::StorageError("historical confirmation lacks debt value".to_string())
+            })?;
+            historical_tree
+                .update(
+                    NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey).to_bytes(),
+                    confirmed_total.to_be_bytes().to_vec(),
+                )
+                .map_err(|error| {
+                    NoteError::StorageError(format!(
+                        "historical confirmation AVL replay failed: {error}"
+                    ))
+                })?;
+        }
+
+        if historical_tree.root_digest() != anchor.root {
+            return Err(NoteError::StorageError(
+                "historical confirmation values do not reproduce the accepted AVL root".to_string(),
+            ));
+        }
+        Ok(Some(anchor))
+    }
+
+    /// Whether any durable BNS1 chain-accounting artifact exists, including a
+    /// partial crash prefix whose global projection receipt was already
+    /// cleared or not yet written. This is a bootstrap guard, not confirmation
+    /// authority.
+    pub fn has_persisted_confirmation_history(&self) -> Result<bool, NoteError> {
+        self.ensure_healthy()?;
+        let global = self.quarantine_on_storage_failure(self.storage.confirmed_projection())?;
+        Ok(global.is_some()
+            || self
+                .confirmations
+                .values()
+                .any(NoteConfirmation::has_confirmed_history))
     }
 
     /// Mark every note whose local value differs from its confirmed value as
@@ -697,23 +1245,37 @@ impl TrackerStateManager {
         tx_id: &str,
         submitted_height: u64,
     ) -> Result<usize, NoteError> {
-        let _ = (digest, submitted_height);
-        let notes = self.storage.get_all_notes_with_issuer()?;
+        self.ensure_healthy()?;
+        let snapshot = self.validate_complete_snapshot_against_live()?;
+        if snapshot.avl_root_digest != digest {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
+        let publication = PendingTrackerPublication {
+            digest,
+            tx_id: tx_id.to_ascii_lowercase(),
+            submitted_height,
+        };
+        let storage_result = self.storage.store_pending_publication(&publication);
+        self.quarantine_on_storage_failure(storage_result)?;
+        let notes = snapshot.notes;
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
             let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
             let local_value = note.amount_collected;
-            let entry = self
+            let mut updated = self
                 .confirmations
-                .entry(key)
-                .or_insert_with(NoteConfirmation::local_only);
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(NoteConfirmation::local_only);
 
-            if Some(local_value) != entry.confirmed_total_debt {
-                entry.pending_total_debt = Some(local_value);
-                entry.pending_tx_id = Some(tx_id.to_string());
-                entry.status = NoteConfirmationStatus::Pending;
-                let _ = self.storage.store_confirmation(&key, entry);
+            if Some(local_value) != updated.confirmed_total_debt {
+                updated.pending_total_debt = Some(local_value);
+                updated.pending_tx_id = Some(tx_id.to_string());
+                updated.status = NoteConfirmationStatus::Pending;
+                let storage_result = self.storage.store_confirmation(&key, &updated);
+                self.quarantine_on_storage_failure(storage_result)?;
+                self.confirmations.insert(key, updated);
                 count += 1;
             }
         }
@@ -727,32 +1289,143 @@ impl TrackerStateManager {
         Ok(count)
     }
 
+    /// Return the checksummed external-effect receipt, if a tracker publication
+    /// is still awaiting active-chain reconciliation.
+    pub fn pending_publication(&self) -> Result<Option<PendingTrackerPublication>, NoteError> {
+        self.ensure_healthy()?;
+        self.validate_complete_snapshot_against_live()?;
+        self.quarantine_on_storage_failure(self.storage.pending_publication())
+    }
+
     /// Promote every `Pending` note to `Confirmed`, copying the pending value to
     /// the confirmed value and recording the confirming box metadata. Returns the
     /// number of notes transitioned to `Confirmed`.
-    pub fn confirm_pending_notes(&mut self, box_id: &str, height: u64) -> Result<usize, NoteError> {
-        let keys: Vec<NoteKeyBytes> = self.confirmations.keys().copied().collect();
+    #[cfg(test)]
+    pub(crate) fn confirm_pending_notes(
+        &mut self,
+        box_id: &str,
+        height: u64,
+    ) -> Result<usize, NoteError> {
+        let pending = self
+            .pending_publication()?
+            .ok_or(NoteError::PublicationLeaseMismatch)?;
+        self.confirm_pending_publication(&pending.tx_id, box_id, height)
+    }
+
+    /// Confirm exactly the durable publication receipt observed on the active
+    /// chain. A different transaction cannot release the publication fence.
+    #[cfg(test)]
+    pub(crate) fn confirm_pending_publication(
+        &mut self,
+        tx_id: &str,
+        box_id: &str,
+        height: u64,
+    ) -> Result<usize, NoteError> {
+        self.apply_confirmed_tracker_projection(
+            tx_id,
+            &"00".repeat(32),
+            box_id,
+            &"00".repeat(32),
+            height,
+            0,
+            None,
+        )
+    }
+
+    /// Apply only a private ticket which has already bound the signed
+    /// transaction to its exact predecessor, successor, R5 root, active block,
+    /// coherent tip and configured successor depth.
+    pub fn confirm_validated_publication(
+        &mut self,
+        effect: &chain_reconciliation::ValidatedChainEffect,
+    ) -> Result<usize, NoteError> {
+        let root = effect
+            .tracker_root()
+            .ok_or(NoteError::UnsupportedOperation)?;
+        self.apply_confirmed_tracker_projection(
+            effect.tx_id(),
+            effect.intent_id(),
+            effect.successor_box_id(),
+            effect.block_id(),
+            effect.inclusion_height(),
+            effect.successor_depth(),
+            Some(root),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_confirmed_tracker_projection(
+        &mut self,
+        tx_id: &str,
+        intent_id: &str,
+        box_id: &str,
+        block_id: &str,
+        height: u64,
+        successor_depth: u64,
+        expected_root: Option<[u8; 33]>,
+    ) -> Result<usize, NoteError> {
+        self.ensure_healthy()?;
+        let snapshot = self.validate_complete_snapshot_against_live()?;
+        let pending = self.quarantine_on_storage_failure(self.storage.pending_publication())?;
+        let Some(pending) = pending else {
+            let root = expected_root.ok_or(NoteError::PublicationLeaseMismatch)?;
+            return self.restore_confirmed_tracker_projection(
+                tx_id,
+                intent_id,
+                box_id,
+                block_id,
+                height,
+                successor_depth,
+                root,
+            );
+        };
+        if !pending.tx_id.eq_ignore_ascii_case(tx_id)
+            || pending.digest != snapshot.avl_root_digest
+            || expected_root.is_some_and(|root| root != snapshot.avl_root_digest)
+        {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
+        let confirmed_root = expected_root.unwrap_or(snapshot.avl_root_digest);
         let mut count = 0usize;
 
-        for key in keys {
-            let should_confirm = self
+        // The publication receipt is persisted before the per-note advisory
+        // records. A crash can therefore leave any prefix of those records on
+        // disk. The confirmed root authenticates the complete current snapshot,
+        // so replay confirmation from that snapshot instead of trusting which
+        // advisory rows happened to reach storage before the crash.
+        for (issuer_pubkey, note) in &snapshot.notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let mut updated = self
                 .confirmations
                 .get(&key)
-                .map(|c| c.status == NoteConfirmationStatus::Pending)
-                .unwrap_or(false);
-
-            if should_confirm {
-                if let Some(entry) = self.confirmations.get_mut(&key) {
-                    entry.confirmed_total_debt = entry.pending_total_debt;
-                    entry.pending_total_debt = None;
-                    entry.pending_tx_id = None;
-                    entry.confirmed_box_id = Some(box_id.to_string());
-                    entry.confirmed_height = Some(height);
-                    entry.status = NoteConfirmationStatus::Confirmed;
-                    let _ = self.storage.store_confirmation(&key, entry);
-                    count += 1;
-                }
-            }
+                .cloned()
+                .unwrap_or_else(NoteConfirmation::local_only);
+            let changed = updated.confirmed_total_debt != Some(note.amount_collected)
+                || updated.status != NoteConfirmationStatus::Confirmed
+                || updated.pending_total_debt.is_some()
+                || updated.pending_tx_id.is_some()
+                || updated.confirmed_box_id.as_deref() != Some(box_id)
+                || updated.confirmed_height != Some(height)
+                || updated.confirmed_tx_id.as_deref() != Some(tx_id)
+                || updated.confirmed_block_id.as_deref() != Some(block_id)
+                || updated.confirmed_successor_depth != Some(successor_depth)
+                || updated.confirmed_intent_id.as_deref() != Some(intent_id)
+                || updated.confirmed_root.as_deref() != Some(confirmed_root.as_slice());
+            updated.confirmed_total_debt = Some(note.amount_collected);
+            updated.pending_total_debt = None;
+            updated.pending_tx_id = None;
+            updated.confirmed_box_id = Some(box_id.to_string());
+            updated.confirmed_height = Some(height);
+            updated.confirmed_tx_id = Some(tx_id.to_ascii_lowercase());
+            updated.confirmed_block_id = Some(block_id.to_ascii_lowercase());
+            updated.confirmed_successor_depth = Some(successor_depth);
+            updated.confirmed_intent_id = Some(intent_id.to_ascii_lowercase());
+            updated.confirmed_root = Some(confirmed_root.to_vec());
+            updated.status = NoteConfirmationStatus::Confirmed;
+            let storage_result = self.storage.store_confirmation(&key, &updated);
+            self.quarantine_on_storage_failure(storage_result)?;
+            self.confirmations.insert(key, updated);
+            count += usize::from(changed);
         }
 
         tracing::info!(
@@ -761,6 +1434,138 @@ impl TrackerStateManager {
             box_id,
             height
         );
+        if expected_root.is_some() {
+            let anchor = ConfirmedProjectionAnchor::from_parts(
+                tx_id.to_ascii_lowercase(),
+                box_id.to_ascii_lowercase(),
+                block_id.to_ascii_lowercase(),
+                height,
+                successor_depth,
+                intent_id.to_ascii_lowercase(),
+                confirmed_root,
+            );
+            let storage_result = self.storage.store_confirmed_projection(&anchor);
+            self.quarantine_on_storage_failure(storage_result)?;
+        }
+        let clear_result = self.storage.clear_pending_publication(tx_id);
+        self.quarantine_on_storage_failure(clear_result)?;
+        Ok(count)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn restore_confirmed_tracker_projection(
+        &mut self,
+        tx_id: &str,
+        intent_id: &str,
+        box_id: &str,
+        block_id: &str,
+        height: u64,
+        successor_depth: u64,
+        root: [u8; 33],
+    ) -> Result<usize, NoteError> {
+        let anchor = self
+            .validated_confirmation_anchor()?
+            .ok_or(NoteError::PublicationLeaseMismatch)?;
+        if anchor.tx_id != tx_id
+            || anchor.intent_id != intent_id
+            || anchor.box_id != box_id
+            || anchor.block_id != block_id
+            || anchor.height != height
+            || anchor.successor_depth != successor_depth
+            || anchor.root != root
+        {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
+        let snapshot = self.validate_complete_snapshot_against_live()?;
+        let mut count = 0usize;
+        for (issuer_pubkey, note) in &snapshot.notes {
+            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let Some(mut updated) = self.confirmations.get(&key).cloned() else {
+                continue;
+            };
+            if updated.confirmed_tx_id.as_deref() != Some(tx_id)
+                || updated.confirmed_box_id.as_deref() != Some(box_id)
+                || updated.confirmed_block_id.as_deref() != Some(block_id)
+                || updated.confirmed_height != Some(height)
+                || updated.confirmed_successor_depth != Some(successor_depth)
+                || updated.confirmed_intent_id.as_deref() != Some(intent_id)
+                || updated.confirmed_root.as_deref() != Some(root.as_slice())
+            {
+                continue;
+            }
+            let restored_status = if updated.confirmed_total_debt == Some(note.amount_collected) {
+                NoteConfirmationStatus::Confirmed
+            } else {
+                NoteConfirmationStatus::LocalOnly
+            };
+            let changed = updated.status != restored_status
+                || updated.pending_total_debt.is_some()
+                || updated.pending_tx_id.is_some();
+            updated.status = restored_status;
+            updated.pending_total_debt = None;
+            updated.pending_tx_id = None;
+            let storage_result = self.storage.store_confirmation(&key, &updated);
+            self.quarantine_on_storage_failure(storage_result)?;
+            self.confirmations.insert(key, updated);
+            count += usize::from(changed);
+        }
+        Ok(count)
+    }
+
+    /// Demote exactly the application projection whose accepted block has been
+    /// displaced at its original height. Duplicate rollback replay is a no-op.
+    pub fn rollback_validated_publication(
+        &mut self,
+        rollback: &chain_reconciliation::ValidatedRollback,
+    ) -> Result<usize, NoteError> {
+        self.ensure_healthy()?;
+        let projection = self.quarantine_on_storage_failure(self.storage.confirmed_projection())?;
+        if projection.as_ref().is_some_and(|anchor| {
+            anchor.tx_id() != rollback.tx_id()
+                || anchor.block_id() != rollback.removed_block_id()
+                || anchor.intent_id() != rollback.intent_id()
+        }) {
+            return Err(NoteError::PublicationLeaseMismatch);
+        }
+        // Remove the authoritative projection receipt before touching the
+        // advisory rows. A crash at any later point restarts with no accepted
+        // projection and the durable ApplyRollback ticket completes the
+        // demotion idempotently.
+        let clear_result = self.storage.clear_confirmed_projection();
+        self.quarantine_on_storage_failure(clear_result)?;
+        let notes = self.validate_complete_snapshot_against_live()?.notes;
+        let mut count = 0usize;
+        for (issuer_pubkey, note) in notes {
+            let key = Self::confirmation_key(&issuer_pubkey, &note.recipient_pubkey);
+            let Some(mut updated) = self.confirmations.get(&key).cloned() else {
+                continue;
+            };
+            let matches_removed_effect = updated.confirmed_tx_id.as_deref()
+                == Some(rollback.tx_id())
+                && updated.confirmed_block_id.as_deref() == Some(rollback.removed_block_id())
+                && updated.confirmed_intent_id.as_deref() == Some(rollback.intent_id());
+            if !matches_removed_effect {
+                continue;
+            }
+            updated.status =
+                if updated.pending_tx_id.is_some() && updated.pending_total_debt.is_some() {
+                    NoteConfirmationStatus::Pending
+                } else {
+                    NoteConfirmationStatus::LocalOnly
+                };
+            updated.confirmed_total_debt = None;
+            updated.confirmed_box_id = None;
+            updated.confirmed_height = None;
+            updated.confirmed_tx_id = None;
+            updated.confirmed_block_id = None;
+            updated.confirmed_successor_depth = None;
+            updated.confirmed_intent_id = None;
+            updated.confirmed_root = None;
+            let storage_result = self.storage.store_confirmation(&key, &updated);
+            self.quarantine_on_storage_failure(storage_result)?;
+            self.confirmations.insert(key, updated);
+            count += 1;
+        }
         Ok(count)
     }
 
@@ -768,8 +1573,10 @@ impl TrackerStateManager {
     /// transaction is dropped or rejected). Clears pending metadata and recomputes
     /// the status from the local value versus the confirmed value. Returns the
     /// number of notes reverted.
-    pub fn revert_pending_notes(&mut self) -> Result<usize, NoteError> {
-        let notes = self.storage.get_all_notes_with_issuer()?;
+    #[cfg(test)]
+    pub(crate) fn revert_pending_notes(&mut self) -> Result<usize, NoteError> {
+        self.ensure_healthy()?;
+        let notes = self.validate_complete_snapshot_against_live()?.notes;
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
@@ -781,22 +1588,30 @@ impl TrackerStateManager {
                 .unwrap_or(false);
 
             if is_pending {
-                if let Some(entry) = self.confirmations.get_mut(&key) {
-                    entry.pending_total_debt = None;
-                    entry.pending_tx_id = None;
+                if let Some(mut updated) = self.confirmations.get(&key).cloned() {
+                    updated.pending_total_debt = None;
+                    updated.pending_tx_id = None;
                     let local_value = note.amount_collected;
-                    entry.status = if Some(local_value) == entry.confirmed_total_debt {
+                    updated.status = if Some(local_value) == updated.confirmed_total_debt {
                         NoteConfirmationStatus::Confirmed
                     } else {
                         NoteConfirmationStatus::LocalOnly
                     };
-                    let _ = self.storage.store_confirmation(&key, entry);
+                    let storage_result = self.storage.store_confirmation(&key, &updated);
+                    self.quarantine_on_storage_failure(storage_result)?;
+                    self.confirmations.insert(key, updated);
                     count += 1;
                 }
             }
         }
 
         tracing::info!("Reverted {} pending notes to local state", count);
+        if let Some(pending) =
+            self.quarantine_on_storage_failure(self.storage.pending_publication())?
+        {
+            let clear_result = self.storage.clear_pending_publication(&pending.tx_id);
+            self.quarantine_on_storage_failure(clear_result)?;
+        }
         Ok(count)
     }
 
@@ -804,37 +1619,41 @@ impl TrackerStateManager {
     /// confirmed digest equals the current local digest, every note's local value
     /// is the confirmed value, so mark them all as `Confirmed` with the given box
     /// metadata. Returns the number of notes promoted to `Confirmed`.
-    pub fn reconcile_with_confirmed_digest(
+    #[cfg(test)]
+    pub(crate) fn reconcile_with_confirmed_digest(
         &mut self,
         confirmed_digest: &[u8; 33],
         box_id: &str,
         height: u64,
     ) -> Result<usize, NoteError> {
+        self.ensure_healthy()?;
+        let notes = self.validate_complete_snapshot_against_live()?.notes;
         if confirmed_digest != &self.current_state.avl_root_digest {
             return Ok(0);
         }
-
-        let notes = self.storage.get_all_notes_with_issuer()?;
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
             let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
             let local_value = note.amount_collected;
-            let entry = self
+            let mut updated = self
                 .confirmations
-                .entry(key)
-                .or_insert_with(NoteConfirmation::local_only);
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(NoteConfirmation::local_only);
 
-            if entry.status != NoteConfirmationStatus::Confirmed
-                || entry.confirmed_total_debt != Some(local_value)
+            if updated.status != NoteConfirmationStatus::Confirmed
+                || updated.confirmed_total_debt != Some(local_value)
             {
-                entry.confirmed_total_debt = Some(local_value);
-                entry.pending_total_debt = None;
-                entry.pending_tx_id = None;
-                entry.confirmed_box_id = Some(box_id.to_string());
-                entry.confirmed_height = Some(height);
-                entry.status = NoteConfirmationStatus::Confirmed;
-                let _ = self.storage.store_confirmation(&key, entry);
+                updated.confirmed_total_debt = Some(local_value);
+                updated.pending_total_debt = None;
+                updated.pending_tx_id = None;
+                updated.confirmed_box_id = Some(box_id.to_string());
+                updated.confirmed_height = Some(height);
+                updated.status = NoteConfirmationStatus::Confirmed;
+                let storage_result = self.storage.store_confirmation(&key, &updated);
+                self.quarantine_on_storage_failure(storage_result)?;
+                self.confirmations.insert(key, updated);
                 count += 1;
             }
         }
@@ -850,48 +1669,69 @@ impl TrackerStateManager {
         Ok(count)
     }
 
-    /// Update an existing note in the tracker state
-    /// Updates the AVL tree with hash(issuer||receiver) -> totalDebt mapping
-    pub fn update_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
-        // Validate that timestamp is not in the future
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
-            .as_millis() as u64;
-
-        if note.timestamp > current_time {
-            return Err(NoteError::FutureTimestamp);
+    /// Persist tracker-derived settlement progress without accepting an arbitrary
+    /// replacement for the issuer-signed note.
+    ///
+    /// The signed cumulative debt, timestamp, recipient and signature are kept
+    /// byte-for-byte. Only the unsigned local `amount_redeemed` field may advance,
+    /// with checked arithmetic and a hard cap at `amount_collected`.
+    #[cfg(test)]
+    pub(crate) fn record_redemption_progress(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        redeemed_amount: u64,
+    ) -> Result<IouNote, NoteError> {
+        self.ensure_healthy()?;
+        let target_key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey).to_bytes();
+        let mut note = self
+            .validate_complete_snapshot_against_live()?
+            .notes
+            .into_iter()
+            .find_map(|(stored_issuer, note)| {
+                (NoteKey::from_keys(&stored_issuer, &note.recipient_pubkey).to_bytes()
+                    == target_key)
+                    .then_some(note)
+            })
+            .ok_or_else(|| NoteError::StorageError("Note not found".to_string()))?;
+        if note.verify_signature(issuer_pubkey).is_err() {
+            self.poison();
+            return Err(NoteError::InvalidSignature);
         }
 
-        // Check if there is an existing note with the same issuer-recipient pair
-        // and ensure the new timestamp is greater than the existing one (ever increasing)
-        if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
-            if note.timestamp <= existing_note.timestamp {
-                return Err(NoteError::PastTimestamp);
+        let committed_total = match self.get_total_debt(issuer_pubkey, recipient_pubkey) {
+            Ok(total) => total,
+            Err(error) => {
+                // A persisted note without the matching live AVL entry means the
+                // two authoritative views have diverged. Do not keep serving a
+                // root or accepting writes from this manager instance.
+                self.poison();
+                return Err(error);
             }
+        };
+        if committed_total != note.amount_collected {
+            self.poison();
+            return Err(NoteError::StorageError(
+                "Stored note does not match the live AVL commitment".to_string(),
+            ));
         }
 
-        // Prepare AVL tree key: hash(issuer_pubkey || receiver_pubkey)
-        let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Value is just the totalDebt (amount_collected) as 8-byte big-endian
-        // This matches the contract spec: hash(A||B) -> totalDebt
-        let value_bytes = note.amount_collected.to_be_bytes().to_vec();
-
-        // Update AVL tree state first to ensure consistency
-        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
-
-        // Only proceed with database storage if AVL tree update succeeded
-        match avl_result {
-            Ok(()) => {
-                // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
-                self.update_state();
-                Ok(())
-            }
-            Err(e) => Err(NoteError::StorageError(e.to_string())),
+        let new_amount_redeemed = note
+            .amount_redeemed
+            .checked_add(redeemed_amount)
+            .ok_or(NoteError::AmountOverflow)?;
+        if new_amount_redeemed > note.amount_collected {
+            return Err(NoteError::StorageError(
+                "Redeemed amount exceeds cumulative debt".to_string(),
+            ));
         }
+
+        note.amount_redeemed = new_amount_redeemed;
+        let storage_result =
+            self.storage
+                .store_note(issuer_pubkey, &note, self.current_state.avl_root_digest);
+        self.quarantine_on_storage_failure(storage_result)?;
+        Ok(note)
     }
 
     /// Get the total debt for a specific (issuer, receiver) pair from the AVL tree
@@ -901,6 +1741,7 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Result<u64, NoteError> {
+        self.ensure_healthy()?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
@@ -921,217 +1762,75 @@ impl TrackerStateManager {
         Ok(u64::from_be_bytes(bytes))
     }
 
-    /// Generate a tracker lookup proof for context var #8
-    /// This proof verifies that totalDebt exists in the tracker's AVL tree
-    pub fn generate_tracker_lookup_proof(
-        &mut self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<TrackerLookupProof, NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Get the total debt value
-        let total_debt = self.get_total_debt(issuer_pubkey, recipient_pubkey)?;
-
-        // Generate AVL proof for the lookup of this specific key
-        let (avl_proof, _returned_value) = self.avl_state.generate_lookup_proof(key_bytes.to_vec());
-
-        Ok(TrackerLookupProof {
-            key: key_bytes,
-            value: total_debt.to_be_bytes().to_vec(),
-            proof: avl_proof,
-        })
-    }
-
-    /// Get the already_redeemed amount for a specific (issuer, receiver) pair from the reserve AVL tree
-    /// Returns the cumulative redeemed amount stored in the reserve's AVL tree
-    pub fn get_already_redeemed(
-        &self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<u64, NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Lookup value in reserve AVL tree
-        let value_bytes = match self.reserve_avl_state.get(&key_bytes) {
-            Some(bytes) => bytes,
-            None => return Ok(0u64), // First redemption - no already_redeemed amount
-        };
-
-        // Value format: timestamp (8 bytes BE) || redeemedAmount (8 bytes BE) = 16 bytes total
-        if value_bytes.len() != 16 {
-            return Err(NoteError::StorageError(format!(
-                "Invalid reserve tree value format: expected 16 bytes (timestamp || redeemedAmount), got {}",
-                value_bytes.len()
-            )));
-        }
-
-        let mut redeemed_bytes = [0u8; 8];
-        redeemed_bytes.copy_from_slice(&value_bytes[8..16]);
-        Ok(u64::from_be_bytes(redeemed_bytes))
-    }
-
-    /// Generate a reserve lookup proof for context var #7
-    /// This proof verifies that already_redeemed exists in the reserve's AVL tree
-    /// Returns None proof for first redemption (no lookup proof needed)
-    pub fn generate_reserve_lookup_proof(
-        &mut self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<ReserveLookupProof, NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Get the already_redeemed value
-        let already_redeemed = self.get_already_redeemed(issuer_pubkey, recipient_pubkey)?;
-
-        // For first redemption, no lookup proof is needed (per spec)
-        let is_first_redemption = already_redeemed == 0;
-
-        // Value: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes
-        let mut value_bytes = Vec::with_capacity(16);
-        // For lookup, use the stored timestamp if available; otherwise 0 for first redemption.
-        // The persistent tree stores timestamp || already_redeemed, so retrieve the actual value.
-        let stored_value = self.reserve_avl_state.get(&key_bytes).unwrap_or_else(|| {
-            let mut empty_value = vec![0u8; 8]; // timestamp = 0
-            empty_value.extend_from_slice(&already_redeemed.to_be_bytes());
-            empty_value
-        });
-        if stored_value.len() == 16 {
-            value_bytes.extend_from_slice(&stored_value);
-        } else {
-            // Fallback for old-format entries or first redemption: 0 timestamp
-            value_bytes.extend_from_slice(&0u64.to_be_bytes());
-            value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
-        }
-
-        if is_first_redemption {
-            Ok(ReserveLookupProof {
-                key: key_bytes,
-                value: value_bytes,
-                proof: None, // Omitted for first redemption
-            })
-        } else {
-            // Generate AVL proof for the lookup of this specific key
-            let (avl_proof, _returned_value) = self
-                .reserve_avl_state
-                .generate_lookup_proof(key_bytes.to_vec());
-
-            Ok(ReserveLookupProof {
-                key: key_bytes,
-                value: value_bytes,
-                proof: Some(avl_proof),
-            })
-        }
-    }
-
-    /// Generate a reserve insert proof for context var #5 and return updated tree digest for R5.
-    ///
-    /// This operates on a temporary clone of the reserve AVL tree so that proof generation
-    /// is idempotent and does not mutate the persistent tracker state. The persistent tree
-    /// is only updated when `update_already_redeemed` is called after a successful on-chain
-    /// redemption.
-    ///
-    /// Value format: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes total
-    ///
-    /// # Returns
-    /// * `(insert_proof, updated_tree_digest)` - Proof bytes and serialized tree digest
-    pub fn generate_reserve_insert_proof(
-        &self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-        timestamp: u64,
-        new_already_redeemed: u64,
-    ) -> Result<(Vec<u8>, Vec<u8>), NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-        // Value: timestamp (8 bytes BE) || already_redeemed (8 bytes BE)
-        let mut value_bytes = Vec::with_capacity(16);
-        value_bytes.extend_from_slice(&timestamp.to_be_bytes());
-        value_bytes.extend_from_slice(&new_already_redeemed.to_be_bytes());
-
-        // Use the non-mutating proof generator so repeated calls return the same proof.
-        let (insert_proof, updated_digest) = self
-            .reserve_avl_state
-            .generate_insert_proof(key_bytes, value_bytes)
-            .map_err(|e| {
-                NoteError::StorageError(format!("Reserve AVL tree insert proof failed: {}", e))
-            })?;
-
-        Ok((insert_proof, updated_digest.to_vec()))
-    }
-
-    /// Current reserve AVL tree root digest (33 bytes). The on-chain reserve box being spent must
-    /// have exactly this R5 digest for the insert proof to verify on-chain.
-    pub fn reserve_state_digest(&self) -> Vec<u8> {
-        self.reserve_avl_state.root_digest().to_vec()
-    }
-
-    /// Update the already_redeemed amount in the reserve AVL tree.
-    /// Called after a successful redemption to prevent double-spending.
-    /// Value format: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes total
-    pub fn update_already_redeemed(
-        &mut self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-        timestamp: u64,
-        already_redeemed: u64,
-    ) -> Result<(), NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-        let mut value_bytes = Vec::with_capacity(16);
-        value_bytes.extend_from_slice(&timestamp.to_be_bytes());
-        value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
-
-        // Update reserve AVL tree
-        self.reserve_avl_state
-            .update(key_bytes, value_bytes)
-            .map_err(|e| {
-                NoteError::StorageError(format!("Reserve AVL tree update failed: {}", e))
-            })?;
-
-        Ok(())
-    }
-
-    /// Generate proof for a specific note
-    pub fn generate_proof(
-        &mut self,
-        issuer_pubkey: &PubKey,
-        recipient_pubkey: &PubKey,
-    ) -> Result<NoteProof, NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-
-        // Generate a lookup proof for the key in the AVL tree
-        // This captures the path to the key, which can be verified against the root digest
-        let (avl_proof, _value) = self.avl_state.generate_lookup_proof(key_bytes.to_vec());
-
-        // Lookup the note to include in proof
-        let note = self.lookup_note(issuer_pubkey, recipient_pubkey)?;
-
-        Ok(NoteProof {
-            note,
-            avl_proof,
-            operations: Vec::new(),
-        })
-    }
-
     /// Lookup a note by issuer and recipient
     pub fn lookup_note(
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
     ) -> Result<IouNote, NoteError> {
-        self.storage
-            .get_note(issuer_pubkey, recipient_pubkey)?
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_note(issuer_pubkey, recipient_pubkey))?
             .ok_or_else(|| NoteError::StorageError("Note not found".to_string()))
     }
 
     /// Get all notes for a specific issuer
     pub fn get_issuer_notes(&self, issuer_pubkey: &PubKey) -> Result<Vec<IouNote>, NoteError> {
-        self.storage.get_issuer_notes(issuer_pubkey)
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_issuer_notes(issuer_pubkey))
+    }
+
+    /// Calculate a conservative issuer-wide debt snapshot for an acceptance check.
+    ///
+    /// Every edge uses the greatest cumulative `totalDebt` known locally, pending,
+    /// or confirmed. The candidate replaces its recipient edge exactly once, but a
+    /// lower candidate cannot reduce an already observed cumulative value. When no
+    /// recipient is supplied, the candidate is treated as a new edge. Gross debt is
+    /// intentional here: local redemption state is not yet reconstructed on reorgs,
+    /// so subtracting it could make a collateral check fail open.
+    pub fn projected_issuer_gross_debt(
+        &self,
+        issuer_pubkey: &PubKey,
+        candidate_recipient: Option<&PubKey>,
+        candidate_total_debt: u64,
+    ) -> Result<u64, NoteError> {
+        self.ensure_healthy()?;
+        // The versioned primary snapshot is the sole liability authority. A
+        // malformed, missing or root-inconsistent snapshot fails this check.
+        let notes = self
+            .quarantine_on_storage_failure(self.storage.get_issuer_notes_strict(issuer_pubkey))?;
+        let mut total = 0u64;
+        let mut replaced_candidate_edge = false;
+
+        for note in notes {
+            let confirmation = self.get_confirmation(issuer_pubkey, &note.recipient_pubkey);
+            let mut edge_debt = note.amount_collected;
+
+            if let Some(confirmation) = confirmation {
+                if let Some(confirmed) = confirmation.confirmed_total_debt {
+                    edge_debt = edge_debt.max(confirmed);
+                }
+                if let Some(pending) = confirmation.pending_total_debt {
+                    edge_debt = edge_debt.max(pending);
+                }
+            }
+
+            if candidate_recipient == Some(&note.recipient_pubkey) {
+                edge_debt = edge_debt.max(candidate_total_debt);
+                replaced_candidate_edge = true;
+            }
+
+            total = total
+                .checked_add(edge_debt)
+                .ok_or(NoteError::AmountOverflow)?;
+        }
+
+        if candidate_recipient.is_none() || !replaced_candidate_edge {
+            total = total
+                .checked_add(candidate_total_debt)
+                .ok_or(NoteError::AmountOverflow)?;
+        }
+
+        Ok(total)
     }
 
     /// Get all notes for a specific recipient
@@ -1139,7 +1838,8 @@ impl TrackerStateManager {
         &self,
         recipient_pubkey: &PubKey,
     ) -> Result<Vec<IouNote>, NoteError> {
-        self.storage.get_recipient_notes(recipient_pubkey)
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_recipient_notes(recipient_pubkey))
     }
 
     /// Get all notes for a specific recipient with issuer information
@@ -1147,18 +1847,23 @@ impl TrackerStateManager {
         &self,
         recipient_pubkey: &PubKey,
     ) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
-        self.storage
-            .get_recipient_notes_with_issuer(recipient_pubkey)
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(
+            self.storage
+                .get_recipient_notes_with_issuer(recipient_pubkey),
+        )
     }
 
     /// Get all notes in the tracker
     pub fn get_all_notes(&self) -> Result<Vec<IouNote>, NoteError> {
-        self.storage.get_all_notes()
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_all_notes())
     }
 
     /// Get all notes in the tracker with issuer information
     pub fn get_all_notes_with_issuer(&self) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
-        self.storage.get_all_notes_with_issuer()
+        self.ensure_healthy()?;
+        self.quarantine_on_storage_failure(self.storage.get_all_notes_with_issuer())
     }
 
     /// Update the current state with latest AVL tree root
@@ -1171,8 +1876,25 @@ impl TrackerStateManager {
             .as_millis() as u64;
     }
 
-    /// Get the current tracker state
+    /// Return a fully validated snapshot of the current tracker state.
+    ///
+    /// Root exposure is a publication boundary: the checksummed BNS2 snapshot,
+    /// replayed physical AVL state, and cached digest must still agree at the
+    /// instant this value is produced.
+    pub fn validated_state(&self) -> Result<TrackerState, NoteError> {
+        self.ensure_healthy()?;
+        self.validate_complete_snapshot_against_live()?;
+        Ok(self.current_state.clone())
+    }
+
+    /// Compatibility accessor for local callers. It performs the same complete
+    /// validation but preserves the historical reference-returning API. Server
+    /// publication surfaces use `validated_state` through the sole actor so a
+    /// quarantine becomes a typed unavailable response rather than a panic.
     pub fn get_state(&self) -> &TrackerState {
+        if let Err(error) = self.validated_state() {
+            panic!("Cannot expose invalid tracker state: {error:?}");
+        }
         &self.current_state
     }
 }
@@ -1184,6 +1906,7 @@ impl TrackerStateManager {
         issuer_pubkey_hex: &str,
         reserve_tracker: &ReserveTracker,
     ) -> Result<String, NoteError> {
+        self.ensure_healthy()?;
         // Get all reserves from the reserve tracker
         let all_reserves = reserve_tracker.get_all_reserves();
 
@@ -1373,9 +2096,6 @@ pub use ergo_scanner::{
     create_default_scanner, start_scanner, ErgoBox, NodeConfig, ReserveEvent, ScanType,
     ScannerError, ServerState,
 };
-
-// Re-export redemption types
-pub use redemption::{RedemptionData, RedemptionError, RedemptionManager, RedemptionRequest};
 
 // Re-export reqwest for use in dependent crates
 pub use reqwest;

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "BetterMoneyLabs/chaincash",
+    "commit": "04031626f09c6590a20ad20d5583c6eccc14412d",
+    "scala_version": "2.12.17",
+    "plasma_toolkit": "1.1.0",
+    "ergo_appkit": "6.0.0",
+    "reference_test": "src/test/scala/chaincash/BasisV2Spec.scala"
+  },
+  "shape": {
+    "key_length": 32,
+    "insert_allowed": true,
+    "update_allowed": true,
+    "remove_allowed": false
+  },
+  "tracker_32_8": {
+    "entries": [
+      { "key_fill": 1, "value_fill": 2 },
+      { "key_fill": 3, "value_fill": 4 }
+    ],
+    "lookup_key_fill": 1,
+    "update_value_fill": 5,
+    "empty_digest_hex": "aebde47e15b6bfb577265ea5a819f5779328085286d86e7e1089636641dae9b800",
+    "starting_digest_hex": "591e0f5f7172950ab9be5730ba39a48787a5729606924a215afda454b685a80902",
+    "lookup_proof_hex": "03ab4abecbeaed2ac82898c746116937f33e7c65af8b4f0df1e3782d663f67f2480201010101010101010101010101010101010101010101010101010101010101010303030303030303030303030303030303030303030303030303030303030303020202020202020203a6f2d1ca904906805d75f80c96a4bc9709814266545b258c3d48f66b9dedb08900010402",
+    "lookup_proof_sha256": "5b3e3451d8137978f6b86ea2021bdc0d8e31a80ecbbe8ed48f9d67e9c1f3ca54",
+    "update_proof_hex": "03ab4abecbeaed2ac82898c746116937f33e7c65af8b4f0df1e3782d663f67f2480201010101010101010101010101010101010101010101010101010101010101010303030303030303030303030303030303030303030303030303030303030303020202020202020203a6f2d1ca904906805d75f80c96a4bc9709814266545b258c3d48f66b9dedb08900010402",
+    "update_proof_sha256": "5b3e3451d8137978f6b86ea2021bdc0d8e31a80ecbbe8ed48f9d67e9c1f3ca54",
+    "output_digest_hex": "0e34a6b2c50f8da80ed5f253bece227e943ee21cd8e1533099e013bb2f94897202"
+  },
+  "reserve_32_24": {
+    "existing_key_fill": 1,
+    "existing_value_fill": 2,
+    "new_key_fill": 3,
+    "new_value_fill": 4,
+    "empty_digest_hex": "b4a91cda32c6691b89913b30400b586ef792743e4c3e8ea938ede0de5d679dfe00",
+    "starting_digest_hex": "1ec099b5d613454bcc4d65d6d4c2c3d0f649e180a13d184e745a3ffb2a1d634e01",
+    "absence_proof_hex": "03f4749808979636f55fbea47d3963e6959c6d41029fcf90698c821b05968ff2da020101010101010101010101010101010101010101010101010101010101010101ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff020202020202020202020202020202020202020202020202000400",
+    "absence_proof_sha256": "80f33ed16eee7c83ba7d316d07a5bb988a2e5c8f83a50487e4698829dfe02d76",
+    "insert_proof_hex": "03f4749808979636f55fbea47d3963e6959c6d41029fcf90698c821b05968ff2da020101010101010101010101010101010101010101010101010101010101010101ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff020202020202020202020202020202020202020202020202000400",
+    "insert_proof_sha256": "80f33ed16eee7c83ba7d316d07a5bb988a2e5c8f83a50487e4698829dfe02d76",
+    "output_digest_hex": "97bd1c2dde43af94a8073e25ec7d0a9c65236d384bcc71088489ead69dc1cd6502"
+  }
+}

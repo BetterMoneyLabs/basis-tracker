@@ -1,5 +1,8 @@
 # CLI Tools Analysis Report
 
+> **Status: superseded v1 inventory.** Transaction-generation and local-sign
+> surfaces described below have been removed from the compiled CLI.
+
 ## Executive Summary
 
 This repository contains **4 compiled CLI binaries** and **6 shell scripts** that provide command-line interfaces for the Basis Tracker system. The primary CLI tool is `basis_cli` (Rust-based), the secondary is `basis_server` (Rust-based daemon), the third is `basis_app` (TUI wallet, also Rust-based), and the fourth is `basis_mcp` (MCP server for AI agents). Supporting shell scripts handle server lifecycle management, database cleanup, deployment, and TUI wallet launch. Integration testing is covered by Rust test suite (`cargo test`).
@@ -149,7 +152,7 @@ An MCP (Model Context Protocol) server over stdio that exposes the Basis wallet 
 
 #### Tools
 - **Read-only** (`readOnlyHint`): `server_status`, `account_list`, `account_current`, `note_list`, `note_get`, `reserve_status`, `policy_get`
-- **Write**: `account_create`, `account_switch`, `account_import`, `note_create`, `note_redeem` (local signing), `reserve_create`, `policy_set` (`destructiveHint` where applicable)
+- **Write**: `account_create`, `account_switch`, `account_import`, `note_create`, `reserve_create`, `policy_set` (`destructiveHint` where applicable). `note_redeem` is a retired compatibility tombstone.
 
 Private-key export is deliberately not exposed through any tool; signing happens in-process. See `docs/AGENT_INTERFACE.md` for the full tool reference and client configuration snippets.
 

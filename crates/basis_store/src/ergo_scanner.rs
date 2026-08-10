@@ -2,17 +2,214 @@
 //! This module provides blockchain integration using /blockchain endpoints (no node scans).
 
 use std::{
+    collections::HashSet,
     path::Path,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use reqwest::Client;
+use reqwest::{RequestBuilder, StatusCode};
+use serde::de::DeserializeOwned;
+
+pub(crate) const SCAN_PAGE_SIZE: usize = 100;
+pub(crate) const MAX_SCAN_PAGES: usize = 1_024;
+pub(crate) const MAX_SCAN_BOXES: usize = 100_000;
+#[cfg(test)]
+pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = NODE_HTTP_MAX_BODY_BYTES;
+pub(crate) const MAX_CONCURRENT_SCANNER_REQUESTS: usize = 4;
+const MAX_ERROR_BODY_CHARS: usize = 1_024;
+
+/// Total deadline applied to every outbound Ergo node request in this process.
+pub const NODE_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum response body accepted from the Ergo node.
+pub const NODE_HTTP_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum number of concurrent Ergo node requests across scanners and server.
+pub const NODE_HTTP_MAX_IN_FLIGHT: usize = 16;
+
+/// Failure returned by the process-wide bounded Ergo node HTTP client.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BoundedHttpError {
+    #[error("failed to initialize bounded HTTP client: {0}")]
+    ClientInitialization(String),
+    #[error("outbound node request limit reached")]
+    Overloaded,
+    #[error("outbound node request timed out")]
+    Timeout,
+    #[error("outbound node request failed: {0}")]
+    Request(String),
+    #[error("outbound node response body exceeds {limit} bytes")]
+    BodyTooLarge { limit: usize },
+    #[error("failed to read outbound node response: {0}")]
+    Body(String),
+    #[error("outbound node response is not valid JSON: {0}")]
+    Json(String),
+}
+
+fn map_reqwest_error(error: reqwest::Error) -> BoundedHttpError {
+    if error.is_timeout() {
+        BoundedHttpError::Timeout
+    } else {
+        BoundedHttpError::Request(error.to_string())
+    }
+}
+
+/// Fully buffered response whose body has already passed the configured cap.
+#[derive(Debug)]
+pub struct BoundedResponse {
+    pub status: StatusCode,
+    body: Vec<u8>,
+}
+
+impl BoundedResponse {
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub fn json<T: DeserializeOwned>(&self) -> Result<T, BoundedHttpError> {
+        serde_json::from_slice(&self.body)
+            .map_err(|error| BoundedHttpError::Json(error.to_string()))
+    }
+
+    pub fn text_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.body)
+    }
+
+    /// Return the already-buffered, size-checked response body.
+    pub fn bytes(&self) -> &[u8] {
+        &self.body
+    }
+
+    pub(crate) fn into_parts(self) -> (StatusCode, Vec<u8>) {
+        (self.status, self.body)
+    }
+}
+
+/// HTTP executor that applies one admission budget, total deadline, and body cap.
+#[derive(Clone)]
+pub struct BoundedHttpClient {
+    client: reqwest::Client,
+    permits: Arc<Semaphore>,
+    timeout: Duration,
+    max_body_bytes: usize,
+}
+
+impl BoundedHttpClient {
+    pub fn new(
+        timeout: Duration,
+        max_body_bytes: usize,
+        max_in_flight: usize,
+    ) -> Result<Self, BoundedHttpError> {
+        if timeout.is_zero() || max_body_bytes == 0 || max_in_flight == 0 {
+            return Err(BoundedHttpError::ClientInitialization(
+                "timeout, body cap, and concurrency limit must be non-zero".to_string(),
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(timeout.min(Duration::from_secs(3)))
+            .timeout(timeout)
+            .pool_max_idle_per_host(max_in_flight)
+            .build()
+            .map_err(|error| BoundedHttpError::ClientInitialization(error.to_string()))?;
+        Ok(Self {
+            client,
+            permits: Arc::new(Semaphore::new(max_in_flight)),
+            timeout,
+            max_body_bytes,
+        })
+    }
+
+    pub fn get(&self, url: &str) -> RequestBuilder {
+        self.request(reqwest::Method::GET, url)
+    }
+
+    pub fn post(&self, url: &str) -> RequestBuilder {
+        self.request(reqwest::Method::POST, url)
+    }
+
+    pub fn request(&self, method: reqwest::Method, url: &str) -> RequestBuilder {
+        self.client.request(method, url)
+    }
+
+    /// Execute a request through this client's shared policy.
+    pub async fn execute(
+        &self,
+        request: RequestBuilder,
+    ) -> Result<BoundedResponse, BoundedHttpError> {
+        let _permit = self
+            .permits
+            .try_acquire()
+            .map_err(|_| BoundedHttpError::Overloaded)?;
+        let max_body_bytes = self.max_body_bytes;
+
+        tokio::time::timeout(self.timeout, async move {
+            let mut response = request.send().await.map_err(map_reqwest_error)?;
+            if response
+                .content_length()
+                .is_some_and(|length| length > max_body_bytes as u64)
+            {
+                return Err(BoundedHttpError::BodyTooLarge {
+                    limit: max_body_bytes,
+                });
+            }
+
+            let status = response.status();
+            let mut body = Vec::with_capacity(
+                response
+                    .content_length()
+                    .unwrap_or(0)
+                    .min(max_body_bytes as u64) as usize,
+            );
+            while let Some(chunk) = response.chunk().await.map_err(|error| {
+                if error.is_timeout() {
+                    BoundedHttpError::Timeout
+                } else {
+                    BoundedHttpError::Body(error.to_string())
+                }
+            })? {
+                let new_len = body
+                    .len()
+                    .checked_add(chunk.len())
+                    .filter(|length| *length <= max_body_bytes)
+                    .ok_or(BoundedHttpError::BodyTooLarge {
+                        limit: max_body_bytes,
+                    })?;
+                body.reserve(new_len.saturating_sub(body.capacity()));
+                body.extend_from_slice(&chunk);
+            }
+            Ok(BoundedResponse { status, body })
+        })
+        .await
+        .map_err(|_| BoundedHttpError::Timeout)?
+    }
+}
+
+static NODE_HTTP_CLIENT: LazyLock<Result<BoundedHttpClient, BoundedHttpError>> =
+    LazyLock::new(|| {
+        BoundedHttpClient::new(
+            NODE_HTTP_TIMEOUT,
+            NODE_HTTP_MAX_BODY_BYTES,
+            NODE_HTTP_MAX_IN_FLIGHT,
+        )
+    });
+
+/// Return the one process-wide client used by server and scanner node calls.
+pub fn node_http() -> Result<&'static BoundedHttpClient, BoundedHttpError> {
+    NODE_HTTP_CLIENT
+        .as_ref()
+        .map_err(|error| BoundedHttpError::ClientInitialization(error.to_string()))
+}
+
+pub(crate) fn summarize_error_body(body: &[u8]) -> String {
+    String::from_utf8_lossy(body)
+        .chars()
+        .take(MAX_ERROR_BODY_CHARS)
+        .collect()
+}
 
 /// Response from `POST /blockchain/box/unspent/byAddress` is a JSON array of IndexedErgoBox.
 pub(crate) type ByAddressResponse = Vec<IndexedErgoBox>;
@@ -21,7 +218,7 @@ pub(crate) type ByAddressResponse = Vec<IndexedErgoBox>;
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct IndexedErgoBox {
     #[serde(rename = "boxId")]
-    box_id: String,
+    pub(crate) box_id: String,
     value: u64,
     #[serde(rename = "ergoTree")]
     ergo_tree: String,
@@ -43,6 +240,14 @@ pub(crate) struct IndexedBoxAsset {
     #[serde(rename = "tokenId")]
     token_id: String,
     amount: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub(crate) struct IndexedHeightResponse {
+    #[serde(rename = "indexedHeight")]
+    pub(crate) indexed_height: u64,
+    #[serde(rename = "fullHeight")]
+    pub(crate) full_height: u64,
 }
 
 impl From<IndexedErgoBox> for ScanBox {
@@ -91,6 +296,21 @@ pub enum ScannerError {
     HttpError(String),
     #[error("JSON parse error: {0}")]
     JsonError(String),
+    #[error("Scanner response exceeds {max_bytes} bytes")]
+    ResponseTooLarge { max_bytes: usize },
+    #[error("Scanner request concurrency gate is closed")]
+    RequestGateClosed,
+    #[error("Scanner request capacity is exhausted")]
+    RequestCapacityExceeded,
+    #[error("Indexed node is behind: indexed height {indexed_height}, full height {full_height}")]
+    IndexLag {
+        indexed_height: u64,
+        full_height: u64,
+    },
+    #[error("Incoherent scanner snapshot: {0}")]
+    IncoherentSnapshot(String),
+    #[error("Scanner resource limit exceeded: {0}")]
+    ScanLimitExceeded(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +327,7 @@ impl ScanType {
 }
 
 /// Configuration for scanner
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// Starting block height for scanning
     pub start_height: Option<u64>,
@@ -119,6 +339,18 @@ pub struct NodeConfig {
     pub scan_name: Option<String>,
     /// API key for Ergo node authentication
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("start_height", &self.start_height)
+            .field("reserve_contract_p2s", &self.reserve_contract_p2s)
+            .field("node_url", &self.node_url)
+            .field("scan_name", &self.scan_name)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Inner state for scanner that requires synchronization
@@ -135,42 +367,85 @@ pub struct ServerStateInner {
 pub struct ServerState {
     pub config: NodeConfig,
     pub inner: Arc<Mutex<ServerStateInner>>,
-    pub client: Client,
+    pub(crate) request_permits: Arc<Semaphore>,
     pub reserve_tracker: ReserveTracker,
     pub metadata_storage: ScannerMetadataStorage,
     pub reserve_storage: ReserveStorage,
 }
 
 impl ServerState {
+    async fn request_bytes(
+        &self,
+        request: reqwest::RequestBuilder,
+        context: &str,
+    ) -> Result<(StatusCode, Vec<u8>), ScannerError> {
+        let _permit = self
+            .request_permits
+            .try_acquire()
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::Closed => ScannerError::RequestGateClosed,
+                tokio::sync::TryAcquireError::NoPermits => ScannerError::RequestCapacityExceeded,
+            })?;
+        let response = node_http()
+            .map_err(|error| ScannerError::HttpError(format!("{}: {}", context, error)))?
+            .execute(request)
+            .await
+            .map_err(|error| match error {
+                BoundedHttpError::BodyTooLarge { limit } => {
+                    ScannerError::ResponseTooLarge { max_bytes: limit }
+                }
+                BoundedHttpError::Overloaded => ScannerError::RequestCapacityExceeded,
+                other => ScannerError::HttpError(format!("{}: {}", context, other)),
+            })?;
+        Ok(response.into_parts())
+    }
+
     /// Create HTTP request builder with API key header if configured
-    fn request_builder(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+    fn request_builder(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+    ) -> Result<reqwest::RequestBuilder, ScannerError> {
         debug!("Request method: {}, URL: {}", method, url);
 
-        let mut request = self.client.request(method, url);
+        let client = node_http().map_err(|error| ScannerError::HttpError(error.to_string()))?;
+        let mut request = client.request(method, url);
 
         // Add API key header if configured
         if let Some(api_key) = &self.config.api_key {
-            debug!("Using API key '{}' for request to: {}", api_key, url);
-            info!("Adding HTTP header: api_key: {}", api_key);
+            debug!("Using configured API key for request to: {}", url);
             request = request.header("api_key", api_key);
         } else {
             debug!("No API key configured for request to: {}", url);
             info!("No API key header added to HTTP request");
         }
 
-        request
+        Ok(request)
     }
 
     /// Create a server state that uses real Ergo scanner
     pub fn new(config: NodeConfig, data_dir: impl AsRef<Path>) -> Result<Self, ScannerError> {
+        let configured = config.reserve_contract_p2s.as_deref().ok_or_else(|| {
+            ScannerError::Generic(
+                "reserve scanner contract generation is required before storage can be opened"
+                    .to_string(),
+            )
+        })?;
+        let historical = crate::contract_compiler::get_basis_reserve_contract_p2s()
+            .map_err(|error| ScannerError::Generic(error.to_string()))?;
+        if configured != historical {
+            return Err(ScannerError::Generic(
+                "reserve scanner generation is unsupported; v2 requires the BNS2/BRS2 scanner and unknown identities are rejected"
+                    .to_string(),
+            ));
+        }
         let start_height = config.start_height.unwrap_or(0);
-        let client = Client::new();
         let data_dir = data_dir.as_ref();
 
         // Log which Ergo node is being used (INFO level)
         info!("Initializing Ergo scanner with node: {}", config.node_url);
-        if let Some(api_key) = &config.api_key {
-            info!("Using API key: {}", api_key);
+        if config.api_key.is_some() {
+            info!("Ergo node API key is configured");
         } else {
             warn!("No API key configured for Ergo node");
         }
@@ -233,7 +508,7 @@ impl ServerState {
         Ok(Self {
             config,
             inner,
-            client,
+            request_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_SCANNER_REQUESTS)),
             reserve_tracker,
             metadata_storage,
             reserve_storage,
@@ -247,22 +522,21 @@ impl ServerState {
         let url = format!("{}/info", self.config.node_url);
         info!("Fetching current blockchain height from: {}", url);
 
-        let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
-            .await
-            .map_err(|e| ScannerError::HttpError(format!("Failed to connect to node: {}", e)))?;
+        let (status, body) = self
+            .request_bytes(
+                self.request_builder(reqwest::Method::GET, &url)?,
+                "Failed to fetch node height",
+            )
+            .await?;
 
-        if !response.status().is_success() {
+        if !status.is_success() {
             return Err(ScannerError::NodeError(format!(
                 "Node returned status: {}",
-                response.status()
+                status
             )));
         }
 
-        let info: serde_json::Value = response
-            .json()
-            .await
+        let info: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
 
         let height = info["fullHeight"].as_u64().ok_or_else(|| {
@@ -312,22 +586,21 @@ impl ServerState {
         // Fetch from node
         let url = format!("{}/info", self.config.node_url);
 
-        let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
-            .await
-            .map_err(|e| ScannerError::HttpError(format!("Failed to connect to node: {}", e)))?;
+        let (status, body) = self
+            .request_bytes(
+                self.request_builder(reqwest::Method::GET, &url)?,
+                "Failed to fetch node height",
+            )
+            .await?;
 
-        if !response.status().is_success() {
+        if !status.is_success() {
             return Err(ScannerError::NodeError(format!(
                 "Node returned status: {}",
-                response.status()
+                status
             )));
         }
 
-        let info: serde_json::Value = response
-            .json()
-            .await
+        let info: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
 
         let height = info["fullHeight"].as_u64().ok_or_else(|| {
@@ -347,45 +620,145 @@ impl ServerState {
         Ok(height)
     }
 
-    /// Get unspent reserve boxes via `POST /blockchain/box/unspent/byAddress`.
+    async fn fetch_indexed_height(&self) -> Result<IndexedHeightResponse, ScannerError> {
+        let url = format!("{}/blockchain/indexedHeight", self.config.node_url);
+        let (status, body) = self
+            .request_bytes(
+                self.request_builder(reqwest::Method::GET, &url)?,
+                "Failed to fetch indexed height",
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(ScannerError::NodeError(format!(
+                "Failed to get indexed height with status {}: {}",
+                status,
+                summarize_error_body(&body)
+            )));
+        }
+        serde_json::from_slice(&body).map_err(|e| {
+            ScannerError::JsonError(format!("Failed to parse indexed height response: {}", e))
+        })
+    }
+
+    fn require_caught_up(height: IndexedHeightResponse) -> Result<(), ScannerError> {
+        if height.indexed_height < height.full_height {
+            return Err(ScannerError::IndexLag {
+                indexed_height: height.indexed_height,
+                full_height: height.full_height,
+            });
+        }
+        Ok(())
+    }
+
+    async fn fetch_unspent_reserve_page(
+        &self,
+        reserve_contract_p2s: &str,
+        offset: usize,
+    ) -> Result<Vec<IndexedErgoBox>, ScannerError> {
+        let url = format!("{}/blockchain/box/unspent/byAddress", self.config.node_url);
+        let request = self
+            .request_builder(reqwest::Method::POST, &url)?
+            .query(&[
+                ("offset", offset.to_string()),
+                ("limit", SCAN_PAGE_SIZE.to_string()),
+                ("sortDirection", "asc".to_string()),
+                ("includeUnconfirmed", "false".to_string()),
+                ("excludeMempoolSpent", "false".to_string()),
+            ])
+            .json(reserve_contract_p2s);
+        let (status, body) = self
+            .request_bytes(request, "Failed to fetch reserve boxes")
+            .await?;
+
+        // The pinned v6.0.3 route returns a JSON sequence. Only an HTTP 200
+        // carrying that sequence can prove page contents; in particular, a
+        // 404 is an ambiguous source failure rather than an exhausted page.
+        if status != StatusCode::OK {
+            return Err(ScannerError::NodeError(format!(
+                "Failed to get reserve boxes with status {}: {}",
+                status,
+                summarize_error_body(&body)
+            )));
+        }
+        serde_json::from_slice(&body).map_err(|e| {
+            ScannerError::JsonError(format!("Failed to parse reserve boxes response: {}", e))
+        })
+    }
+
+    /// Get a complete, height-coherent set of unspent reserve boxes via
+    /// `POST /blockchain/box/unspent/byAddress`.
     pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ScanBox>, ScannerError> {
         let reserve_contract_p2s = self.config.reserve_contract_p2s.as_ref().ok_or_else(|| {
             ScannerError::Generic("Reserve contract P2S not configured".to_string())
         })?;
 
-        let url = format!("{}/blockchain/box/unspent/byAddress", self.config.node_url);
-        info!("Fetching unspent reserve boxes from: {}", url);
+        let before = self.fetch_indexed_height().await?;
+        Self::require_caught_up(before)?;
 
-        let response = self
-            .request_builder(reqwest::Method::POST, &url)
-            .json(reserve_contract_p2s)
-            .send()
-            .await
-            .map_err(|e| {
-                ScannerError::HttpError(format!("Failed to fetch reserve boxes: {}", e))
+        let mut parsed: ByAddressResponse = Vec::new();
+        let mut seen_box_ids = HashSet::new();
+        let mut exhausted = false;
+
+        for page_index in 0..MAX_SCAN_PAGES {
+            let offset = page_index.checked_mul(SCAN_PAGE_SIZE).ok_or_else(|| {
+                ScannerError::ScanLimitExceeded("page offset overflow".to_string())
             })?;
+            let page = self
+                .fetch_unspent_reserve_page(reserve_contract_p2s, offset)
+                .await?;
+            if page.len() > SCAN_PAGE_SIZE {
+                return Err(ScannerError::IncoherentSnapshot(format!(
+                    "node returned {} boxes for requested page size {} at offset {}",
+                    page.len(),
+                    SCAN_PAGE_SIZE,
+                    offset
+                )));
+            }
 
-        let status = response.status();
-        if !status.is_success() {
-            let response_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unable to read response".to_string());
-            error!(
-                "Failed to get reserve boxes with status {}: {}",
-                status, response_text
-            );
-            return Err(ScannerError::NodeError(format!(
-                "Failed to get reserve boxes with status: {}",
-                status
+            let page_len = page.len();
+            for box_ in page {
+                if !seen_box_ids.insert(box_.box_id.clone()) {
+                    return Err(ScannerError::IncoherentSnapshot(format!(
+                        "duplicate box id {} across paginated response",
+                        box_.box_id
+                    )));
+                }
+                if parsed.len() >= MAX_SCAN_BOXES {
+                    return Err(ScannerError::ScanLimitExceeded(format!(
+                        "more than {} reserve boxes",
+                        MAX_SCAN_BOXES
+                    )));
+                }
+                parsed.push(box_);
+            }
+
+            if page_len < SCAN_PAGE_SIZE {
+                exhausted = true;
+                break;
+            }
+        }
+
+        if !exhausted {
+            return Err(ScannerError::ScanLimitExceeded(format!(
+                "scan did not exhaust within {} pages",
+                MAX_SCAN_PAGES
             )));
         }
 
-        let parsed: ByAddressResponse = response.json().await.map_err(|e| {
-            ScannerError::JsonError(format!("Failed to parse reserve boxes response: {}", e))
-        })?;
+        let after = self.fetch_indexed_height().await?;
+        Self::require_caught_up(after)?;
+        if before != after {
+            return Err(ScannerError::IncoherentSnapshot(format!(
+                "indexed/full height changed from {}/{} to {}/{} during pagination",
+                before.indexed_height, before.full_height, after.indexed_height, after.full_height
+            )));
+        }
 
-        info!("Found {} reserve boxes", parsed.len());
+        info!(
+            "Found {} reserve boxes in a complete snapshot at indexed height {}",
+            parsed.len(),
+            after.indexed_height
+        );
         Ok(parsed.into_iter().map(Into::into).collect())
     }
 
@@ -435,13 +808,28 @@ impl ServerState {
     }
 
     /// Parse reserve box into ExtendedReserveInfo
-    pub fn parse_reserve_box(
+    pub(crate) fn parse_reserve_box(
         &self,
         scan_box: &ScanBox,
     ) -> Result<ExtendedReserveInfo, ScannerError> {
         let box_id = scan_box.box_id.clone();
         let value = scan_box.value;
         let creation_height = scan_box.creation_height;
+
+        let expected_tree = crate::contract_compiler::get_basis_reserve_ergo_tree_hex()
+            .map_err(|error| ScannerError::Generic(error.to_string()))?;
+        let actual_tree = hex::decode(&scan_box.ergo_tree).map_err(|_| {
+            ScannerError::InvalidReserveBox(format!("Invalid ErgoTree encoding in box {}", box_id))
+        })?;
+        let expected_tree = hex::decode(expected_tree).map_err(|_| {
+            ScannerError::Generic("embedded historical ErgoTree is invalid".to_string())
+        })?;
+        if actual_tree != expected_tree {
+            return Err(ScannerError::InvalidReserveBox(format!(
+                "Reserve contract generation mismatch in box {}",
+                box_id
+            )));
+        }
 
         // Extract owner public key from R4 register
         let owner_pubkey_raw = scan_box
@@ -525,51 +913,29 @@ impl ServerState {
         let scan_boxes = self.get_scan_boxes().await?;
         info!("Retrieved {} scan boxes to process", scan_boxes.len());
 
-        let mut current_box_ids = Vec::new();
-
+        // Validate the entire coherent snapshot before the first mutation. A
+        // malformed candidate must not turn an incomplete observation into a
+        // destructive reconciliation.
+        let mut parsed_reserves = Vec::with_capacity(scan_boxes.len());
         for scan_box in &scan_boxes {
             debug!(
                 "Processing scan box: ID={}, value={}, registers={:?}",
                 scan_box.box_id, scan_box.value, scan_box.additional_registers
             );
-
-            match self.parse_reserve_box(scan_box) {
-                Ok(reserve_info) => {
-                    debug!(
-                        "Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
-                        reserve_info.box_id,
-                        reserve_info.owner_pubkey,
-                        reserve_info.base_info.collateral_amount
-                    );
-                    current_box_ids.push(reserve_info.box_id.clone());
-
-                    // Update in-memory tracker
-                    if let Err(e) = self.reserve_tracker.update_reserve(reserve_info.clone()) {
-                        warn!("Failed to update reserve {}: {}", scan_box.box_id, e);
-                    } else {
-                        // Persist to database
-                        if let Err(e) = self.reserve_storage.store_reserve(&reserve_info) {
-                            warn!(
-                                "Failed to persist reserve {} to database: {:?}",
-                                scan_box.box_id, e
-                            );
-                        } else {
-                            info!("Updated and persisted reserve: {}", scan_box.box_id);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to parse reserve box {}: {} - registers: {:?}",
-                        scan_box.box_id, e, scan_box.additional_registers
-                    );
-                }
-            }
+            let reserve_info = self.parse_reserve_box(scan_box)?;
+            debug!(
+                "Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
+                reserve_info.box_id,
+                reserve_info.owner_pubkey,
+                reserve_info.base_info.collateral_amount
+            );
+            parsed_reserves.push(reserve_info);
         }
 
-        // Remove reserves that are no longer in the scan
-        // NOTE: Disabled for testing to prevent manually-inserted reserves from being deleted
-        // when they don't exist on the local test node.
+        let current_box_ids: HashSet<String> = parsed_reserves
+            .iter()
+            .map(|reserve| reserve.box_id.clone())
+            .collect();
         let all_reserves = self.reserve_tracker.get_all_reserves();
         info!(
             "Current tracker has {} reserves, {} are still active in scan",
@@ -577,33 +943,54 @@ impl ServerState {
             current_box_ids.len()
         );
 
-        // Only remove reserves if we actually found VALID boxes in the scan.
-        // If no valid reserves were parsed (e.g., all failed validation), don't remove manually-inserted reserves.
-        if !current_box_ids.is_empty() {
-            for reserve in all_reserves {
-                if !current_box_ids.contains(&reserve.box_id) {
-                    info!(
-                        "Removing spent reserve: {} (not found in current scan)",
-                        reserve.box_id
-                    );
-                    // Remove from in-memory tracker
-                    if let Err(e) = self.reserve_tracker.remove_reserve(&reserve.box_id) {
-                        warn!("Failed to remove reserve {}: {}", reserve.box_id, e);
-                    } else {
-                        // Remove from database
-                        if let Err(e) = self.reserve_storage.remove_reserve(&reserve.box_id) {
-                            warn!(
-                                "Failed to remove reserve {} from database: {:?}",
-                                reserve.box_id, e
-                            );
-                        } else {
-                            info!("Removed spent reserve: {}", reserve.box_id);
-                        }
-                    }
-                }
+        // Apply upserts only after collection and validation completed. Persist
+        // before publishing the value to the in-memory reader.
+        for reserve_info in &parsed_reserves {
+            self.reserve_storage
+                .store_reserve(reserve_info)
+                .map_err(|e| {
+                    ScannerError::StoreError(format!(
+                        "Failed to persist reserve {}: {:?}",
+                        reserve_info.box_id, e
+                    ))
+                })?;
+            self.reserve_tracker
+                .update_reserve(reserve_info.clone())
+                .map_err(|e| {
+                    ScannerError::StoreError(format!(
+                        "Failed to update reserve {} in memory: {}",
+                        reserve_info.box_id, e
+                    ))
+                })?;
+        }
+
+        // A successfully exhausted empty set is meaningful and removes every
+        // stale reserve. Fetch, height, duplicate, bound, and parse failures
+        // returned above before this destructive phase.
+        for reserve in all_reserves {
+            if current_box_ids.contains(&reserve.box_id) {
+                continue;
             }
-        } else {
-            info!("Scan returned 0 boxes, skipping reserve removal to preserve manually-inserted reserves");
+            info!(
+                "Removing spent reserve: {} (not found in complete snapshot)",
+                reserve.box_id
+            );
+            self.reserve_storage
+                .remove_reserve(&reserve.box_id)
+                .map_err(|e| {
+                    ScannerError::StoreError(format!(
+                        "Failed to remove reserve {} from database: {:?}",
+                        reserve.box_id, e
+                    ))
+                })?;
+            self.reserve_tracker
+                .remove_reserve(&reserve.box_id)
+                .map_err(|e| {
+                    ScannerError::StoreError(format!(
+                        "Failed to remove reserve {} from memory: {}",
+                        reserve.box_id, e
+                    ))
+                })?;
         }
 
         debug!(
@@ -831,6 +1218,68 @@ fn decode_vlq_long(bytes: &[u8]) -> Result<i64, String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn oversized_declared_response_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                NODE_HTTP_MAX_BODY_BYTES + 1
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn reserve_scanner_rejects_oversized_declared_node_body() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = NodeConfig {
+            node_url: oversized_declared_response_server().await,
+            ..historical_config()
+        };
+        let state = ServerState::new(config, temp_dir.path()).unwrap();
+
+        let error = state.fetch_current_height().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScannerError::ResponseTooLarge {
+                max_bytes: NODE_HTTP_MAX_BODY_BYTES
+            }
+        ));
+    }
+
+    fn historical_tree() -> String {
+        crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap()
+    }
+
+    fn historical_config() -> NodeConfig {
+        NodeConfig {
+            reserve_contract_p2s: Some(
+                crate::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
+            ..NodeConfig::default()
+        }
+    }
+
+    #[test]
+    fn node_config_debug_redacts_api_key() {
+        let sentinel = "sentinel-node-api-key-do-not-log";
+        let config = NodeConfig {
+            api_key: Some(sentinel.to_string()),
+            ..NodeConfig::default()
+        };
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains(sentinel));
+        assert!(rendered.contains("<redacted>"));
+    }
 
     #[test]
     fn test_parse_reserve_box_with_r6_register() {
@@ -849,14 +1298,14 @@ mod tests {
             box_id: "test_box_id".to_string(),
             value: 1000000000, // 1 ERG
             creation_height: 1000,
-            ergo_tree: "test_ergo_tree".to_string(),
+            ergo_tree: historical_tree(),
             transaction_id: "test_tx_id".to_string(),
             additional_registers: registers,
             assets: vec![],
         };
 
         // Create a dummy server state for testing
-        let config = NodeConfig::default();
+        let config = historical_config();
         let data_dir = std::env::temp_dir().join(format!(
             "basis_scanner_test_{}_{}",
             std::time::SystemTime::now()
@@ -908,14 +1357,14 @@ mod tests {
             box_id: "test_box_id_2".to_string(),
             value: 1000000000, // 1 ERG
             creation_height: 1000,
-            ergo_tree: "test_ergo_tree".to_string(),
+            ergo_tree: historical_tree(),
             transaction_id: "test_tx_id".to_string(),
             additional_registers: registers,
             assets: vec![],
         };
 
         // Create a dummy server state for testing
-        let config = NodeConfig::default();
+        let config = historical_config();
         let data_dir = std::env::temp_dir().join(format!(
             "basis_scanner_test_{}_{}",
             std::time::SystemTime::now()
@@ -961,14 +1410,14 @@ mod tests {
             box_id: "test_box_id_3".to_string(),
             value: 1000000000, // 1 ERG
             creation_height: 1000,
-            ergo_tree: "test_ergo_tree".to_string(),
+            ergo_tree: historical_tree(),
             transaction_id: "test_tx_id".to_string(),
             additional_registers: registers,
             assets: vec![],
         };
 
         // Create a dummy server state for testing
-        let config = NodeConfig::default();
+        let config = historical_config();
         let data_dir = std::env::temp_dir().join(format!(
             "basis_scanner_test_{}_{}",
             std::time::SystemTime::now()
@@ -997,5 +1446,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn scanner_rejects_missing_v2_and_unknown_generations_before_opening_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "basis_scanner_generation_guard_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let exact_v2 = crate::contract_compiler::get_basis_v2_contract_p2s(
+            crate::contract_compiler::BasisV2ContractKind::Erg,
+        )
+        .unwrap();
+        let configurations = [
+            (None, "contract generation is required"),
+            (Some(exact_v2), "generation is unsupported"),
+            (
+                Some("unknown-generation".to_string()),
+                "generation is unsupported",
+            ),
+        ];
+        for (configured, expected) in configurations {
+            let config = NodeConfig {
+                reserve_contract_p2s: configured,
+                ..NodeConfig::default()
+            };
+            assert!(matches!(
+                ServerState::new(config, &root),
+                Err(ScannerError::Generic(message)) if message.contains(expected)
+            ));
+            assert!(!root.exists());
+        }
+    }
+
+    #[test]
+    fn unsupported_generation_never_loads_a_seeded_unversioned_reserve() {
+        let exact_v2 = crate::contract_compiler::get_basis_v2_contract_p2s(
+            crate::contract_compiler::BasisV2ContractKind::Erg,
+        )
+        .unwrap();
+        for (marker, configured) in [
+            (1u8, None),
+            (2u8, Some(exact_v2)),
+            (3u8, Some("unknown-generation".to_string())),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "basis_scanner_seeded_generation_guard_{}_{}_{}",
+                std::process::id(),
+                marker,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let storage = ReserveStorage::open(root.join("reserves")).unwrap();
+            let mut reserve = ExtendedReserveInfo::new(
+                &[marker; 32],
+                &[2u8; 33],
+                1_000_000,
+                Some(&[3u8; 32]),
+                1,
+                0,
+            );
+            reserve.set_contract_address("unversioned-or-wrong-generation".to_string());
+            storage.store_reserve(&reserve).unwrap();
+            drop(storage);
+
+            let config = NodeConfig {
+                reserve_contract_p2s: configured,
+                ..NodeConfig::default()
+            };
+            assert!(ServerState::new(config, &root).is_err());
+
+            let storage = ReserveStorage::open(root.join("reserves")).unwrap();
+            let persisted = storage.get_all_reserves().unwrap();
+            assert_eq!(persisted.len(), 1);
+            assert_eq!(persisted[0].box_id, reserve.box_id);
+            assert_eq!(
+                persisted[0].base_info.contract_address,
+                reserve.base_info.contract_address
+            );
+        }
+    }
+
+    #[test]
+    fn parser_rejects_a_box_from_another_contract_generation_first() {
+        let mut registers = HashMap::new();
+        registers.insert(
+            "R4".to_string(),
+            "02c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3".to_string(),
+        );
+        registers.insert("R6".to_string(), format!("0e20{}", "11".repeat(32)));
+        let scan_box = ScanBox {
+            box_id: "wrong-generation".to_string(),
+            value: 1_000_000,
+            ergo_tree: crate::contract_compiler::BASIS_V2_ERG_ERGO_TREE_HEX
+                .trim()
+                .to_string(),
+            creation_height: 1,
+            transaction_id: "tx".to_string(),
+            additional_registers: registers,
+            assets: Vec::new(),
+        };
+        let root = std::env::temp_dir().join(format!(
+            "basis_scanner_parser_guard_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let state = ServerState::new(historical_config(), &root).unwrap();
+        assert!(matches!(
+            state.parse_reserve_box(&scan_box),
+            Err(ScannerError::InvalidReserveBox(message)) if message.contains("generation mismatch")
+        ));
     }
 }

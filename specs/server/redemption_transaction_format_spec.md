@@ -1,5 +1,12 @@
 # Redemption Transaction Format Specification
 
+> **Status: historical v1 wire-format reference — superseded.** The node-wallet
+> signing, secret-bearing request, proof, build, submit and broadcast flows
+> described below are removed from the compiled clients or exposed only as
+> unconditional pre-effect tombstones. Current v2 code performs bounded
+> manifest admission only and has no prover, signer, wallet, submitter or
+> broadcaster. Do not use this document as an operational runbook.
+
 ## Overview
 This document specifies the format for redemption transactions that spend reserve boxes to pay out to note holders. The unsigned transaction can be signed either by the Ergo node (`/wallet/transaction/sign`) or entirely off-chain by the client, and is then broadcast via `/transactions`. It includes all necessary context extension variables for the Basis reserve contract validation. For the off-chain (client-side) signing path and its serialization requirements, see [offchain_redemption_signing.md](../client/offchain_redemption_signing.md).
 

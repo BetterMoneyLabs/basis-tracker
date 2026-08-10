@@ -8,14 +8,32 @@ data_dir = "data"
 database_url = "sqlite:data/basis.db"
 
 [ergo]
-basis_reserve_contract_p2s = "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT"
+# The historical reserve identity is the temporary compatibility default. The
+# `/reserves/create`, `/config/reserve-contract-p2s`, and
+# `/redemption/build` are disabled; this is not a claim about legacy library
+# prototypes and not a legacy-safety endorsement.
+# The pinned Basis v2 candidate identity is embedded, but runtime activation
+# fails closed until the v2 scanner and BNS2/BRS2 stores are installed.
 # Tracker NFT ID (hex-encoded) - required for reserve creation and redemption
 # This NFT identifies the tracker server and must be set in reserve contract R6 register
 tracker_nft_id = "your_tracker_nft_token_id_here"
+# Set true only once when intentionally creating a new, empty tracker generation.
+# Keep false for every restart and for every existing on-chain tracker NFT.
+allow_fresh_tracker_generation = false
+# Confirmation policy, expressed as successor depth (the inclusion tip is 0).
+confirmed_chain_min_successor_depth = 6
+confirmed_chain_max_evidence_age_ms = 60000
+# Required explicit application horizon. Maintainers must ratify and uncomment
+# a value; the publisher stays disabled while it is absent, below the
+# acceptance depth, or above the implementation bound of 4095.
+# confirmed_chain_reorg_monitor_depth = 720
+# Set true only together with a genuinely new, history-free BNS1 generation.
+# Keep false for every restart; a missing/misdirected journal then fails closed.
+allow_fresh_reconciliation_journal = false
 # Tracker public key - can be hex-encoded public key or P2PK address
 tracker_public_key = "your_tracker_public_key_or_p2pk_address_here"
 # Tracker secret key for local signing (hex-encoded, 32 bytes)
-# If provided, the server will sign redemption transactions locally instead of using the Ergo node API
+# The tracker-box publisher signs in process and never sends this key to the node.
 # WARNING: never commit this value to version control
 tracker_secret_key = "your_tracker_secret_key_here"
 

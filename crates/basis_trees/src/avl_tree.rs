@@ -19,6 +19,8 @@ pub struct BasisAvlTree {
     /// In-memory cache for key-value lookups
     /// This mirrors the AVL tree state for efficient get() operations
     cache: HashMap<Vec<u8>, Vec<u8>>,
+    /// Stable first-insertion order used whenever the prover must be rebuilt.
+    insertion_order: Vec<Vec<u8>>,
 }
 
 // Simple resolver function for AVL tree
@@ -54,11 +56,13 @@ impl BasisAvlTree {
             prover,
             current_state,
             cache: HashMap::new(),
+            insertion_order: Vec::new(),
         })
     }
 
     /// Insert a key-value pair into the AVL tree
     pub fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), TreeError> {
+        let is_new_key = !self.cache.contains_key(&key);
         let operation = Operation::Insert(KeyValue {
             key: key.clone().into(),
             value: value.clone().into(),
@@ -72,6 +76,9 @@ impl BasisAvlTree {
 
         // Update cache
         self.cache.insert(key.clone(), value.clone());
+        if is_new_key {
+            self.insertion_order.push(key.clone());
+        }
 
         // Update state
         self.update_state();
@@ -81,6 +88,7 @@ impl BasisAvlTree {
 
     /// Update an existing key-value pair (or insert if key doesn't exist)
     pub fn update(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), TreeError> {
+        let is_new_key = !self.cache.contains_key(&key);
         // Try update first, and if it fails (e.g., key doesn't exist), try insert
         let update_op = Operation::Update(KeyValue {
             key: key.clone().into(),
@@ -91,6 +99,9 @@ impl BasisAvlTree {
             Ok(_) => {
                 // Update cache
                 self.cache.insert(key.clone(), value.clone());
+                if is_new_key {
+                    self.insertion_order.push(key.clone());
+                }
                 self.update_state();
                 Ok(())
             }
@@ -107,10 +118,30 @@ impl BasisAvlTree {
 
                 // Update cache
                 self.cache.insert(key.clone(), value.clone());
+                if is_new_key {
+                    self.insertion_order.push(key.clone());
+                }
                 self.update_state();
                 Ok(())
             }
         }
+    }
+
+    /// Rebuild an independent prover with the exact first-insertion order.
+    ///
+    /// `AVLTree::clone()` is shallow, so callers that need an isolated candidate
+    /// must use this method instead of cloning the underlying prover.
+    pub fn try_clone(&self) -> Result<Self, TreeError> {
+        let mut cloned = Self::new()?;
+        for key in &self.insertion_order {
+            let value = self.cache.get(key).ok_or_else(|| {
+                TreeError::StorageError(
+                    "AVL insertion order references a missing cached value".to_string(),
+                )
+            })?;
+            cloned.insert(key.clone(), value.clone())?;
+        }
+        Ok(cloned)
     }
 
     /// Generate a proof for a lookup operation on the given key.
@@ -179,20 +210,10 @@ impl BasisAvlTree {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<(Vec<u8>, [u8; 33]), TreeError> {
-        // Rebuild a temporary tree from the in-memory cache. `AVLTree::clone()` is shallow
-        // (`Rc<RefCell<Node>>`), so operating on a clone would mutate the persistent tree's
-        // shared nodes and corrupt its state.
-        let mut temp_prover = BatchAVLProver::new(AVLTree::new(tree_resolver, 32, None), true);
-        for (cached_key, cached_value) in &self.cache {
-            temp_prover
-                .perform_one_operation(&Operation::Insert(KeyValue {
-                    key: cached_key.clone().into(),
-                    value: cached_value.clone().into(),
-                }))
-                .map_err(|e| {
-                    TreeError::StorageError(format!("AVL tree rebuild failed: {:?}", e))
-                })?;
-        }
+        // Rebuild from the stable first-insertion order. Iterating the HashMap
+        // directly would produce a different root for the same live key set.
+        let cloned = self.try_clone()?;
+        let mut temp_prover = cloned.prover;
         // Commit the rebuild so the proof below covers only the single insert-or-update
         // operation against the committed starting digest.
         let _ = temp_prover.generate_proof();
@@ -256,6 +277,49 @@ impl BasisAvlTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolated_clone_rebuilds_final_values_in_first_insertion_order() {
+        let mut original = BasisAvlTree::new().unwrap();
+        let key_a = vec![1u8; 32];
+        let key_b = vec![2u8; 32];
+
+        original.insert(key_a.clone(), vec![10u8; 8]).unwrap();
+        original.insert(key_b.clone(), vec![20u8; 8]).unwrap();
+        original.update(key_a.clone(), vec![30u8; 8]).unwrap();
+
+        let original_digest = original.root_digest();
+        let mut cloned = original.try_clone().unwrap();
+        assert_eq!(cloned.root_digest(), original_digest);
+        assert_eq!(cloned.get(&key_a), Some(vec![30u8; 8]));
+        assert_eq!(cloned.get(&key_b), Some(vec![20u8; 8]));
+
+        cloned.update(key_b.clone(), vec![40u8; 8]).unwrap();
+        assert_ne!(cloned.root_digest(), original_digest);
+        assert_eq!(original.root_digest(), original_digest);
+        assert_eq!(original.get(&key_b), Some(vec![20u8; 8]));
+    }
+
+    #[test]
+    fn multi_key_insert_proof_is_deterministic_and_non_mutating() {
+        let mut tree = BasisAvlTree::new().unwrap();
+        tree.insert(vec![1u8; 32], vec![1u8; 8]).unwrap();
+        tree.insert(vec![2u8; 32], vec![2u8; 8]).unwrap();
+        tree.update(vec![1u8; 32], vec![3u8; 8]).unwrap();
+        let before = tree.root_digest();
+
+        let candidate_key = vec![3u8; 32];
+        let candidate_value = vec![4u8; 8];
+        let first = tree
+            .generate_insert_proof(candidate_key.clone(), candidate_value.clone())
+            .unwrap();
+        let second = tree
+            .generate_insert_proof(candidate_key, candidate_value)
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(tree.root_digest(), before);
+    }
 
     #[test]
     fn generate_insert_proof_does_not_mutate_state() {

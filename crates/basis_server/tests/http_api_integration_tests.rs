@@ -6,9 +6,10 @@ mod http_api_tests {
     use basis_server::{
         api::{
             get_note_state, get_notes_by_issuer, get_notes_by_recipient, get_pending_tx,
-            get_tracker_state,
+            get_tracker_state, submit_reserve_transaction,
         },
         config,
+        models::ReserveCreationResponse,
         store::EventStore,
         AppState, TrackerCommand,
     };
@@ -35,6 +36,9 @@ mod http_api_tests {
         // Create a default NodeConfig for the scanner
         let config = basis_store::ergo_scanner::NodeConfig {
             node_url: "http://localhost:9053".to_string(),
+            reserve_contract_p2s: Some(
+                basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+            ),
             ..Default::default()
         };
         let ergo_scanner = Arc::new(tokio::sync::Mutex::new(
@@ -44,11 +48,10 @@ mod http_api_tests {
 
         // Spawn tracker thread for tests
         tokio::task::spawn_blocking(move || {
-            use basis_store::{RedemptionManager, TrackerStateManager};
+            use basis_store::TrackerStateManager;
 
             tracing::debug!("Test tracker thread started");
-            let tracker = TrackerStateManager::new_with_temp_storage();
-            let mut redemption_manager = RedemptionManager::new(tracker);
+            let mut tracker = TrackerStateManager::new_with_temp_storage();
 
             while let Some(cmd) = rx.blocking_recv() {
                 tracing::debug!("Test tracker thread received command: {:?}", cmd);
@@ -58,23 +61,34 @@ mod http_api_tests {
                         note,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                        let result = tracker.add_note(&issuer_pubkey, &note);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByIssuer {
                         issuer_pubkey,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.get_issuer_notes(&issuer_pubkey);
+                        let result = tracker.get_issuer_notes(&issuer_pubkey);
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::GetProjectedIssuerGrossDebt {
+                        issuer_pubkey,
+                        candidate_recipient,
+                        candidate_total_debt,
+                        response_tx,
+                    } => {
+                        let result = tracker.projected_issuer_gross_debt(
+                            &issuer_pubkey,
+                            candidate_recipient.as_ref(),
+                            candidate_total_debt,
+                        );
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByRecipient {
                         recipient_pubkey,
                         response_tx,
                     } => {
-                        let result = redemption_manager
-                            .tracker
-                            .get_recipient_notes(&recipient_pubkey);
+                        let result = tracker.get_recipient_notes(&recipient_pubkey);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -82,88 +96,15 @@ mod http_api_tests {
                         recipient_pubkey,
                         response_tx,
                     } => {
-                        let result = redemption_manager
-                            .tracker
+                        let result = tracker
                             .lookup_note(&issuer_pubkey, &recipient_pubkey)
                             .map(Some);
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::InitiateRedemption {
-                        request,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.initiate_redemption(&request);
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::CompleteRedemption {
-                        issuer_pubkey,
-                        recipient_pubkey,
-                        redeemed_amount,
-                        new_already_redeemed,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.complete_redemption(
-                            &issuer_pubkey,
-                            &recipient_pubkey,
-                            redeemed_amount,
-                            new_already_redeemed,
-                        );
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotes { response_tx } => {
                         // For testing purposes, return an empty list
                         let result = Ok(Vec::new());
                         let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::GenerateProof {
-                        issuer_pubkey: _,
-                        recipient_pubkey: _,
-                        response_tx,
-                    } => {
-                        // For testing purposes, return a mock proof
-                        let mock_proof = basis_store::NoteProof {
-                            note: basis_store::IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]),
-                            avl_proof: vec![1, 2, 3, 4], // Mock proof data
-                            operations: vec![],
-                        };
-                        let result = Ok(mock_proof);
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::GetTrackerLookupProof {
-                        issuer_pubkey: _,
-                        recipient_pubkey: _,
-                        response_tx,
-                    } => {
-                        // Mock tracker lookup proof
-                        let mock_proof = basis_store::TrackerLookupProof {
-                            key: vec![0u8; 64],
-                            value: vec![0u8; 8],
-                            proof: vec![1, 2, 3, 4],
-                        };
-                        let _ = response_tx.send(Ok(mock_proof));
-                    }
-                    TrackerCommand::GetReserveLookupProof {
-                        issuer_pubkey: _,
-                        recipient_pubkey: _,
-                        response_tx,
-                    } => {
-                        // Mock reserve lookup proof
-                        let mock_proof = basis_store::ReserveLookupProof {
-                            key: vec![0u8; 64],
-                            value: vec![0u8; 8],
-                            proof: Some(vec![1, 2, 3, 4]),
-                        };
-                        let _ = response_tx.send(Ok(mock_proof));
-                    }
-                    TrackerCommand::GetReserveInsertProof {
-                        issuer_pubkey: _,
-                        recipient_pubkey: _,
-                        timestamp: _,
-                        new_already_redeemed: _,
-                        response_tx,
-                    } => {
-                        // Mock reserve insert proof
-                        let _ = response_tx.send(Ok((vec![1, 2, 3, 4], vec![5, 6, 7, 8])));
                     }
                     TrackerCommand::GetNotesByRecipientWithIssuer {
                         recipient_pubkey: _,
@@ -177,55 +118,26 @@ mod http_api_tests {
                         recipient_pubkey,
                         response_tx,
                     } => {
-                        let result = Ok(redemption_manager
-                            .tracker
-                            .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                        let result =
+                            Ok(tracker.get_confirmation(&issuer_pubkey, &recipient_pubkey));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
-                        let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
+                        let _ = response_tx.send(Ok(tracker.all_confirmations()));
                     }
-                    TrackerCommand::MarkNotesPending {
-                        digest,
-                        tx_id,
-                        submitted_height,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.tracker.mark_notes_pending(
-                            digest,
-                            &tx_id,
-                            submitted_height,
-                        );
-                        let _ = response_tx.send(result);
+                    TrackerCommand::GetValidatedState { response_tx } => {
+                        let _ = response_tx.send(tracker.validated_state());
                     }
-                    TrackerCommand::ConfirmPendingNotes {
-                        box_id,
-                        height,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager
-                            .tracker
-                            .confirm_pending_notes(&box_id, height);
-                        let _ = response_tx.send(result);
+                    TrackerCommand::BeginPublication { response_tx, .. } => {
+                        let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
                     }
-                    TrackerCommand::RevertPendingNotes { response_tx } => {
-                        let result = redemption_manager.tracker.revert_pending_notes();
-                        let _ = response_tx.send(result);
+                    TrackerCommand::RecordPublicationAttempt { response_tx, .. }
+                    | TrackerCommand::ConfirmPublication { response_tx, .. }
+                    | TrackerCommand::RollbackPublication { response_tx, .. } => {
+                        let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
                     }
-                    TrackerCommand::ReconcileWithConfirmedDigest {
-                        digest,
-                        box_id,
-                        height,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager
-                            .tracker
-                            .reconcile_with_confirmed_digest(&digest, &box_id, height);
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::GetReserveStateDigest { response_tx } => {
-                        let digest = redemption_manager.tracker.reserve_state_digest();
-                        let _ = response_tx.send(digest);
+                    TrackerCommand::AbortPublication { response_tx, .. } => {
+                        let _ = response_tx.send(Err(basis_store::NoteError::UnsupportedOperation));
                     }
                 }
             }
@@ -248,6 +160,11 @@ mod http_api_tests {
                 tracker_nft_id: Some(
                     "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
                 ),
+                allow_fresh_tracker_generation: false,
+                confirmed_chain_min_successor_depth: None,
+                confirmed_chain_max_evidence_age_ms: None,
+                confirmed_chain_reorg_monitor_depth: None,
+                allow_fresh_reconciliation_journal: false,
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),
@@ -478,17 +395,30 @@ mod http_api_tests {
     async fn test_get_tracker_state() {
         let state = create_mock_app_state().await;
         let digest = [1u8; 33];
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::GetValidatedState { response_tx })
+            .await
+            .unwrap();
+        let local_digest = response_rx.await.unwrap().unwrap().avl_root_digest;
         {
             let shared = state.shared_tracker_state.lock().await;
-            shared.set_avl_root_digest(digest);
-            shared.set_confirmed(digest, "box1".to_string(), 100);
+            shared.set_confirmed(
+                digest,
+                "11".repeat(32),
+                "box1".to_string(),
+                "22".repeat(32),
+                100,
+                6,
+            );
         }
 
         let response = get_tracker_state(axum::extract::State(state)).await;
         assert_eq!(response.0, StatusCode::OK);
         assert!(response.1.success);
         let data = response.1.data.clone().unwrap();
-        assert_eq!(data.local_digest, hex::encode(digest));
+        assert_eq!(data.local_digest, hex::encode(local_digest));
         assert_eq!(data.confirmed_digest, Some(hex::encode(digest)));
         assert_eq!(data.confirmed_box_id, Some("box1".to_string()));
         assert_eq!(data.confirmed_height, Some(100));
@@ -510,6 +440,18 @@ mod http_api_tests {
         assert_eq!(data.pending_tx_id, Some("tx1".to_string()));
         assert_eq!(data.pending_digest, Some(hex::encode(digest)));
         assert_eq!(data.submitted_height, Some(150));
+    }
+
+    #[tokio::test]
+    async fn reserve_wallet_proxy_is_a_gone_tombstone() {
+        let payload = ReserveCreationResponse {
+            requests: Vec::new(),
+            fee: 1_000_000,
+            change_address: "not-forwarded".to_string(),
+        };
+
+        let response = submit_reserve_transaction(axum::extract::Json(payload)).await;
+        assert_eq!(response.0, StatusCode::GONE);
     }
 
     #[tokio::test]

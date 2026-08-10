@@ -1,5 +1,9 @@
 # Alice and Bob Redemption Test Instructions
 
+> **Status: historical v1 walkthrough — superseded.** The redemption and proof
+> commands below are removed or `410 Gone`; do not execute this as a current
+> test plan.
+
 This document provides step-by-step instructions for testing the credit creation and redemption functionality with Alice and Bob.
 
 ## Step 1: Generate Alice's Keys

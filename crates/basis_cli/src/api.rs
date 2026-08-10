@@ -2,6 +2,13 @@ use anyhow::Result;
 use basis_store;
 use serde::{Deserialize, Serialize};
 
+const V1_REDEMPTION_RETIRED: &str =
+    "Basis v1 redemption is retired; a fully validated v2 manifest and confirmed-chain authority are required before proof generation or signing";
+
+fn reject_retired_v1_redemption<T>() -> Result<T> {
+    Err(anyhow::anyhow!(V1_REDEMPTION_RETIRED))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateNoteRequest {
     pub issuer_pubkey: String,
@@ -45,60 +52,6 @@ pub struct KeyStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedeemRequest {
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    /// Reserve box ID (optional - will be looked up if not provided)
-    #[serde(default)]
-    pub reserve_box_id: String,
-    /// Tracker box ID (optional - fetched by server)
-    #[serde(default)]
-    pub tracker_box_id: String,
-    /// Tracker NFT ID from reserve box R6 register (optional - fetched by server)
-    #[serde(default)]
-    pub tracker_nft_id: String,
-    /// Current blockchain height (optional - fetched by server)
-    #[serde(default)]
-    pub current_height: u64,
-    /// Recipient address for redemption output (optional - derived from recipient_pubkey if not provided)
-    #[serde(default)]
-    pub recipient_address: String,
-    /// Change address for transaction outputs (optional - server will derive from tracker pubkey if not provided)
-    #[serde(default)]
-    pub change_address: String,
-    /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    pub issuer_signature: String,
-    /// Whether this is an emergency redemption
-    #[serde(default)]
-    pub emergency: bool,
-    /// Tracker's Schnorr signature (optional - server will generate if not provided)
-    #[serde(default)]
-    pub tracker_signature: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedeemResponse {
-    pub redemption_id: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    pub proof_available: bool,
-    pub transaction_pending: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompleteRedemptionRequest {
-    pub redemption_id: String,
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub redeemed_amount: u64,
-    /// Cumulative reserve-tree already_redeemed after this redemption.
-    #[serde(default)]
-    pub new_already_redeemed: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateReserveRequest {
     pub nft_id: String,
     pub owner_pubkey: String,
@@ -126,24 +79,7 @@ pub struct Asset {
     pub amount: u64,
 }
 
-/// Response from submitting a reserve creation payload to the tracker's Ergo node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReserveSubmissionResponse {
-    pub tx_id: String,
-}
-
-// Tracker signature request/response for redemption
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrackerSignatureRequest {
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub total_debt: u64,
-    /// Payment timestamp in milliseconds since Unix epoch
-    pub timestamp: u64,
-    #[serde(default)]
-    pub emergency: bool,
-}
-
+/// Legacy response shape retained by the unconditional v1 tombstone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerSignatureResponse {
     pub success: bool,
@@ -328,117 +264,20 @@ impl TrackerClient {
         }
     }
 
-    // Redemption
-    pub async fn initiate_redemption(&self, request: RedeemRequest) -> Result<RedeemResponse> {
-        let url = format!("{}/redeem", self.base_url);
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!(
-                    "Failed to initiate redemption: {}",
-                    error_text
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Request failed: {}", e));
-            }
-        };
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<RedeemResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to initiate redemption: {}",
-                error_text
-            ))
-        }
-    }
-
-    pub async fn complete_redemption(&self, request: CompleteRedemptionRequest) -> Result<()> {
-        let url = format!("{}/redeem/complete", self.base_url);
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!(
-                    "Failed to complete redemption: {}",
-                    error_text
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Request failed: {}", e));
-            }
-        };
-
-        if response.status() == 200 {
-            Ok(())
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to complete redemption: {}",
-                error_text
-            ))
-        }
-    }
-
-    /// Request tracker signature for redemption
-    /// Following the Basis protocol specification - POST /tracker/signature
+    /// Retired v1 tracker-signature call.
     pub async fn request_tracker_signature(
         &self,
-        issuer_pubkey: &str,
-        recipient_pubkey: &str,
-        total_debt: u64,
-        timestamp: u64,
-        emergency: bool,
+        _issuer_pubkey: &str,
+        _recipient_pubkey: &str,
+        _total_debt: u64,
+        _timestamp: u64,
+        _emergency: bool,
     ) -> Result<TrackerSignatureResponse> {
-        let request = TrackerSignatureRequest {
-            issuer_pubkey: issuer_pubkey.to_string(),
-            recipient_pubkey: recipient_pubkey.to_string(),
-            total_debt,
-            timestamp,
-            emergency,
-        };
-
-        let url = format!("{}/tracker/signature", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<TrackerSignatureResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to request tracker signature: {}",
-                error_text
-            ))
-        }
+        reject_retired_v1_redemption()
     }
 }
 
-// Define structs outside of the impl block
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedemptionPreparationRequest {
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub amount: u64,
-    pub timestamp: u64,
-}
-
+/// Legacy response shape retained by the unconditional v1 tombstone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedemptionPreparationResponse {
     pub redemption_id: String,
@@ -450,8 +289,9 @@ pub struct RedemptionPreparationResponse {
     pub tracker_box_id: String, // ID of the tracker box used for the proof
 }
 
-// Tracker-assisted 2-phase redemption build/submit (POST /redemption/build, /redemption/submit).
+/// Legacy request shape retained by the unconditional v1 tombstone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedemptionBuildRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
@@ -463,8 +303,6 @@ pub struct RedemptionBuildRequest {
     pub emergency: bool,
     #[serde(default)]
     pub tracker_box_id: Option<String>,
-    #[serde(default)]
-    pub change_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -484,26 +322,12 @@ pub struct RedemptionBuildResponse {
     pub recipient_address: String,
     pub is_first_redemption: bool,
     pub fee: u64,
-    /// Cumulative reserve-tree `already_redeemed` proven by the build; round-trip to submit.
+    /// Legacy response field; no successful v1 build response is produced.
     #[serde(default)]
     pub new_already_redeemed: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedemptionSubmitRequest {
-    pub signed_tx: serde_json::Value,
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub redeemed_amount: u64,
-    pub new_already_redeemed: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedemptionSubmitResponse {
-    pub tx_id: String,
-}
-
-// Tracker proof response for context var #8
+/// Legacy response shape retained by the unconditional v1 tombstone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerProofResponse {
     pub key: String,
@@ -513,8 +337,7 @@ pub struct TrackerProofResponse {
     pub tracker_state_digest: String,
 }
 
-// Reserve proof response for context var #5 (insert) and #7 (lookup)
-// GET /reserve/proof endpoint response
+/// Legacy response shape retained by the unconditional v1 tombstone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReserveProofResponse {
     /// Hex-encoded AVL tree key: hash(ownerKey || receiverKey)
@@ -535,188 +358,47 @@ pub struct ReserveProofResponse {
 }
 
 impl TrackerClient {
-    /// Get tracker lookup proof for context var #8
+    /// Retired v1 tracker-proof call.
     pub async fn get_tracker_proof(
         &self,
-        issuer_pubkey: &str,
-        recipient_pubkey: &str,
+        _issuer_pubkey: &str,
+        _recipient_pubkey: &str,
     ) -> Result<TrackerProofResponse> {
-        let url = format!(
-            "{}/tracker/proof?issuer_pubkey={}&recipient_pubkey={}",
-            self.base_url, issuer_pubkey, recipient_pubkey
-        );
-        let response = ureq::get(&url).call()?;
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<TrackerProofResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to get tracker proof: {}",
-                error_text
-            ))
-        }
+        reject_retired_v1_redemption()
     }
 
-    /// Get reserve proof for context var #5 (insert) and #7 (lookup)
+    /// Retired v1 reserve-proof call.
     pub async fn get_reserve_proof(
         &self,
-        issuer_pubkey: &str,
-        recipient_pubkey: &str,
-        amount: u64,
-        timestamp: u64,
+        _issuer_pubkey: &str,
+        _recipient_pubkey: &str,
+        _amount: u64,
+        _timestamp: u64,
     ) -> Result<ReserveProofResponse> {
-        let url = format!(
-            "{}/reserve/proof?issuer_pubkey={}&recipient_pubkey={}&amount={}&timestamp={}",
-            self.base_url, issuer_pubkey, recipient_pubkey, amount, timestamp
-        );
-        let response = ureq::get(&url).call()?;
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<ReserveProofResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                // If reserve not found, this might be first redemption
-                Err(anyhow::anyhow!(
-                    "Reserve record not found: {:?}",
-                    api_response.error
-                ))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to get reserve proof: {}",
-                error_text
-            ))
-        }
+        reject_retired_v1_redemption()
     }
 
+    /// Retired v1 redemption-preparation call.
     pub async fn prepare_redemption(
         &self,
-        issuer_pubkey: &str,
-        recipient_pubkey: &str,
-        amount: u64,
+        _issuer_pubkey: &str,
+        _recipient_pubkey: &str,
+        _amount: u64,
     ) -> Result<RedemptionPreparationResponse> {
-        let request = RedemptionPreparationRequest {
-            issuer_pubkey: issuer_pubkey.to_string(),
-            recipient_pubkey: recipient_pubkey.to_string(),
-            amount,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-
-        let url = format!("{}/redemption/prepare", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<RedemptionPreparationResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!(
-                    "API error during redemption preparation: {:?}",
-                    api_response.error
-                ))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to prepare redemption: {}",
-                error_text
-            ))
-        }
+        reject_retired_v1_redemption()
     }
 
-    /// Build the unsigned redemption transaction on the tracker and have it sign the fee input(s)
-    /// locally. Returns the unsigned tx, the fee-signed partial tx, the sigma-serialized input/data
-    /// boxes, and the block headers the client needs to add the reserve-input proof.
-    /// POST /redemption/build
+    /// Retired v1 transaction-build call.
     pub async fn redemption_build(
         &self,
-        request: RedemptionBuildRequest,
+        _request: RedemptionBuildRequest,
     ) -> Result<RedemptionBuildResponse> {
-        let url = format!("{}/redemption/build", self.base_url);
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!("redemption build failed: {}", error_text));
-            }
-            Err(e) => return Err(anyhow::anyhow!("redemption build request failed: {}", e)),
-        };
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<RedemptionBuildResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!(
-                    "redemption build API error: {:?}",
-                    api_response.error
-                ))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!("redemption build failed: {}", error_text))
-        }
+        reject_retired_v1_redemption()
     }
 
-    /// Broadcast a fully-signed redemption transaction via the tracker. POST /redemption/submit.
-    /// Returns the node-accepted transaction id.
-    ///
-    /// `redeemed_amount` and `new_already_redeemed` let the tracker sync its local note and
-    /// reserve-tree state after a successful broadcast.
-    pub async fn redemption_submit(
-        &self,
-        signed_tx: serde_json::Value,
-        issuer_pubkey: &str,
-        recipient_pubkey: &str,
-        redeemed_amount: u64,
-        new_already_redeemed: u64,
-    ) -> Result<String> {
-        let url = format!("{}/redemption/submit", self.base_url);
-        let request = RedemptionSubmitRequest {
-            signed_tx,
-            issuer_pubkey: issuer_pubkey.to_string(),
-            recipient_pubkey: recipient_pubkey.to_string(),
-            redeemed_amount,
-            new_already_redeemed,
-        };
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!("redemption submit failed: {}", error_text));
-            }
-            Err(e) => return Err(anyhow::anyhow!("redemption submit request failed: {}", e)),
-        };
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<RedemptionSubmitResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap().tx_id)
-            } else {
-                Err(anyhow::anyhow!(
-                    "redemption submit API error: {:?}",
-                    api_response.error
-                ))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!("redemption submit failed: {}", error_text))
-        }
+    /// Retired v1 transaction-submit call.
+    pub async fn redemption_submit(&self, _signed_tx: serde_json::Value) -> Result<String> {
+        reject_retired_v1_redemption()
     }
 
     // Events & Status
@@ -779,27 +461,6 @@ impl TrackerClient {
         } else {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to create reserve: {}", error_text))
-        }
-    }
-
-    /// Submit a reserve creation payload to the tracker's configured Ergo node for broadcast.
-    pub async fn submit_reserve(
-        &self,
-        payload: ReserveCreationResponse,
-    ) -> Result<ReserveSubmissionResponse> {
-        let url = format!("{}/reserves/submit", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(payload)?)?;
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<ReserveSubmissionResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!("Failed to submit reserve: {}", error_text))
         }
     }
 
@@ -938,7 +599,7 @@ impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
 }
 
 impl TrackerClient {
-    // New methods for the redemption transaction generation
+    // Reserve discovery remains active; v1 redemption construction methods above are tombstones.
 
     /// Get reserves for a specific issuer
     pub async fn get_reserves_by_issuer(
@@ -1165,44 +826,6 @@ impl TrackerClient {
         }
     }
 
-    /// Get the private key for a wallet address from the Ergo node.
-    /// This is used to satisfy `proveDlog(receiver)` conditions in the Basis reserve contract.
-    pub async fn get_private_key(
-        &self,
-        node_url: &str,
-        api_key: Option<&str>,
-        address: &str,
-    ) -> Result<String> {
-        let url = format!("{}/wallet/getPrivateKey", node_url.trim_end_matches('/'));
-        let mut request = ureq::post(&url);
-
-        if let Some(key) = api_key {
-            request = request.set("api_key", key);
-        }
-
-        let request_body = serde_json::json!({ "address": address });
-        let response = request.send_json(request_body)?;
-
-        if response.status() == 200 {
-            let secret: String = response.into_json()?;
-            Ok(secret)
-        } else if response.status() == 404 {
-            let error_text = response.into_string().unwrap_or_default();
-            Err(anyhow::anyhow!(
-                "Address {} not found in node wallet: {}",
-                address,
-                error_text
-            ))
-        } else {
-            let error_text = response.into_string().unwrap_or_default();
-            Err(anyhow::anyhow!(
-                "Failed to get private key for {}: {}",
-                address,
-                error_text
-            ))
-        }
-    }
-
     pub async fn get_all_notes(&self) -> Result<Vec<SerializableIouNoteWithAge>> {
         let url = format!("{}/notes", self.base_url);
         let response = ureq::get(&url).call()?;
@@ -1263,5 +886,45 @@ impl SerializableIouNoteWithAge {
     /// Calculate the outstanding debt (amount collected minus amount redeemed)
     pub fn outstanding_debt(&self) -> u64 {
         self.amount_collected.saturating_sub(self.amount_redeemed)
+    }
+}
+
+#[cfg(test)]
+mod v1_redemption_tombstone_tests {
+    use super::*;
+
+    fn assert_retired<T>(result: Result<T>) {
+        assert_eq!(
+            result.err().expect("v1 call must fail").to_string(),
+            V1_REDEMPTION_RETIRED
+        );
+    }
+
+    #[tokio::test]
+    async fn every_v1_client_proof_build_sign_and_submit_call_fails_before_network_io() {
+        let client = TrackerClient::new("http://127.0.0.1:1".to_string());
+
+        assert_retired(
+            client
+                .request_tracker_signature("issuer", "receiver", 1, 1, false)
+                .await,
+        );
+        assert_retired(client.get_tracker_proof("issuer", "receiver").await);
+        assert_retired(client.get_reserve_proof("issuer", "receiver", 1, 1).await);
+        assert_retired(client.prepare_redemption("issuer", "receiver", 1).await);
+        assert_retired(
+            client
+                .redemption_build(RedemptionBuildRequest {
+                    issuer_pubkey: "issuer".to_string(),
+                    recipient_pubkey: "receiver".to_string(),
+                    amount: 1,
+                    timestamp: 1,
+                    issuer_signature: "signature".to_string(),
+                    emergency: false,
+                    tracker_box_id: None,
+                })
+                .await,
+        );
+        assert_retired(client.redemption_submit(serde_json::json!({})).await);
     }
 }

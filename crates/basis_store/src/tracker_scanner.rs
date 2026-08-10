@@ -1,21 +1,24 @@
 //! Tracker box scanner for monitoring Basis tracker state commitment boxes
 //! This module provides blockchain integration using /blockchain endpoints (no node scans).
 
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use reqwest::Client;
+use reqwest::StatusCode;
 
 use crate::{
-    ergo_scanner::{IndexedErgoBox, ScanBox},
+    ergo_scanner::{
+        node_http, summarize_error_body, BoundedHttpError, IndexedErgoBox, IndexedHeightResponse,
+        ScanBox, MAX_CONCURRENT_SCANNER_REQUESTS, MAX_SCAN_BOXES, MAX_SCAN_PAGES, SCAN_PAGE_SIZE,
+    },
     persistence::{ScannerMetadataStorage, TrackerStorage},
-    TrackerBoxInfo, TrackerStateManager,
+    TrackerBoxInfo,
 };
 
 #[derive(Error, Debug)]
@@ -44,10 +47,25 @@ pub enum TrackerScannerError {
     InvalidRegisterData(String),
     #[error("Missing tracker NFT in box assets")]
     MissingTrackerNft,
+    #[error("Tracker scanner response exceeds {max_bytes} bytes")]
+    ResponseTooLarge { max_bytes: usize },
+    #[error("Tracker scanner request concurrency gate is closed")]
+    RequestGateClosed,
+    #[error("Tracker scanner request capacity is exhausted")]
+    RequestCapacityExceeded,
+    #[error("Indexed node is behind: indexed height {indexed_height}, full height {full_height}")]
+    IndexLag {
+        indexed_height: u64,
+        full_height: u64,
+    },
+    #[error("Incoherent tracker scanner snapshot: {0}")]
+    IncoherentSnapshot(String),
+    #[error("Tracker scanner resource limit exceeded: {0}")]
+    ScanLimitExceeded(String),
 }
 
 /// Configuration for tracker scanner
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackerNodeConfig {
     /// Starting block height for scanning
     pub start_height: Option<u64>,
@@ -61,6 +79,18 @@ pub struct TrackerNodeConfig {
     pub api_key: Option<String>,
 }
 
+impl std::fmt::Debug for TrackerNodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrackerNodeConfig")
+            .field("start_height", &self.start_height)
+            .field("tracker_nft_id", &self.tracker_nft_id)
+            .field("node_url", &self.node_url)
+            .field("scan_name", &self.scan_name)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// Inner state for tracker scanner that requires synchronization
 #[derive(Clone)]
 pub struct TrackerServerStateInner {
@@ -71,44 +101,131 @@ pub struct TrackerServerStateInner {
 
 /// Server state for tracker scanner
 /// Uses real blockchain integration with proper synchronization
+#[derive(Clone)]
 pub struct TrackerServerState {
     pub config: TrackerNodeConfig,
     pub inner: Arc<Mutex<TrackerServerStateInner>>,
-    pub client: Client,
-    pub tracker_state: TrackerStateManager,
+    pub(crate) request_permits: Arc<Semaphore>,
     pub metadata_storage: ScannerMetadataStorage,
     pub tracker_storage: TrackerStorage,
-    pub data_dir: PathBuf,
-}
-
-impl Clone for TrackerServerState {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            inner: Arc::clone(&self.inner),
-            client: self.client.clone(),
-            tracker_state: TrackerStateManager::new(&self.data_dir), // Create new instance since it doesn't implement Clone
-            metadata_storage: self.metadata_storage.clone(),
-            tracker_storage: self.tracker_storage.clone(),
-            data_dir: self.data_dir.clone(),
-        }
-    }
 }
 
 impl TrackerServerState {
+    async fn request_bytes(
+        &self,
+        request: reqwest::RequestBuilder,
+        context: &str,
+    ) -> Result<(StatusCode, Vec<u8>), TrackerScannerError> {
+        let _permit = self
+            .request_permits
+            .try_acquire()
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::Closed => TrackerScannerError::RequestGateClosed,
+                tokio::sync::TryAcquireError::NoPermits => {
+                    TrackerScannerError::RequestCapacityExceeded
+                }
+            })?;
+        let response = node_http()
+            .map_err(|error| TrackerScannerError::HttpError(format!("{}: {}", context, error)))?
+            .execute(request)
+            .await
+            .map_err(|error| match error {
+                BoundedHttpError::BodyTooLarge { limit } => {
+                    TrackerScannerError::ResponseTooLarge { max_bytes: limit }
+                }
+                BoundedHttpError::Overloaded => TrackerScannerError::RequestCapacityExceeded,
+                other => TrackerScannerError::HttpError(format!("{}: {}", context, other)),
+            })?;
+        Ok(response.into_parts())
+    }
+
     /// Create HTTP request builder with API key header if configured
-    fn request_builder(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+    fn request_builder(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+    ) -> Result<reqwest::RequestBuilder, TrackerScannerError> {
         debug!("Tracker request method: {}, URL: {}", method, url);
-        let mut builder = self.client.request(method, url);
+        let client =
+            node_http().map_err(|error| TrackerScannerError::HttpError(error.to_string()))?;
+        let mut builder = client.request(method, url);
 
         if let Some(api_key) = &self.config.api_key {
             builder = builder.header("api_key", api_key);
         }
 
-        builder
+        Ok(builder)
     }
 
-    /// Get unspent tracker boxes via `GET /blockchain/box/unspent/byTokenId/{trackerNftId}`.
+    async fn fetch_indexed_height(&self) -> Result<IndexedHeightResponse, TrackerScannerError> {
+        let url = format!("{}/blockchain/indexedHeight", self.config.node_url);
+        let (status, body) = self
+            .request_bytes(
+                self.request_builder(reqwest::Method::GET, &url)?,
+                "Failed to fetch indexed height",
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(TrackerScannerError::NodeError(format!(
+                "Failed to get indexed height with status {}: {}",
+                status,
+                summarize_error_body(&body)
+            )));
+        }
+        serde_json::from_slice(&body).map_err(|e| {
+            TrackerScannerError::JsonError(format!(
+                "Failed to parse indexed height response: {}",
+                e
+            ))
+        })
+    }
+
+    fn require_caught_up(height: IndexedHeightResponse) -> Result<(), TrackerScannerError> {
+        if height.indexed_height < height.full_height {
+            return Err(TrackerScannerError::IndexLag {
+                indexed_height: height.indexed_height,
+                full_height: height.full_height,
+            });
+        }
+        Ok(())
+    }
+
+    async fn fetch_unspent_tracker_page(
+        &self,
+        tracker_nft_id: &str,
+        offset: usize,
+    ) -> Result<Vec<IndexedErgoBox>, TrackerScannerError> {
+        let url = format!(
+            "{}/blockchain/box/unspent/byTokenId/{}",
+            self.config.node_url, tracker_nft_id
+        );
+        let request = self.request_builder(reqwest::Method::GET, &url)?.query(&[
+            ("offset", offset.to_string()),
+            ("limit", SCAN_PAGE_SIZE.to_string()),
+            ("sortDirection", "asc".to_string()),
+            ("includeUnconfirmed", "false".to_string()),
+            ("excludeMempoolSpent", "false".to_string()),
+        ]);
+        let (status, body) = self
+            .request_bytes(request, "Failed to fetch tracker boxes")
+            .await?;
+        // The pinned v6.0.3 route returns a JSON sequence. Only an HTTP 200
+        // carrying that sequence can prove page contents; in particular, a
+        // 404 is an ambiguous source failure rather than an exhausted page.
+        if status != StatusCode::OK {
+            return Err(TrackerScannerError::NodeError(format!(
+                "Failed to get tracker boxes with status {}: {}",
+                status,
+                summarize_error_body(&body)
+            )));
+        }
+        serde_json::from_slice(&body).map_err(|e| {
+            TrackerScannerError::JsonError(format!("Failed to parse tracker boxes: {}", e))
+        })
+    }
+
+    /// Get a complete, height-coherent set of unspent tracker boxes via the
+    /// indexed-node token route.
     pub async fn get_unspent_tracker_boxes(&self) -> Result<Vec<ScanBox>, TrackerScannerError> {
         let tracker_nft_id = self
             .config
@@ -116,41 +233,71 @@ impl TrackerServerState {
             .as_ref()
             .ok_or(TrackerScannerError::MissingTrackerNftId)?;
 
-        let url = format!(
-            "{}/blockchain/box/unspent/byTokenId/{}?limit=5&includeUnconfirmed=false",
-            self.config.node_url, tracker_nft_id
-        );
+        let before = self.fetch_indexed_height().await?;
+        Self::require_caught_up(before)?;
+        let mut indexed_boxes = Vec::new();
+        let mut seen_box_ids = HashSet::new();
+        let mut exhausted = false;
 
-        debug!("Fetching unspent tracker boxes from: {}", url);
-
-        let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
-            .await
-            .map_err(|e| {
-                TrackerScannerError::HttpError(format!("Failed to fetch tracker boxes: {}", e))
+        for page_index in 0..MAX_SCAN_PAGES {
+            let offset = page_index.checked_mul(SCAN_PAGE_SIZE).ok_or_else(|| {
+                TrackerScannerError::ScanLimitExceeded("page offset overflow".to_string())
             })?;
+            let page = self
+                .fetch_unspent_tracker_page(tracker_nft_id, offset)
+                .await?;
+            if page.len() > SCAN_PAGE_SIZE {
+                return Err(TrackerScannerError::IncoherentSnapshot(format!(
+                    "node returned {} boxes for requested page size {} at offset {}",
+                    page.len(),
+                    SCAN_PAGE_SIZE,
+                    offset
+                )));
+            }
+            let page_len = page.len();
+            for box_ in page {
+                if !seen_box_ids.insert(box_.box_id.clone()) {
+                    return Err(TrackerScannerError::IncoherentSnapshot(format!(
+                        "duplicate box id {} across paginated response",
+                        box_.box_id
+                    )));
+                }
+                if indexed_boxes.len() >= MAX_SCAN_BOXES {
+                    return Err(TrackerScannerError::ScanLimitExceeded(format!(
+                        "more than {} tracker boxes",
+                        MAX_SCAN_BOXES
+                    )));
+                }
+                indexed_boxes.push(box_);
+            }
+            if page_len < SCAN_PAGE_SIZE {
+                exhausted = true;
+                break;
+            }
+        }
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(TrackerScannerError::NodeError(format!(
-                "Failed to get unspent tracker boxes with status {}: {}",
-                status, error_text
+        if !exhausted {
+            return Err(TrackerScannerError::ScanLimitExceeded(format!(
+                "scan did not exhaust within {} pages",
+                MAX_SCAN_PAGES
             )));
         }
 
-        let indexed_boxes: Vec<IndexedErgoBox> = response.json().await.map_err(|e| {
-            error!("Failed to parse tracker boxes JSON: {}", e);
-            TrackerScannerError::JsonError(format!("Failed to parse tracker boxes: {}", e))
-        })?;
+        let after = self.fetch_indexed_height().await?;
+        Self::require_caught_up(after)?;
+        if before != after {
+            return Err(TrackerScannerError::IncoherentSnapshot(format!(
+                "indexed/full height changed from {}/{} to {}/{} during pagination",
+                before.indexed_height, before.full_height, after.indexed_height, after.full_height
+            )));
+        }
 
         let boxes: Vec<ScanBox> = indexed_boxes.into_iter().map(Into::into).collect();
-        info!("Retrieved {} unspent tracker boxes", boxes.len());
-
+        info!(
+            "Retrieved {} tracker boxes in a complete snapshot at indexed height {}",
+            boxes.len(),
+            after.indexed_height
+        );
         Ok(boxes)
     }
 
@@ -251,7 +398,8 @@ impl TrackerServerState {
         // It should start with 0x64 (SAvlTree type identifier) followed by the tree data
         if !state_commitment.starts_with("64") {
             return Err(TrackerScannerError::InvalidRegisterData(
-                format!("Invalid state commitment format: does not start with SAvlTree type identifier (64)")
+                "Invalid state commitment format: does not start with SAvlTree type identifier (64)"
+                    .to_string(),
             ));
         }
 
@@ -279,30 +427,22 @@ impl TrackerServerState {
     pub async fn process_tracker_boxes(&self) -> Result<Vec<TrackerBoxInfo>, TrackerScannerError> {
         let unspent_boxes = self.get_unspent_tracker_boxes().await?;
         let total_boxes = unspent_boxes.len();
-        let mut processed_boxes = Vec::new();
+        let mut processed_boxes = Vec::with_capacity(total_boxes);
 
+        // Validate the complete snapshot before persisting any derived box.
         for scan_box in &unspent_boxes {
-            match self.parse_tracker_box(scan_box) {
-                Ok(tracker_box) => {
-                    // Store the parsed box
-                    self.tracker_storage
-                        .store_tracker_box(&tracker_box)
-                        .map_err(|e| {
-                            TrackerScannerError::StoreError(format!(
-                                "Failed to store tracker box: {:?}",
-                                e
-                            ))
-                        })?;
-
-                    processed_boxes.push(tracker_box);
-
-                    debug!("Successfully processed tracker box: {}", scan_box.box_id);
-                }
-                Err(e) => {
-                    warn!("Failed to parse tracker box {}: {}", scan_box.box_id, e);
-                    // Continue processing other boxes
-                }
-            }
+            processed_boxes.push(self.parse_tracker_box(scan_box)?);
+        }
+        for tracker_box in &processed_boxes {
+            self.tracker_storage
+                .store_tracker_box(tracker_box)
+                .map_err(|e| {
+                    TrackerScannerError::StoreError(format!(
+                        "Failed to store tracker box {}: {:?}",
+                        tracker_box.box_id, e
+                    ))
+                })?;
+            debug!("Successfully processed tracker box: {}", tracker_box.box_id);
         }
 
         info!(
@@ -347,9 +487,17 @@ impl TrackerServerState {
         for tracker_box in tracker_boxes {
             debug!(
                 "Tracker box: id={}, pubkey={}, commitment={}, height={}",
-                &tracker_box.box_id[..16], // First 16 chars of box ID
-                &tracker_box.tracker_pubkey[..16], // First 16 chars of pubkey
-                &tracker_box.state_commitment[..16], // First 16 chars of commitment
+                tracker_box.box_id.chars().take(16).collect::<String>(),
+                tracker_box
+                    .tracker_pubkey
+                    .chars()
+                    .take(16)
+                    .collect::<String>(),
+                tracker_box
+                    .state_commitment
+                    .chars()
+                    .take(16)
+                    .collect::<String>(),
                 tracker_box.last_verified_height
             );
         }
@@ -396,20 +544,21 @@ impl TrackerServerState {
         // Fetch from node
         let url = format!("{}/info", self.config.node_url);
 
-        let response = self
-            .request_builder(reqwest::Method::GET, &url)
-            .send()
-            .await
-            .map_err(|e| TrackerScannerError::HttpError(format!("Failed to get height: {}", e)))?;
+        let (status, body) = self
+            .request_bytes(
+                self.request_builder(reqwest::Method::GET, &url)?,
+                "Failed to get height",
+            )
+            .await?;
 
-        if !response.status().is_success() {
+        if !status.is_success() {
             return Err(TrackerScannerError::NodeError(format!(
                 "Failed to get height: {}",
-                response.status()
+                status
             )));
         }
 
-        let info: serde_json::Value = response.json().await.map_err(|e| {
+        let info: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
             TrackerScannerError::JsonError(format!("Failed to parse height: {}", e))
         })?;
 
@@ -476,7 +625,6 @@ pub fn create_tracker_server_state(
     config: TrackerNodeConfig,
     metadata_storage: ScannerMetadataStorage,
     tracker_storage: TrackerStorage,
-    data_dir: impl AsRef<Path>,
 ) -> TrackerServerState {
     let inner = TrackerServerStateInner {
         _current_height: 0,
@@ -487,10 +635,8 @@ pub fn create_tracker_server_state(
     TrackerServerState {
         config,
         inner: Arc::new(Mutex::new(inner)),
-        client: Client::new(),
-        tracker_state: TrackerStateManager::new(&data_dir),
+        request_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_SCANNER_REQUESTS)),
         metadata_storage,
         tracker_storage,
-        data_dir: data_dir.as_ref().to_path_buf(),
     }
 }

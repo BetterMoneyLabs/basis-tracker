@@ -2,6 +2,7 @@
 //! Contains shared types, traits, and implementations for cryptography and AVL trees
 
 pub mod acceptance;
+pub mod basis_v2;
 pub mod impls;
 pub mod traits;
 pub mod types;

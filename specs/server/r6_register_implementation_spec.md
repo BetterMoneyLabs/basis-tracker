@@ -1,5 +1,12 @@
 # R6 Register Implementation Specification
 
+> **Historical v1 implementation plan — superseded.** The v1 transaction
+> builder named below is quarantined as a test-only fixture and must not be
+> restored as a production path. The scanner/storage notes remain useful for
+> lineage analysis, but any active R6 handling must be specified and tested as
+> part of the reviewed v2 generation-admission and builder workstream. See
+> [`../legacy_runtime_quarantine.md`](../legacy_runtime_quarantine.md).
+
 ## Overview
 
 This document specifies the implementation requirements for supporting the R6 register in the Basis Tracker system. The R6 register in reserve boxes contains the tracker NFT ID (identifying which tracker server the reserve is linked to).
@@ -8,7 +15,7 @@ This specification focuses on the implementation changes needed to properly hand
 
 ## Problem Statement
 
-The Basis Tracker system currently does not properly handle the R6 register in reserve boxes. According to the contract specification, reserve boxes must have an R6 register containing the tracker NFT ID to identify which tracker server the reserve is linked to. The system needs to be updated to:
+At the time of this v1 design, the Basis Tracker system did not properly handle the R6 register in reserve boxes. According to the historical contract specification, reserve boxes had to contain the tracker NFT ID in R6. The proposed work was to:
 
 1. Parse and store the R6 register value from reserve boxes
 2. Include the R6 register in redemption transactions
@@ -113,8 +120,9 @@ The Basis Tracker system currently does not properly handle the R6 register in r
 ### 2. Transaction Builder Updates
 
 #### 2.1 Redemption Transaction Creation
-- **File**: `crates/basis_store/src/transaction_builder.rs`
-- **Change**: Update redemption transaction creation to preserve R6 register from input to output
+- **Historical file (now test-only)**: `crates/basis_store/src/transaction_builder.rs`
+- **Retirement status**: Do not add or restore production behavior in this v1 builder. A reviewed v2 builder must preserve and authenticate its generation-specific register schema.
+- **Historical change**: Update redemption transaction creation to preserve R6 register from input to output
 - **Logic**: Copy R6 register value from input reserve box to output reserve box
 - **Serialization Format**: When creating the output box, ensure R6 register follows the proper SColl(SByte) serialization:
   - The R6 register value must be a serialized collection (SColl(SByte)) using Sigma serialization
@@ -637,4 +645,6 @@ fn deserialize_r6_register(box_with_bytes: &ErgoBox) -> Result<[u8; 32], String>
 - Ensure tracker NFT ID is properly configured before deployment
 - Verify that Ergo node connections can access register information
 
-This specification ensures that the Basis Tracker system properly handles the R6 register in reserve boxes, maintaining the link between reserves and their associated tracker servers as required by the contract specification.
+Historically, this plan aimed to preserve the R6 link between v1 reserves and
+their tracker servers. It is not evidence that the current runtime implements
+or admits that retired transaction path.

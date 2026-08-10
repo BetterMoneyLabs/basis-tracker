@@ -3,12 +3,13 @@ use axum::{
     Router,
 };
 use basis_server::{
-    api::*, build_redemption, reserve_api::*, store::EventStore, submit_redemption, AppConfig,
-    AppState, ErgoConfig, EventType, ServerConfig, SharedTrackerState, TrackerBoxUpdateConfig,
-    TrackerBoxUpdater, TrackerCommand, TrackerEvent, TransactionConfig,
+    api::*, handle_options, reserve_api::*, reserve_construction_routes,
+    retired_v1_redemption_routes, store::EventStore, AppConfig, AppState, EventType,
+    PublicationLease, SharedTrackerState, TrackerBoxUpdateConfig, TrackerBoxUpdater,
+    TrackerCommand, TrackerEvent,
 };
 use basis_store::{
-    ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
+    ergo_scanner::{start_scanner, ReserveEvent, ServerState},
     tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
     ReserveTracker,
 };
@@ -16,53 +17,205 @@ use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+struct UpdaterTaskHealthGuard {
+    shared_state: SharedTrackerState,
+    graceful: bool,
+}
+
+impl UpdaterTaskHealthGuard {
+    fn new(shared_state: SharedTrackerState) -> Self {
+        Self {
+            shared_state,
+            graceful: false,
+        }
+    }
+
+    fn mark_graceful(&mut self) {
+        self.graceful = true;
+    }
+}
+
+impl Drop for UpdaterTaskHealthGuard {
+    fn drop(&mut self) {
+        if !self.graceful {
+            // Also runs during task unwinding, so a panic cannot silently
+            // leave the sole reorg watcher dead while effects remain readable.
+            self.shared_state.quarantine_publication();
+        }
+    }
+}
+
+fn reject_while_publication_is_fenced(command: TrackerCommand) {
+    use basis_store::NoteError;
+
+    match command {
+        TrackerCommand::AddNote { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNotesByIssuer { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetProjectedIssuerGrossDebt { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNotesByRecipient { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNotesByRecipientWithIssuer { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNoteByIssuerAndRecipient { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetNotes { response_tx } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetValidatedState { response_tx } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetConfirmation { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::GetAllConfirmations { response_tx } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::BeginPublication { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationInProgress));
+        }
+        TrackerCommand::RecordPublicationAttempt { response_tx, .. }
+        | TrackerCommand::ConfirmPublication { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
+        }
+        TrackerCommand::RollbackPublication { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
+        }
+        TrackerCommand::AbortPublication { response_tx, .. } => {
+            let _ = response_tx.send(Err(NoteError::PublicationLeaseMismatch));
+        }
+    }
+}
+
+fn restore_pending_publication(
+    pending: Option<&basis_store::PendingTrackerPublication>,
+    shared_state: &SharedTrackerState,
+) -> Option<PublicationLease> {
+    pending.map(|pending| {
+        shared_state.set_pending(
+            pending.digest(),
+            pending.tx_id().to_string(),
+            pending.submitted_height(),
+        );
+        PublicationLease {
+            id: 0,
+            digest: pending.digest(),
+        }
+    })
+}
+
+fn handle_command_while_publication_is_fenced(
+    active_lease: PublicationLease,
+    command: TrackerCommand,
+    tracker: &mut basis_store::TrackerStateManager,
+    shared_state: &SharedTrackerState,
+) -> Option<PublicationLease> {
+    match command {
+        TrackerCommand::RecordPublicationAttempt {
+            lease,
+            tx_id,
+            submitted_height,
+            response_tx,
+        } if lease == active_lease => {
+            let result = tracker.validated_state().and_then(|state| {
+                if state.avl_root_digest != lease.digest {
+                    return Err(basis_store::NoteError::PublicationLeaseMismatch);
+                }
+                tracker.mark_notes_pending(lease.digest, &tx_id, submitted_height)
+            });
+            if result.is_err() {
+                shared_state.quarantine_publication();
+            }
+            let _ = response_tx.send(result);
+            Some(active_lease)
+        }
+        TrackerCommand::ConfirmPublication {
+            effect,
+            response_tx,
+        } => {
+            let result = tracker.confirm_validated_publication(&effect);
+            let confirmed = result.is_ok();
+            if result.as_ref().is_err_and(|error| {
+                !matches!(error, basis_store::NoteError::PublicationLeaseMismatch)
+            }) {
+                shared_state.quarantine_publication();
+            }
+            let _ = response_tx.send(result);
+            if confirmed {
+                None
+            } else {
+                Some(active_lease)
+            }
+        }
+        TrackerCommand::RollbackPublication {
+            rollback,
+            response_tx,
+        } => {
+            let result = tracker.rollback_validated_publication(&rollback);
+            if result.is_err() {
+                shared_state.quarantine_publication();
+            }
+            let _ = response_tx.send(result);
+            Some(active_lease)
+        }
+        TrackerCommand::AbortPublication { lease, response_tx } if lease == active_lease => {
+            let result = tracker.pending_publication().and_then(|pending| {
+                if pending.is_some() {
+                    Err(basis_store::NoteError::PublicationInProgress)
+                } else {
+                    Ok(())
+                }
+            });
+            let released = result.is_ok();
+            let _ = response_tx.send(result);
+            if released {
+                None
+            } else {
+                Some(active_lease)
+            }
+        }
+        other => {
+            reject_while_publication_is_fenced(other);
+            Some(active_lease)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing::info!("Starting basis server...");
     // Load configuration
     tracing::info!("Loading configuration...");
-    let config = match AppConfig::load() {
-        Ok(config) => config,
-        Err(e) => {
-            tracing::warn!("Failed to load configuration: {}", e);
-            tracing::info!("Using default configuration...");
-            AppConfig::load().unwrap_or_else(|_| {
-                // Fallback to hardcoded defaults if config loading fails completely
-                AppConfig {
-                    server: ServerConfig {
-                        host: "0.0.0.0".to_string(),
-                        port: 3048,
-                        data_dir: Some("data".to_string()),
-                        database_url: Some("sqlite:data/basis.db".to_string()),
-                    },
-                    ergo: ErgoConfig {
-                        node: NodeConfig {
-                            start_height: None,
-                            reserve_contract_p2s: None,
-                            node_url: "http://127.0.0.1:9053".to_string(),
-                            scan_name: Some("Basis Reserve Scanner".to_string()),
-                            api_key: None,
-                        },
-                        basis_reserve_contract_p2s: "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT".to_string(),
-                        tracker_nft_id: None,
-                        tracker_public_key: None,
-                        tracker_secret_key: None,
-                    },
-                    transaction: TransactionConfig {
-                        fee: 1000000, // 0.001 ERG
-                        change_address: None, // Will be derived from tracker public key
-                    },
-                    acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
-                }
-            })
+    let config = AppConfig::load_for_startup().unwrap_or_else(|error| {
+        tracing::error!("{}", error);
+        std::process::exit(1);
+    });
+
+    if let Err(e) = config.validate_runtime_contract_mode() {
+        tracing::error!("{}", e);
+        std::process::exit(1);
+    }
+
+    // Validate that tracker NFT ID is exactly the token id bound to persistent state.
+    let tracker_nft_bytes: [u8; 32] = match config
+        .tracker_nft_bytes()
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+    {
+        Some(bytes) => bytes,
+        None => {
+            tracing::error!("Tracker NFT ID must be exactly 32 bytes of hex");
+            std::process::exit(1);
         }
     };
-
-    // Validate that tracker NFT ID is properly configured
-    if let Err(_) = config.tracker_nft_bytes() {
-        tracing::error!("Tracker NFT ID is not properly configured in the configuration file. The server requires a valid tracker_nft_id value.");
-        std::process::exit(1); // Exit with error code if tracker NFT ID is not configured
-    }
 
     tracing::info!("Configuration loaded successfully");
 
@@ -88,20 +241,10 @@ async fn main() {
     scanner_config.reserve_contract_p2s = Some(config.ergo.basis_reserve_contract_p2s.clone());
 
     // Create real scanner state with configured node URL and contract template
-    let ergo_scanner = match ServerState::new(scanner_config, &data_dir) {
-        Ok(scanner) => scanner,
-        Err(e) => {
-            tracing::warn!("Failed to create Ergo scanner: {}", e);
-            tracing::info!("Continuing without blockchain scanner...");
-            // Create a minimal scanner that won't actually scan
-            let minimal_config = NodeConfig {
-                node_url: "http://127.0.0.1:9053".to_string(), // Dummy URL that won't be used
-                ..Default::default()
-            };
-            ServerState::new(minimal_config, &data_dir)
-                .unwrap_or_else(|_| panic!("Failed to create minimal scanner"))
-        }
-    };
+    let ergo_scanner = ServerState::new(scanner_config, &data_dir).unwrap_or_else(|error| {
+        tracing::error!("Failed to create generation-bound Ergo scanner: {}", error);
+        std::process::exit(1);
+    });
 
     // Start the scanner background task
     if let Err(e) = start_scanner(ergo_scanner.clone()).await {
@@ -171,7 +314,6 @@ async fn main() {
                             tracker_scanner_config,
                             metadata_storage,
                             tracker_storage,
-                            &data_dir,
                         );
 
                         // Process tracker boxes directly, no scan registration required
@@ -243,64 +385,96 @@ async fn main() {
     // Create channel for communicating with tracker thread
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
 
-    // Initialize tracker manager outside of the blocking task so it can be shared
-    use basis_store::TrackerStateManager;
-    let shared_tracker_state =
-        std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new(&data_dir)));
+    let generation = basis_store::TrackerGenerationConfig {
+        tracker_nft_id: tracker_nft_bytes,
+        fresh_generation: if config.ergo.allow_fresh_tracker_generation {
+            basis_store::FreshGenerationApproval::Approve
+        } else {
+            basis_store::FreshGenerationApproval::Deny
+        },
+    };
 
-    // Clone the data directory for the tracker thread before the async move.
+    // Open and validate state in its owning blocking thread, then wait for the
+    // startup result before exposing any API or publisher task.
+    let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
     let data_dir_for_tracker_thread = data_dir.clone();
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel();
 
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
-    let _shared_tracker_state_clone = shared_tracker_state.clone();
-    let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
     tokio::task::spawn_blocking(move || {
-        use basis_store::RedemptionManager;
-
         tracing::debug!("Tracker thread started");
-        let tracker = TrackerStateManager::new(&data_dir_for_tracker_thread);
-
-        // Update shared state with the rebuilt AVL root digest after initialization
-        let initial_root = tracker.get_state().avl_root_digest;
-        shared_state_for_tracker.set_avl_root_digest(initial_root);
+        let mut tracker = match basis_store::TrackerStateManager::try_new_with_publication_health(
+            &data_dir_for_tracker_thread,
+            generation,
+            shared_state_for_tracker.publication_health(),
+        ) {
+            Ok(tracker) => tracker,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        let initial_root = match tracker.validated_state() {
+            Ok(state) => state.avl_root_digest,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        let initial_pending = match tracker.pending_publication() {
+            Ok(pending) => pending,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        let initial_confirmation = match tracker.validated_confirmation_anchor() {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        let confirmation_history_present = match tracker.has_persisted_confirmation_history() {
+            Ok(present) => present,
+            Err(error) => {
+                shared_state_for_tracker.quarantine_publication();
+                let _ = init_tx.send(Err(format!("{error:?}")));
+                return;
+            }
+        };
+        shared_state_for_tracker.set_confirmation_history_present(confirmation_history_present);
+        shared_state_for_tracker.set_historical_confirmation(initial_confirmation);
+        let mut active_publication =
+            restore_pending_publication(initial_pending.as_ref(), &shared_state_for_tracker);
+        let _ = init_tx.send(Ok((initial_root, initial_pending.clone())));
         tracing::info!(
             "Tracker thread initialized with AVL root digest: {}",
             hex::encode(&initial_root)
         );
 
-        let mut redemption_manager = RedemptionManager::new(tracker);
-
-        // Temporary startup repair: allow re-inserting a lost reserve AVL tree entry
-        // from the environment so a restarted server can continue a redemption sequence.
-        if let (Ok(issuer_hex), Ok(recipient_hex), Ok(ts_str), Ok(already_str)) = (
-            std::env::var("REPAIR_RESERVE_ISSUER"),
-            std::env::var("REPAIR_RESERVE_RECIPIENT"),
-            std::env::var("REPAIR_RESERVE_TIMESTAMP"),
-            std::env::var("REPAIR_RESERVE_ALREADY_REDEEMED"),
-        ) {
-            if let (Ok(ts), Ok(already)) = (ts_str.parse::<u64>(), already_str.parse::<u64>()) {
-                let issuer = hex::decode(&issuer_hex)
-                    .ok()
-                    .and_then(|v| v.try_into().ok());
-                let recipient = hex::decode(&recipient_hex)
-                    .ok()
-                    .and_then(|v| v.try_into().ok());
-                if let (Some(issuer), Some(recipient)) = (issuer, recipient) {
-                    match redemption_manager
-                        .tracker
-                        .update_already_redeemed(&issuer, &recipient, ts, already)
-                    {
-                        Ok(_) => tracing::info!(
-                            "Reserve tree repaired: ts={ts}, already_redeemed={already}"
-                        ),
-                        Err(e) => tracing::warn!("Failed to repair reserve tree: {e:?}"),
-                    }
-                }
-            }
-        }
-
+        let mut next_publication_id = 1u64;
         while let Some(cmd) = rx.blocking_recv() {
+            if cmd.response_is_closed() {
+                tracing::debug!("Dropping tracker command whose requester already closed");
+                continue;
+            }
             tracing::debug!("Tracker thread received command: {:?}", cmd);
+
+            if let Some(active_lease) = active_publication {
+                active_publication = handle_command_while_publication_is_fenced(
+                    active_lease,
+                    cmd,
+                    &mut tracker,
+                    &shared_state_for_tracker,
+                );
+                continue;
+            }
+
             match cmd {
                 TrackerCommand::AddNote {
                     issuer_pubkey,
@@ -308,14 +482,11 @@ async fn main() {
                     response_tx,
                 } => {
                     // Get mutable access to the tracker for adding a note
-                    let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                    let result = tracker.add_note(&issuer_pubkey, &note);
 
                     // Update shared state for tracker box updater if successful
                     if result.is_ok() {
                         // Update the shared AVL root digest to match the current tracker state
-                        let current_root = redemption_manager.tracker.get_state().avl_root_digest;
-                        shared_state_for_tracker.set_avl_root_digest(current_root);
-
                         // Note: In a real implementation, we'd send this back to the async context to store
                         // For now, we'll handle event storage in the async handler
                     }
@@ -326,25 +497,34 @@ async fn main() {
                     issuer_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.get_issuer_notes(&issuer_pubkey);
+                    let result = tracker.get_issuer_notes(&issuer_pubkey);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::GetProjectedIssuerGrossDebt {
+                    issuer_pubkey,
+                    candidate_recipient,
+                    candidate_total_debt,
+                    response_tx,
+                } => {
+                    let result = tracker.projected_issuer_gross_debt(
+                        &issuer_pubkey,
+                        candidate_recipient.as_ref(),
+                        candidate_total_debt,
+                    );
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNotesByRecipient {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .get_recipient_notes(&recipient_pubkey);
+                    let result = tracker.get_recipient_notes(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNotesByRecipientWithIssuer {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .get_recipient_notes_with_issuer(&recipient_pubkey);
+                    let result = tracker.get_recipient_notes_with_issuer(&recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -352,149 +532,108 @@ async fn main() {
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
+                    let result = tracker
                         .lookup_note(&issuer_pubkey, &recipient_pubkey)
                         .map(Some);
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::InitiateRedemption {
-                    request,
-                    response_tx,
-                } => {
-                    let result = redemption_manager.initiate_redemption(&request);
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::CompleteRedemption {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    redeemed_amount,
-                    new_already_redeemed,
-                    response_tx,
-                } => {
-                    let result = redemption_manager.complete_redemption(
-                        &issuer_pubkey,
-                        &recipient_pubkey,
-                        redeemed_amount,
-                        new_already_redeemed,
-                    );
-
-                    // Update shared state for tracker box updater if successful
-                    if result.is_ok() {
-                        // Update the shared AVL root digest to match the current tracker state
-                        let current_root = redemption_manager.tracker.get_state().avl_root_digest;
-                        shared_state_for_tracker.set_avl_root_digest(current_root);
-                    }
-
-                    let _ = response_tx.send(result);
-                }
                 TrackerCommand::GetNotes { response_tx } => {
-                    let result = redemption_manager.tracker.get_all_notes_with_issuer();
+                    let result = tracker.get_all_notes_with_issuer();
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::GenerateProof {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    response_tx,
-                } => {
-                    let result = redemption_manager
-                        .tracker
-                        .generate_proof(&issuer_pubkey, &recipient_pubkey);
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::GetTrackerLookupProof {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    response_tx,
-                } => {
-                    let result = redemption_manager
-                        .tracker
-                        .generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::GetReserveLookupProof {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    response_tx,
-                } => {
-                    let result = redemption_manager
-                        .tracker
-                        .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey);
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::GetReserveInsertProof {
-                    issuer_pubkey,
-                    recipient_pubkey,
-                    timestamp,
-                    new_already_redeemed,
-                    response_tx,
-                } => {
-                    let result = redemption_manager.tracker.generate_reserve_insert_proof(
-                        &issuer_pubkey,
-                        &recipient_pubkey,
-                        timestamp,
-                        new_already_redeemed,
-                    );
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::GetReserveStateDigest { response_tx } => {
-                    let digest = redemption_manager.tracker.reserve_state_digest();
-                    let _ = response_tx.send(digest);
+                TrackerCommand::GetValidatedState { response_tx } => {
+                    let _ = response_tx.send(tracker.validated_state());
                 }
                 TrackerCommand::GetConfirmation {
                     issuer_pubkey,
                     recipient_pubkey,
                     response_tx,
                 } => {
-                    let result = Ok(redemption_manager
-                        .tracker
-                        .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                    let result = tracker.try_get_confirmation(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetAllConfirmations { response_tx } => {
-                    let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
+                    let result = tracker.try_all_confirmations();
+                    let _ = response_tx.send(result);
                 }
-                TrackerCommand::MarkNotesPending {
-                    digest,
-                    tx_id,
-                    submitted_height,
+                TrackerCommand::BeginPublication {
+                    tracker_nft_id,
+                    observed_root,
+                    box_id: _,
+                    height: _,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.mark_notes_pending(
-                        digest,
-                        &tx_id,
-                        submitted_height,
-                    );
-                    let _ = response_tx.send(result);
+                    let result = tracker
+                        .validate_observed_generation(&tracker_nft_id, observed_root)
+                        .and_then(|_| tracker.validated_state())
+                        .and_then(|state| {
+                            next_publication_id
+                                .checked_add(1)
+                                .ok_or(basis_store::NoteError::PublicationLeaseMismatch)?;
+                            Ok(PublicationLease {
+                                id: next_publication_id,
+                                digest: state.avl_root_digest,
+                            })
+                        });
+
+                    match result {
+                        Ok(lease) => {
+                            if response_tx.send(Ok(lease)).is_ok() {
+                                active_publication = Some(lease);
+                                next_publication_id += 1;
+                            }
+                        }
+                        Err(error) => {
+                            shared_state_for_tracker.quarantine_publication();
+                            let _ = response_tx.send(Err(error));
+                        }
+                    }
                 }
-                TrackerCommand::ConfirmPendingNotes {
-                    box_id,
-                    height,
+                TrackerCommand::RecordPublicationAttempt { response_tx, .. } => {
+                    let _ = response_tx.send(Err(basis_store::NoteError::PublicationLeaseMismatch));
+                }
+                TrackerCommand::ConfirmPublication {
+                    effect,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .confirm_pending_notes(&box_id, height);
+                    let result = tracker.confirm_validated_publication(&effect);
+                    if result.as_ref().is_err_and(|error| {
+                        !matches!(error, basis_store::NoteError::PublicationLeaseMismatch)
+                    }) {
+                        shared_state_for_tracker.quarantine_publication();
+                    }
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::RevertPendingNotes { response_tx } => {
-                    let result = redemption_manager.tracker.revert_pending_notes();
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::ReconcileWithConfirmedDigest {
-                    digest,
-                    box_id,
-                    height,
+                TrackerCommand::RollbackPublication {
+                    rollback,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .reconcile_with_confirmed_digest(&digest, &box_id, height);
+                    let result = tracker.rollback_validated_publication(&rollback);
+                    if result.is_err() {
+                        shared_state_for_tracker.quarantine_publication();
+                    }
                     let _ = response_tx.send(result);
+                }
+                TrackerCommand::AbortPublication { response_tx, .. } => {
+                    let _ = response_tx.send(Err(basis_store::NoteError::PublicationLeaseMismatch));
                 }
             }
         }
     });
+
+    match init_rx.await {
+        Ok(Ok((_root, _pending))) => {}
+        Ok(Err(error)) => {
+            shared_tracker_state_for_updater.quarantine_publication();
+            tracing::error!(error, "Tracker state initialization failed closed");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            shared_tracker_state_for_updater.quarantine_publication();
+            tracing::error!("Tracker state thread ended during initialization");
+            std::process::exit(1);
+        }
+    }
 
     // Create tracker box updater
     tracing::info!("Initializing tracker box updater...");
@@ -523,8 +662,16 @@ async fn main() {
         api_key: config.ergo.node.api_key.clone(),
         update_interval_seconds: 600, // 10 minutes
         fee: config.transaction.fee,
-        change_address: config.get_change_address().ok(),
         tracker_secret_key: config.tracker_secret_key_bytes(),
+        min_successor_depth: config.ergo.confirmed_chain_min_successor_depth.unwrap_or(6),
+        max_evidence_age_ms: config
+            .ergo
+            .confirmed_chain_max_evidence_age_ms
+            .unwrap_or(60_000),
+        reorg_monitor_depth: config.ergo.confirmed_chain_reorg_monitor_depth,
+        reconciliation_journal_path: data_dir.join("confirmed-chain"),
+        allow_fresh_reconciliation_journal: config.ergo.allow_fresh_reconciliation_journal,
+        ..TrackerBoxUpdateConfig::default()
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
@@ -537,7 +684,8 @@ async fn main() {
     let updater_cmd_tx = tx.clone();
     let updater_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        if let Err(e) = TrackerBoxUpdater::start(
+        let mut health_guard = UpdaterTaskHealthGuard::new(shared_state_clone.clone());
+        match TrackerBoxUpdater::start(
             updater_config,
             shared_state_clone,
             updater_shutdown_rx,
@@ -545,7 +693,11 @@ async fn main() {
         )
         .await
         {
-            tracing::error!("Tracker box updater failed: {}", e);
+            Ok(()) => health_guard.mark_graceful(),
+            Err(e) => tracing::error!(
+                "Tracker box updater failed and commitment effects were quarantined: {}",
+                e
+            ),
         }
     });
     tracing::info!("Tracker box updater started successfully");
@@ -747,37 +899,9 @@ async fn main() {
             "/acceptance/policy/{pubkey}",
             get(get_policy_by_recipient).options(handle_options),
         )
-        .route("/redeem", post(initiate_redemption).options(handle_options))
-        .route(
-            "/redeem/complete",
-            post(complete_redemption).options(handle_options),
-        )
-        .route("/proof/redemption", get(get_redemption_proof))
-        .route("/tracker/proof", get(get_tracker_proof))
         .route("/tracker/state", get(get_tracker_state))
         .route("/tracker/pending-tx", get(get_pending_tx))
-        .route("/reserve/proof", get(get_reserve_proof))
-        .route(
-            "/tracker/signature",
-            post(request_tracker_signature).options(handle_options),
-        )
-        .route(
-            "/redemption/prepare",
-            post(prepare_redemption).options(handle_options),
-        )
-        .route(
-            "/redemption/build",
-            post(build_redemption).options(handle_options),
-        )
-        .route(
-            "/redemption/submit",
-            post(submit_redemption).options(handle_options),
-        )
         .route("/reserves", get(get_all_reserves))
-        .route(
-            "/reserves/create",
-            post(create_reserve_payload).options(handle_options),
-        )
         .route(
             "/reserves/submit",
             post(submit_reserve_transaction).options(handle_options),
@@ -796,10 +920,8 @@ async fn main() {
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
-        .route(
-            "/config/reserve-contract-p2s",
-            get(get_basis_reserve_contract_p2s),
-        )
+        .merge(retired_v1_redemption_routes())
+        .merge(reserve_construction_routes())
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(
@@ -825,7 +947,7 @@ async fn main() {
     tracing::debug!("  GET /events");
     tracing::debug!("  GET /events/paginated");
     tracing::debug!("  GET /key-status/{{pubkey}}");
-    tracing::debug!("  POST /redeem");
+    tracing::debug!("  Legacy redemption routes return HTTP 410 (v1 retired)");
     tracing::debug!("  POST /acceptance/check");
     tracing::debug!("  POST /acceptance/policy");
     tracing::debug!("  GET /tracker/latest-box-id");
@@ -855,6 +977,188 @@ async fn main() {
         tracing::error!("Server error: {}", e);
         std::process::exit(1);
     };
+}
+
+#[cfg(test)]
+mod publication_fence_tests {
+    use super::*;
+
+    fn generation(
+        fresh_generation: basis_store::FreshGenerationApproval,
+    ) -> basis_store::TrackerGenerationConfig {
+        basis_store::TrackerGenerationConfig {
+            tracker_nft_id: [0x42; 32],
+            fresh_generation,
+        }
+    }
+
+    fn issuer_pubkey(secret: &[u8; 32]) -> [u8; 33] {
+        let secp = secp256k1::Secp256k1::new();
+        let secret = secp256k1::SecretKey::from_slice(secret).expect("valid test secret");
+        secp256k1::PublicKey::from_secret_key(&secp, &secret).serialize()
+    }
+
+    #[tokio::test]
+    async fn active_publication_rejects_state_mutation_and_root_exposure() {
+        let (add_tx, add_rx) = tokio::sync::oneshot::channel();
+        reject_while_publication_is_fenced(TrackerCommand::AddNote {
+            issuer_pubkey: [2u8; 33],
+            note: basis_store::IouNote {
+                recipient_pubkey: [3u8; 33],
+                amount_collected: 1,
+                amount_redeemed: 0,
+                timestamp: 1,
+                signature: [0u8; 65],
+            },
+            response_tx: add_tx,
+        });
+        assert!(matches!(
+            add_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+
+        let (state_tx, state_rx) = tokio::sync::oneshot::channel();
+        reject_while_publication_is_fenced(TrackerCommand::GetValidatedState {
+            response_tx: state_tx,
+        });
+        assert!(matches!(
+            state_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+    }
+
+    #[test]
+    fn updater_task_guard_quarantines_unexpected_termination_only() {
+        let failed = SharedTrackerState::new();
+        {
+            let _guard = UpdaterTaskHealthGuard::new(failed.clone());
+        }
+        assert!(!failed.is_publication_healthy());
+
+        let graceful = SharedTrackerState::new();
+        {
+            let mut guard = UpdaterTaskHealthGuard::new(graceful.clone());
+            guard.mark_graceful();
+        }
+        assert!(graceful.is_publication_healthy());
+    }
+
+    #[tokio::test]
+    async fn stale_publication_receipt_cannot_release_the_actor_fence() {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        reject_while_publication_is_fenced(TrackerCommand::AbortPublication {
+            lease: PublicationLease {
+                id: 7,
+                digest: [7u8; 33],
+            },
+            response_tx,
+        });
+        assert!(matches!(
+            response_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationLeaseMismatch))
+        ));
+    }
+
+    #[tokio::test]
+    async fn durable_receipt_restores_the_actor_and_updater_fences_after_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note =
+            basis_store::IouNote::create_and_sign(recipient, 1_000, 1, &issuer_secret).unwrap();
+        let tx_id = "11".repeat(32);
+        let digest;
+
+        {
+            let mut manager = basis_store::TrackerStateManager::try_new(
+                temp_dir.path(),
+                generation(basis_store::FreshGenerationApproval::Approve),
+            )
+            .unwrap();
+            manager.add_note(&issuer, &note).unwrap();
+            digest = manager.validated_state().unwrap().avl_root_digest;
+            manager.mark_notes_pending(digest, &tx_id, 100).unwrap();
+        }
+
+        let restarted_shared = SharedTrackerState::new();
+        let reopened = basis_store::TrackerStateManager::try_new_with_publication_health(
+            temp_dir.path(),
+            generation(basis_store::FreshGenerationApproval::Deny),
+            restarted_shared.publication_health(),
+        )
+        .unwrap();
+        let pending = reopened.pending_publication().unwrap().unwrap();
+        let mut active = restore_pending_publication(Some(&pending), &restarted_shared);
+        assert_eq!(active.unwrap().digest, digest);
+        let updater_pending = restarted_shared.get_pending();
+        assert_eq!(updater_pending.tx_id.as_deref(), Some(tx_id.as_str()));
+        assert_eq!(updater_pending.digest, Some(digest));
+        assert_eq!(updater_pending.submitted_height, Some(100));
+        assert_eq!(
+            TrackerBoxUpdater::restored_pending_transaction(&restarted_shared).unwrap(),
+            Some((tx_id.clone(), digest))
+        );
+
+        let mut tracker = reopened;
+
+        let (state_tx, state_rx) = tokio::sync::oneshot::channel();
+        active = handle_command_while_publication_is_fenced(
+            active.unwrap(),
+            TrackerCommand::GetValidatedState {
+                response_tx: state_tx,
+            },
+            &mut tracker,
+            &restarted_shared,
+        );
+        assert!(matches!(
+            state_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+
+        let (add_tx, add_rx) = tokio::sync::oneshot::channel();
+        active = handle_command_while_publication_is_fenced(
+            active.unwrap(),
+            TrackerCommand::AddNote {
+                issuer_pubkey: issuer,
+                note: note.clone(),
+                response_tx: add_tx,
+            },
+            &mut tracker,
+            &restarted_shared,
+        );
+        assert!(matches!(
+            add_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        let restored_lease = active.unwrap();
+        active = handle_command_while_publication_is_fenced(
+            restored_lease,
+            TrackerCommand::AbortPublication {
+                lease: restored_lease,
+                response_tx: abort_tx,
+            },
+            &mut tracker,
+            &restarted_shared,
+        );
+        assert!(matches!(
+            abort_rx.await,
+            Ok(Err(basis_store::NoteError::PublicationInProgress))
+        ));
+        assert!(active.is_some());
+        assert!(restarted_shared.is_publication_healthy());
+        assert_eq!(
+            tracker.pending_publication().unwrap().unwrap().tx_id(),
+            tx_id
+        );
+        assert_eq!(
+            TrackerBoxUpdater::restored_pending_transaction(&restarted_shared).unwrap(),
+            Some((tx_id.clone(), digest))
+        );
+        assert!(active.is_some());
+    }
 }
 
 /// Background task that continuously scans the blockchain for reserve events
@@ -963,15 +1267,6 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
             }
         }
     }
-}
-
-/// Handle OPTIONS preflight requests for CORS
-async fn handle_options() -> impl axum::response::IntoResponse {
-    (
-        axum::http::StatusCode::OK,
-        [("Access-Control-Allow-Origin", "*")],
-        "",
-    )
 }
 
 /// Process a reserve event and store it in the event store

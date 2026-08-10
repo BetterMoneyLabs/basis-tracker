@@ -2,6 +2,23 @@
 
 use thiserror::Error;
 
+use ergo_lib::ergotree_ir::chain::address::{Address, AddressEncoder, NetworkPrefix};
+use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+/// Full ErgoTree bytes pinned by the ChainCash Basis v2 source receipt.
+pub const BASIS_V2_ERG_ERGO_TREE_HEX: &str = include_str!("../contracts/basis-v2.p2s");
+/// Full token-reserve ErgoTree bytes pinned by the ChainCash Basis v2 source receipt.
+pub const BASIS_V2_TOKEN_ERGO_TREE_HEX: &str = include_str!("../contracts/basis-token-v2.p2s");
+/// Machine-readable source-to-byte provenance copied from the pinned
+/// ChainCash candidate receipt. It is evidence metadata, not an activation flag.
+pub const BASIS_V2_PROVENANCE_JSON: &str = include_str!("../contracts/basis-v2-provenance.json");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BasisV2ContractKind {
+    Erg,
+    Token,
+}
+
 #[derive(Error, Debug)]
 pub enum CompilerError {
     #[error("File not found: {0}")]
@@ -10,11 +27,64 @@ pub enum CompilerError {
     CompilationFailed(String),
     #[error("Ergo-lib not available: {0}")]
     ErgoLibUnavailable(String),
+    #[error("invalid Basis contract address: {0}")]
+    InvalidAddress(String),
+    #[error("configured contract does not match the exact Basis v2 {0} ErgoTree")]
+    ContractIdentityMismatch(&'static str),
 }
 
-/// Get the Basis reserve contract P2S address
+impl BasisV2ContractKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Erg => "ERG",
+            Self::Token => "token",
+        }
+    }
+
+    pub fn ergo_tree_hex(self) -> &'static str {
+        match self {
+            Self::Erg => BASIS_V2_ERG_ERGO_TREE_HEX.trim(),
+            Self::Token => BASIS_V2_TOKEN_ERGO_TREE_HEX.trim(),
+        }
+    }
+}
+
+/// Derive the mainnet P2S address from the exact committed v2 ErgoTree bytes.
+pub fn get_basis_v2_contract_p2s(kind: BasisV2ContractKind) -> Result<String, CompilerError> {
+    let tree_bytes = hex::decode(kind.ergo_tree_hex())
+        .map_err(|e| CompilerError::ErgoLibUnavailable(format!("invalid golden hex: {e}")))?;
+    Ok(AddressEncoder::new(NetworkPrefix::Mainnet).address_to_str(&Address::P2S(tree_bytes)))
+}
+
+/// Fail closed unless `configured_p2s` resolves to the exact v2 tree selected by `kind`.
+pub fn validate_basis_v2_contract_p2s(
+    configured_p2s: &str,
+    kind: BasisV2ContractKind,
+) -> Result<(), CompilerError> {
+    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
+    let address = encoder
+        .parse_address_from_str(configured_p2s)
+        .map_err(|e| CompilerError::InvalidAddress(e.to_string()))?;
+    let actual = address
+        .script()
+        .map_err(|e| CompilerError::InvalidAddress(e.to_string()))?
+        .sigma_serialize_bytes()
+        .map_err(|e| CompilerError::ErgoLibUnavailable(e.to_string()))?;
+    let expected = hex::decode(kind.ergo_tree_hex())
+        .map_err(|e| CompilerError::ErgoLibUnavailable(format!("invalid golden hex: {e}")))?;
+    if actual != expected {
+        return Err(CompilerError::ContractIdentityMismatch(kind.label()));
+    }
+    Ok(())
+}
+
+/// Get the historical strict-insert Basis reserve contract P2S address.
+///
+/// This identity is retained for lineage checks and compatibility detection.
+/// It must not be used as the default for builders that emit insert-or-update
+/// reserve state.
 pub fn get_basis_reserve_contract_p2s() -> Result<String, CompilerError> {
-    // Return the compiled Basis reserve contract P2S address
+    // Exact compiled identity of the historical strict-insert generation.
     Ok("3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT".to_string())
 }
 
@@ -31,10 +101,78 @@ mod tests {
     use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
     use ergo_lib::ergotree_ir::chain::address::NetworkPrefix;
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+    use sha2::{Digest, Sha256};
 
     #[test]
-    fn test_contract_compilation_placeholder() {
-        // Test that we can get the Basis reserve contract P2S
+    fn v2_golden_lengths_and_addresses_are_exact() {
+        let erg = hex::decode(BASIS_V2_ERG_ERGO_TREE_HEX.trim()).unwrap();
+        let token = hex::decode(BASIS_V2_TOKEN_ERGO_TREE_HEX.trim()).unwrap();
+        assert_eq!(erg.len(), 1682);
+        assert_eq!(token.len(), 1963);
+        assert_eq!(
+            hex::encode(Sha256::digest(&erg)),
+            "2690634924efb22359a776f89f5274d77e067bd8ad0619a6e358a2f96697a0c2"
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(&token)),
+            "ba1df64e7d95ecffc4f3d49fcada8baebe59a676eb617737cd010bdb52381cb3"
+        );
+
+        let receipt: serde_json::Value = serde_json::from_str(BASIS_V2_PROVENANCE_JSON).unwrap();
+        assert_eq!(receipt["abi_generation"], 2);
+        assert_eq!(receipt["source_repository"], "BetterMoneyLabs/chaincash");
+        assert_eq!(
+            receipt["contract_source_commit"],
+            "9a274396d5f78f7be5ed76bacee5329c42570317"
+        );
+        assert_eq!(
+            receipt["claim_key_vector_commit"],
+            "04031626f09c6590a20ad20d5583c6eccc14412d"
+        );
+        assert_eq!(
+            receipt["claim_key_vector_test_blob"],
+            "52cf88c3f692e0f0c23903562f603fae700b2ebe"
+        );
+        assert_eq!(receipt["contracts"]["erg"]["ergo_tree_bytes"], 1682);
+        assert_eq!(receipt["contracts"]["token"]["ergo_tree_bytes"], 1963);
+        assert_eq!(
+            receipt["contracts"]["erg"]["ergo_tree_sha256"],
+            hex::encode(Sha256::digest(&erg))
+        );
+        assert_eq!(
+            receipt["contracts"]["token"]["ergo_tree_sha256"],
+            hex::encode(Sha256::digest(&token))
+        );
+
+        for kind in [BasisV2ContractKind::Erg, BasisV2ContractKind::Token] {
+            let p2s = get_basis_v2_contract_p2s(kind).unwrap();
+            validate_basis_v2_contract_p2s(&p2s, kind).unwrap();
+        }
+    }
+
+    #[test]
+    fn v2_identity_rejects_wrong_family_and_legacy_bytes() {
+        let erg = get_basis_v2_contract_p2s(BasisV2ContractKind::Erg).unwrap();
+        let token = get_basis_v2_contract_p2s(BasisV2ContractKind::Token).unwrap();
+        assert!(validate_basis_v2_contract_p2s(&erg, BasisV2ContractKind::Token).is_err());
+        assert!(validate_basis_v2_contract_p2s(&token, BasisV2ContractKind::Erg).is_err());
+        assert!(validate_basis_v2_contract_p2s(
+            &get_basis_reserve_contract_p2s().unwrap(),
+            BasisV2ContractKind::Erg
+        )
+        .is_err());
+
+        let mut mutated = hex::decode(BASIS_V2_ERG_ERGO_TREE_HEX.trim()).unwrap();
+        let last = mutated.len() - 1;
+        mutated[last] ^= 1;
+        let mutated_p2s =
+            AddressEncoder::new(NetworkPrefix::Mainnet).address_to_str(&Address::P2S(mutated));
+        assert!(validate_basis_v2_contract_p2s(&mutated_p2s, BasisV2ContractKind::Erg).is_err());
+    }
+
+    #[test]
+    fn historical_contract_identity_is_a_valid_p2s() {
+        // Test that the retained historical identity remains parseable.
         let p2s = get_basis_reserve_contract_p2s().unwrap();
         assert!(!p2s.is_empty());
         // The P2S should be a valid P2S address
@@ -64,7 +202,7 @@ mod tests {
             !ergo_tree_hex.is_empty(),
             "ErgoTree bytes should not be empty"
         );
-        // Updated expected ErgoTree bytes for current P2S address
+        // Expected ErgoTree bytes for the historical strict-insert address.
         assert_eq!(ergo_tree_hex, "102004140414050004000400041004200500040004420400040004000410050004420500040004420442010104e021050004020500058084af5f04040500040605000480a3050100d806d6017ee4e3000204d6029d72017300d603b2a59e7201730100d604e4c6a70407d605ededed93c27203c2a793db63087203db6308a793e4c672030407720493e4c67203060ee4c6a7060ed606e5c6a707057302959372027303d813d607b2db6501fe730400d608db07027204d609e4e30107d60acbb37208db07027209d60be4e30305d60ce4e30405d60de3070ed60ee6720dd60f7a720cd61095720e7cb4e4dc640ae4c6a7056402720ae4720d730573067307d61199c1a7c17203d612db6a01ddd613e4e3020ed614b4721373087309d615b3b3720a7a720b720fd616e4e3060ed617b17216d618917217730ad619e4c672070407ea02d1ededededededed7205938cb2db63087207730b0001e4c6a7060e937ce4dc640ae4c67207056402720ae4e3080e720b91720c95720e7cb4e4dc640ae4c6a7056402720ae4720d730c730d730e93e4dc640ce4c6a705640283013c0e0e8602720ab3720f7a9a72107211e4e3050ee4c672030564939f72127bb47213730fb17213a0ee72149f72047bcbb3b3721472157208eded917211731090721199720b7210957218957218d801d61ab4721673117312939f72127bb4721673137217a0ee721a9f72197bcbb3b3721a7215db0702721973149199a38cc7720701731593e5c67203070573167206cd7209959372027317d1ededed720593e4c672030564e4c6a7056493e5c672030705731872069299c17203c1a7731995937202731aea02d1edededed720592c17203c1a793e4c672030564e4c6a7056492e4c6720307057ea305937206731bcd720495937202731cea02d1ed917206731d927ea3059a72067e731e05cd7204d1731f",
             "ErgoTree bytes don't match expected raw bytes");
 
@@ -101,7 +239,7 @@ mod tests {
         let serialized_hex = hex::encode(&serialized_bytes);
 
         // The expected ByteArrayConstant-wrapped bytes that the Ergo node expects for scan registration
-        // Updated for current P2S address: starts with 0eaa04 (ByteArrayConstant prefix with length)
+        // Historical P2S scan constant (ByteArrayConstant prefix plus tree bytes).
         let expected_bytes_hex = "0ead05102004140414050004000400041004200500040004420400040004000410050004420500040004420442010104e021050004020500058084af5f04040500040605000480a3050100d806d6017ee4e3000204d6029d72017300d603b2a59e7201730100d604e4c6a70407d605ededed93c27203c2a793db63087203db6308a793e4c672030407720493e4c67203060ee4c6a7060ed606e5c6a707057302959372027303d813d607b2db6501fe730400d608db07027204d609e4e30107d60acbb37208db07027209d60be4e30305d60ce4e30405d60de3070ed60ee6720dd60f7a720cd61095720e7cb4e4dc640ae4c6a7056402720ae4720d730573067307d61199c1a7c17203d612db6a01ddd613e4e3020ed614b4721373087309d615b3b3720a7a720b720fd616e4e3060ed617b17216d618917217730ad619e4c672070407ea02d1ededededededed7205938cb2db63087207730b0001e4c6a7060e937ce4dc640ae4c67207056402720ae4e3080e720b91720c95720e7cb4e4dc640ae4c6a7056402720ae4720d730c730d730e93e4dc640ce4c6a705640283013c0e0e8602720ab3720f7a9a72107211e4e3050ee4c672030564939f72127bb47213730fb17213a0ee72149f72047bcbb3b3721472157208eded917211731090721199720b7210957218957218d801d61ab4721673117312939f72127bb4721673137217a0ee721a9f72197bcbb3b3721a7215db0702721973149199a38cc7720701731593e5c67203070573167206cd7209959372027317d1ededed720593e4c672030564e4c6a7056493e5c672030705731872069299c17203c1a7731995937202731aea02d1edededed720592c17203c1a793e4c672030564e4c6a7056492e4c6720307057ea305937206731bcd720495937202731cea02d1ed917206731d927ea3059a72067e731e05cd7204d1731f";
 
         // Verify the reserve scan contains exactly the expected ByteArrayConstant-wrapped bytes

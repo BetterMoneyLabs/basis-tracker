@@ -4,12 +4,71 @@
 mod tests {
     use super::*;
     use crate::{
-        ergo_scanner::{BoxAsset, ScanBox},
+        ergo_scanner::{BoxAsset, ScanBox, NODE_HTTP_MAX_BODY_BYTES},
         persistence::{ScannerMetadataStorage, TrackerStorage},
-        tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
+        tracker_scanner::{create_tracker_server_state, TrackerNodeConfig, TrackerScannerError},
     };
     use std::collections::HashMap;
     use std::path::Path;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn tracker_node_config_debug_redacts_api_key() {
+        let sentinel = "tracker-node-api-key-sentinel";
+        let config = TrackerNodeConfig {
+            start_height: Some(42),
+            tracker_nft_id: Some("11".repeat(32)),
+            node_url: "http://127.0.0.1:9053".to_string(),
+            scan_name: Some("redaction-test".to_string()),
+            api_key: Some(sentinel.to_string()),
+        };
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains(sentinel));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    async fn oversized_declared_response_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                NODE_HTTP_MAX_BODY_BYTES + 1
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn tracker_scanner_rejects_oversized_declared_node_body() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let metadata_storage = ScannerMetadataStorage::open(temp_dir.path().join("metadata"))
+            .expect("Failed to create metadata storage");
+        let tracker_storage = TrackerStorage::open(temp_dir.path().join("tracker"))
+            .expect("Failed to create tracker storage");
+        let config = TrackerNodeConfig {
+            start_height: Some(0),
+            tracker_nft_id: Some("11".repeat(32)),
+            node_url: oversized_declared_response_server().await,
+            scan_name: Some("bounded-http-test".to_string()),
+            api_key: None,
+        };
+        let state = create_tracker_server_state(config, metadata_storage, tracker_storage);
+
+        let error = state.get_current_height().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            TrackerScannerError::ResponseTooLarge {
+                max_bytes: NODE_HTTP_MAX_BODY_BYTES
+            }
+        ));
+    }
 
     #[tokio::test]
     async fn test_tracker_scan_registration_payload() {
@@ -75,8 +134,7 @@ mod tests {
             api_key: None,
         };
 
-        let server_state =
-            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
+        let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
 
         // Verify the server state was created
         assert_eq!(server_state.config.node_url, "http://localhost:9053");
@@ -135,8 +193,7 @@ mod tests {
             api_key: None,
         };
 
-        let server_state =
-            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
+        let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
 
         // Create a mock ScanBox
         let mut registers = HashMap::new();
@@ -212,8 +269,7 @@ mod tests {
             api_key: None,
         };
 
-        let server_state =
-            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
+        let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
 
         // Create a mock ScanBox without the tracker NFT
         let mut registers = HashMap::new();
@@ -272,8 +328,7 @@ mod tests {
             api_key: None,
         };
 
-        let server_state =
-            create_tracker_server_state(config, metadata_storage, tracker_storage, temp_dir.path());
+        let server_state = create_tracker_server_state(config, metadata_storage, tracker_storage);
 
         // Create a mock ScanBox missing R5 register (required)
         let mut registers = HashMap::new();

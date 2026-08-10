@@ -1,5 +1,9 @@
 # Off-Chain (Client-Side) Redemption Signing
 
+> **Status: historical v1 signing design — superseded.** The implementation and
+> CLI command below are removed. Current v2 code validates a manifest but has no
+> prover, signer, wallet, submit, or broadcast implementation.
+
 ## Overview
 
 A Basis redemption can be signed **entirely off-chain** and then broadcast to the node for
@@ -161,8 +165,9 @@ extension already in Scala order), signs the **fee input(s)** itself with the
 configured `tracker_secret_key`, and returns the partial transaction plus all signing
 material (input/data box binaries, last 10 headers). The client only adds the reserve
 input's `proveDlog(recipient)` over the same `bytes_to_sign` and posts the fully-signed
-transaction to `POST /redemption/submit`, which broadcasts it and syncs the tracker's
-note/reserve-tree state (see
+transaction to `POST /redemption/submit`, which only requests node broadcast. A
+node-accepted transaction is not settlement evidence; a separate confirmed-chain
+reconciler derives note/reserve-tree state after active-chain confirmation (see
 [redemption_state_spec.md](../server/redemption_state_spec.md#tracker-assisted-2-phase-endpoints-redemptionbuild-redemptionsubmit)).
 
 Because the tracker produces the canonical extension order and the client never
@@ -175,9 +180,10 @@ in [redemption_execution_report.md](../redemption_execution_report.md)).
 | Party | Produces in this variant |
 |-------|--------------------------|
 | Issuer (client) | issuer Schnorr signature over the 48-byte message (build request) |
-| Tracker server | unsigned tx, all AVL proofs, tracker Schnorr signature (`#6`), **fee-input `proveDlog`**, broadcast, state sync |
+| Tracker server | unsigned tx, all AVL proofs, tracker Schnorr signature (`#6`), **fee-input `proveDlog`**, broadcast request |
 | Receiver (client) | `proveDlog(receiver)` over `bytes_to_sign` spliced into the reserve input |
 | Ergo node | validates only; does not sign |
+| Confirmed-chain reconciler | derives settlement from the authenticated active-chain successor and rolls it back on reorg |
 
 ## References
 

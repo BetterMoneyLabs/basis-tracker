@@ -16,22 +16,14 @@
 #[cfg(test)]
 mod tests {
     use crate::schnorr::{
-        self, generate_keypair, pubkey_from_hex, pubkey_to_hex, schnorr_sign, schnorr_verify,
+        generate_keypair, pubkey_from_hex, pubkey_to_hex, schnorr_sign, schnorr_verify,
         signature_from_hex, signature_to_hex,
     };
-    use crate::{IouNote, NoteKey, PubKey, TrackerStateManager};
+    use crate::{IouNote, NoteKey, PubKey};
     use basis_core::types::signing_message as core_signing_message;
     use blake2::{Blake2b, Digest};
     use generic_array::typenum::U32;
     use secp256k1::{Secp256k1, SecretKey};
-
-    // ========== Test Constants (matching Scala BasisSpec) ==========
-
-    const BASIS_TOKEN_ID: &str = "4b2d8b7beb3eaac8234d9e61792d270898a43934d6a27275e4f3a044609c9f2a";
-    const TRACKER_NFT: &str = "3c45f29a5165b030fdb5eaf5d81f8108f9d8f507b31487dd51f4ae08fe07cf4a";
-
-    const MIN_VALUE: u64 = 1_000_000_000; // 1 ERG
-    const FEE_VALUE: u64 = 1_000_000; // 0.001 ERG
 
     // Standard test timestamp (in seconds, Sept 2001 - clearly in the past)
     // Note: The add_note check compares timestamp (ms) against current_time (secs),
@@ -44,14 +36,6 @@ mod tests {
         let mut hasher = Blake2b::<U32>::new();
         hasher.update(data);
         hasher.finalize().into()
-    }
-
-    /// Create a debt record key: blake2b256(ownerKey || receiverKey)
-    fn debt_record_key(owner_key: &PubKey, receiver_key: &PubKey) -> [u8; 32] {
-        let mut input = [0u8; 66];
-        input[..33].copy_from_slice(owner_key);
-        input[33..].copy_from_slice(receiver_key);
-        blake2b256(&input)
     }
 
     /// Generate a random keypair
@@ -781,103 +765,6 @@ mod tests {
             note_key.key_hash.to_vec(),
             expected,
             "NoteKey hash must match Scala demo message prefix"
-        );
-    }
-
-    // ========== TRACKER STATE MANAGER TESTS ==========
-
-    /// Test reserve tree value format: 8 bytes (already_redeemed)
-    #[test]
-    fn reserve_tree_value_format_8_bytes() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
-
-        let (issuer_secret, issuer_pk) = random_keypair();
-        let (_, recipient_pk) = random_keypair();
-
-        let total_debt: u64 = 1_000_000_000;
-        let timestamp: u64 = TEST_TIMESTAMP;
-
-        let note =
-            IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
-
-        // Insert note into tracker
-        tracker.add_note(&issuer_pk, &note).unwrap();
-
-        // Generate reserve lookup proof
-        let lookup_proof = tracker
-            .generate_reserve_lookup_proof(&issuer_pk, &recipient_pk)
-            .unwrap();
-
-        // For first redemption, value should be 16 bytes: 0 timestamp || 0 redeemedAmount
-        assert_eq!(
-            lookup_proof.value.len(),
-            16,
-            "Reserve tree value must be 16 bytes (timestamp || redeemedAmount)"
-        );
-
-        // For first redemption, value should be all zeros
-        assert_eq!(
-            lookup_proof.value,
-            vec![0u8; 16],
-            "First redemption value should be 16 zero bytes"
-        );
-    }
-
-    /// Test that get_already_redeemed returns 0 for first redemption
-    #[test]
-    fn first_redemption_returns_zero_already_redeemed() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
-
-        let (issuer_secret, issuer_pk) = random_keypair();
-        let (_, recipient_pk) = random_keypair();
-
-        let total_debt: u64 = 1_000_000_000;
-        let timestamp: u64 = TEST_TIMESTAMP;
-
-        let note =
-            IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
-        tracker.add_note(&issuer_pk, &note).unwrap();
-
-        let already_redeemed = tracker
-            .get_already_redeemed(&issuer_pk, &recipient_pk)
-            .unwrap();
-        assert_eq!(
-            already_redeemed, 0,
-            "First redemption should have 0 already redeemed"
-        );
-    }
-
-    /// Test tracker tree lookup proof generation
-    #[test]
-    fn tracker_tree_lookup_proof() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
-
-        let (issuer_secret, issuer_pk) = random_keypair();
-        let (_, recipient_pk) = random_keypair();
-
-        let total_debt: u64 = 1_000_000_000;
-        let timestamp: u64 = TEST_TIMESTAMP;
-
-        let note =
-            IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
-        tracker.add_note(&issuer_pk, &note).unwrap();
-
-        let lookup_proof = tracker
-            .generate_tracker_lookup_proof(&issuer_pk, &recipient_pk)
-            .unwrap();
-
-        // Tracker tree value should be 8 bytes (totalDebt as big-endian u64)
-        assert_eq!(
-            lookup_proof.value.len(),
-            8,
-            "Tracker tree value must be 8 bytes (totalDebt)"
-        );
-
-        // Value should match the note's totalDebt
-        let decoded_debt = u64::from_be_bytes(lookup_proof.value.try_into().unwrap());
-        assert_eq!(
-            decoded_debt, total_debt,
-            "Tracker tree value must match note's totalDebt"
         );
     }
 
