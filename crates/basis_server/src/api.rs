@@ -1670,6 +1670,106 @@ pub async fn initiate_redemption(
         found_reserve.unwrap()
     };
 
+    // Acceptance-policy compliance check at redemption time: reject redemptions
+    // that would newly violate another debt holder's collateralization policy.
+    // Emergency redemptions bypass the tracker (contract path after the time
+    // lock) and are exempt from this check.
+    if state.config.redemption.enforce_acceptance_policy && !payload.emergency {
+        let issuer_pk: Option<PubKey> =
+            hex::decode(basis_store::normalize_public_key(&payload.issuer_pubkey))
+                .ok()
+                .and_then(|b| b.try_into().ok());
+        let recipient_pk: Option<PubKey> = hex::decode(&payload.recipient_pubkey)
+            .ok()
+            .and_then(|b| b.try_into().ok());
+
+        match (issuer_pk, recipient_pk) {
+            (Some(issuer_pk), Some(recipient_pk)) => {
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                if let Err(e) = state
+                    .tx
+                    .send(TrackerCommand::GetNotesByIssuer {
+                        issuer_pubkey: issuer_pk,
+                        response_tx,
+                    })
+                    .await
+                {
+                    tracing::error!("Failed to send to tracker thread: {:?}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(crate::models::error_response(
+                            "Tracker thread unavailable".to_string(),
+                        )),
+                    );
+                }
+
+                let notes = match response_rx.await {
+                    Ok(Ok(notes)) => notes,
+                    Ok(Err(e)) => {
+                        tracing::error!("Failed to get issuer notes for policy check: {:?}", e);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(crate::models::error_response(
+                                "Failed to retrieve notes for policy check".to_string(),
+                            )),
+                        );
+                    }
+                    Err(_) => {
+                        tracing::error!("Tracker thread response channel closed");
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(crate::models::error_response(
+                                "Internal server error".to_string(),
+                            )),
+                        );
+                    }
+                };
+
+                // The miner fee is paid by explicit fee inputs, not deducted from
+                // the reserve output, so the simulated post-redemption collateral
+                // only decreases by the redeemed amount (fee = 0 here).
+                if let Err(e) =
+                    crate::acceptance::redemption_check::check_redemption_policy_compliance(
+                        &issuer_pk,
+                        &recipient_pk,
+                        payload.amount,
+                        reserve_box_value,
+                        0,
+                        reserve_refund_initiation_height > 0,
+                        &notes,
+                        &state.policy_storage,
+                        &state.config.acceptance,
+                    )
+                {
+                    use crate::acceptance::redemption_check::RedemptionPolicyError;
+                    let failure_id = match &e {
+                        RedemptionPolicyError::WouldViolatePolicy { .. } => {
+                            "failed_policy_violation"
+                        }
+                        RedemptionPolicyError::NotOldestNote { .. } => "failed_not_oldest_note",
+                    };
+                    tracing::warn!(
+                        "Redemption rejected by acceptance policy check ({}): {}",
+                        failure_id,
+                        e
+                    );
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(crate::models::error_response(format!(
+                            "{}: {}",
+                            failure_id, e
+                        ))),
+                    );
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    "Skipping redemption policy check: could not decode issuer/recipient public keys"
+                );
+            }
+        }
+    }
+
     // Fetch blockchain data from Ergo node
     let (tracker_box_id, tracker_nft_id, current_height) = {
         // Get tracker_storage reference first (before any awaits)

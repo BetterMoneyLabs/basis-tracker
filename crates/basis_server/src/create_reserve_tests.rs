@@ -81,6 +81,7 @@ mod create_reserve_tests {
                 change_address: None,
             },
             acceptance: crate::acceptance::config::AcceptanceConfig::empty(),
+            redemption: crate::config::RedemptionConfig::default(),
         });
 
         let reserve_tracker = Arc::new(Mutex::new(basis_store::ReserveTracker::new()));

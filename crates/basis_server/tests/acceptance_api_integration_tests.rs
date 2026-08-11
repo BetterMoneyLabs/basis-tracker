@@ -705,6 +705,7 @@ async fn create_test_app(
             change_address: None,
         },
         acceptance: acceptance::config::AcceptanceConfig::empty(),
+        redemption: config::RedemptionConfig::default(),
     });
 
     let scanner_temp_dir = tempfile::tempdir().unwrap();
@@ -792,6 +793,7 @@ async fn create_test_app_with_policy_routes(
             change_address: None,
         },
         acceptance: acceptance::config::AcceptanceConfig::empty(),
+        redemption: config::RedemptionConfig::default(),
     });
 
     let scanner_temp_dir = tempfile::tempdir().unwrap();
@@ -885,6 +887,7 @@ async fn create_test_app_with_all_routes(
             change_address: None,
         },
         acceptance: acceptance::config::AcceptanceConfig::empty(),
+        redemption: config::RedemptionConfig::default(),
     });
 
     let scanner_temp_dir = tempfile::tempdir().unwrap();

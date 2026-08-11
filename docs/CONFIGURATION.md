@@ -52,6 +52,32 @@ api_key = "hello"                    # API key for authenticated nodes
 timeout_secs = 30                    # Request timeout in seconds
 ```
 
+### Redemption Configuration
+
+```toml
+[redemption]
+# Enforce acceptance-policy compliance on redemption requests (default: true)
+enforce_acceptance_policy = true
+```
+
+When `enforce_acceptance_policy` is enabled, the tracker checks every redemption
+request (`POST /redeem` and `POST /redemption/build`) against the acceptance
+policies of the reserve issuer's **other** debt holders before signing:
+
+- The tracker simulates the post-redemption collateralization ratio
+  (`(collateral - amount) / (total_debt - amount)`) and rejects the request with
+  HTTP 400 `failed_policy_violation` if any other holder's policy would be newly
+  violated.
+- If **all** other holders' policies are already violated (distressed,
+  undercollateralized reserve), a FIFO fallback applies: only the issuer's
+  **oldest outstanding note** (minimum timestamp) may be redeemed; other requests
+  are rejected with HTTP 400 `failed_not_oldest_note` (the message includes the
+  oldest note's timestamp).
+
+Set it to `false` to disable these checks (e.g. for testing). Emergency
+redemptions via the contract path bypass the tracker and are never
+policy-checked. See `specs/redemption_acceptance_policy.md` for the full design.
+
 ## Tracker NFT Configuration
 
 ### What is the Tracker NFT?
@@ -149,6 +175,9 @@ tracker_nft_id = ""
 url = "http://159.89.116.15:11088"
 api_key = "hello"
 timeout_secs = 30
+
+[redemption]
+enforce_acceptance_policy = true
 ```
 
 ## Verification

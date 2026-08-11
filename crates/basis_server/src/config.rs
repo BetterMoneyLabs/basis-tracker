@@ -20,6 +20,9 @@ pub struct AppConfig {
     /// Acceptance predicate configuration
     #[serde(default)]
     pub acceptance: AcceptanceConfig,
+    /// Redemption policy enforcement configuration
+    #[serde(default)]
+    pub redemption: RedemptionConfig,
 }
 
 /// Server-specific configuration
@@ -73,6 +76,29 @@ pub struct TransactionConfig {
     pub change_address: Option<String>,
 }
 
+/// Redemption policy enforcement configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedemptionConfig {
+    /// Enforce acceptance-policy compliance at redemption time: reject redemptions
+    /// that would newly violate another debt holder's collateralization policy.
+    /// When all other holders are already violated (distressed reserve), only the
+    /// oldest outstanding note may redeem (FIFO fallback).
+    #[serde(default = "default_enforce_acceptance_policy")]
+    pub enforce_acceptance_policy: bool,
+}
+
+fn default_enforce_acceptance_policy() -> bool {
+    true
+}
+
+impl Default for RedemptionConfig {
+    fn default() -> Self {
+        Self {
+            enforce_acceptance_policy: default_enforce_acceptance_policy(),
+        }
+    }
+}
+
 impl AppConfig {
     /// Load configuration from file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, config::ConfigError> {
@@ -106,6 +132,8 @@ impl AppConfig {
             // Acceptance predicate configuration (optional)
             .set_default("acceptance.default", "reject")?
             .set_default("acceptance.predicates", Vec::<String>::new())?
+            // Redemption policy enforcement (optional)
+            .set_default("redemption.enforce_acceptance_policy", true)?
             // Environment variables
             .add_source(config::Environment::with_prefix("BASIS"))
             // Configuration file
@@ -358,6 +386,7 @@ mod tests {
                 change_address: None,
             },
             acceptance: AcceptanceConfig::empty(),
+            redemption: RedemptionConfig::default(),
         };
 
         // Test hex format
@@ -378,5 +407,19 @@ mod tests {
         // This test would validate P2PK address parsing, but to avoid complex ergo-lib
         // dependencies in unit tests, we rely on integration testing for this functionality.
         // The important thing is that our parsing logic handles both formats correctly.
+    }
+
+    #[test]
+    fn test_redemption_enforce_acceptance_policy_defaults_to_true() {
+        // Acceptance-policy enforcement at redemption time is on by default.
+        assert!(RedemptionConfig::default().enforce_acceptance_policy);
+
+        // An absent [redemption] section in the TOML config also defaults to true.
+        let config: RedemptionConfig = toml::from_str("").unwrap();
+        assert!(config.enforce_acceptance_policy);
+
+        // Explicit opt-out is honored.
+        let config: RedemptionConfig = toml::from_str("enforce_acceptance_policy = false").unwrap();
+        assert!(!config.enforce_acceptance_policy);
     }
 }

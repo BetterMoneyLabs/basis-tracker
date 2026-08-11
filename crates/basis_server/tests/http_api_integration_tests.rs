@@ -258,6 +258,7 @@ mod http_api_tests {
                 change_address: None,
             },
             acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
+            redemption: config::RedemptionConfig::default(),
         });
 
         let temp_dir = std::env::temp_dir().join(format!(

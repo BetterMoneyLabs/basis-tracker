@@ -6,6 +6,7 @@
 
 pub mod builder;
 pub mod config;
+pub mod redemption_check;
 
 use basis_store::PubKey;
 use std::collections::HashSet;

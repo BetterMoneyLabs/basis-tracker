@@ -297,6 +297,7 @@ The server implements comprehensive error handling:
 - Graceful fallback when blockchain scanner is unavailable
 - AVL tree proof validation errors
 - Emergency redemption timeout handling
+- Acceptance policy enforcement at redemption time: normal redemptions via `POST /redeem` and `POST /redemption/build` are rejected with HTTP 400 when they would newly violate another debt holder's acceptance policy (failure id `failed_policy_violation`) or, on a distressed reserve, when the redeemer does not hold the issuer's oldest outstanding note (failure id `failed_not_oldest_note`). Configurable via `[redemption] enforce_acceptance_policy` (default `true`); see `specs/redemption_acceptance_policy.md`
 
 ## Security Considerations
 

@@ -39,6 +39,34 @@ This document describes the integration tests for the acceptance policy feature.
 | `test_check_acceptance_uses_per_recipient_policy` | Tests that check_acceptance uses per-recipient policy from DB when available |
 | `test_check_acceptance_fallback_to_global_policy` | Tests fallback to global policy when no per-recipient policy exists |
 
+### 5. Redemption-Time Policy Check Tests
+
+The acceptance policy is also enforced at redemption time (see
+`specs/redemption_acceptance_policy.md`). Coverage for that check lives outside
+`acceptance_api_integration_tests.rs`:
+
+- Unit tests for `check_redemption_policy_compliance` in
+  `crates/basis_server/src/acceptance/redemption_check.rs` (well-collateralized
+  pass, newly-violated holder rejection, FIFO fallback on a distressed reserve —
+  including timestamp ties, skipping fully-redeemed notes in the queue, and a
+  redeemer with no outstanding note — mixed cases, no-other-holders, zero-debt
+  edges, `min_ratio` boundary equality, stored-policy precedence in both
+  directions, corrupted/empty stored policy, composite `AllOf`/`Not` semantics,
+  `NoPendingRefund` with a pending refund).
+- Handler-level tests in `crates/basis_server/tests/redemption_api_integration_tests.rs`:
+  - `test_redeem_rejected_when_would_violate_holder_policy` — `POST /redeem` returns
+    400 with failure id `failed_policy_violation`.
+  - `test_redeem_rejected_when_not_oldest_note` — `POST /redeem` returns 400 with
+    failure id `failed_not_oldest_note`, message contains the oldest note's timestamp.
+  - `test_redeem_skips_policy_check_when_enforcement_disabled` — with
+    `[redemption] enforce_acceptance_policy = false`, the same request that would
+    fail policy checks is accepted.
+  - `test_build_redemption_rejected_when_would_violate_holder_policy` and
+    `test_build_redemption_rejected_when_not_oldest_note` — the same two
+    rejections through `POST /redemption/build`, using a mock Ergo node
+    (`spawn_mock_node_with_reserve_box`) that reports the reserve box unspent
+    with an R5 digest matching the tracker's reserve tree.
+
 ## Running the Tests
 
 ```bash
@@ -88,7 +116,7 @@ Policies must use the correct JSON format with `type` fields:
 
 ## Test Results
 
-All 15 tests pass successfully:
+All 15 tests in `acceptance_api_integration_tests.rs` pass successfully:
 - 4 `check_acceptance` tests
 - 7 `upload_policy` tests
 - 2 `get_policy_by_recipient` tests

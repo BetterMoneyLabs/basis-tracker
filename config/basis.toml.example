@@ -28,3 +28,10 @@ timeout_secs = 30
 [transaction]
 # Default transaction fee in nanoERG (0.001 ERG = 1,000,000 nanoERG)
 fee = 1000000
+
+[redemption]
+# Enforce acceptance-policy compliance at redemption time: reject redemptions that
+# would newly violate another debt holder's collateralization policy. When all other
+# holders are already violated (distressed reserve), only the oldest outstanding
+# note may redeem (FIFO fallback). Emergency redemptions bypass this check.
+enforce_acceptance_policy = true

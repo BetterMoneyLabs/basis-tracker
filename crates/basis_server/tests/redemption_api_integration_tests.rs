@@ -27,10 +27,12 @@ mod redemption_api_tests {
             CompleteRedemptionRequest, RedeemRequest, RedemptionPreparationRequest,
             TrackerSignatureRequest,
         },
+        redemption_build::{build_redemption, RedemptionBuildRequest},
         AppState, TrackerCommand,
     };
     use basis_store::schnorr::generate_keypair;
     use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
 
     /// Global lock to serialize Fjall storage initialization across concurrent tests.
@@ -45,6 +47,26 @@ mod redemption_api_tests {
     // ============================================================================
 
     async fn create_mock_app_state() -> AppState {
+        create_mock_app_state_with_acceptance(
+            basis_server::acceptance::config::AcceptanceConfig::empty(),
+        )
+        .await
+    }
+
+    async fn create_mock_app_state_with_acceptance(
+        acceptance: basis_server::acceptance::config::AcceptanceConfig,
+    ) -> AppState {
+        create_mock_app_state_with_options(acceptance, true, "http://localhost:9053").await
+    }
+
+    /// Full mock-state constructor: allows overriding acceptance-policy
+    /// enforcement (`[redemption] enforce_acceptance_policy`) and the Ergo node
+    /// URL (so tests can point at a local mock node).
+    async fn create_mock_app_state_with_options(
+        acceptance: basis_server::acceptance::config::AcceptanceConfig,
+        enforce_acceptance_policy: bool,
+        node_url: &str,
+    ) -> AppState {
         let (tx, mut rx) = mpsc::channel(100);
         let event_store = Arc::new(basis_server::store::EventStore::new().await.unwrap());
 
@@ -54,7 +76,7 @@ mod redemption_api_tests {
 
         // Create a default NodeConfig for the scanner
         let config = basis_store::ergo_scanner::NodeConfig {
-            node_url: "http://localhost:9053".to_string(),
+            node_url: node_url.to_string(),
             ..Default::default()
         };
         let ergo_scanner = Arc::new(tokio::sync::Mutex::new(
@@ -255,7 +277,7 @@ mod redemption_api_tests {
             },
             ergo: basis_server::config::ErgoConfig {
                 node: basis_store::ergo_scanner::NodeConfig {
-                    node_url: "http://localhost:9053".to_string(),
+                    node_url: node_url.to_string(),
                     ..Default::default()
                 },
                 basis_reserve_contract_p2s: "test".to_string(),
@@ -271,7 +293,10 @@ mod redemption_api_tests {
                 fee: 1000000,
                 change_address: None,
             },
-            acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
+            acceptance,
+            redemption: basis_server::config::RedemptionConfig {
+                enforce_acceptance_policy,
+            },
         });
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -312,17 +337,18 @@ mod redemption_api_tests {
     /// Helper to add a note to the tracker for testing
     async fn add_test_note(
         state: &AppState,
+        issuer_secret: &[u8; 32],
         issuer_pubkey: &str,
         recipient_pubkey: &str,
         amount: u64,
         timestamp: u64,
     ) {
-        let (secret, _) = generate_keypair();
         let recipient_bytes = hex::decode(recipient_pubkey).unwrap();
         let recipient_arr: [u8; 33] = recipient_bytes.try_into().unwrap();
 
-        let note = basis_store::IouNote::create_and_sign(recipient_arr, amount, timestamp, &secret)
-            .unwrap();
+        let note =
+            basis_store::IouNote::create_and_sign(recipient_arr, amount, timestamp, issuer_secret)
+                .unwrap();
 
         let issuer_bytes = hex::decode(issuer_pubkey).unwrap();
         let issuer_arr: [u8; 33] = issuer_bytes.try_into().unwrap();
@@ -335,7 +361,92 @@ mod redemption_api_tests {
         };
 
         state.tx.send(cmd).await.unwrap();
-        let _ = response_rx.await.unwrap();
+        let result = response_rx.await.unwrap();
+        result.expect("add_test_note: AddNote failed");
+    }
+
+    /// Helper to store a reserve for the issuer in the scanner's reserve storage
+    async fn add_test_reserve(state: &AppState, issuer_pubkey: &str, collateral: u64) {
+        let scanner = state.ergo_scanner.lock().await;
+        scanner
+            .reserve_storage()
+            .store_reserve(&basis_store::reserve_tracker::ExtendedReserveInfo {
+                base_info: basis_store::ReserveInfo {
+                    collateral_amount: collateral,
+                    last_updated_height: 0,
+                    contract_address: "test".to_string(),
+                    tracker_nft_id: "test".to_string(),
+                    refund_initiation_height: 0,
+                },
+                total_debt: 0,
+                box_id: format!("box_{}", issuer_pubkey),
+                owner_pubkey: issuer_pubkey.to_string(),
+                last_updated_timestamp: 0,
+            })
+            .expect("Failed to store test reserve");
+    }
+
+    /// Spawn a minimal mock Ergo node that answers `GET /utxo/byId/{id}` with a
+    /// single unspent reserve box JSON whose R5 register holds `r5_hex`. Any
+    /// other request also gets the same box JSON — the `/redemption/build` flow
+    /// only calls `box_details` before the acceptance-policy check, which is
+    /// what these tests exercise. Returns the base URL (`http://127.0.0.1:PORT`).
+    async fn spawn_mock_node_with_reserve_box(value: u64, r5_hex: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock node");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let body = format!(
+                "{{\"boxId\":\"{}\",\"value\":{},\"ergoTree\":\"00\",\"assets\":[],\"additionalRegisters\":{{\"R5\":\"{}\"}}}}",
+                "00".repeat(32),
+                value,
+                r5_hex
+            );
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    // Read the request head; the path is not inspected.
+                    let _ = socket.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    /// R5 register value whose digest (`r5[2..68]`) matches the tracker's
+    /// current reserve AVL tree root digest. The mock tracker thread starts
+    /// with an empty reserve tree and redemption tests never complete a
+    /// redemption, so the digest equals that of a fresh, empty tree.
+    fn reserve_r5_matching_tracker() -> String {
+        let digest = hex::encode(
+            basis_store::TrackerStateManager::new_with_temp_storage().reserve_state_digest(),
+        );
+        format!("64{}00", digest)
+    }
+
+    /// Collateralization-only global acceptance config for policy-check tests
+    fn collateral_acceptance(min_ratio: f64) -> basis_server::acceptance::config::AcceptanceConfig {
+        use basis_server::acceptance::config::{AcceptanceConfig, DefaultPolicy, PredicateConfig};
+        AcceptanceConfig {
+            default: DefaultPolicy::Reject,
+            root: None,
+            predicates: vec![PredicateConfig::Collateralization {
+                name: "collat".to_string(),
+                min_ratio,
+            }],
+        }
     }
 
     // ============================================================================
@@ -399,6 +510,328 @@ mod redemption_api_tests {
             !body.success || body.data.is_none(),
             "Expected failure or no data, got: {:?}",
             body
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redeem_rejected_when_would_violate_holder_policy() {
+        // C=900, D=1000 (ratio 0.9), global min_ratio 0.85. Redeeming 400 moves the
+        // ratio to 500/600 = 0.833 < 0.85: newly violates the other holder's policy.
+        let state = create_mock_app_state_with_acceptance(collateral_acceptance(0.85)).await;
+
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
+        let redeemer_hex = hex::encode(redeemer_pubkey);
+        let (_holder_secret, holder_pubkey) = generate_keypair();
+        let holder_hex = hex::encode(holder_pubkey);
+
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &redeemer_hex,
+            400,
+            1000,
+        )
+        .await;
+        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 600, 2000).await;
+        add_test_reserve(&state, &issuer_hex, 900).await;
+
+        let request = RedeemRequest {
+            issuer_pubkey: issuer_hex,
+            recipient_pubkey: redeemer_hex,
+            amount: 400,
+            timestamp: 1000,
+            reserve_box_id: "".to_string(),
+            recipient_address: "".to_string(),
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+        };
+
+        let response =
+            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+
+        assert_eq!(
+            response.0,
+            StatusCode::BAD_REQUEST,
+            "body: {:?}",
+            response.1
+        );
+        let body = &response.1;
+        assert!(!body.success);
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("failed_policy_violation"),
+            "expected failed_policy_violation, got: {}",
+            error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redeem_rejected_when_not_oldest_note() {
+        // Deeply undercollateralized reserve: C=100, D=1000, min_ratio 1.0. Every
+        // holder's policy is already violated, so only the oldest note may redeem.
+        // The redeemer's note (ts 2000) is newer than the holder's (ts 1000).
+        let state = create_mock_app_state_with_acceptance(collateral_acceptance(1.0)).await;
+
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
+        let redeemer_hex = hex::encode(redeemer_pubkey);
+        let (_holder_secret, holder_pubkey) = generate_keypair();
+        let holder_hex = hex::encode(holder_pubkey);
+
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &redeemer_hex,
+            400,
+            2000,
+        )
+        .await;
+        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 600, 1000).await;
+        add_test_reserve(&state, &issuer_hex, 100).await;
+
+        let request = RedeemRequest {
+            issuer_pubkey: issuer_hex,
+            recipient_pubkey: redeemer_hex,
+            amount: 100,
+            timestamp: 2000,
+            reserve_box_id: "".to_string(),
+            recipient_address: "".to_string(),
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+        };
+
+        let response =
+            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let body = &response.1;
+        assert!(!body.success);
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("failed_not_oldest_note"),
+            "expected failed_not_oldest_note, got: {}",
+            error
+        );
+        // The message carries the oldest note's timestamp so the client knows the
+        // queue position.
+        assert!(
+            error.contains("1000"),
+            "expected oldest timestamp in message, got: {}",
+            error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redeem_skips_policy_check_when_enforcement_disabled() {
+        // Same setup as test_redeem_rejected_when_would_violate_holder_policy
+        // (C=900, D=1000, global min_ratio 0.85, redeeming 400 newly violates the
+        // other holder's policy), but with [redemption]
+        // enforce_acceptance_policy = false the policy check is skipped entirely:
+        // the request must not fail with a policy failure id. (It fails later,
+        // at the blockchain-height fetch, since no node is available in tests.)
+        let state = create_mock_app_state_with_options(
+            collateral_acceptance(0.85),
+            false,
+            "http://localhost:9053",
+        )
+        .await;
+
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
+        let redeemer_hex = hex::encode(redeemer_pubkey);
+        let (_holder_secret, holder_pubkey) = generate_keypair();
+        let holder_hex = hex::encode(holder_pubkey);
+
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &redeemer_hex,
+            400,
+            1000,
+        )
+        .await;
+        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 600, 2000).await;
+        add_test_reserve(&state, &issuer_hex, 900).await;
+
+        let request = RedeemRequest {
+            issuer_pubkey: issuer_hex,
+            recipient_pubkey: redeemer_hex,
+            amount: 400,
+            timestamp: 1000,
+            reserve_box_id: "".to_string(),
+            recipient_address: "".to_string(),
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+        };
+
+        let response =
+            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+
+        let body = &response.1;
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(
+            !error.contains("failed_policy_violation"),
+            "policy check should be skipped when enforcement is disabled, got: {}",
+            error
+        );
+        assert!(
+            !error.contains("failed_not_oldest_note"),
+            "policy check should be skipped when enforcement is disabled, got: {}",
+            error
+        );
+    }
+
+    // ============================================================================
+    // POST /redemption/build acceptance-policy tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_build_redemption_rejected_when_would_violate_holder_policy() {
+        // Same ratio math as the /redeem case, scaled above the 1_000_000
+        // nanoERG minimum reserve remainder: C=1_900_000, D=2_500_000 (ratio
+        // 0.76), global min_ratio 0.75. Redeeming 400_000 moves the ratio to
+        // 1_500_000/2_100_000 = 0.714 < 0.75: newly violates the other holder's
+        // policy. Reserve selection requires the mock node to report the box
+        // unspent with R5 matching the tracker's reserve tree.
+        let node_url =
+            spawn_mock_node_with_reserve_box(1_900_000, reserve_r5_matching_tracker()).await;
+        let state =
+            create_mock_app_state_with_options(collateral_acceptance(0.75), true, &node_url).await;
+
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
+        let redeemer_hex = hex::encode(redeemer_pubkey);
+        let (_holder_secret, holder_pubkey) = generate_keypair();
+        let holder_hex = hex::encode(holder_pubkey);
+
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &redeemer_hex,
+            1_000_000,
+            1000,
+        )
+        .await;
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &holder_hex,
+            1_500_000,
+            2000,
+        )
+        .await;
+        add_test_reserve(&state, &issuer_hex, 1_900_000).await;
+
+        let request = RedemptionBuildRequest {
+            issuer_pubkey: issuer_hex,
+            recipient_pubkey: redeemer_hex,
+            amount: 400_000,
+            timestamp: 1000,
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+            tracker_box_id: None,
+            change_address: None,
+        };
+
+        let response =
+            build_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+
+        assert_eq!(
+            response.0,
+            StatusCode::BAD_REQUEST,
+            "body: {:?}",
+            response.1
+        );
+        let body = &response.1;
+        assert!(!body.success);
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("failed_policy_violation"),
+            "expected failed_policy_violation, got: {}",
+            error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_redemption_rejected_when_not_oldest_note() {
+        // Distressed reserve: C=1_100_000, D=2_000_000 (ratio 0.55), global
+        // min_ratio 1.0 — every holder's policy is already violated, so only
+        // the oldest note may redeem. The redeemer's note (ts 2000) is newer
+        // than the holder's (ts 1000).
+        let node_url =
+            spawn_mock_node_with_reserve_box(1_100_000, reserve_r5_matching_tracker()).await;
+        let state =
+            create_mock_app_state_with_options(collateral_acceptance(1.0), true, &node_url).await;
+
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
+        let redeemer_hex = hex::encode(redeemer_pubkey);
+        let (_holder_secret, holder_pubkey) = generate_keypair();
+        let holder_hex = hex::encode(holder_pubkey);
+
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &redeemer_hex,
+            800_000,
+            2000,
+        )
+        .await;
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &holder_hex,
+            1_200_000,
+            1000,
+        )
+        .await;
+        add_test_reserve(&state, &issuer_hex, 1_100_000).await;
+
+        let request = RedemptionBuildRequest {
+            issuer_pubkey: issuer_hex,
+            recipient_pubkey: redeemer_hex,
+            amount: 100_000,
+            timestamp: 2000,
+            issuer_signature: "01".repeat(65),
+            emergency: false,
+            tracker_box_id: None,
+            change_address: None,
+        };
+
+        let response =
+            build_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+
+        assert_eq!(
+            response.0,
+            StatusCode::BAD_REQUEST,
+            "body: {:?}",
+            response.1
+        );
+        let body = &response.1;
+        assert!(!body.success);
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("failed_not_oldest_note"),
+            "expected failed_not_oldest_note, got: {}",
+            error
+        );
+        assert!(
+            error.contains("1000"),
+            "expected oldest timestamp in message, got: {}",
+            error
         );
     }
 

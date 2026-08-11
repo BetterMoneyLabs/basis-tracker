@@ -8,6 +8,8 @@ Acceptance predicates determine whether a Basis note (IOU) is acceptable as paym
 
 When agent A offers a note to agent B as payment, B evaluates the note using their personal acceptance predicate P(note). If P(note) returns true, B accepts the payment; otherwise, it is rejected.
 
+Predicates are evaluated in two places: at acceptance time (`POST /acceptance/check`) and at redemption time, where the tracker verifies that a redemption does not newly violate any other debt holder's policy for the same issuer (see `specs/redemption_acceptance_policy.md`).
+
 Predicates operate on note data including:
 - Note owner (issuer, public key)
 - Note receiver (creditor, public key)
@@ -525,6 +527,7 @@ Acceptance predicates are:
 2. Built into a predicate tree via `build_predicate_tree()`
 3. Stored in `AppState.acceptance_predicate: Option<Arc<dyn NotePredicate>>`
 4. Evaluated by `POST /acceptance/check` endpoint
+5. Evaluated again at redemption time (`POST /redeem` and `POST /redemption/build`) to ensure a redemption does not newly violate another debt holder's policy — see `specs/redemption_acceptance_policy.md`
 
 ### Storage
 

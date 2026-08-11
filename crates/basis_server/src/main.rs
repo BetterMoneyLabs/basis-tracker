@@ -53,6 +53,7 @@ async fn main() {
                         change_address: None, // Will be derived from tracker public key
                     },
                     acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
+                    redemption: basis_server::config::RedemptionConfig::default(),
                 }
             })
         }

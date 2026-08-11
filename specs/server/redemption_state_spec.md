@@ -246,6 +246,7 @@ After the unsigned redemption transaction is built:
 5. **Reserve Existence**: A matching reserve must exist for the issuer
 6. **Sufficient Collateral**: Reserve must have sufficient collateral to cover redemption
 7. **Tracker Box Validity**: Tracker box must exist and NFT ID must match reserve's R6
+8. **Acceptance Policy Compliance**: For normal (non-emergency) redemptions, the tracker simulates the post-redemption collateralization state and rejects the request (HTTP 400) if it would newly violate another debt holder's acceptance policy (`failed_policy_violation`), or — when the reserve is already distressed (all other holders already violated) — if the redeemer does not hold the issuer's oldest outstanding note (`failed_not_oldest_note`). The check runs after the reserve lookup and before the tracker signature is issued, in both `POST /redeem` and `POST /redemption/build`. Emergency redemptions bypass the tracker and are not policy-checked. See `specs/redemption_acceptance_policy.md` for the full design.
 
 ### Post-Redemption Validation
 1. **State Consistency**: Reserve's AVL tree must be properly updated

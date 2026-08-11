@@ -376,7 +376,7 @@ async fn build_redemption_inner(
     // Select the smallest reserve that covers the redemption, leaves a valid remainder, is actually
     // unspent on-chain, AND whose on-chain R5 (reserve AVL tree) matches the tracker's current
     // reserve tree digest — otherwise the insert proof cannot verify on-chain.
-    let reserve_box_id = {
+    let (reserve_box_id, reserve_collateral, reserve_refund_height) = {
         // The tracker's current reserve tree root digest; the spent reserve's R5 must equal this.
         let tracker_reserve_digest = {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -412,7 +412,7 @@ async fn build_redemption_inner(
         let required = payload.amount.saturating_add(MIN_RESERVE_REMAINDER);
 
         // Gather matching candidates (issuer owner, sufficient collateral), smallest first.
-        let mut candidates: Vec<(String, u64)> = Vec::new();
+        let mut candidates: Vec<(String, u64, u64)> = Vec::new();
         for reserve in &reserves {
             // Owner key may be double-hex-encoded in the DB.
             let owner = if let Ok(b) = hex::decode(&reserve.owner_pubkey) {
@@ -435,18 +435,22 @@ async fn build_redemption_inner(
             if collateral < required {
                 continue;
             }
-            candidates.push((decode_box_id(&reserve.box_id), collateral));
+            candidates.push((
+                decode_box_id(&reserve.box_id),
+                collateral,
+                reserve.base_info.refund_initiation_height,
+            ));
         }
-        candidates.sort_by_key(|(_, c)| *c);
+        candidates.sort_by_key(|(_, c, _)| *c);
 
         // Pick the smallest candidate that is unspent on-chain and whose R5 matches the tracker's
         // current reserve tree digest.
-        let mut found: Option<String> = None;
-        for (box_id, _) in &candidates {
+        let mut found: Option<(String, u64, u64)> = None;
+        for (box_id, collateral, refund_height) in &candidates {
             match node.box_details(box_id).await {
                 Ok(b) if b.value >= required => match b.r5_digest_hex() {
                     Some(d) if d == tracker_reserve_digest => {
-                        found = Some(box_id.clone());
+                        found = Some((box_id.clone(), *collateral, *refund_height));
                         break;
                     }
                     Some(d) => {
@@ -480,6 +484,65 @@ async fn build_redemption_inner(
             }
         }
     };
+
+    // Acceptance-policy compliance check at redemption time: reject redemptions
+    // that would newly violate another debt holder's collateralization policy.
+    // Emergency redemptions bypass the tracker (contract path after the time
+    // lock) and are exempt from this check.
+    if state.config.redemption.enforce_acceptance_policy && !payload.emergency {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if state
+            .tx
+            .send(TrackerCommand::GetNotesByIssuer {
+                issuer_pubkey,
+                response_tx: tx,
+            })
+            .await
+            .is_err()
+        {
+            return api_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "tracker thread unavailable",
+            );
+        }
+        let notes = match rx.await {
+            Ok(Ok(notes)) => notes,
+            Ok(Err(e)) => {
+                return api_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("note lookup failed: {e:?}"),
+                )
+            }
+            Err(_) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, "tracker unavailable"),
+        };
+
+        // The miner fee is paid by explicit fee inputs, not deducted from the
+        // reserve output, so the simulated post-redemption collateral only
+        // decreases by the redeemed amount (fee = 0 here).
+        if let Err(e) = crate::acceptance::redemption_check::check_redemption_policy_compliance(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            payload.amount,
+            reserve_collateral,
+            0,
+            reserve_refund_height > 0,
+            &notes,
+            &state.policy_storage,
+            &state.config.acceptance,
+        ) {
+            use crate::acceptance::redemption_check::RedemptionPolicyError;
+            let failure_id = match &e {
+                RedemptionPolicyError::WouldViolatePolicy { .. } => "failed_policy_violation",
+                RedemptionPolicyError::NotOldestNote { .. } => "failed_not_oldest_note",
+            };
+            tracing::warn!(
+                "Redemption rejected by acceptance policy check ({}): {}",
+                failure_id,
+                e
+            );
+            return api_err(StatusCode::BAD_REQUEST, format!("{}: {}", failure_id, e));
+        }
+    }
 
     // Tracker box id (data input). Prefer the live shared state over the static
     // tracker storage, which can contain spent boxes.
