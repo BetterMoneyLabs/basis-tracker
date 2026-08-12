@@ -163,7 +163,9 @@ Where:
 
 ## Contract Specification
 
-### Reserve Contract
+The protocol defines two reserve contract variants. They share the same redemption, refund, and tracker-signature logic, but differ in how collateral is held and how redemption/top-up amounts are measured.
+
+### ERG-Backed Reserve Contract (`basis.es`)
 
 #### Data (Registers)
 
@@ -178,14 +180,37 @@ Where:
 
 #### Actions
 
-- **Redeem note** (#0): Spend reserve to pay out to note holder
-- **Top up** (#1): Add collateral to the reserve (minimum 0.1 ERG)
+- **Redeem note** (#0): Spend reserve to pay out ERG to note holder
+- **Top up** (#1): Add ERG collateral to the reserve (minimum 0.1 ERG = 100,000,000 nanoERG)
 - **Initiate refund** (#2): Reserve owner announces intent to withdraw, setting R7 to current height
 - **Complete refund** (#3): After 43200 blocks (~2 months), owner takes all funds and closes reserve
 
-#### Refund (Reserve Owner Exit)
+### Token-Backed Reserve Contract (`basis-token.es`)
 
-The reserve owner can unilaterally exit without tracker or creditor cooperation, protecting the owner from censorship. To protect creditors from the owner silently draining collateral, refund is two-phase:
+#### Data (Registers)
+
+Same registers as the ERG-backed contract, plus token semantics:
+
+- **Token #0**: Reserve NFT (amount 1). Identifies the reserve box and must be preserved in every output.
+- **Token #1**: Reserve token. This is the custom token used as collateral. Its amount is reduced during redemption and increased during top-up.
+
+#### Actions
+
+- **Redeem note** (#0): Spend reserve to pay out reserve tokens to note holder. The redeemed amount is measured as the decrease in token #1 amount between input and output (`SELF.tokens(1)._2 - selfOut.tokens(1)._2`).
+- **Top up** (#1): Add reserve tokens to the reserve. Must increase token #1 amount by at least 1 whole token unit.
+- **Initiate refund** (#2): Same as ERG-backed variant. No reserve tokens or ERG may leave the box.
+- **Complete refund** (#3): After the waiting period, the owner takes **all** ERG and **all** tokens (reserve NFT and reserve tokens), destroying the reserve box.
+
+#### Token Preservation Rules
+
+- The output reserve box must contain exactly two tokens.
+- Token IDs at positions #0 and #1 must match the input reserve box.
+- Token #0 (reserve NFT) amount is preserved by the contract logic (Ergo does not allow 0-value tokens).
+- Token #1 (reserve token) amount may change according to redemption or top-up logic.
+
+### Refund (Reserve Owner Exit)
+
+Both contract variants use the same two-phase refund. The reserve owner can unilaterally exit without tracker or creditor cooperation, protecting the owner from censorship. To protect creditors from the owner silently draining collateral, refund is two-phase:
 
 1. **Initiate refund (action #2):** the owner signs a transaction setting register R7 to the initiation height (current or slightly future-dated, to tolerate delayed block inclusion; backdating is rejected). One-shot only: re-initiation is not allowed.
 2. **Complete refund (action #3):** after a waiting period of 43200 blocks (~2 months), the owner signs a transaction spending the reserve box and taking all funds and tokens.
@@ -219,13 +244,17 @@ Only full withdrawal is supported: a partial refund would require tracker attest
 
 #### Validation Steps
 
-1. **Self preservation**: Verify contract proposition bytes, tokens, R4, and R6 are preserved in output
+1. **Self preservation**:
+   - For `basis.es`: verify contract proposition bytes, tokens, R4, and R6 are preserved in output.
+   - For `basis-token.es`: verify contract proposition bytes, R4, and R6 are preserved; verify output has exactly two tokens; verify token IDs at positions #0 and #1 match the input (token #0 amount is preserved, token #1 amount may change).
 2. **Tracker ID verification**: Verify tracker box NFT ID matches reserve's R6
 3. **Tracker debt verification**: Verify totalDebt is committed in tracker's AVL tree using context var #8
 4. **Timestamp verification**: Verify new timestamp > stored timestamp (prevents replay attacks with old notes)
 5. **Reserve owner signature verification**: Verify Schnorr signature on `key || totalDebt || timestamp` (65 bytes)
 6. **Tracker signature verification**: Verify Schnorr signature on `key || totalDebt || timestamp` (65 bytes), OR emergency period has passed
-7. **Redemption amount verification**: Ensure redeemed amount > 0 and <= (totalDebt - alreadyRedeemed)
+7. **Redemption amount verification**:
+   - For `basis.es`: ensure `SELF.value - selfOut.value` is > 0 and <= (totalDebt - alreadyRedeemed)
+   - For `basis-token.es`: ensure `SELF.tokens(1)._2 - selfOut.tokens(1)._2` is > 0 and <= (totalDebt - alreadyRedeemed)
 8. **AVL tree update verification**: Verify reserve's AVL tree is properly updated with new `(timestamp, cumulativeRedeemedAmount)` using context var #5
 9. **Receiver signature verification**: Verify receiver's signature on transaction bytes (proveDlog)
 
@@ -244,16 +273,18 @@ Only full withdrawal is supported: a partial refund would require tracker attest
 
 #### Requirements
 
-- Reserve contract preserved (proposition bytes, tokens, R4, R6 unchanged)
+- Reserve contract preserved (proposition bytes, R4, R6 unchanged; for `basis-token.es` also preserve token IDs and two-token structure)
 - R5 (AVL tree) preserved
 - R7 (pending refund flag, if any) preserved
-- At least 0.1 ERG added (100,000,000 nanoERG)
+- Collateral increase:
+  - For `basis.es`: at least 0.1 ERG added (100,000,000 nanoERG)
+  - For `basis-token.es`: at least 1 whole reserve token added to token #1 amount
 
 ### Refund Paths (Actions #2 and #3)
 
 #### Initiate Refund (Action #2)
 
-- Reserve contract preserved (proposition bytes, tokens, R4, R6 unchanged)
+- Reserve contract preserved (proposition bytes, R4, R6 unchanged; for `basis-token.es` also preserve token IDs and two-token structure)
 - R5 (AVL tree) preserved
 - No funds or tokens can be taken out
 - R7 set to current height (or slightly future-dated), no backdating allowed

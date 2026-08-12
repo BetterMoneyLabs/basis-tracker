@@ -89,12 +89,49 @@ should reject new notes backed by reserves with a pending refund.
 ## Basis-Token Contract (Token-Based Reserve)
 
 A variant of the Basis contract that uses custom tokens instead of ERG for reserve backing is available @ [basis-token.es](../contract/basis-token.es).
-It supports the same two-phase reserve owner refund as the Basis contract (see "Reserve Owner Refund (Exit)" above):
-on completion the owner takes both the reserve tokens and the ERG, destroying the reserve box.
+It supports the same four actions and the same two-phase reserve owner refund as the ERG-backed Basis contract.
+
+### Token Structure
+
+A `basis-token.es` reserve box holds exactly two tokens:
+
+- **Token #0**: Reserve NFT (amount 1). Identifies the reserve and must be preserved in every output.
+- **Token #1**: Reserve token. This is the custom token used as collateral. Its amount is reduced during redemption and increased during top-up.
+
+### Redemption
+
+Redemption follows the same signature and proof requirements as the ERG-backed contract, but the redeemed amount is measured as the decrease in token #1 amount:
+
+```
+redeemed = SELF.tokens(1)._2 - selfOut.tokens(1)._2
+```
+
+The recipient output receives the redeemed amount as reserve tokens, while the reserve output's ERG value remains unchanged (only storage rent needs to be preserved).
+
+### Top-up
+
+Top-up increases the reserve token amount by at least 1 whole token unit:
+
+```
+selfOut.tokens(1)._2 - SELF.tokens(1)._2 >= 1
+```
+
+Unlike the ERG-backed contract, there is no 0.1 ERG minimum because custom tokens are indivisible.
+
+### Token Preservation Rules
+
+- The output reserve box must contain exactly two tokens.
+- Token IDs at positions #0 and #1 must match the input reserve box.
+- Token #0 (reserve NFT) amount is preserved by the contract logic (Ergo does not allow 0-value tokens).
+- Token #1 (reserve token) amount may change according to redemption or top-up logic.
+
+### Refund
+
+On completion of the two-phase refund, the owner takes **all** ERG and **all** tokens (reserve NFT and reserve tokens), destroying the reserve box.
 
 **Compiled Contract Address (P2S):**
 ```
-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
+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
 ```
 
 ## Offchain Logic

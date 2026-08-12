@@ -1,7 +1,7 @@
 # Redemption Transaction Format Specification
 
 ## Overview
-This document specifies the format for redemption transactions that spend reserve boxes to pay out to note holders. The unsigned transaction can be signed either by the Ergo node (`/wallet/transaction/sign`) or entirely off-chain by the client, and is then broadcast via `/transactions`. It includes all necessary context extension variables for the Basis reserve contract validation. For the off-chain (client-side) signing path and its serialization requirements, see [offchain_redemption_signing.md](../client/offchain_redemption_signing.md).
+This document specifies the format for redemption transactions that spend reserve boxes to pay out to note holders. The unsigned transaction can be signed either by the Ergo node (`/wallet/transaction/sign`) or entirely off-chain by the client, and is then broadcast via `/transactions`. It includes all necessary context extension variables for the Basis reserve contract validation. The examples and field descriptions below focus on the ERG-backed contract (`basis.es`); the token-backed variant (`basis-token.es`) moves collateral as tokens rather than ERG value. See "Token-Backed Reserve Variant" below for the differences. For the off-chain (client-side) signing path and its serialization requirements, see [offchain_redemption_signing.md](../client/offchain_redemption_signing.md).
 
 ## Transaction Request Format
 
@@ -144,14 +144,22 @@ A redemption transaction has the following structure:
 
 #### 1. Redemption Output (First Request)
 - `address`: The recipient's address (the note holder claiming redemption)
-- `value`: The amount being redeemed (in nanoERG)
-- `assets`: Empty array (no tokens transferred to recipient in basic redemption)
+- For `basis.es`:
+  - `value`: The amount being redeemed (in nanoERG)
+  - `assets`: Empty array (no tokens transferred to recipient in basic redemption)
+- For `basis-token.es`:
+  - `value`: Minimum storage-rent value
+  - `assets`: Array containing the reserve token with amount equal to the redemption amount
 - `registers`: Empty object (no special registers needed for recipient)
 
 #### 2. Updated Reserve Output (Second Request)
 - `address`: The issuer's address (where remaining collateral goes)
-- `value`: Remaining collateral after redemption (original collateral - redeemed amount - fee)
-- `assets`: Contains the tracker NFT token to maintain reserve identity
+- `value`:
+  - For `basis.es`: remaining collateral after redemption (original collateral - redeemed amount - fee)
+  - For `basis-token.es`: unchanged storage-rent value (collateral moves as tokens, not ERG value)
+- `assets`:
+  - For `basis.es`: contains the tracker NFT token to maintain reserve identity
+  - For `basis-token.es`: contains token #0 (reserve NFT, amount 1) and token #1 (reserve token) with amount reduced by the redeemed amount
 - `registers`:
   - `R4`: The issuer's public key (33-byte compressed format / GroupElement) - identifies the reserve owner (unchanged from input)
   - `R5`: The **updated** AVL tree root digest after inserting or updating the reserve entry
@@ -424,6 +432,27 @@ verify: trackerTotalDebt == totalDebt
 - Tracker's signature on `key || totalDebt || timestamp` (48 bytes, required in transaction but verification bypassed for emergency redemption after 3 days)
 - Signatures must be provided as 65-byte Schnorr signatures (33 bytes 'a' + 32 bytes 'z')
 - Signatures are attached via context extension variables #2 and #6
+
+## Token-Backed Reserve Variant (`basis-token.es`)
+
+The token-backed contract uses the same redemption logic, context extension variables, and signature format as the ERG-backed contract. The only differences are in how collateral is represented and transferred:
+
+### Reserve Box Assets
+- **Token #0**: Reserve NFT (amount 1). Must be preserved in the updated reserve output.
+- **Token #1**: Reserve token. The redemption amount is measured as the decrease in this token's amount between input and output (`inputAmount - outputAmount`).
+
+### Redemption Output
+- `value`: Minimum storage-rent value, not the redemption amount.
+- `assets`: Contains token #1 (reserve token) with amount equal to the redeemed amount.
+
+### Updated Reserve Output
+- `value`: Unchanged storage-rent value (the ERG value does not decrease).
+- `assets`:
+  - Token #0: reserve NFT (amount 1, preserved)
+  - Token #1: reserve token with amount reduced by the redeemed amount
+
+### Context Extensions and Proofs
+All context extension variables (#0-#8), AVL proofs, and signature requirements are identical to the ERG-backed contract.
 
 ## Emergency Redemption
 

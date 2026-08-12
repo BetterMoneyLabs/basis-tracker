@@ -4,6 +4,8 @@
 
 This document specifies the CLI command for generating unsigned Ergo redemption transactions according to the Basis protocol contract (`basis.es`). The generated transaction is ready for signing via the Ergo node's `/wallet/transaction/sign` endpoint and spends a reserve box to pay a creditor while preserving the remaining collateral in a new reserve box.
 
+A token-backed variant of the contract exists at `contract/basis-token.es`. The command described here targets the ERG-backed contract; see "Token-Backed Reserve Variant" below for the differences required when redeeming token collateral.
+
 ## CLI Command Definition
 
 ### Command Name
@@ -64,18 +66,20 @@ Addresses are derived from public keys using `ergo-lib` (compressed point -> `Pr
 #### 3. Outputs
 
 **Output 0 - Updated Reserve** (must be at index 0):
-- `value`: Original reserve value minus the redeemed amount
+- `value`: Original reserve value minus the redeemed amount (for `basis.es`), or unchanged storage-rent value (for `basis-token.es`)
 - `ergoTree`: The Basis reserve contract P2S address (from server configuration)
-- `assets`: The reserve NFT token preserved from the input
+- `assets`:
+  - For `basis.es`: the reserve NFT token preserved from the input
+  - For `basis-token.es`: token #0 (reserve NFT, amount 1) preserved and token #1 (reserve token) with amount reduced by the redeemed amount
 - `additionalRegisters`:
   - `R4`: Issuer's public key (GroupElement)
   - `R5`: Updated reserve AVL tree root digest after inserting the new redeemed entry
   - `R6`: Tracker server NFT ID
 
 **Output 1 - Recipient Redemption**:
-- `value`: The redemption amount
+- For `basis.es`: `value` is the redemption amount in nanoERG; `assets` is empty.
+- For `basis-token.es`: `value` is the minimum box value (storage rent); `assets` contains the reserve token with amount equal to the redemption amount.
 - `ergoTree`: P2PK contract for the recipient
-- `assets`: Empty
 - `additionalRegisters`: Empty
 
 **Output 2 - Fee**:
@@ -95,12 +99,28 @@ Addresses are derived from public keys using `ergo-lib` (compressed point -> `Pr
 | #0 | action | Byte | `action*10 + index` (0x00 for redemption at output index 0) | Yes |
 | #1 | receiver | GroupElement | Recipient's public key (33 bytes compressed) | Yes |
 | #2 | reserveSig | Coll[Byte] | Reserve owner's 65-byte Schnorr signature (33-byte a + 32-byte z) | Yes |
-| #3 | totalDebt | Long | Total cumulative debt amount (nanoERG) | Yes |
+| #3 | totalDebt | Long | Total cumulative debt amount (in collateral units: nanoERG for `basis.es`, token units for `basis-token.es`) | Yes |
 | #4 | timestamp | Long | Payment timestamp (milliseconds since Unix epoch) | Yes |
 | #5 | insertOrUpdateProof | Coll[Byte] | AVL proof for inserting or updating the reserve tree entry | Yes |
 | #6 | trackerSig | Coll[Byte] | Tracker's 65-byte Schnorr signature | Yes (normal redemption) |
 | #7 | lookupProofReserve | Coll[Byte] | AVL proof for looking up `(timestamp, redeemedDebt)` in reserve tree | No (omit for first redemption) |
 | #8 | lookupProofTracker | Coll[Byte] | AVL proof for looking up `totalDebt` in tracker tree | Yes |
+
+### Token-Backed Reserve Variant (`basis-token.es`)
+
+When the reserve is backed by a custom token rather than ERG, the transaction layout is the same but the collateral moves as tokens instead of ERG value:
+
+- The reserve input box holds:
+  - Token #0: reserve NFT (amount 1)
+  - Token #1: reserve token (arbitrary amount)
+- The updated reserve output holds:
+  - Token #0: reserve NFT (amount 1, preserved)
+  - Token #1: reserve token with amount reduced by the redeemed amount
+- The recipient redemption output receives the redeemed amount as token #1 of the reserve token, rather than as ERG value.
+- The reserve output's ERG value only needs to cover the box's minimum storage rent; it is not reduced by the redemption amount.
+- The `--amount` option is interpreted in whole token units (the same units used in the note's `totalDebt`), not in nanoERG.
+
+All signature, proof, and context-extension requirements are identical to the ERG-backed contract.
 
 ### Transaction Metadata
 - `fee`: 1,000,000 nanoERG (0.001 ERG), paid by wallet-owned inputs

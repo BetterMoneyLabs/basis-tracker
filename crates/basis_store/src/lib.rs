@@ -29,6 +29,8 @@ pub mod transaction_builder;
 #[cfg(test)]
 pub mod basis_spec_tests;
 #[cfg(test)]
+pub mod basis_token_spec_tests;
+#[cfg(test)]
 pub mod cross_verification_tests;
 #[cfg(test)]
 pub mod property_tests;
