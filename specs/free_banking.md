@@ -49,11 +49,18 @@ reserve is drained.
 
 Two caveats keep the analogy honest. Classical free banking was
 *fractional*-reserve — banks held precautionary reserves against clearing
-variability, not full backing [6] — whereas Basis reserves are
-(over)collateralized by design, placing the system closer to a 100%-reserve or
-currency-board discipline than to Scottish practice; Basis is best described as
-redemption discipline made cryptographic, not as fractional-reserve free
-banking. Second, the historical system's discipline rested on legal
+variability, not full backing [6] — and on this point Basis is closer to
+Scottish practice than to a currency board: nothing in the protocol mandates
+backing. Neither the reserve contract nor the tracker enforces a minimum
+collateralization ratio; an issuer can circulate notes against a thin reserve,
+or against no reserve at all as pure credit. Collateralization requirements are
+individual, not systemic — each holder's acceptance policy declares the floor
+it demands of an issuer, so an issuer's effective backing is whatever the
+market of note holders insists on, note by note. Aggregate collateralization is
+therefore an emergent outcome: a Basis economy could be fully backed, or could
+run mostly on undercollateralized credit, with redemption discipline and
+policy-gated acceptance doing the work that reserve requirements did
+historically. Second, the historical system's discipline rested on legal
 enforceability of contracts and unlimited liability (the Ayr Bank failure of
 1772 was absorbed by shareholders, not note holders [2]); Basis substitutes
 collateral and cryptographic verification for courts and personal liability,
