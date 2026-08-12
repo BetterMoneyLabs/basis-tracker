@@ -259,6 +259,7 @@ mod http_api_tests {
             },
             acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
             redemption: config::RedemptionConfig::default(),
+            confirmation: config::ConfirmationConfig::default(),
         });
 
         let temp_dir = std::env::temp_dir().join(format!(

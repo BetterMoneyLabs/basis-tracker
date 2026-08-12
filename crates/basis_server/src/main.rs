@@ -54,6 +54,7 @@ async fn main() {
                     },
                     acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
                     redemption: basis_server::config::RedemptionConfig::default(),
+                    confirmation: basis_server::config::ConfirmationConfig::default(),
                 }
             })
         }
@@ -526,6 +527,7 @@ async fn main() {
         fee: config.transaction.fee,
         change_address: config.get_change_address().ok(),
         tracker_secret_key: config.tracker_secret_key_bytes(),
+        min_confirmation_depth: config.confirmation.min_depth,
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 

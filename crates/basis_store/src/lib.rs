@@ -7,6 +7,7 @@ pub mod contract_compiler;
 pub mod cross_validation_tests;
 pub mod cross_verification;
 pub mod ergo_scanner;
+pub mod http;
 pub mod persistence;
 pub mod redemption;
 #[cfg(test)]

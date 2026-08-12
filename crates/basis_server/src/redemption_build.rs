@@ -179,7 +179,7 @@ impl NodeClient {
     }
 
     async fn get_json(&self, path: &str) -> Result<Value, String> {
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!("{}{}", self.url, path);
         let mut req = client.get(&url);
         if let Some(ref k) = self.api_key {
@@ -188,10 +188,12 @@ impl NodeClient {
         let resp = req.send().await.map_err(|e| format!("GET {url}: {e}"))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = basis_store::http::read_body_capped(resp)
+                .await
+                .unwrap_or_default();
             return Err(format!("GET {url} HTTP {status}: {body}"));
         }
-        resp.json::<Value>()
+        basis_store::http::read_json_capped(resp)
             .await
             .map_err(|e| format!("GET {url} json: {e}"))
     }
@@ -229,7 +231,7 @@ impl NodeClient {
     }
 
     async fn broadcast(&self, tx: &Value) -> Result<String, String> {
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!("{}/transactions", self.url);
         let mut req = client.post(&url).json(tx);
         if let Some(ref k) = self.api_key {
@@ -237,7 +239,9 @@ impl NodeClient {
         }
         let resp = req.send().await.map_err(|e| format!("broadcast: {e}"))?;
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = basis_store::http::read_body_capped(resp)
+            .await
+            .unwrap_or_default();
         if !status.is_success() {
             return Err(format!("broadcast rejected HTTP {status}: {body}"));
         }

@@ -547,6 +547,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 4000000000,
             reserve_tracker: None,
+            issuer_gross_debt: None,
         };
         assert!(pred.acceptable(&ctx));
 
@@ -561,6 +562,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: u64::MAX,
             reserve_tracker: None,
+            issuer_gross_debt: None,
         };
         assert!(pred.acceptable(&ctx2));
 
@@ -575,6 +577,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: None,
+            issuer_gross_debt: None,
         };
         assert!(!pred.acceptable(&ctx3));
     }
@@ -625,6 +628,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(100),
         };
 
         assert!(pred.acceptable(&ctx));
@@ -676,6 +680,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(100),
         };
 
         // 50 collateral / 100 debt = 0.5 ratio, which is < 1.0 min_ratio
@@ -728,6 +733,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(100),
         };
 
         // 100 collateral / 100 debt = 1.0 ratio, which meets 1.0 min_ratio
@@ -780,6 +786,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(100),
         };
 
         // 250 collateral / 100 debt = 2.5 ratio, which exceeds 2.0 min_ratio
@@ -832,6 +839,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 0,
             reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(0),
         };
 
         // Zero debt should be acceptable (no liability)
@@ -866,6 +874,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(100),
         };
 
         // No reserve found, should be rejected
@@ -920,6 +929,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: Some(tracker.clone()),
+            issuer_gross_debt: Some(100),
         };
         assert!(pred.acceptable(&ctx1));
 
@@ -934,6 +944,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(100),
         };
         assert!(!pred.acceptable(&ctx2));
     }
@@ -984,6 +995,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(100),
         };
 
         // 51 collateral / 100 debt = 0.51 ratio, which exceeds 0.5 min_ratio
@@ -1051,6 +1063,7 @@ mod tests {
             recipient_pubkey: [0u8; 33],
             total_debt: 100,
             reserve_tracker: None,
+            issuer_gross_debt: None,
         };
         assert!(pred.acceptable(&ctx));
     }

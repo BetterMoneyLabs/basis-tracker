@@ -259,6 +259,7 @@ mod cors_tests {
             },
             acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
             redemption: basis_server::config::RedemptionConfig::default(),
+            confirmation: basis_server::config::ConfirmationConfig::default(),
         });
 
         // Use a unique temporary directory for each test invocation using a counter

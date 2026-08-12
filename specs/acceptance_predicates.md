@@ -29,6 +29,11 @@ pub struct PredicateContext {
     pub total_debt: u64,
     /// Optional cloned reserve tracker for collateralization checks
     pub reserve_tracker: Option<ReserveTracker>,
+    /// Gross outstanding liabilities of the issuer, derived from tracker note
+    /// state (per-recipient cumulative edges plus the candidate note).
+    /// `None` when the liability snapshot is unavailable; collateralization
+    /// checks fail closed in that case.
+    pub issuer_gross_debt: Option<u64>,
 }
 
 /// Trait for note acceptance predicates
@@ -38,6 +43,11 @@ pub trait NotePredicate: Send + Sync + std::fmt::Debug {
     
     /// Get the predicate name
     fn name(&self) -> &str;
+
+    /// Whether this predicate tree contains a collateralization leaf and
+    /// therefore needs the issuer liability snapshot to evaluate correctly
+    /// (used to fail closed, including under negation)
+    fn requires_liability_snapshot(&self) -> bool;
 }
 ```
 
@@ -74,10 +84,23 @@ For a given note, compute:
 ```
 owner_reserve     = reserve associated with note owner (issuer)
 assets            = owner_reserve.value (in nanoERG)
-liabilities       = owner_reserve.total_issued_debt (in nanoERG)
+liabilities       = issuer's gross outstanding debt, derived from tracker note
+                    state (see below), in nanoERG
 
 accept if: assets >= liabilities * min_ratio
 ```
+
+**Liability source**: liabilities come from the tracker's note state, NOT from
+the reserve box (the reserve tracker's `total_debt` field is unmaintained).
+Per recipient edge the greatest locally-known cumulative debt is used:
+`max(note.amount_collected, confirmed_total_debt, pending_total_debt)`; the
+candidate note's `total_debt` replaces its own edge (never lowering an observed
+value) or is added as a new edge. Gross (not net-of-redemptions) debt is
+deliberate: redemption state is not reconstructed on reorgs, so subtracting
+redeemed amounts could make the check fail open. If the snapshot is
+unavailable the predicate REJECTS (fail closed), and a `Not` predicate over a
+collateralization tree also fails closed rather than negating the missing
+input. See `specs/pr12_triage.md` (fix 1).
 
 **Variants**:
 - **Full collateralization** (ratio = 1.0): Assets ≥ Liabilities
@@ -226,6 +249,17 @@ This accepts notes if either:
 - The owner is whitelisted, OR
 - The note is backed by ≥100% collateral
 
+## Liability Snapshot Propagation
+
+A predicate tree declares whether it needs the issuer liability snapshot via
+`requires_liability_snapshot()`. The leaf implementation returns `true` for
+`CollateralizationPredicate` and `false` for all other leaf kinds. Composite
+predicates propagate the requirement with `any()` over their children, so an
+`AnyOf` or `AllOf` containing a collateralization leaf needs the snapshot, and a
+`Not` over a collateralization tree also needs it. `check_acceptance` only
+computes the snapshot when the root predicate requires it; otherwise the field
+is left `None` to avoid unnecessary store queries.
+
 ## Evaluation Algorithm
 
 ```rust
@@ -258,7 +292,13 @@ fn check_collateralization(ctx: &PredicateContext, min_ratio: f64) -> bool {
     };
     
     let assets = reserve.base_info.collateral_amount;
-    let liabilities = reserve.total_debt;
+    
+    // Liabilities come from the tracker's note state, not from the reserve box.
+    // Fail closed when the liability snapshot is unavailable.
+    let liabilities = match ctx.issuer_gross_debt {
+        Some(debt) => debt,
+        None => return false,
+    };
     
     if liabilities == 0 {
         return true;  // No debt means fully collateralized
@@ -538,7 +578,10 @@ Acceptance predicates are:
 ### Performance
 
 - Whitelist/blacklist checks: O(1) with HashSet
-- Collateralization checks: O(1) - single reserve lookup for note owner
+- Collateralization checks: O(N) where N is the number of distinct recipient
+  edges the issuer has notes for, because the issuer liability snapshot is
+  computed from tracker note state. The snapshot is computed once per API call,
+  not per predicate leaf.
 - Composite predicates: Depth-first evaluation with short-circuiting
 - Predicate tree built once at startup, not per-request
 
@@ -547,8 +590,12 @@ Acceptance predicates are:
 - Predicate configuration is server-local and not shared on-chain
 - Acceptance decisions are client-side; no central authority enforces rules
 - A note rejected by B may still be accepted by C
-- Collateralization ratios depend on accurate reserve tracking
-- Fail-safe: missing reserve → reject note
+- Collateralization ratios depend on accurate reserve and note tracking
+- Fail-safe: missing reserve, missing liability snapshot, or missing tracker
+  thread state → reject note
+- Negation of a collateralization predicate fails closed when the liability
+  snapshot or reserve tracker is unavailable, so `Not(Collateralization)` cannot
+  be exploited to accept notes during a tracking outage
 
 ## Future Extensions
 

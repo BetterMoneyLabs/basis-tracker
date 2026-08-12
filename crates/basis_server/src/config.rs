@@ -23,6 +23,9 @@ pub struct AppConfig {
     /// Redemption policy enforcement configuration
     #[serde(default)]
     pub redemption: RedemptionConfig,
+    /// On-chain confirmation policy configuration
+    #[serde(default)]
+    pub confirmation: ConfirmationConfig,
 }
 
 /// Server-specific configuration
@@ -99,6 +102,27 @@ impl Default for RedemptionConfig {
     }
 }
 
+/// On-chain confirmation policy configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmationConfig {
+    /// Minimum on-chain depth (including the inclusion block) before a tracker
+    /// box update is treated as confirmed and pending notes become redeemable.
+    #[serde(default = "default_min_confirmation_depth")]
+    pub min_depth: u64,
+}
+
+fn default_min_confirmation_depth() -> u64 {
+    2
+}
+
+impl Default for ConfirmationConfig {
+    fn default() -> Self {
+        Self {
+            min_depth: default_min_confirmation_depth(),
+        }
+    }
+}
+
 impl AppConfig {
     /// Load configuration from file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, config::ConfigError> {
@@ -134,6 +158,8 @@ impl AppConfig {
             .set_default("acceptance.predicates", Vec::<String>::new())?
             // Redemption policy enforcement (optional)
             .set_default("redemption.enforce_acceptance_policy", true)?
+            // On-chain confirmation policy (optional)
+            .set_default("confirmation.min_depth", 2)?
             // Environment variables
             .add_source(config::Environment::with_prefix("BASIS"))
             // Configuration file
@@ -387,6 +413,7 @@ mod tests {
             },
             acceptance: AcceptanceConfig::empty(),
             redemption: RedemptionConfig::default(),
+            confirmation: ConfirmationConfig::default(),
         };
 
         // Test hex format
@@ -421,5 +448,19 @@ mod tests {
         // Explicit opt-out is honored.
         let config: RedemptionConfig = toml::from_str("enforce_acceptance_policy = false").unwrap();
         assert!(!config.enforce_acceptance_policy);
+    }
+
+    #[test]
+    fn test_confirmation_min_depth_defaults_to_two() {
+        // Minimum confirmation depth defaults to 2 (inclusion + one successor).
+        assert_eq!(ConfirmationConfig::default().min_depth, 2);
+
+        // An absent [confirmation] section in the TOML config also defaults to 2.
+        let config: ConfirmationConfig = toml::from_str("").unwrap();
+        assert_eq!(config.min_depth, 2);
+
+        // Explicit override is honored.
+        let config: ConfirmationConfig = toml::from_str("min_depth = 6").unwrap();
+        assert_eq!(config.min_depth, 6);
     }
 }

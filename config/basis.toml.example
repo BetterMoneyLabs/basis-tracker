@@ -35,3 +35,9 @@ fee = 1000000
 # holders are already violated (distressed reserve), only the oldest outstanding
 # note may redeem (FIFO fallback). Emergency redemptions bypass this check.
 enforce_acceptance_policy = true
+
+[confirmation]
+# Minimum on-chain depth (including the inclusion block) before a tracker box update
+# is treated as confirmed and pending notes become redeemable. Presence of the update
+# transaction in a block alone is not confirmation.
+min_depth = 2

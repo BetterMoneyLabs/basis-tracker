@@ -143,10 +143,18 @@ impl TrackerServerState {
             )));
         }
 
-        let indexed_boxes: Vec<IndexedErgoBox> = response.json().await.map_err(|e| {
-            error!("Failed to parse tracker boxes JSON: {}", e);
-            TrackerScannerError::JsonError(format!("Failed to parse tracker boxes: {}", e))
-        })?;
+        let indexed_boxes: Vec<IndexedErgoBox> = crate::http::read_json_capped(response)
+            .await
+            .map_err(|e| {
+                error!("Failed to parse tracker boxes JSON: {}", e);
+                TrackerScannerError::JsonError(format!("Failed to parse tracker boxes: {}", e))
+            })
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(|e| {
+                    error!("Failed to parse tracker boxes JSON: {}", e);
+                    TrackerScannerError::JsonError(format!("Failed to parse tracker boxes: {}", e))
+                })
+            })?;
 
         let boxes: Vec<ScanBox> = indexed_boxes.into_iter().map(Into::into).collect();
         info!("Retrieved {} unspent tracker boxes", boxes.len());
@@ -409,9 +417,10 @@ impl TrackerServerState {
             )));
         }
 
-        let info: serde_json::Value = response.json().await.map_err(|e| {
-            TrackerScannerError::JsonError(format!("Failed to parse height: {}", e))
-        })?;
+        let info: serde_json::Value =
+            crate::http::read_json_capped(response).await.map_err(|e| {
+                TrackerScannerError::JsonError(format!("Failed to parse height: {}", e))
+            })?;
 
         let height = info["fullHeight"].as_u64().ok_or_else(|| {
             TrackerScannerError::JsonError("Missing fullHeight in response".to_string())
@@ -487,7 +496,7 @@ pub fn create_tracker_server_state(
     TrackerServerState {
         config,
         inner: Arc::new(Mutex::new(inner)),
-        client: Client::new(),
+        client: crate::http::bounded_client(),
         tracker_state: TrackerStateManager::new(&data_dir),
         metadata_storage,
         tracker_storage,

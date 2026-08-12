@@ -164,7 +164,7 @@ impl ServerState {
     /// Create a server state that uses real Ergo scanner
     pub fn new(config: NodeConfig, data_dir: impl AsRef<Path>) -> Result<Self, ScannerError> {
         let start_height = config.start_height.unwrap_or(0);
-        let client = Client::new();
+        let client = crate::http::bounded_client();
         let data_dir = data_dir.as_ref();
 
         // Log which Ergo node is being used (INFO level)
@@ -260,8 +260,7 @@ impl ServerState {
             )));
         }
 
-        let info: serde_json::Value = response
-            .json()
+        let info: serde_json::Value = crate::http::read_json_capped(response)
             .await
             .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
 
@@ -325,8 +324,7 @@ impl ServerState {
             )));
         }
 
-        let info: serde_json::Value = response
-            .json()
+        let info: serde_json::Value = crate::http::read_json_capped(response)
             .await
             .map_err(|e| ScannerError::JsonError(format!("Failed to parse node info: {}", e)))?;
 
@@ -381,9 +379,19 @@ impl ServerState {
             )));
         }
 
-        let parsed: ByAddressResponse = response.json().await.map_err(|e| {
-            ScannerError::JsonError(format!("Failed to parse reserve boxes response: {}", e))
-        })?;
+        let parsed: ByAddressResponse = crate::http::read_json_capped(response)
+            .await
+            .map_err(|e| {
+                ScannerError::JsonError(format!("Failed to parse reserve boxes response: {}", e))
+            })
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(|e| {
+                    ScannerError::JsonError(format!(
+                        "Failed to parse reserve boxes response: {}",
+                        e
+                    ))
+                })
+            })?;
 
         info!("Found {} reserve boxes", parsed.len());
         Ok(parsed.into_iter().map(Into::into).collect())
@@ -526,6 +534,7 @@ impl ServerState {
         info!("Retrieved {} scan boxes to process", scan_boxes.len());
 
         let mut current_box_ids = Vec::new();
+        let mut parse_failures = 0usize;
 
         for scan_box in &scan_boxes {
             debug!(
@@ -559,6 +568,7 @@ impl ServerState {
                     }
                 }
                 Err(e) => {
+                    parse_failures += 1;
                     warn!(
                         "Failed to parse reserve box {}: {} - registers: {:?}",
                         scan_box.box_id, e, scan_box.additional_registers
@@ -579,7 +589,7 @@ impl ServerState {
 
         // Only remove reserves if we actually found VALID boxes in the scan.
         // If no valid reserves were parsed (e.g., all failed validation), don't remove manually-inserted reserves.
-        if !current_box_ids.is_empty() {
+        if !current_box_ids.is_empty() && parse_failures == 0 {
             for reserve in all_reserves {
                 if !current_box_ids.contains(&reserve.box_id) {
                     info!(
@@ -602,6 +612,17 @@ impl ServerState {
                     }
                 }
             }
+        } else if parse_failures > 0 {
+            // Fail closed: a snapshot with unparseable boxes is not
+            // authoritative. Removing reserves not present in
+            // `current_box_ids` could delete a live reserve whose box merely
+            // failed to parse (corrupted node response, new register
+            // serialization), so the previous state is preserved.
+            warn!(
+                "Skipping reserve removal: {} of {} scan boxes failed to parse",
+                parse_failures,
+                scan_boxes.len()
+            );
         } else {
             info!("Scan returned 0 boxes, skipping reserve removal to preserve manually-inserted reserves");
         }
@@ -997,5 +1018,294 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_process_scan_boxes_removes_absent_reserves_on_clean_scan() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Mock node returns one valid reserve box. A pre-existing stored reserve
+        // that is absent from the scan should be removed because the snapshot is
+        // fully parseable and therefore authoritative.
+        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let body = format!(
+            concat!(
+                "[",
+                "{{\"boxId\":\"valid_box_1\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
+                "\"transactionId\":\"tx1\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                "]"
+            ),
+            prefixed_pubkey, tracker_nft_id
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        let config = NodeConfig {
+            node_url: format!("http://{}", addr),
+            reserve_contract_p2s: Some("test_p2s".to_string()),
+            ..Default::default()
+        };
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_remove_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let server_state =
+            ServerState::new(config, &data_dir).expect("Failed to create server state");
+
+        // Pre-existing reserve that is NOT in the scan result.
+        let preexisting = ExtendedReserveInfo {
+            base_info: crate::ReserveInfo {
+                collateral_amount: 500,
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
+            },
+            total_debt: 0,
+            box_id: "preexisting_box".to_string(),
+            owner_pubkey: "deadbeef".to_string(),
+            last_updated_timestamp: 0,
+        };
+        server_state
+            .reserve_tracker
+            .update_reserve(preexisting.clone())
+            .unwrap();
+        server_state
+            .reserve_storage
+            .store_reserve(&preexisting)
+            .unwrap();
+
+        server_state.process_scan_boxes().await.unwrap();
+
+        let remaining: Vec<String> = server_state
+            .reserve_tracker
+            .get_all_reserves()
+            .into_iter()
+            .map(|r| r.box_id)
+            .collect();
+        assert!(
+            remaining.contains(&hex::encode("valid_box_1")),
+            "valid scanned box should be tracked (hex-encoded box id): {:?}",
+            remaining
+        );
+        assert!(
+            !remaining.contains(&"preexisting_box".to_string()),
+            "absent pre-existing reserve must be removed on a clean scan: {:?}",
+            remaining
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_scan_boxes_preserves_reserves_on_empty_scan() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Mock node returns an empty array. No reserves should be removed because
+        // an empty scan is not treated as authoritative proof that all reserves
+        // were spent (this also protects manually-inserted test reserves).
+        let body = "[]";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let body = body.to_string();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        let config = NodeConfig {
+            node_url: format!("http://{}", addr),
+            reserve_contract_p2s: Some("test_p2s".to_string()),
+            ..Default::default()
+        };
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_empty_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let server_state =
+            ServerState::new(config, &data_dir).expect("Failed to create server state");
+
+        let preexisting = ExtendedReserveInfo {
+            base_info: crate::ReserveInfo {
+                collateral_amount: 500,
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
+            },
+            total_debt: 0,
+            box_id: "preexisting_box".to_string(),
+            owner_pubkey: "deadbeef".to_string(),
+            last_updated_timestamp: 0,
+        };
+        server_state
+            .reserve_tracker
+            .update_reserve(preexisting.clone())
+            .unwrap();
+        server_state
+            .reserve_storage
+            .store_reserve(&preexisting)
+            .unwrap();
+
+        server_state.process_scan_boxes().await.unwrap();
+
+        let remaining: Vec<String> = server_state
+            .reserve_tracker
+            .get_all_reserves()
+            .into_iter()
+            .map(|r| r.box_id)
+            .collect();
+        assert!(
+            remaining.contains(&"preexisting_box".to_string()),
+            "pre-existing reserve must be preserved on an empty scan: {:?}",
+            remaining
+        );
+    }
+
+    async fn test_process_scan_boxes_preserves_reserves_when_boxes_fail_to_parse() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Mock node returning one valid reserve box and one malformed box
+        // (missing R4). A pre-existing stored reserve must survive: the
+        // malformed box makes the snapshot non-authoritative, so the removal
+        // phase must be skipped (fail closed).
+        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let body = format!(
+            concat!(
+                "[",
+                "{{\"boxId\":\"valid_box_1\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
+                "\"transactionId\":\"tx1\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                ",",
+                "{{\"boxId\":\"bad_box_2\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
+                "\"transactionId\":\"tx2\",\"additionalRegisters\":{{}}}}",
+                "]"
+            ),
+            prefixed_pubkey, tracker_nft_id
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        let config = NodeConfig {
+            node_url: format!("http://{}", addr),
+            reserve_contract_p2s: Some("test_p2s".to_string()),
+            ..Default::default()
+        };
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let server_state =
+            ServerState::new(config, &data_dir).expect("Failed to create server state");
+
+        // Pre-existing reserve that is NOT in the scan result; previously it
+        // would have been removed because one valid box was parsed.
+        let preexisting = ExtendedReserveInfo {
+            base_info: crate::ReserveInfo {
+                collateral_amount: 500,
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
+            },
+            total_debt: 0,
+            box_id: "preexisting_box".to_string(),
+            owner_pubkey: "deadbeef".to_string(),
+            last_updated_timestamp: 0,
+        };
+        server_state
+            .reserve_tracker
+            .update_reserve(preexisting.clone())
+            .unwrap();
+        server_state
+            .reserve_storage
+            .store_reserve(&preexisting)
+            .unwrap();
+
+        server_state.process_scan_boxes().await.unwrap();
+
+        let remaining: Vec<String> = server_state
+            .reserve_tracker
+            .get_all_reserves()
+            .into_iter()
+            .map(|r| r.box_id)
+            .collect();
+        assert!(
+            remaining.contains(&hex::encode("valid_box_1")),
+            "valid scanned box should be tracked (hex-encoded box id): {:?}",
+            remaining
+        );
+        assert!(
+            remaining.contains(&"preexisting_box".to_string()),
+            "pre-existing reserve must be preserved when any scan box fails to parse: {:?}",
+            remaining
+        );
     }
 }

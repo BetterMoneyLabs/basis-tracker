@@ -14,7 +14,6 @@ use crate::{
     },
     AppState, TrackerCommand,
 };
-use basis_store::reqwest;
 use basis_store::{IouNote, NoteError, PubKey, Signature};
 use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
 use serde::{Deserialize, Serialize};
@@ -53,7 +52,7 @@ async fn call_schnorr_sign_api(
     address: &str,
     message: &str,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = basis_store::http::bounded_client();
 
     let request_body = SchnorrSignRequest {
         address: address.to_string(),
@@ -75,8 +74,7 @@ async fn call_schnorr_sign_api(
         .map_err(|e| format!("Failed to send request: {}", e))?;
 
     let status = response.status();
-    let response_text = response
-        .text()
+    let response_text = basis_store::http::read_body_capped(response)
         .await
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
@@ -808,6 +806,68 @@ pub async fn get_all_notes(
     }
 }
 
+/// Load the issuer's gross liability snapshot from tracker note state.
+///
+/// Per recipient edge the greatest locally-known cumulative debt is used:
+/// `max(note.amount_collected, confirmed_total_debt, pending_total_debt)`.
+/// The candidate note (`candidate_total_debt` for `candidate_recipient`)
+/// replaces its own edge, never lowering an observed value; an unknown
+/// recipient is added as a new edge. Gross debt is intentional: redemption
+/// state is not reconstructed on reorgs, so subtracting redeemed amounts could
+/// make a collateral check fail open. Returns `None` — deliberate fail-closed
+/// input for collateral predicates — when the tracker snapshot is unavailable.
+async fn load_issuer_gross_debt(
+    state: &AppState,
+    issuer_pubkey: &PubKey,
+    candidate_recipient: &PubKey,
+    candidate_total_debt: u64,
+) -> Option<u64> {
+    let (notes_tx, notes_rx) = tokio::sync::oneshot::channel();
+    state
+        .tx
+        .send(TrackerCommand::GetNotesByIssuer {
+            issuer_pubkey: *issuer_pubkey,
+            response_tx: notes_tx,
+        })
+        .await
+        .ok()?;
+    let notes = notes_rx.await.ok()?.ok()?;
+
+    let (conf_tx, conf_rx) = tokio::sync::oneshot::channel();
+    state
+        .tx
+        .send(TrackerCommand::GetAllConfirmations {
+            response_tx: conf_tx,
+        })
+        .await
+        .ok()?;
+    let confirmations = conf_rx.await.ok()?;
+
+    let mut total: u64 = 0;
+    let mut candidate_edge_replaced = false;
+    for note in &notes {
+        let mut edge = note.amount_collected;
+        let key = basis_store::NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
+        if let Some(conf) = confirmations.get(&key.key_hash) {
+            if let Some(confirmed) = conf.confirmed_total_debt {
+                edge = edge.max(confirmed);
+            }
+            if let Some(pending) = conf.pending_total_debt {
+                edge = edge.max(pending);
+            }
+        }
+        if note.recipient_pubkey == *candidate_recipient {
+            edge = edge.max(candidate_total_debt);
+            candidate_edge_replaced = true;
+        }
+        total = total.checked_add(edge)?;
+    }
+    if !candidate_edge_replaced {
+        total = total.checked_add(candidate_total_debt)?;
+    }
+    Some(total)
+}
+
 /// Check if a note would be accepted by the server's acceptance policy
 ///
 /// First checks for a per-recipient policy in the database. If found, uses that policy.
@@ -892,12 +952,25 @@ pub async fn check_acceptance(
                             // Clone reserve tracker from mutex
                             let reserve_tracker = state.reserve_tracker.lock().await.clone();
 
+                            let issuer_gross_debt = if predicate.requires_liability_snapshot() {
+                                load_issuer_gross_debt(
+                                    &state,
+                                    &issuer_pubkey,
+                                    &recipient_pubkey,
+                                    payload.total_debt,
+                                )
+                                .await
+                            } else {
+                                None
+                            };
+
                             // Build context
                             let ctx = crate::acceptance::PredicateContext {
                                 issuer_pubkey,
                                 recipient_pubkey,
                                 total_debt: payload.total_debt,
                                 reserve_tracker: Some(reserve_tracker),
+                                issuer_gross_debt,
                             };
 
                             let acceptable = predicate.acceptable(&ctx);
@@ -951,12 +1024,25 @@ pub async fn check_acceptance(
                 // Clone reserve tracker from mutex
                 let reserve_tracker = state.reserve_tracker.lock().await.clone();
 
+                let issuer_gross_debt = if predicate.requires_liability_snapshot() {
+                    load_issuer_gross_debt(
+                        &state,
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        payload.total_debt,
+                    )
+                    .await
+                } else {
+                    None
+                };
+
                 // Build context
                 let ctx = crate::acceptance::PredicateContext {
                     issuer_pubkey,
                     recipient_pubkey,
                     total_debt: payload.total_debt,
                     reserve_tracker: Some(reserve_tracker),
+                    issuer_gross_debt,
                 };
 
                 let acceptable = predicate.acceptable(&ctx);
@@ -987,11 +1073,23 @@ pub async fn check_acceptance(
             // Fall back to global policy on error
             if let Some(predicate) = &state.acceptance_predicate {
                 let reserve_tracker = state.reserve_tracker.lock().await.clone();
+                let issuer_gross_debt = if predicate.requires_liability_snapshot() {
+                    load_issuer_gross_debt(
+                        &state,
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        payload.total_debt,
+                    )
+                    .await
+                } else {
+                    None
+                };
                 let ctx = crate::acceptance::PredicateContext {
                     issuer_pubkey,
                     recipient_pubkey,
                     total_debt: payload.total_debt,
                     reserve_tracker: Some(reserve_tracker),
+                    issuer_gross_debt,
                 };
                 let acceptable = predicate.acceptable(&ctx);
                 let reason = if acceptable {
@@ -3686,7 +3784,7 @@ pub async fn submit_reserve_transaction(
         "{}/wallet/payment/send",
         node_config.node_url.trim_end_matches('/')
     );
-    let client = reqwest::Client::new();
+    let client = basis_store::http::bounded_client();
     let mut request = client.post(&url).json(&payment_requests);
     if let Some(ref api_key) = node_config.api_key {
         request = request.header("api_key", api_key);
@@ -3695,7 +3793,7 @@ pub async fn submit_reserve_transaction(
     match request.send().await {
         Ok(response) => {
             let status = response.status();
-            match response.text().await {
+            match basis_store::http::read_body_capped(response).await {
                 Ok(body) => {
                     if status.is_success() {
                         // The Ergo node returns the transaction id as a quoted string.

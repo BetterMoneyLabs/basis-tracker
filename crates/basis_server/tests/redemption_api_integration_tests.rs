@@ -20,12 +20,12 @@ mod redemption_api_tests {
     use axum::http::StatusCode;
     use basis_server::{
         api::{
-            complete_redemption, get_redemption_proof, initiate_redemption, prepare_redemption,
-            request_tracker_signature,
+            check_acceptance, complete_redemption, get_redemption_proof, initiate_redemption,
+            prepare_redemption, request_tracker_signature,
         },
         models::{
-            CompleteRedemptionRequest, RedeemRequest, RedemptionPreparationRequest,
-            TrackerSignatureRequest,
+            CheckAcceptanceRequest, CompleteRedemptionRequest, RedeemRequest,
+            RedemptionPreparationRequest, TrackerSignatureRequest,
         },
         redemption_build::{build_redemption, RedemptionBuildRequest},
         AppState, TrackerCommand,
@@ -297,6 +297,7 @@ mod redemption_api_tests {
             redemption: basis_server::config::RedemptionConfig {
                 enforce_acceptance_policy,
             },
+            confirmation: basis_server::config::ConfirmationConfig::default(),
         });
 
         let temp_dir = std::env::temp_dir().join(format!(
@@ -832,6 +833,93 @@ mod redemption_api_tests {
             error.contains("1000"),
             "expected oldest timestamp in message, got: {}",
             error
+        );
+    }
+
+    // ============================================================================
+    // POST /acceptance/check liability-source regression test
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_acceptance_check_uses_note_derived_liabilities() {
+        // Regression test for the finding that collateralization used the
+        // unmaintained reserve `total_debt` placeholder (always 0) instead of
+        // the issuer's real liabilities. Setup: collateral 1000, one existing
+        // note of 800 to holder A, global min_ratio 1.0.
+        // - candidate total_debt 100 -> liabilities 900, ratio 1.11 >= 1.0 -> accept
+        // - candidate total_debt 300 -> liabilities 1100, ratio 0.91 < 1.0 -> reject
+        // With the old placeholder (0 debt) both would have been accepted.
+        let mut state = create_mock_app_state_with_acceptance(collateral_acceptance(1.0)).await;
+        state.acceptance_predicate =
+            basis_server::acceptance::builder::build_predicate_tree(collateral_acceptance(1.0))
+                .unwrap()
+                .map(std::sync::Arc::from);
+
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let (_holder_secret, holder_pubkey) = generate_keypair();
+        let holder_hex = hex::encode(holder_pubkey);
+        let (_candidate_secret, candidate_pubkey) = generate_keypair();
+        let candidate_hex = hex::encode(candidate_pubkey);
+
+        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 800, 1000).await;
+
+        // Reserve with 1000 collateral; total_debt stays the unmaintained
+        // placeholder value 0 and must NOT be used as the liability source.
+        state
+            .reserve_tracker
+            .lock()
+            .await
+            .update_reserve(basis_store::reserve_tracker::ExtendedReserveInfo {
+                base_info: basis_store::ReserveInfo {
+                    collateral_amount: 1000,
+                    last_updated_height: 0,
+                    contract_address: "test".to_string(),
+                    tracker_nft_id: "test".to_string(),
+                    refund_initiation_height: 0,
+                },
+                total_debt: 0,
+                box_id: "box1".to_string(),
+                owner_pubkey: issuer_hex.clone(),
+                last_updated_timestamp: 0,
+            })
+            .unwrap();
+
+        let accept_request = CheckAcceptanceRequest {
+            issuer_pubkey: issuer_hex.clone(),
+            total_debt: 100,
+            recipient_pubkey: Some(candidate_hex.clone()),
+        };
+        let response = check_acceptance(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(accept_request),
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "body: {:?}", response.1);
+        let body = &response.1;
+        let data = body.data.as_ref().expect("expected data in response");
+        assert!(
+            data.acceptable,
+            "900 liabilities against 1000 collateral at min_ratio 1.0 should be acceptable: {:?}",
+            data.reason
+        );
+
+        let reject_request = CheckAcceptanceRequest {
+            issuer_pubkey: issuer_hex,
+            total_debt: 300,
+            recipient_pubkey: Some(candidate_hex),
+        };
+        let response = check_acceptance(
+            axum::extract::State(state),
+            axum::extract::Json(reject_request),
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "body: {:?}", response.1);
+        let body = &response.1;
+        let data = body.data.as_ref().expect("expected data in response");
+        assert!(
+            !data.acceptable,
+            "1100 liabilities against 1000 collateral at min_ratio 1.0 should be rejected"
         );
     }
 

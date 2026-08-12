@@ -78,6 +78,29 @@ Set it to `false` to disable these checks (e.g. for testing). Emergency
 redemptions via the contract path bypass the tracker and are never
 policy-checked. See `specs/redemption_acceptance_policy.md` for the full design.
 
+### Confirmation Configuration
+
+```toml
+[confirmation]
+# Minimum on-chain depth (including the inclusion block) before a tracker box
+# update is treated as confirmed and pending notes become redeemable
+min_depth = 2
+```
+
+Presence of the tracker update transaction in a block alone is not treated as
+confirmation; the tracker box updater waits until the transaction has
+`min_depth` blocks before promoting pending notes to `Confirmed` (making them
+redeemable). Box/height fetch failures are retried on the next update cycle.
+Note this is only a depth gate — reorg handling beyond it is out of scope
+(see `specs/pr12_triage.md`).
+
+### Node HTTP bounds
+
+All outbound Ergo node requests share one bounded client
+(`crates/basis_store/src/http.rs`): 3 s connect timeout, 15 s total request
+timeout, and a 2 MiB response body cap. These values are currently compile-time
+constants, not config keys.
+
 ## Tracker NFT Configuration
 
 ### What is the Tracker NFT?
@@ -178,6 +201,9 @@ timeout_secs = 30
 
 [redemption]
 enforce_acceptance_policy = true
+
+[confirmation]
+min_depth = 2
 ```
 
 ## Verification

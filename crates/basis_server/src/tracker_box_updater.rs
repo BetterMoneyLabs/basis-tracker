@@ -176,6 +176,10 @@ pub struct TrackerBoxUpdateConfig {
     pub fee: u64,
     pub change_address: Option<String>,
     pub tracker_secret_key: Option<[u8; 32]>,
+    /// Minimum on-chain depth (including the inclusion block) before a
+    /// tracker box update is treated as confirmed and pending notes are
+    /// promoted to `Confirmed`.
+    pub min_confirmation_depth: u64,
 }
 
 impl Default for TrackerBoxUpdateConfig {
@@ -187,6 +191,7 @@ impl Default for TrackerBoxUpdateConfig {
             fee: 1_000_000,
             change_address: None,
             tracker_secret_key: None,
+            min_confirmation_depth: 2,
         }
     }
 }
@@ -264,6 +269,18 @@ fn vlq_encode(mut value: usize) -> Vec<u8> {
     bytes
 }
 
+/// Compute the on-chain confirmation depth of a transaction included at
+/// `inclusion_height` given the current chain tip `current_height`. Both heights
+/// are inclusive, so a transaction in the current tip has depth 1. A height of 0
+/// means the inclusion height is unknown and depth is reported as 0.
+pub fn confirmation_depth(current_height: u64, inclusion_height: u64) -> u64 {
+    if inclusion_height == 0 {
+        0
+    } else {
+        current_height.saturating_sub(inclusion_height) + 1
+    }
+}
+
 /// Tracker box updater service
 pub struct TrackerBoxUpdater;
 
@@ -297,13 +314,46 @@ impl TrackerBoxUpdater {
             if let Some((ref tx_id, expected_digest)) = pending_tx {
                 match Self::check_transaction_confirmation(&config, tx_id).await {
                     Ok(true) => {
+                        // Look up the confirming box to record its height/id.
+                        let (box_id, height) =
+                            match Self::fetch_tracker_box_summary(&config, tx_id).await {
+                                Ok(summary) => summary,
+                                Err(e) => {
+                                    error!(
+                                        "Failed to fetch confirming box for {}: {}. Will retry.",
+                                        tx_id, e
+                                    );
+                                    continue;
+                                }
+                            };
+
+                        // Require a minimum on-chain depth (presence in a block
+                        // alone is not confirmation) before promoting pending
+                        // notes to Confirmed.
+                        if config.min_confirmation_depth > 1 {
+                            match Self::get_node_height(&config).await {
+                                Ok(current) => {
+                                    let depth = confirmation_depth(current as u64, height);
+                                    if depth < config.min_confirmation_depth {
+                                        info!(
+                                            "Transaction {} included at height {} (depth {}/{}), waiting for more confirmations...",
+                                            tx_id, height, depth, config.min_confirmation_depth
+                                        );
+                                        continue;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to fetch node height for depth check of {}: {}. Will retry.",
+                                        tx_id, e
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+
                         info!("Transaction {} confirmed on chain. Update complete.", tx_id);
                         last_submitted_digest = Some(expected_digest);
-
-                        // Look up the confirming box to record its height/id.
-                        let (box_id, height) = Self::fetch_tracker_box_summary(&config, tx_id)
-                            .await
-                            .unwrap_or_else(|_| (tx_id.clone(), 0));
 
                         shared_state.set_confirmed(expected_digest, box_id.clone(), height);
                         shared_state.clear_pending();
@@ -460,7 +510,7 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         tx_id: &str,
     ) -> Result<(String, u64), TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/blockchain/transaction/byId/{}",
             config.node_url.trim_end_matches('/'),
@@ -484,10 +534,14 @@ impl TrackerBoxUpdater {
             )));
         }
 
-        let body: serde_json::Value = response
-            .json()
+        let body: serde_json::Value = basis_store::http::read_json_capped(response)
             .await
-            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(|e| {
+                    TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e))
+                })
+            })?;
 
         // The new tracker box is the first output of the update transaction.
         if let Some(outputs) = body.get("outputs").and_then(|o| o.as_array()) {
@@ -513,7 +567,7 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         tracker_nft_id: &str,
     ) -> Result<ErgoBoxApi, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/blockchain/box/unspent/byTokenId/{}?limit=5",
             config.node_url.trim_end_matches('/'),
@@ -539,10 +593,14 @@ impl TrackerBoxUpdater {
             )));
         }
 
-        let boxes: Vec<ErgoBoxApi> = response
-            .json()
+        let boxes: Vec<ErgoBoxApi> = basis_store::http::read_json_capped(response)
             .await
-            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(|e| {
+                    TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e))
+                })
+            })?;
 
         if boxes.is_empty() {
             return Err(TrackerBoxUpdaterError::NoTrackerBoxFound);
@@ -565,7 +623,7 @@ impl TrackerBoxUpdater {
     async fn get_wallet_boxes(
         config: &TrackerBoxUpdateConfig,
     ) -> Result<Vec<ErgoBoxApi>, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/wallet/boxes/unspent?minConfirmations=0&maxConfirmations=-1",
             config.node_url.trim_end_matches('/')
@@ -590,10 +648,14 @@ impl TrackerBoxUpdater {
             )));
         }
 
-        let entries: Vec<WalletBoxEntry> = response
-            .json()
+        let entries: Vec<WalletBoxEntry> = basis_store::http::read_json_capped(response)
             .await
-            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(|e| {
+                    TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e))
+                })
+            })?;
 
         Ok(entries.into_iter().map(|e| e.box_details).collect())
     }
@@ -663,7 +725,7 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         box_id: &str,
     ) -> Result<String, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/utxo/byIdBinary/{}",
             config.node_url.trim_end_matches('/'),
@@ -689,10 +751,14 @@ impl TrackerBoxUpdater {
             )));
         }
 
-        let binary: BoxBinaryResponse = response
-            .json()
+        let binary: BoxBinaryResponse = basis_store::http::read_json_capped(response)
             .await
-            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(|e| {
+                    TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e))
+                })
+            })?;
 
         Ok(binary.bytes)
     }
@@ -701,7 +767,7 @@ impl TrackerBoxUpdater {
     async fn get_node_height(
         config: &TrackerBoxUpdateConfig,
     ) -> Result<u32, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!("{}/info", config.node_url.trim_end_matches('/'));
 
         let mut request = client.get(&url);
@@ -723,10 +789,14 @@ impl TrackerBoxUpdater {
             )));
         }
 
-        let body: serde_json::Value = response
-            .json()
+        let body: serde_json::Value = basis_store::http::read_json_capped(response)
             .await
-            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(|e| {
+                    TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e))
+                })
+            })?;
 
         body["fullHeight"]
             .as_u64()
@@ -741,7 +811,7 @@ impl TrackerBoxUpdater {
     ) -> Result<serde_json::Value, TrackerBoxUpdaterError> {
         info!("Signing unsigned transaction: {}", unsigned_tx);
 
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/wallet/transaction/sign",
             config.node_url.trim_end_matches('/')
@@ -782,7 +852,7 @@ impl TrackerBoxUpdater {
     ) -> Result<String, TrackerBoxUpdaterError> {
         info!("Broadcasting signed transaction: {}", signed_tx);
 
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!("{}/transactions", config.node_url.trim_end_matches('/'));
 
         let mut request = client.post(&url).json(signed_tx);
@@ -978,7 +1048,7 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         tx_id: &str,
     ) -> Result<bool, TrackerBoxUpdaterError> {
-        let client = reqwest::Client::new();
+        let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/blockchain/transaction/byId/{}",
             config.node_url.trim_end_matches('/'),
@@ -1047,4 +1117,38 @@ fn change_address_to_ergo_tree(address_str: &str) -> Result<String, TrackerBoxUp
     Ok(hex::encode(tree.sigma_serialize_bytes().map_err(|e| {
         TrackerBoxUpdaterError::SerializationError(format!("Failed to serialize ergoTree: {:?}", e))
     })?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_confirmation_depth_current_tip() {
+        // Transaction in the current tip has depth 1.
+        assert_eq!(confirmation_depth(100, 100), 1);
+    }
+
+    #[test]
+    fn test_confirmation_depth_one_block_back() {
+        assert_eq!(confirmation_depth(101, 100), 2);
+    }
+
+    #[test]
+    fn test_confirmation_depth_unknown_height() {
+        // An inclusion height of 0 is treated as unknown.
+        assert_eq!(confirmation_depth(100, 0), 0);
+    }
+
+    #[test]
+    fn test_confirmation_depth_does_not_underflow() {
+        // If current height somehow lags inclusion height, depth is at least 1.
+        assert_eq!(confirmation_depth(100, 200), 1);
+    }
+
+    #[test]
+    fn test_tracker_box_update_config_default_depth() {
+        let config = TrackerBoxUpdateConfig::default();
+        assert_eq!(config.min_confirmation_depth, 2);
+    }
 }

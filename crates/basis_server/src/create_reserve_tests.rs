@@ -11,6 +11,11 @@ mod create_reserve_tests {
     };
     use basis_store::ergo_scanner::{NodeConfig, ServerState};
 
+    /// Serializes fjall keyspace creation across parallel tests; concurrent
+    /// `ServerState::new` calls race inside lsm-tree Tree creation and can
+    /// abort the test process (see the same pattern in the integration tests).
+    static STORAGE_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // Helper function to create a unique temporary directory for test storage
     fn unique_test_storage_path(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -45,14 +50,10 @@ mod create_reserve_tests {
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let scanner = ServerState::new(config, &data_dir).unwrap_or_else(|_| {
-            // Fallback to a scanner with minimal initialization that doesn't access storage
-            let config = NodeConfig {
-                node_url: "http://example.com".to_string(), // Invalid URL to avoid file access
-                ..Default::default()
-            };
-            ServerState::new(config, &data_dir).expect("Fallback scanner creation should succeed")
-        });
+        let scanner = {
+            let _guard = STORAGE_INIT_LOCK.lock().unwrap();
+            ServerState::new(config, &data_dir).expect("Failed to create test scanner state")
+        };
 
         // Create a minimal config for testing
         let test_config = std::sync::Arc::new(crate::config::AppConfig {
@@ -82,6 +83,7 @@ mod create_reserve_tests {
             },
             acceptance: crate::acceptance::config::AcceptanceConfig::empty(),
             redemption: crate::config::RedemptionConfig::default(),
+            confirmation: crate::config::ConfirmationConfig::default(),
         });
 
         let reserve_tracker = Arc::new(Mutex::new(basis_store::ReserveTracker::new()));
