@@ -1,16 +1,19 @@
 # Basis Tracker Development Guide
 
 ## Build & Test Commands
-- `cargo build` - Build all crates
+- `cargo build` - Build all Rust crates
 - `cargo check` - Type check without building
-- `cargo test` - Run all tests
-- `cargo test -p <crate_name>` - Run tests for specific crate
-- `cargo test --test <test_name>` - Run specific test
-- `cargo clippy` - Lint with Clippy
-- `cargo fmt` - Format code
+- `cargo test` - Run all Rust tests
+- `cargo test -p <crate_name>` - Run tests for specific Rust crate
+- `cargo test --test <test_name>` - Run specific Rust integration test
+- `cargo clippy` - Lint Rust with Clippy
+- `cargo fmt` - Format Rust code
+- `cd scala && sbt compile` - Compile Scala reference implementation
+- `cd scala && sbt test` - Run Scala contract tests
 
 ## Code Style Guidelines
 - **Rust 2021 edition** with standard formatting
+- **Scala 2.12** for the reference implementation under `scala/`
 - **Imports**: Group std, external, internal crates with blank lines
 - **Naming**: snake_case for variables/functions, PascalCase for types
 - **Error handling**: Use `Result` and `?` operator, avoid unwrap()
@@ -46,6 +49,11 @@
 - **Reserve tracking** to ensure proper collateralization
 - **Event emission** for off-chain tracking of reserve changes
 - **Collateralization ratio enforcement** to prevent over-issuance
+- **Four actions**: redeem note (#0), top up (#1), initiate refund (#2), complete refund (#3)
+- **Two-phase refund**: owner can initiate unilateral exit, creditors have ~2 months to redeem before completion
+- **Two contract variants**:
+  - `contract/basis.es` — ERG-collateralized reserve
+  - `contract/basis-token.es` — token-collateralized reserve
 
 ### Cryptographic Operations
 - **Note signing**: Issuers sign notes with their private keys
@@ -81,6 +89,29 @@
 - **Deployment parameters**: Customizable collateral requirements and ratios
 - **Address generation**: Deterministic contract address from template and parameters
 - **Multi-chain support**: Designed for deployment on Ergo mainnet and testnets
+
+## Scala Reference Implementation
+
+A Scala reference implementation for the Basis protocol lives under `scala/`:
+
+- `scala/src/main/scala/basis/contracts/` — Contract compilation, deployment utilities, address/key helpers, and test-vector generation
+- `scala/src/main/scala/basis/offchain/` — Reference Schnorr signing/verification
+- `scala/src/test/scala/basis/contracts/` — On-chain contract tests (`BasisSpec`, `BasisTokenSpec`)
+
+It is built with sbt and reads contracts from `../contract/` relative to the `scala/` directory.
+
+### Running
+
+```bash
+cd scala
+sbt compile
+sbt test
+sbt "runMain basis.contracts.TestVectorGenerator"
+```
+
+### Test Secrets
+
+Tests require `scala/secrets/participants.csv` with valid `name,address,secret_hex` rows for `tracker`, `alice`, and `bob`. A committed test fixture is provided; for real deployments copy `scala/secrets/participants.csv.template` to `scala/secrets/participants.local.csv`.
 
 ## Schnorr Signature Implementation
 

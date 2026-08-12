@@ -217,7 +217,7 @@ impl AppConfig {
                         pubkey_bytes.copy_from_slice(&bytes);
                         tracing::info!(
                             "Returning 33-byte compressed public key from hex: {}",
-                            hex::encode(&pubkey_bytes)
+                            hex::encode(pubkey_bytes)
                         );
                         return Ok(Some(pubkey_bytes));
                     } else {
@@ -246,7 +246,7 @@ impl AppConfig {
                             result.copy_from_slice(&pk_bytes);
                             tracing::info!(
                                 "Returning 33-byte compressed public key from P2PK: {}",
-                                hex::encode(&result)
+                                hex::encode(result)
                             );
                             Ok(Some(result))
                         } else {

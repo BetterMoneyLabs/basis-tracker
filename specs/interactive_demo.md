@@ -33,8 +33,8 @@ Run it from the project root directory:
 ./target/debug/basis_cli --help
 
 # Or add to your PATH
-export PATH="$PATH:/home/kushti/chaincash/basis-tracker/target/debug"
-./target/debug/basis_cli --help
+export PATH="$PATH:$PWD/target/debug"
+./basis_cli --help
 ```
 
 **Key Participants:**

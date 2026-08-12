@@ -71,6 +71,12 @@ pub struct ReserveTracker {
     reserves: Arc<RwLock<HashMap<String, ExtendedReserveInfo>>>,
 }
 
+impl Default for ReserveTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReserveTracker {
     /// Create a new reserve tracker
     pub fn new() -> Self {
@@ -230,9 +236,7 @@ impl ExtendedReserveInfo {
                 collateral_amount,
                 last_updated_height,
                 contract_address: String::new(), // Must be set separately via set_contract_address()
-                tracker_nft_id: tracker_nft_id
-                    .map(|id| hex::encode(id))
-                    .unwrap_or_else(|| "".to_string()),
+                tracker_nft_id: tracker_nft_id.map(hex::encode).unwrap_or_default(),
                 refund_initiation_height,
             },
             total_debt: 0,

@@ -50,9 +50,9 @@ impl KeyPair {
 
             // Compute challenge e = H(a || message || issuer_pubkey)
             let mut hasher = Blake2b::<U32>::new();
-            hasher.update(&a_bytes);
+            hasher.update(a_bytes);
             hasher.update(message);
-            hasher.update(&issuer_pubkey_bytes);
+            hasher.update(issuer_pubkey_bytes);
             let e_bytes = hasher.finalize();
 
             // Take first 32 bytes for the scalar

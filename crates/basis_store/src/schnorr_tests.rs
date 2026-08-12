@@ -30,6 +30,7 @@ pub struct SchnorrVerificationVector {
 
 impl SchnorrVerificationVector {
     /// Create a test vector with computed intermediate values
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: &'static str,
         description: &'static str,
@@ -58,7 +59,7 @@ impl SchnorrVerificationVector {
         let mut hasher = Blake2b::<U32>::new();
         hasher.update(a_bytes);
         hasher.update(&signing_message);
-        hasher.update(&issuer_pubkey);
+        hasher.update(issuer_pubkey);
         let challenge_full = hasher.finalize();
         let challenge_hash: [u8; 32] = challenge_full[..32].try_into().unwrap();
 

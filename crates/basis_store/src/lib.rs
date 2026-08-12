@@ -41,10 +41,8 @@ pub mod test_helpers;
 #[cfg(test)]
 pub mod tracker_scanner_test;
 
-use basis_core;
 use basis_core::impls::SchnorrVerifier;
 use basis_core::traits::SignatureVerifier;
-use secp256k1;
 use std::path::Path;
 
 /// Public key type (Secp256k1)
@@ -422,7 +420,7 @@ impl TrackerStateManager {
         let root_digest = self.current_state.avl_root_digest;
         tracing::info!(
             "AVL tree rebuilt successfully with root digest: {}",
-            hex::encode(&root_digest)
+            hex::encode(root_digest)
         );
 
         Ok(())
@@ -1321,7 +1319,7 @@ impl IouNote {
 
     /// Get the recipient public key as a hex-encoded string
     pub fn recipient_pubkey_hex(&self) -> String {
-        hex::encode(&self.recipient_pubkey)
+        hex::encode(self.recipient_pubkey)
     }
 }
 
@@ -1349,7 +1347,7 @@ pub fn normalize_public_key(pubkey_hex: &str) -> String {
         Err(_) => return pubkey_hex.to_string(), // Return original if invalid hex
     };
 
-    if pubkey_bytes.len() < 1 {
+    if pubkey_bytes.is_empty() {
         return pubkey_hex.to_string();
     }
 

@@ -199,6 +199,7 @@ impl RedemptionManager {
     ///
     /// When blockchain integration is complete, this will produce actual
     /// Ergo transactions that can be submitted to the network.
+    #[allow(clippy::too_many_arguments)]
     pub fn build_unsigned_redemption_transaction(
         &mut self,
         note: &IouNote,

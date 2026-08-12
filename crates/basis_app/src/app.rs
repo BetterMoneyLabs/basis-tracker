@@ -291,52 +291,43 @@ impl App {
 
         // Refresh reserve status
         if let Some(ref acc) = self.current_account {
-            match self.client.get_reserve_status(&acc.pubkey).await {
-                Ok(status) => {
-                    self.reserve_status = Some(ReserveInfo {
-                        issuer: status.issuer_pubkey,
-                        total_debt: status.total_debt,
-                        collateral: status.collateral,
-                        ratio: status.collateralization_ratio,
-                        note_count: status.note_count,
-                        _last_updated: status.last_updated,
-                        has_pending_refund: status.has_pending_refund,
-                    });
-                }
-                Err(_) => {}
+            if let Ok(status) = self.client.get_reserve_status(&acc.pubkey).await {
+                self.reserve_status = Some(ReserveInfo {
+                    issuer: status.issuer_pubkey,
+                    total_debt: status.total_debt,
+                    collateral: status.collateral,
+                    ratio: status.collateralization_ratio,
+                    note_count: status.note_count,
+                    _last_updated: status.last_updated,
+                    has_pending_refund: status.has_pending_refund,
+                });
             }
 
             // Refresh notes
-            match self.client.get_issuer_notes(&acc.pubkey).await {
-                Ok(notes) => {
-                    self.issued_notes = notes
-                        .into_iter()
-                        .map(|n| NoteInfo {
-                            issuer: n.issuer_pubkey,
-                            recipient: n.recipient_pubkey,
-                            amount: n.amount_collected,
-                            redeemed: n.amount_redeemed,
-                            _timestamp: n.timestamp,
-                        })
-                        .collect();
-                }
-                Err(_) => {}
+            if let Ok(notes) = self.client.get_issuer_notes(&acc.pubkey).await {
+                self.issued_notes = notes
+                    .into_iter()
+                    .map(|n| NoteInfo {
+                        issuer: n.issuer_pubkey,
+                        recipient: n.recipient_pubkey,
+                        amount: n.amount_collected,
+                        redeemed: n.amount_redeemed,
+                        _timestamp: n.timestamp,
+                    })
+                    .collect();
             }
 
-            match self.client.get_recipient_notes(&acc.pubkey).await {
-                Ok(notes) => {
-                    self.received_notes = notes
-                        .into_iter()
-                        .map(|n| NoteInfo {
-                            issuer: n.issuer_pubkey,
-                            recipient: n.recipient_pubkey,
-                            amount: n.amount_collected,
-                            redeemed: n.amount_redeemed,
-                            _timestamp: n.timestamp,
-                        })
-                        .collect();
-                }
-                Err(_) => {}
+            if let Ok(notes) = self.client.get_recipient_notes(&acc.pubkey).await {
+                self.received_notes = notes
+                    .into_iter()
+                    .map(|n| NoteInfo {
+                        issuer: n.issuer_pubkey,
+                        recipient: n.recipient_pubkey,
+                        amount: n.amount_collected,
+                        redeemed: n.amount_redeemed,
+                        _timestamp: n.timestamp,
+                    })
+                    .collect();
             }
         }
         Ok(())

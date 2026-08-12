@@ -9,7 +9,7 @@
 use basis_store::persistence::NoteStorage;
 use basis_store::PubKey;
 
-const NOTES_PATH: &str = "/home/kushti/chaincash/basis-tracker/crates/basis_server/data/notes";
+const NOTES_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/notes");
 const ISSUER_HEX: &str = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
 const RECIPIENT_HEX: &str = "03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea";
 const ONCHAIN_PAYMENT_TIMESTAMP: u64 = 1783612740170;

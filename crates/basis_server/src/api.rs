@@ -265,8 +265,8 @@ pub async fn create_note(
         Ok(Ok(())) => {
             tracing::info!(
                 "Successfully created note from {} to {}",
-                hex::encode(&issuer_pubkey),
-                hex::encode(&recipient_pubkey)
+                hex::encode(issuer_pubkey),
+                hex::encode(recipient_pubkey)
             );
 
             // Store event in event store
@@ -274,8 +274,8 @@ pub async fn create_note(
                 id: 0, // Will be set by event store
                 event_type: crate::models::EventType::NoteUpdated,
                 timestamp: payload.timestamp,
-                issuer_pubkey: Some(hex::encode(&issuer_pubkey)),
-                recipient_pubkey: Some(hex::encode(&recipient_pubkey)),
+                issuer_pubkey: Some(hex::encode(issuer_pubkey)),
+                recipient_pubkey: Some(hex::encode(recipient_pubkey)),
                 amount: Some(payload.amount),
                 reserve_box_id: None,
                 collateral_amount: None,
@@ -632,7 +632,7 @@ pub async fn get_note_by_issuer_and_recipient(
     // Send command to tracker thread
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
-    if let Err(_) = state
+    if state
         .tx
         .send(crate::TrackerCommand::GetNoteByIssuerAndRecipient {
             issuer_pubkey,
@@ -640,6 +640,7 @@ pub async fn get_note_by_issuer_and_recipient(
             response_tx,
         })
         .await
+        .is_err()
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -726,10 +727,11 @@ pub async fn get_all_notes(
     // Send command to tracker thread
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
-    if let Err(_) = state
+    if state
         .tx
         .send(crate::TrackerCommand::GetNotes { response_tx })
         .await
+        .is_err()
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2308,7 +2310,7 @@ pub async fn get_tracker_proof(
     // Get tracker state digest from shared state
     let tracker_state_digest = {
         let tracker_state = state.shared_tracker_state.lock().await;
-        hex::encode(&tracker_state.get_avl_root_digest())
+        hex::encode(tracker_state.get_avl_root_digest())
     };
 
     // Request tracker lookup proof from tracker thread
@@ -2354,8 +2356,8 @@ pub async fn get_tracker_proof(
 
             tracing::info!(
                 "Tracker proof generated for {} -> {} (total_debt: {})",
-                hex::encode(&issuer_pubkey),
-                hex::encode(&recipient_pubkey),
+                hex::encode(issuer_pubkey),
+                hex::encode(recipient_pubkey),
                 proof_data.total_debt
             );
 
@@ -2556,7 +2558,7 @@ pub async fn get_reserve_proof(
             let proof_data = crate::models::ReserveProofData {
                 key: hex::encode(&proof.key),
                 value: hex::encode(&proof.value),
-                proof: proof.proof.clone().map(|p| hex::encode(p)),
+                proof: proof.proof.clone().map(hex::encode),
                 already_redeemed,
                 is_first_redemption: proof.proof.is_none(),
                 insert_proof: hex::encode(&insert_proof.0),
@@ -2565,8 +2567,8 @@ pub async fn get_reserve_proof(
 
             tracing::info!(
                 "Reserve proof generated for {} -> {} (already_redeemed: {}, is_first: {})",
-                hex::encode(&issuer_pubkey),
-                hex::encode(&recipient_pubkey),
+                hex::encode(issuer_pubkey),
+                hex::encode(recipient_pubkey),
                 proof_data.already_redeemed,
                 proof_data.is_first_redemption
             );
@@ -2681,7 +2683,7 @@ pub async fn request_tracker_signature(
             &tracker_pubkey_bytes,
         ) {
             Ok(signature) => {
-                let sig_hex = hex::encode(&signature);
+                let sig_hex = hex::encode(signature);
                 tracing::info!("Local tracker signature generated successfully");
                 sig_hex
             }
@@ -2761,7 +2763,7 @@ pub async fn request_tracker_signature(
         tracing::warn!("Signature compatibility warning: {}", verification_error);
     }
 
-    let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
+    let tracker_pubkey = hex::encode(tracker_pubkey_bytes);
 
     let response = TrackerSignatureResponse {
         success: true,
@@ -2881,7 +2883,7 @@ async fn get_tracker_signature_for_redemption(
             )
         })?;
 
-        let signature_hex = hex::encode(&signature);
+        let signature_hex = hex::encode(signature);
         tracing::info!("Local tracker signature generated successfully");
         return Ok(signature_hex);
     }
@@ -3173,7 +3175,7 @@ pub async fn prepare_redemption(
         let shared_state = state.shared_tracker_state.lock().await;
         let current_digest = shared_state.get_avl_root_digest();
         drop(shared_state); // Release the lock early
-        hex::encode(&current_digest)
+        hex::encode(current_digest)
     };
 
     // Generate a real AVL proof for the note
@@ -3273,7 +3275,7 @@ pub async fn prepare_redemption(
     };
 
     let avl_proof = proof_result;
-    let tracker_pubkey = hex::encode(&tracker_pubkey_bytes);
+    let tracker_pubkey = hex::encode(tracker_pubkey_bytes);
 
     // Get current blockchain height from scanner
     let block_height = {
@@ -3352,15 +3354,13 @@ pub async fn get_redemption_proof(
     }
 
     // Validate amount if provided
-    if !amount.is_empty() {
-        if amount.parse::<u64>().is_err() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "Invalid amount parameter".to_string(),
-                )),
-            );
-        }
+    if !amount.is_empty() && amount.parse::<u64>().is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "Invalid amount parameter".to_string(),
+            )),
+        );
     }
 
     // Get the current tracker state digest from shared tracker state
@@ -3369,7 +3369,7 @@ pub async fn get_redemption_proof(
         let shared_state = state.shared_tracker_state.lock().await;
         let current_digest = shared_state.get_avl_root_digest();
         drop(shared_state); // Release the lock early
-        hex::encode(&current_digest)
+        hex::encode(current_digest)
     };
 
     // Generate a real AVL proof for the note
@@ -3643,7 +3643,7 @@ pub async fn create_reserve_payload(
     // Flags: 0x03 (insert + update allowed) for the insertOrUpdate reserve contract.
     let empty_tree_hex =
         "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000";
-    let r5_value = format!("{}", empty_tree_hex);
+    let r5_value = empty_tree_hex.to_string();
 
     // R6: Coll[Byte] (tracker NFT ID) - prefix 0e + 2-byte length + 32-byte NFT ID
     let tracker_nft_id = config

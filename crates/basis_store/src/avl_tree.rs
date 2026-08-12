@@ -29,6 +29,12 @@ fn simple_resolver(_digest: &[u8; 32]) -> ergo_avltree_rust::batch_node::Node {
     })
 }
 
+impl Default for AvlTreeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AvlTreeState {
     /// Create a new AVL tree state
     pub fn new() -> Self {
@@ -212,7 +218,7 @@ impl AvlTreeState {
     pub fn generate_and_verify_lookup(&mut self, key: &[u8], expected_value: &[u8]) -> bool {
         let (proof, returned_value) = self.generate_lookup_proof(key.to_vec());
         let digest = self.root_digest();
-        let value_matches = returned_value.as_ref().map(|v| v.as_slice()) == Some(expected_value);
+        let value_matches = returned_value.as_deref() == Some(expected_value);
         let proof_valid = Self::verify_proof(&digest, &proof, key, expected_value);
         value_matches && proof_valid
     }

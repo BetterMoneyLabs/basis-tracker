@@ -120,8 +120,7 @@ fn test_message_format_compatibility() -> Result<(), String> {
 
 /// Generate a compatibility report
 pub fn generate_compatibility_report() -> String {
-    format!(
-        r#"Basis Signature Verification Implementation Report
+    r#"Basis Signature Verification Implementation Report
 ========================================================
 
 Implementation: Rust (basis_store crate)
@@ -147,7 +146,7 @@ Algorithm Details:
 
 Status: IMPLEMENTED
 "#
-    )
+    .to_string()
 }
 
 #[cfg(test)]

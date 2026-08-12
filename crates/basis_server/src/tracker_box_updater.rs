@@ -50,6 +50,12 @@ pub struct SharedTrackerState {
     pub pending: Arc<RwLock<PendingState>>,
 }
 
+impl Default for SharedTrackerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SharedTrackerState {
     /// Creates a new SharedTrackerState with a default tracker public key for testing.
     /// This should only be used in tests - production code should use new_with_tracker_key.

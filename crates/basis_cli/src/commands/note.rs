@@ -283,7 +283,7 @@ pub async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<De
     message.extend_from_slice(&timestamp.to_be_bytes());
 
     eprintln!("Message: {}", hex::encode(&message));
-    eprintln!("  Key hash: {}", hex::encode(&key_hash));
+    eprintln!("  Key hash: {}", hex::encode(key_hash));
     eprintln!("  Total debt: {} nanoERG", amount);
     eprintln!("  Timestamp: {}", timestamp);
     eprintln!();

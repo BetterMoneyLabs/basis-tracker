@@ -174,11 +174,25 @@ Where:
   - Where timestamp is the latest payment timestamp (Long, 8 bytes big-endian)
   - And cumulativeRedeemedAmount is the total amount redeemed (Long, 8 bytes big-endian)
 - **R6**: NFT ID of tracker server (bytes)
+- **R7**: Refund initiation height (Long). Absent or 0 = no refund pending.
 
 #### Actions
 
 - **Redeem note** (#0): Spend reserve to pay out to note holder
 - **Top up** (#1): Add collateral to the reserve (minimum 0.1 ERG)
+- **Initiate refund** (#2): Reserve owner announces intent to withdraw, setting R7 to current height
+- **Complete refund** (#3): After 43200 blocks (~2 months), owner takes all funds and closes reserve
+
+#### Refund (Reserve Owner Exit)
+
+The reserve owner can unilaterally exit without tracker or creditor cooperation, protecting the owner from censorship. To protect creditors from the owner silently draining collateral, refund is two-phase:
+
+1. **Initiate refund (action #2):** the owner signs a transaction setting register R7 to the initiation height (current or slightly future-dated, to tolerate delayed block inclusion; backdating is rejected). One-shot only: re-initiation is not allowed.
+2. **Complete refund (action #3):** after a waiting period of 43200 blocks (~2 months), the owner signs a transaction spending the reserve box and taking all funds and tokens.
+
+Redemptions and top-ups remain fully enabled during and after the waiting period (both preserve R7), so creditors have ~2 months to redeem their notes before the owner can withdraw. Redemption is also not disabled after the deadline, so an owner who initiated but never completed the refund does not freeze the reserve.
+
+Only full withdrawal is supported: a partial refund would require tracker attestation of outstanding debt, reintroducing the censorship vector the refund protects against.
 
 #### Tracker Box Registers
 
@@ -232,7 +246,26 @@ Where:
 
 - Reserve contract preserved (proposition bytes, tokens, R4, R6 unchanged)
 - R5 (AVL tree) preserved
+- R7 (pending refund flag, if any) preserved
 - At least 0.1 ERG added (100,000,000 nanoERG)
+
+### Refund Paths (Actions #2 and #3)
+
+#### Initiate Refund (Action #2)
+
+- Reserve contract preserved (proposition bytes, tokens, R4, R6 unchanged)
+- R5 (AVL tree) preserved
+- No funds or tokens can be taken out
+- R7 set to current height (or slightly future-dated), no backdating allowed
+- R7 must be 0 (no refund already pending)
+- Requires reserve owner's signature (`proveDlog(ownerKey)`)
+
+#### Complete Refund (Action #3)
+
+- Refund was previously initiated (R7 > 0)
+- Waiting period of 43200 blocks has passed since R7
+- Owner takes all funds and tokens; reserve box is destroyed
+- Requires reserve owner's signature (`proveDlog(ownerKey)`)
 
 ## Examples
 
@@ -301,6 +334,28 @@ An MCP (Model Context Protocol) server over stdio exposing wallet operations as 
 - Read-only tools: `server_status`, `account_list`, `account_current`, `note_list`, `note_get`, `reserve_status`, `policy_get`
 - Write tools: `account_create`, `account_switch`, `account_import`, `note_create`, `note_redeem`, `reserve_create`, `policy_set`
 - Signing happens in-process; private keys are never exposed through any tool
+
+### Scala Reference Implementation
+
+A Scala reference implementation lives under `scala/` and is built with sbt. It provides
+contract compilation, deployment helpers, address/key utilities, on-chain contract tests,
+and a canonical Schnorr signing implementation used to generate cross-validation test vectors.
+
+**Key modules:**
+- `scala/src/main/scala/basis/contracts/` — `BasisConstants`, `BasisDeployer`, `BasisNoteCreator`,
+  `ParticipantSecretsReader`, `AddressUtils`, `TestVectorGenerator`
+- `scala/src/main/scala/basis/offchain/SigUtils.scala` — Schnorr signing/verification and
+  48-byte message construction
+- `scala/src/test/scala/basis/contracts/` — `BasisSpec`, `BasisTokenSpec`, `BasisDeployerSpec`,
+  `ParticipantSecretsSpec`
+
+Run with:
+```bash
+cd scala
+sbt compile
+sbt test
+sbt "runMain basis.contracts.TestVectorGenerator"
+```
 
 ## Possible Extensions
 

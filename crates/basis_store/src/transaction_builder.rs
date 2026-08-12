@@ -232,6 +232,7 @@ impl RedemptionTransactionBuilder {
     ///
     /// # Returns
     /// - RedemptionTransactionData structure containing all transaction components
+    #[allow(clippy::too_many_arguments)]
     pub fn build_unsigned_redemption_transaction(
         reserve_box_id: &str,
         tracker_box_id: &str,
@@ -273,7 +274,7 @@ impl RedemptionTransactionBuilder {
 
         // Validate the tracker NFT ID format according to byte_array_register_serialization.md spec
         // The register should contain exactly 32 bytes for the tracker NFT ID
-        if let Err(_) = hex::decode(tracker_nft_id) {
+        if hex::decode(tracker_nft_id).is_err() {
             return Err(TransactionBuilderError::Configuration(
                 "Tracker NFT ID must be valid hex-encoded bytes".to_string(),
             ));
@@ -354,7 +355,7 @@ impl RedemptionTransactionBuilder {
 
         // Decode recipient public key for context extension
         let recipient_pubkey_bytes =
-            hex::decode(&note.recipient_pubkey_hex()).unwrap_or_else(|_| vec![0u8; 33]);
+            hex::decode(note.recipient_pubkey_hex()).unwrap_or_else(|_| vec![0u8; 33]);
 
         // Build context extension variables (following specs/server/redemption_transaction_format_spec.md)
         // Note: For first redemption, reserve_lookup_proof (#7) is omitted

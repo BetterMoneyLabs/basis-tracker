@@ -234,6 +234,7 @@ Write the assembled JSON to the file specified by `--output-file` or print it to
 
 ## References
 
-- Contract: `chaincash/contracts/offchain/basis.es`
+- Contract: `contract/basis.es`
+- Token-reserve variant: `contract/basis-token.es`
 - Schnorr signature spec: `specs/SCHNORR_SIGNATURE_SPEC.md`
 - Implementation: `crates/basis_cli/src/commands/transaction.rs`

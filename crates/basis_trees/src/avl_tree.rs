@@ -372,8 +372,8 @@ mod tests {
         // semantics (the semantics the on-chain contract relies on for cumulative redemptions).
         // NOTE: the resulting verifier digest is NOT asserted here: ergo_avltree_rust 0.1.1's
         // verifier miscomputes the final label for the update path (it diverges from the
-        // prover), while JVM scrypto 2.3.0's verifier matches the prover exactly — verified
-        // via scala/src/main/scala/chaincash/compare/AvlUpdateDigestCheck.scala.
+        // prover), while JVM scrypto 2.3.0's verifier matches the prover exactly (verified
+        // against the upstream Scala reference during implementation).
         let avl_tree = AVLTree::new(tree_resolver, 32, None);
         let mut verifier = BatchAVLVerifier::new(
             &Bytes::copy_from_slice(&committed_digest),

@@ -69,7 +69,7 @@ pub async fn handle_acceptance_command(
                 .upload_policy(crate::api::UploadPolicyRequest {
                     recipient_pubkey: account.get_pubkey_hex(),
                     policy_json,
-                    signature: hex::encode(&signature),
+                    signature: hex::encode(signature),
                 })
                 .await
                 .context("Policy upload request failed")?;

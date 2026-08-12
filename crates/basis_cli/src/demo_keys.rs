@@ -109,7 +109,7 @@ fn test_secret_for(name: &str) -> Option<String> {
 /// available; otherwise tests use a deterministic fallback key.
 pub fn alice() -> DemoParticipant {
     let secret_hex = load_secret_from_csv("alice")
-        .or_else(|| {
+        .or({
             #[cfg(test)]
             {
                 test_secret_for("alice")
@@ -160,7 +160,7 @@ pub fn bob() -> DemoParticipant {
 /// available; otherwise tests use a deterministic fallback key.
 pub fn tracker() -> DemoParticipant {
     let secret_hex = load_secret_from_csv("tracker")
-        .or_else(|| {
+        .or({
             #[cfg(test)]
             {
                 test_secret_for("tracker")

@@ -278,7 +278,7 @@ async fn draw_accounts(app: &mut App) -> Result<()> {
         .account_manager
         .list_accounts()
         .into_iter()
-        .map(|a| a.clone())
+        .cloned()
         .collect();
 
     if accounts.is_empty() {
@@ -479,7 +479,7 @@ async fn draw_address_book(app: &mut App) -> Result<()> {
         .account_manager
         .list_accounts()
         .into_iter()
-        .map(|a| a.clone())
+        .cloned()
         .collect();
     if !accounts.is_empty() {
         println!("  {}Accounts (auto-synced):{}", BOLD, RESET);
@@ -727,9 +727,8 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
         // Visual bar
         let bar_width = 40;
         let filled = ((reserve.ratio / 3.0).min(1.0) * bar_width as f64) as usize;
-        let bar: String = std::iter::repeat("█")
-            .take(filled)
-            .chain(std::iter::repeat("░").take(bar_width - filled))
+        let bar: String = std::iter::repeat_n("█", filled)
+            .chain(std::iter::repeat_n("░", bar_width - filled))
             .collect();
         println!("  [{}{}{}]\n", ratio_color, bar, RESET);
     } else {
@@ -2171,7 +2170,7 @@ async fn save_and_upload_policy(app: &mut App) -> Result<()> {
 
                 // Sign the policy JSON with the account's private key
                 let signature = account_obj.sign_message(policy_json.as_bytes())?;
-                let signature_hex = hex::encode(&signature);
+                let signature_hex = hex::encode(signature);
 
                 // Create upload request
                 let request = basis_cli_lib::api::UploadPolicyRequest {

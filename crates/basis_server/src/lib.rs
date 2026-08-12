@@ -46,6 +46,7 @@ pub struct AppState {
 
 // Commands that can be sent to the tracker thread
 #[derive(Debug)]
+#[allow(clippy::type_complexity)]
 pub enum TrackerCommand {
     AddNote {
         issuer_pubkey: basis_store::PubKey,

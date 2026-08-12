@@ -62,10 +62,16 @@ jobs:
         cargo test -p basis_store ergo_scanner::tests -- --nocapture
         cargo test -p basis_store tests::test_module -- --nocapture
 
-    - name: Run examples
+    - name: Setup Scala
+      uses: coursier/setup-action@v1
+      with:
+        jvm: adopt:11
+        apps: sbt
+
+    - name: Run Scala reference tests
       run: |
-        cargo run --example reserve_tracker_demo --package basis_store
-        cargo run --example full_integration_demo --package basis_store
+        cd scala
+        sbt test
 
     - name: Check build for all crates
       run: |

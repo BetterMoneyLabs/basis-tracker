@@ -1,7 +1,7 @@
 //! Hardcoded test vectors generated from Scala reference implementation
 //!
 //! These vectors are derived from the existing `schnorr_test_vectors.rs` which
-//! were produced by the Scala reference code (`scala/scala-utils/SigUtils.scala`).
+//! were produced by the Scala reference code (`scala/src/main/scala/basis/offchain/SigUtils.scala`).
 //!
 //! This module provides additional structure and tests around those vectors to
 //! verify cross-compatibility with the Scala redemption logic:
@@ -12,7 +12,7 @@
 //! - Token ID formats
 //!
 //! To regenerate from Scala:
-//!   1. Run: sbt "runMain chaincash.contracts.TestVectorGenerator"
+//!   1. Run: sbt "runMain basis.contracts.TestVectorGenerator"
 //!   2. Copy the printed constants into this file
 
 // Re-export the existing schnorr test vectors for convenience

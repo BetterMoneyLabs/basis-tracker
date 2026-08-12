@@ -61,7 +61,7 @@ async fn main() {
     };
 
     // Validate that tracker NFT ID is properly configured
-    if let Err(_) = config.tracker_nft_bytes() {
+    if config.tracker_nft_bytes().is_err() {
         tracing::error!("Tracker NFT ID is not properly configured in the configuration file. The server requires a valid tracker_nft_id value.");
         std::process::exit(1); // Exit with error code if tracker NFT ID is not configured
     }
@@ -143,7 +143,7 @@ async fn main() {
             .ergo
             .tracker_nft_id
             .as_ref()
-            .map_or(false, |id| !id.is_empty())
+            .is_some_and(|id| !id.is_empty())
     {
         tracing::info!("Initializing tracker scanner with tracker NFT ID...");
         let tracker_scanner_config = TrackerNodeConfig {
@@ -159,7 +159,7 @@ async fn main() {
         let tracker_storage_path = data_dir.join("tracker_boxes");
 
         // Ensure data directory exists
-        std::fs::create_dir_all(&metadata_storage_path.parent().unwrap_or(&data_dir))
+        std::fs::create_dir_all(metadata_storage_path.parent().unwrap_or(&data_dir))
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to create data directory: {}", e);
             });
@@ -247,6 +247,7 @@ async fn main() {
 
     // Initialize tracker manager outside of the blocking task so it can be shared
     use basis_store::TrackerStateManager;
+    #[allow(clippy::arc_with_non_send_sync)]
     let shared_tracker_state =
         std::sync::Arc::new(std::sync::Mutex::new(TrackerStateManager::new(&data_dir)));
 
@@ -267,7 +268,7 @@ async fn main() {
         shared_state_for_tracker.set_avl_root_digest(initial_root);
         tracing::info!(
             "Tracker thread initialized with AVL root digest: {}",
-            hex::encode(&initial_root)
+            hex::encode(initial_root)
         );
 
         let mut redemption_manager = RedemptionManager::new(tracker);

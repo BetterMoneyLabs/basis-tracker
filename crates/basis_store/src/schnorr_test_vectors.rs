@@ -2,7 +2,7 @@
 //!
 //! These test vectors were generated using the Scala-compatible signing algorithm
 //! with bitLength <= 255 constraint, matching the reference implementation in
-//! scala/scala-utils/SigUtils.scala
+//! `scala/src/main/scala/basis/offchain/SigUtils.scala`.
 
 // No imports needed
 

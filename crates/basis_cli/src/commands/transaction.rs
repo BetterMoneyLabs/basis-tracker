@@ -777,7 +777,7 @@ pub async fn execute_local_redemption(
     }
     let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, note.timestamp);
     let issuer_signature = current.sign_message(&message)?;
-    let issuer_signature_hex = hex::encode(&issuer_signature);
+    let issuer_signature_hex = hex::encode(issuer_signature);
 
     let build = build_redemption_tx(
         client,
@@ -851,6 +851,7 @@ pub async fn execute_local_redemption(
     Ok(tx_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn generate_redemption_transaction(
     client: &TrackerClient,
     account_manager: &crate::account::AccountManager,
@@ -1199,7 +1200,7 @@ fn select_fee_inputs(
     let candidates: Vec<crate::api::ErgoBoxDetails> = wallet_boxes
         .iter()
         .filter(|b| b.box_id != reserve_box_id && b.box_id != tracker_box_id)
-        .filter(|b| target_tree.map_or(true, |t| b.ergo_tree == t))
+        .filter(|b| target_tree.is_none_or(|t| b.ergo_tree == t))
         .cloned()
         .collect();
 

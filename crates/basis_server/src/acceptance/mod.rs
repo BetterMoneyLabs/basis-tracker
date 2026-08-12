@@ -32,8 +32,8 @@ pub struct PredicateContext {
 impl std::fmt::Debug for PredicateContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PredicateContext")
-            .field("issuer_pubkey", &hex::encode(&self.issuer_pubkey))
-            .field("recipient_pubkey", &hex::encode(&self.recipient_pubkey))
+            .field("issuer_pubkey", &hex::encode(self.issuer_pubkey))
+            .field("recipient_pubkey", &hex::encode(self.recipient_pubkey))
             .field("total_debt", &self.total_debt)
             .field("reserve_tracker", &self.reserve_tracker.is_some())
             .field("issuer_gross_debt", &self.issuer_gross_debt)
@@ -161,7 +161,7 @@ impl NotePredicate for CollateralizationPredicate {
             None => return false,
         };
 
-        let reserve = match tracker.get_reserve_by_owner(&hex::encode(&ctx.issuer_pubkey)) {
+        let reserve = match tracker.get_reserve_by_owner(&hex::encode(ctx.issuer_pubkey)) {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -176,7 +176,7 @@ impl NotePredicate for CollateralizationPredicate {
             None => {
                 tracing::warn!(
                     "Collateralization check for issuer {} rejected: issuer liability snapshot unavailable",
-                    hex::encode(&ctx.issuer_pubkey)
+                    hex::encode(ctx.issuer_pubkey)
                 );
                 return false;
             }
@@ -220,7 +220,7 @@ impl NotePredicate for NoPendingRefundPredicate {
             None => return false,
         };
 
-        let reserve = match tracker.get_reserve_by_owner(&hex::encode(&ctx.issuer_pubkey)) {
+        let reserve = match tracker.get_reserve_by_owner(&hex::encode(ctx.issuer_pubkey)) {
             Ok(r) => r,
             Err(_) => return false,
         };

@@ -17,20 +17,6 @@ pub fn signing_message(
     basis_core::types::signing_message(owner_key, receiver_key, total_debt, timestamp)
 }
 
-/// Generate the signing message used for on-chain reserve redemption.
-///
-/// This matches the deployed Basis reserve contract, which verifies the Schnorr
-/// signature on `key || longToByteArray(totalDebt)` (no timestamp).
-///
-/// Total: 40 bytes (32 + 8)
-pub fn redemption_signing_message(
-    owner_key: &PubKey,
-    receiver_key: &PubKey,
-    total_debt: u64,
-) -> Vec<u8> {
-    basis_core::types::redemption_signing_message(owner_key, receiver_key, total_debt)
-}
-
 /// Validate that a public key is a valid compressed secp256k1 point
 pub fn validate_public_key(pubkey: &PubKey) -> Result<(), NoteError> {
     match basis_core::impls::validate_public_key(pubkey) {

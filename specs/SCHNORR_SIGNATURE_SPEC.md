@@ -337,9 +337,9 @@ Message breakdown:
 ## Cross-Validation Test Vectors
 
 The following test vectors were generated using the Scala reference implementation
-(`scala/scala-utils/SigUtils.scala`) with the `z.bitLength <= 255` constraint.
-They are hardcoded in the Rust test suite and verify cross-compatibility between
-Scala and Rust implementations.
+(`scala/src/main/scala/basis/offchain/SigUtils.scala`) with the `z.bitLength <= 255`
+constraint. They are hardcoded in the Rust test suite and verify cross-compatibility
+between Scala and Rust implementations.
 
 ### TV001 - Standard valid signature
 - **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`

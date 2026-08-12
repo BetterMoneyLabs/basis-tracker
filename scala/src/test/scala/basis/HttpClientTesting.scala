@@ -1,0 +1,56 @@
+package basis
+
+import org.ergoplatform.appkit.FileMockedErgoClient
+
+import java.io.File
+import java.util.{List => JList}
+import java.lang.{String => JString}
+import scala.collection.JavaConverters._
+
+trait HttpClientTesting {
+  val responsesDir = "src/test/resources/mockwebserver"
+  val addr1 = "9f4QF8AD1nQ3nJahQVkMj8hFSVVzVom77b52JU7EW71Zexg6N8v"
+
+  def loadNodeResponse(name: String) = {
+    scala.io.Source.fromFile(new File(s"$responsesDir/node_responses/$name")).mkString
+  }
+
+  def loadExplorerResponse(name: String) = {
+    scala.io.Source.fromFile(new File(s"$responsesDir/explorer_responses/$name")).mkString
+  }
+
+  /** Load scan response for a given scanId */
+  def loadScanResponse(scanId: Int): String = {
+    loadNodeResponse(s"response_Scan$scanId.json")
+  }
+
+  case class MockData(nodeResponses: Seq[String] = Nil, explorerResponses: Seq[String] = Nil) {
+    def appendNodeResponses(moreResponses: Seq[String]): MockData = {
+      this.copy(nodeResponses = this.nodeResponses ++ moreResponses)
+    }
+    def appendExplorerResponses(moreResponses: Seq[String]): MockData = {
+      this.copy(explorerResponses = this.explorerResponses ++ moreResponses)
+    }
+  }
+
+  object MockData {
+    def empty = MockData()
+  }
+
+  def createMockedErgoClient(data: MockData): FileMockedErgoClient = {
+    val nodeResponses = IndexedSeq(loadNodeResponse("response_NodeInfo.json"), loadNodeResponse("response_LastHeaders.json")) ++ data.nodeResponses
+    val explorerResponses: IndexedSeq[String] = data.explorerResponses.toIndexedSeq
+    new FileMockedErgoClient(nodeResponses.asJava, explorerResponses.asJava, false)
+  }
+
+  /** Create mocked client with scan responses appended for scan endpoint queries */
+  def createMockedErgoClientWithScans(data: MockData, scanIds: Int*): FileMockedErgoClient = {
+    val scanResponses = scanIds.map(loadScanResponse)
+    val nodeResponses = IndexedSeq(
+      loadNodeResponse("response_NodeInfo.json"),
+      loadNodeResponse("response_LastHeaders.json")
+    ) ++ scanResponses ++ data.nodeResponses
+    val explorerResponses: IndexedSeq[String] = data.explorerResponses.toIndexedSeq
+    new FileMockedErgoClient(nodeResponses.asJava, explorerResponses.asJava, false)
+  }
+}

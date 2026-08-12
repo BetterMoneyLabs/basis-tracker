@@ -11,6 +11,12 @@ pub mod test_helpers;
 // Placeholder for offchain functionality
 pub struct OffchainProcessor;
 
+impl Default for OffchainProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OffchainProcessor {
     pub fn new() -> Self {
         Self

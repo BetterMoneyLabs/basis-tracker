@@ -88,7 +88,7 @@ pub fn build_savl_tree_from_digest(digest_hex: &str) -> Vec<u8> {
 pub fn decode_box_id(raw: &str) -> String {
     let mut cur = raw.to_string();
     for _ in 0..2 {
-        if cur.len() % 2 != 0 {
+        if !cur.len().is_multiple_of(2) {
             break;
         }
         match hex::decode(&cur) {

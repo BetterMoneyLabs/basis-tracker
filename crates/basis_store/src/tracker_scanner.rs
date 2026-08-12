@@ -259,7 +259,7 @@ impl TrackerServerState {
         // It should start with 0x64 (SAvlTree type identifier) followed by the tree data
         if !state_commitment.starts_with("64") {
             return Err(TrackerScannerError::InvalidRegisterData(
-                format!("Invalid state commitment format: does not start with SAvlTree type identifier (64)")
+                "Invalid state commitment format: does not start with SAvlTree type identifier (64)".to_string()
             ));
         }
 

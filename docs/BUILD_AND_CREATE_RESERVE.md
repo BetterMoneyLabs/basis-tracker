@@ -4,7 +4,7 @@
 
 ```bash
 # Navigate to the project root
-cd /home/kushti/chaincash/basis-tracker
+cd basis-tracker
 
 # Build the entire workspace (this will build basis-cli)
 cargo build --release

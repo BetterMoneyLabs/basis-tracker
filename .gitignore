@@ -43,10 +43,8 @@ bob.txt
 secret.txt
 alice_keys_output.txt
 
-# Scala reference implementation (managed separately)
-scala/
-
-secrets/
+# Local secret files (test fixtures may be committed)
+secrets/participants.local.csv
 
 # Demo output files
 demo/output/

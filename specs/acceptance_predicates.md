@@ -608,6 +608,5 @@ Potential predicate types for future implementation:
 
 ## References
 
-- ChainCash NotePredicate.scala: `chaincash/offchain/NotePredicate.scala`
-- ChainCash Server Documentation: `chaincash/docs/server.md`
+- Basis acceptance predicates (Rust): `crates/basis_core/src/acceptance.rs` and `crates/basis_server/src/acceptance/`
 - Basis Protocol Specification: `specs/spec.md`

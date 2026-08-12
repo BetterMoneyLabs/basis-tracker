@@ -227,7 +227,7 @@ The tracker thread updates the shared state when tracker changes occur:
 
 ## R5 Register Serialization Format
 
-The tracker box R5 register contains a serialized `SAvlTree` constant. The exact byte layout follows the Sigma serialization produced by Scala's `ValueSerializer.serialize(AvlTreeConstant(tree))` (used in `scala/demo/src/TrackerBoxSetup.scala`):
+The tracker box R5 register contains a serialized `SAvlTree` constant. The exact byte layout follows the Sigma serialization produced by Scala's `ValueSerializer.serialize(AvlTreeConstant(tree))` (used in `demo/basis/simple/src/TrackerBoxSetup.scala`):
 
 | Field | Size | Description |
 |-------|------|-------------|
