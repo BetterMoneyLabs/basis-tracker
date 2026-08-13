@@ -168,7 +168,28 @@ No reserves, collateral, or redemption are used — it is the simplest end-to-en
 MCP workflow and a starting point for LLM-driven agents. See
 `demo/agent_coop/README.md` for the full story and expected output.
 
-## Example: LETS with the TUI wallet
+## Example: competing agent teams with backed judge prize
+
+A runnable reserve-backed example is provided in `demo/agent_teams/`. It spawns
+seven isolated `basis-mcp` processes:
+
+- Team Alpha (`adam` manager, `ava` compute, `alex` storage)
+- Team Beta (`bella` manager, `bryn` compute, `ben` storage)
+- A human judge (`judy`)
+
+Managers decompose the judge's task into subtasks and hire workers; cross-team
+credit is accepted only when the issuer's reserve covers ≥ 50% of liabilities;
+the judge's prize is 100% backed by her reserve and is redeemed on-chain.
+
+```bash
+export TRACKER_NFT_ID=...
+export JUDGE_RESERVE_NFT_ID=...
+export ADAM_RESERVE_NFT_ID=...
+export BELLA_RESERVE_NFT_ID=...
+./demo/agent_teams/run.sh
+```
+
+See `demo/agent_teams/README.md` for prerequisites, NFT setup, and expected output.
 
 A human-driven LETS demo using the `basis-ui` TUI wallet is provided in
 `demo/lets_tutorial/`. Each member runs their own isolated wallet, whitelists the

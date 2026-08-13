@@ -510,6 +510,76 @@ A non-LETS merchant can accept notes that either:
 
 This creates a bridge between the trust-based LETS economy and the broader collateralized economy.
 
+### Example 7: Competing Agent Teams (Pure Credit + Partial Collateral + Full Backing)
+
+This is the acceptance-policy pattern used in `demo/agent_teams/`. Workers accept
+**pure credit** from their own manager, **≥50% collateralized** credit from the
+rival manager, and managers accept only **fully backed** money from the judge.
+
+```toml
+[acceptance]
+default = "reject"
+root = "accept"
+
+# --- For a worker (e.g. Alpha compute worker ava) ---
+[[acceptance.predicates]]
+name = "accept"
+type = "any_of"
+predicates = ["own_team", "cross_team"]
+
+[[acceptance.predicates]]
+name = "own_team"
+type = "whitelist"
+holders = ["02adam_manager_pubkey..."]
+max_debt = 50000000  # 0.05 ERG pure credit
+
+[[acceptance.predicates]]
+name = "cross_team"
+type = "all_of"
+predicates = ["rival_wl", "half_backed"]
+
+[[acceptance.predicates]]
+name = "rival_wl"
+type = "whitelist"
+holders = ["03bella_manager_pubkey..."]
+max_debt = 20000000  # 0.02 ERG cross-team
+
+[[acceptance.predicates]]
+name = "half_backed"
+type = "collateralization"
+min_ratio = 0.5  # requires reserve to cover ≥50% of issuer liabilities
+
+# --- For a manager (e.g. adam) ---
+[acceptance]
+default = "reject"
+root = "judge_money"
+
+[[acceptance.predicates]]
+name = "judge_money"
+type = "all_of"
+predicates = ["judge_wl", "fully_backed"]
+
+[[acceptance.predicates]]
+name = "judge_wl"
+type = "whitelist"
+holders = ["03judy_judge_pubkey..."]
+max_debt = 150000000  # 0.15 ERG prize limit
+
+[[acceptance.predicates]]
+name = "fully_backed"
+type = "collateralization"
+min_ratio = 1.0  # 100% backing required for judge's money
+```
+
+**Properties**:
+- The `collateralization` predicate fails closed: if the issuer has no reserve,
+  the cross-team note is rejected.
+- The same predicate uses the *issuer's total liabilities* (all outstanding notes),
+  not just the current note, so it naturally limits how much credit an issuer can
+  extend while staying above the minimum ratio.
+- Judge's prize notes must be 100% backed; workers never accept notes from the
+  judge, because they are paid by their manager, not by the judge.
+
 ## API Endpoint
 
 ### POST /acceptance/check

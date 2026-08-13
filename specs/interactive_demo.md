@@ -576,10 +576,17 @@ Alice (Issuer)                    Tracker Server                    Bob (Recipie
 
 ## Automation Note
 
-The `demo/run_full_tutorial.sh` automation script has been removed; the demo
-directory now contains only the pure-credit `agent_coop` and `lets_tutorial`
-demos. The command-by-command instructions above remain accurate for anyone who
-wants to run the reserve/note/redemption flow manually.
+The `demo/run_full_tutorial.sh` automation script has been removed. The `demo/`
+directory now contains three demos:
+
+- **`demo/agent_coop/`** — pure-credit multi-agent service co-op.
+- **`demo/lets_tutorial/`** — human-driven LETS mutual-credit demo via the TUI wallet.
+- **`demo/agent_teams/`** — two competing agent teams with managing agents, a human
+  judge, cross-team credit collateralized at ≥50%, and a fully backed, on-chain
+  redeemable prize.
+
+The command-by-command instructions above remain accurate for anyone who wants to
+run the reserve/note/redemption flow manually.
 
 ---
 

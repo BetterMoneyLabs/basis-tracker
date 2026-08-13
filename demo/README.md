@@ -2,9 +2,12 @@
 
 This directory contains runnable demonstrations of the Basis protocol.
 
-Both demos are **pure-credit**: they need only a local tracker server and the
-Basis binaries — no Ergo node, no reserves, no collateral, and no on-chain
-redemption.
+The first two demos (`agent_coop/`, `lets_tutorial/`) are **pure-credit**: they need
+only a local tracker server and the Basis binaries — no Ergo node, no reserves, no
+collateral, and no on-chain redemption.
+
+The third demo (`agent_teams/`) runs against a **real Ergo node**: it adds reserves,
+collateralization-gated credit, and on-chain redemption of a judge's backed prize.
 
 ## 1. Agent Service Co-op Demo
 
@@ -63,6 +66,37 @@ isolated home directories for each member, uploads their LETS acceptance policie
 and launches all three wallets in a tmux session.
 
 **Prerequisites:** Rust toolchain, `bash`, `curl`, `python3`, optional `tmux`.
+
+## 3. Agent Teams Demo — Competing Teams, Human Judge, Backed Money
+
+**Directory:** `agent_teams/`
+**Launcher:** `run.sh`
+**Documentation:** [demo/agent_teams/README.md](agent_teams/README.md)
+
+Two agent teams, each led by a managing agent that decomposes a task into
+subtasks and hires role agents, collaborate economically through a shared
+tracker, and a human judge evaluates their deliverables and rewards the winning
+team with backed money.
+
+It demonstrates a three-tier money spectrum:
+
+- **Pure credit** intra-team (manager → workers, trust only).
+- **≥ 50% collateralized credit** cross-team (enforced by the
+  `collateralization` acceptance predicate against the issuer's on-chain reserve).
+- **Fully backed money** from the judge: a prize note issued against her reserve
+  and redeemed on-chain by the winning manager.
+
+**Quick Start:**
+```bash
+export TRACKER_NFT_ID=... JUDGE_RESERVE_NFT_ID=... \
+       ADAM_RESERVE_NFT_ID=... BELLA_RESERVE_NFT_ID=...
+./demo/agent_teams/run.sh --check   # preflight
+./demo/agent_teams/run.sh           # full demo
+```
+
+**Prerequisites:** Rust toolchain, Python 3, `curl`, a running Ergo node with an
+unlocked, funded wallet (≥ ~0.35 ERG) and four NFTs. See
+[demo/agent_teams/README.md](agent_teams/README.md) for details.
 
 ## References
 
