@@ -696,7 +696,10 @@ async fn create_test_app(
                 ..Default::default()
             },
             basis_reserve_contract_p2s: "test".to_string(),
+            basis_token_reserve_contract_p2s: "test_token".to_string(),
             tracker_nft_id: Some("test".to_string()),
+            reserve_token_id: None,
+            reserve_token_decimals: 0,
             tracker_public_key: None,
             tracker_secret_key: None,
         },
@@ -785,7 +788,10 @@ async fn create_test_app_with_policy_routes(
                 ..Default::default()
             },
             basis_reserve_contract_p2s: "test".to_string(),
+            basis_token_reserve_contract_p2s: "test_token".to_string(),
             tracker_nft_id: Some("test".to_string()),
+            reserve_token_id: None,
+            reserve_token_decimals: 0,
             tracker_public_key: None,
             tracker_secret_key: None,
         },
@@ -880,7 +886,10 @@ async fn create_test_app_with_all_routes(
                 ..Default::default()
             },
             basis_reserve_contract_p2s: "test".to_string(),
+            basis_token_reserve_contract_p2s: "test_token".to_string(),
             tracker_nft_id: Some("test".to_string()),
+            reserve_token_id: None,
+            reserve_token_decimals: 0,
             tracker_public_key: None,
             tracker_secret_key: None,
         },

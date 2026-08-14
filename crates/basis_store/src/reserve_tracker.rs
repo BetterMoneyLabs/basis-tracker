@@ -230,6 +230,7 @@ impl ExtendedReserveInfo {
         tracker_nft_id: Option<&[u8]>,
         last_updated_height: u64,
         refund_initiation_height: u64,
+        reserve_token_id: Option<&[u8]>,
     ) -> Self {
         Self {
             base_info: ReserveInfo {
@@ -238,6 +239,7 @@ impl ExtendedReserveInfo {
                 contract_address: String::new(), // Must be set separately via set_contract_address()
                 tracker_nft_id: tracker_nft_id.map(hex::encode).unwrap_or_default(),
                 refund_initiation_height,
+                reserve_token_id: reserve_token_id.map(hex::encode).unwrap_or_default(),
             },
             total_debt: 0,
             box_id: hex::encode(box_id),
@@ -271,6 +273,7 @@ mod tests {
             Some(b"test_tracker_nft_1234567890"),
             1000,
             0,
+            None,
         );
 
         // Add reserve
@@ -328,6 +331,7 @@ mod tests {
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test_nft_id".to_string(),
                 refund_initiation_height: 0,
+                reserve_token_id: String::new(),
             },
             total_debt: 0,
             box_id: "test".to_string(),
@@ -345,6 +349,7 @@ mod tests {
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test_nft_id".to_string(),
                 refund_initiation_height: 0,
+                reserve_token_id: String::new(),
             },
             total_debt: 800,
             ..reserve.clone()
@@ -362,6 +367,7 @@ mod tests {
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test_nft_id".to_string(),
                 refund_initiation_height: 0,
+                reserve_token_id: String::new(),
             },
             total_debt: 1000,
             ..reserve

@@ -281,9 +281,12 @@ mod redemption_api_tests {
                     ..Default::default()
                 },
                 basis_reserve_contract_p2s: "test".to_string(),
+                basis_token_reserve_contract_p2s: "test_token".to_string(),
                 tracker_nft_id: Some(
                     "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
                 ),
+                reserve_token_id: None,
+                reserve_token_decimals: 0,
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),
@@ -378,6 +381,7 @@ mod redemption_api_tests {
                     contract_address: "test".to_string(),
                     tracker_nft_id: "test".to_string(),
                     refund_initiation_height: 0,
+                    reserve_token_id: String::new(),
                 },
                 total_debt: 0,
                 box_id: format!("box_{}", issuer_pubkey),
@@ -877,6 +881,7 @@ mod redemption_api_tests {
                     contract_address: "test".to_string(),
                     tracker_nft_id: "test".to_string(),
                     refund_initiation_height: 0,
+                    reserve_token_id: String::new(),
                 },
                 total_debt: 0,
                 box_id: "box1".to_string(),

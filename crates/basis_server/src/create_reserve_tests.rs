@@ -69,9 +69,12 @@ mod create_reserve_tests {
                     ..Default::default()
                 },
                 basis_reserve_contract_p2s: "test".to_string(),
+                basis_token_reserve_contract_p2s: "test_token".to_string(),
                 tracker_nft_id: Some(
                     "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
                 ),
+                reserve_token_id: None,
+                reserve_token_decimals: 0,
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),
@@ -130,6 +133,16 @@ mod create_reserve_tests {
         }
     }
 
+    fn create_token_test_app_state() -> AppState {
+        let mut state = create_test_app_state();
+        let mut config = (*state.config).clone();
+        config.ergo.reserve_token_id =
+            Some("a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669".to_string());
+        config.ergo.reserve_token_decimals = 6;
+        state.config = std::sync::Arc::new(config);
+        state
+    }
+
     #[tokio::test]
     async fn test_create_reserve_payload_success() {
         let state = create_test_app_state();
@@ -139,6 +152,8 @@ mod create_reserve_tests {
             owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
                 .to_string(), // 33-byte public key
             erg_amount: 1000000000, // 1 ERG in nanoERG
+            token_amount: 0,
+            token_id: "".to_string(),
         };
 
         let result = create_reserve_payload(State(state), Json(request_payload)).await;
@@ -170,7 +185,7 @@ mod create_reserve_tests {
                 );
                 assert_eq!(
                     reserve_response.requests[0].registers.get("R4").unwrap(),
-                    "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                    "0703e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
                 );
                 assert!(reserve_response.fee > 0); // Should be the configured fee amount
             }
@@ -185,6 +200,8 @@ mod create_reserve_tests {
             nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
             owner_pubkey: "invalid_hex".to_string(), // Invalid hex
             erg_amount: 1000000000,
+            token_amount: 0,
+            token_id: "".to_string(),
         };
 
         let result = create_reserve_payload(State(state), Json(request_payload)).await;
@@ -208,6 +225,8 @@ mod create_reserve_tests {
             nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
             owner_pubkey: "03e8c3e4".to_string(), // Too short (only 4 bytes when should be 33)
             erg_amount: 1000000000,
+            token_amount: 0,
+            token_id: "".to_string(),
         };
 
         let result = create_reserve_payload(State(state), Json(request_payload)).await;
@@ -232,6 +251,8 @@ mod create_reserve_tests {
             owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
                 .to_string(),
             erg_amount: 1000000000,
+            token_amount: 0,
+            token_id: "".to_string(),
         };
 
         let result = create_reserve_payload(State(state), Json(request_payload)).await;
@@ -260,6 +281,8 @@ mod create_reserve_tests {
             owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
                 .to_string(),
             erg_amount: 0, // Zero amount
+            token_amount: 0,
+            token_id: "".to_string(),
         };
 
         let result = create_reserve_payload(State(state), Json(request_payload)).await;
@@ -277,5 +300,72 @@ mod create_reserve_tests {
                 .unwrap()
                 .contains("greater than 0"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_create_token_reserve_payload_success() {
+        let state = create_token_test_app_state();
+
+        let request_payload = CreateReserveRequest {
+            nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                .to_string(),
+            erg_amount: 10000000, // 0.01 ERG for min-box-value
+            token_amount: 1000,
+            token_id: "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
+                .to_string(),
+        };
+
+        let result = create_reserve_payload(State(state), Json(request_payload)).await;
+        let (status, response_json) = result;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response_json.success);
+        assert!(response_json.data.is_some());
+
+        let response_data = response_json.data.clone().unwrap();
+        let reserve_response: ReserveCreationResponse = response_data;
+
+        assert!(!reserve_response.requests.is_empty());
+        let req = &reserve_response.requests[0];
+        assert_eq!(req.address, "test_token");
+        assert_eq!(req.value, 10000000);
+        assert_eq!(req.assets.len(), 2);
+        assert_eq!(
+            req.assets[0].token_id,
+            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        );
+        assert_eq!(req.assets[0].amount, 1);
+        assert_eq!(
+            req.assets[1].token_id,
+            "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
+        );
+        assert_eq!(req.assets[1].amount, 1000);
+    }
+
+    #[tokio::test]
+    async fn test_create_token_reserve_payload_rejects_wrong_token_id() {
+        let state = create_token_test_app_state();
+
+        let request_payload = CreateReserveRequest {
+            nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                .to_string(),
+            erg_amount: 10000000,
+            token_amount: 1000,
+            token_id: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+        };
+
+        let result = create_reserve_payload(State(state), Json(request_payload)).await;
+        let (status, response_json) = result;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!response_json.success);
+        assert!(response_json
+            .error
+            .clone()
+            .unwrap()
+            .contains("must match configured"));
     }
 }

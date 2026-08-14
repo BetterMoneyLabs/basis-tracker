@@ -1520,6 +1520,8 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                 nft_id,
                 owner_pubkey: owner,
                 erg_amount: amount,
+                token_amount: 0,
+                token_id: "".to_string(),
             };
 
             match app.client.create_reserve(request).await {

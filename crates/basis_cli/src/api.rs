@@ -41,6 +41,8 @@ pub struct KeyStatusResponse {
     pub issuer_pubkey: String,
     #[serde(default)]
     pub has_pending_refund: bool,
+    #[serde(default)]
+    pub reserve_token_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +104,10 @@ pub struct CreateReserveRequest {
     pub nft_id: String,
     pub owner_pubkey: String,
     pub erg_amount: u64,
+    #[serde(default)]
+    pub token_amount: u64,
+    #[serde(default)]
+    pub token_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -910,6 +916,8 @@ struct FlattenedReserveInfo {
     pub collateral_amount: u64,
     pub total_debt: u64,
     pub tracker_nft_id: Option<String>,
+    #[serde(default)]
+    pub reserve_token_id: Option<String>,
     pub last_updated_height: u64,
     pub last_updated_timestamp: u64,
     pub collateralization_ratio: Option<f64>,
@@ -938,6 +946,7 @@ impl From<FlattenedReserveInfo> for basis_store::ExtendedReserveInfo {
             contract_address: String::new(), // Set by get_reserves_by_issuer() after fetching from server config
             tracker_nft_id: flattened.tracker_nft_id.unwrap_or_default(),
             refund_initiation_height: flattened.refund_initiation_height,
+            reserve_token_id: flattened.reserve_token_id.unwrap_or_default(),
         };
 
         ExtendedReserveInfo {

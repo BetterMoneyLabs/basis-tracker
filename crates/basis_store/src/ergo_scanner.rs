@@ -113,6 +113,12 @@ pub struct NodeConfig {
     pub start_height: Option<u64>,
     /// Basis reserve contract P2S address (optional)
     pub reserve_contract_p2s: Option<String>,
+    /// Basis token reserve contract P2S address (optional).
+    /// When set alongside `reserve_token_id`, the scanner treats matching boxes as token-backed reserves.
+    pub token_reserve_contract_p2s: Option<String>,
+    /// Reserve token ID (hex-encoded, 32 bytes). When set, collateral for reserves holding
+    /// this token is taken from the token amount rather than the box ERG value.
+    pub reserve_token_id: Option<String>,
     /// Ergo node URL
     pub node_url: String,
     /// Scan registration name
@@ -515,13 +521,38 @@ impl ServerState {
         let refund_initiation_height =
             decode_ergo_long_register(scan_box.additional_registers.get("R7"));
 
+        // Determine collateral: if a reserve token is configured and the box holds it,
+        // use the token amount as collateral; otherwise fall back to the box ERG value.
+        let configured_reserve_token_id = self.config.reserve_token_id.as_deref();
+        let (collateral_amount, reserve_token_id_bytes) = if let Some(token_id) =
+            configured_reserve_token_id
+        {
+            let token_id_lower = token_id.to_ascii_lowercase();
+            scan_box
+                    .assets
+                    .iter()
+                    .find(|a| a.token_id.to_ascii_lowercase() == token_id_lower)
+                    .map(|a| (a.amount, Some(hex::decode(token_id).unwrap_or_default())))
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            "Reserve box {} does not contain configured reserve token {}; falling back to ERG value",
+                            box_id,
+                            token_id
+                        );
+                        (value, None)
+                    })
+        } else {
+            (value, None)
+        };
+
         let reserve_info = ExtendedReserveInfo::new(
             box_id.as_bytes(),
             &owner_pubkey_bytes,
-            value,
+            collateral_amount,
             Some(&tracker_nft_id_bytes),
             creation_height,
             refund_initiation_height,
+            reserve_token_id_bytes.as_deref(),
         );
 
         Ok(reserve_info)
@@ -728,6 +759,8 @@ impl Default for NodeConfig {
         Self {
             start_height: None,
             reserve_contract_p2s: None,
+            token_reserve_contract_p2s: None,
+            reserve_token_id: None,
             node_url: "http://159.89.116.15:11088".to_string(), // Your Ergo node
             scan_name: Some("Basis Reserve Scanner".to_string()),
             api_key: None,
@@ -1085,6 +1118,7 @@ mod tests {
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
                 refund_initiation_height: 0,
+                reserve_token_id: String::new(),
             },
             total_debt: 0,
             box_id: "preexisting_box".to_string(),
@@ -1174,6 +1208,7 @@ mod tests {
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
                 refund_initiation_height: 0,
+                reserve_token_id: String::new(),
             },
             total_debt: 0,
             box_id: "preexisting_box".to_string(),
@@ -1274,6 +1309,7 @@ mod tests {
                 contract_address: "test".to_string(),
                 tracker_nft_id: "test".to_string(),
                 refund_initiation_height: 0,
+                reserve_token_id: String::new(),
             },
             total_debt: 0,
             box_id: "preexisting_box".to_string(),
@@ -1307,5 +1343,66 @@ mod tests {
             "pre-existing reserve must be preserved when any scan box fails to parse: {:?}",
             remaining
         );
+    }
+
+    #[test]
+    fn test_parse_reserve_box_uses_token_collateral_when_configured() {
+        let reserve_token_id =
+            "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669".to_string();
+        let nft_id = "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string();
+        let owner_pubkey = "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12";
+
+        let mut registers = std::collections::HashMap::new();
+        registers.insert("R4".to_string(), format!("07{}", owner_pubkey));
+        registers.insert("R6".to_string(), format!("0e20{}", nft_id));
+        registers.insert("R7".to_string(), "05000000000000000000".to_string());
+
+        let scan_box = ScanBox {
+            box_id: "token_reserve_box".to_string(),
+            value: 10000000, // 0.01 ERG min-box-value
+            creation_height: 1000,
+            ergo_tree: "test".to_string(),
+            transaction_id: "test_tx".to_string(),
+            additional_registers: registers,
+            assets: vec![
+                BoxAsset {
+                    token_id: nft_id.clone(),
+                    amount: 1,
+                },
+                BoxAsset {
+                    token_id: reserve_token_id.clone(),
+                    amount: 5000,
+                },
+            ],
+        };
+
+        let config = NodeConfig {
+            reserve_token_id: Some(reserve_token_id.clone()),
+            ..Default::default()
+        };
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_token_scanner_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let server_state =
+            ServerState::new(config, &data_dir).expect("Failed to create server state");
+
+        let reserve_info = server_state
+            .parse_reserve_box(&scan_box)
+            .expect("should parse token reserve box");
+
+        assert_eq!(
+            reserve_info.base_info.collateral_amount, 5000,
+            "collateral should be taken from reserve token amount"
+        );
+        assert_eq!(
+            reserve_info.base_info.reserve_token_id, reserve_token_id,
+            "reserve_token_id should be recorded"
+        );
+        assert_eq!(reserve_info.base_info.tracker_nft_id, nft_id);
     }
 }

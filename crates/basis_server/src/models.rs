@@ -141,6 +141,9 @@ pub struct KeyStatusResponse {
     pub last_updated: u64,
     pub issuer_pubkey: String,
     pub has_pending_refund: bool,
+    /// Reserve token ID (hex-encoded) when the issuer's reserve is token-backed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserve_token_id: Option<String>,
 }
 
 // Redemption request
@@ -365,7 +368,16 @@ pub struct RedemptionPreparationData {
 pub struct CreateReserveRequest {
     pub nft_id: String,
     pub owner_pubkey: String,
+    /// ERG value for the reserve box (nanoERG). Always required to cover min-box-value and fees.
     pub erg_amount: u64,
+    /// Amount of the reserve token to lock in the reserve (raw token units).
+    /// Required when the tracker is configured for token-backed reserves.
+    #[serde(default)]
+    pub token_amount: u64,
+    /// Reserve token ID (hex-encoded, 32 bytes). Required when the tracker is configured
+    /// for token-backed reserves; must match the configured `reserve_token_id`.
+    #[serde(default)]
+    pub token_id: String,
 }
 
 // Response for reserve creation - formatted for Ergo node's /wallet/payment/send API

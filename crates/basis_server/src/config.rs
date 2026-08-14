@@ -58,15 +58,28 @@ impl ServerConfig {
 pub struct ErgoConfig {
     /// Ergo node configuration
     pub node: NodeConfig,
-    /// Basis reserve contract P2S address
+    /// Basis reserve contract P2S address (ERG-backed reserve)
     pub basis_reserve_contract_p2s: String,
+    /// Basis token reserve contract P2S address (custom-token-backed reserve)
+    pub basis_token_reserve_contract_p2s: String,
     /// Tracker NFT ID (hex-encoded) - identifies the tracker server for reserve contracts
     pub tracker_nft_id: Option<String>,
+    /// Reserve token ID (hex-encoded, 32 bytes). When set, the tracker operates in
+    /// token-reserve mode and uses `basis_token_reserve_contract_p2s` for new reserves.
+    pub reserve_token_id: Option<String>,
+    /// Number of decimal places for the reserve token (e.g. 6 for USE/DexyUSD).
+    /// Used for display/conversion only; on-chain amounts are always raw token units.
+    #[serde(default = "default_reserve_token_decimals")]
+    pub reserve_token_decimals: u8,
     /// Tracker server's public key for the Ergo blockchain (hex-encoded, 33 bytes for compressed format)
     pub tracker_public_key: Option<String>,
     /// Tracker server's secret key for local signing (hex-encoded, 32 bytes)
     /// If provided, the server will sign redemption transactions locally instead of using the Ergo node API
     pub tracker_secret_key: Option<String>,
+}
+
+fn default_reserve_token_decimals() -> u8 {
+    0
 }
 
 /// Transaction configuration
@@ -149,6 +162,10 @@ impl AppConfig {
             .set_default("ergo.node.api_key", "")? // Set via config file or BASIS_ERGO_NODE_API_KEY env var
             // Transaction configuration defaults
             .set_default("transaction.fee", 1000000)? // 0.001 ERG
+            // Token reserve configuration defaults
+            .set_default("ergo.basis_token_reserve_contract_p2s", "")?
+            .set_default("ergo.reserve_token_id", "")?
+            .set_default("ergo.reserve_token_decimals", 0)?
             // Tracker public key (optional)
             .set_default("ergo.tracker_public_key", "")?
             // Tracker secret key (optional - for local signing)
@@ -178,12 +195,39 @@ impl AppConfig {
 
     /// Get the Ergo node configuration
     pub fn ergo_node_config(&self) -> NodeConfig {
-        self.ergo.node.clone()
+        let mut config = self.ergo.node.clone();
+        config.reserve_contract_p2s = Some(self.ergo.basis_reserve_contract_p2s.clone());
+        config.token_reserve_contract_p2s =
+            Some(self.ergo.basis_token_reserve_contract_p2s.clone());
+        config.reserve_token_id = self.ergo.reserve_token_id.clone();
+        config
     }
 
     /// Get the Basis reserve contract P2S address
     pub fn basis_reserve_contract_p2s(&self) -> &str {
         &self.ergo.basis_reserve_contract_p2s
+    }
+
+    /// Get the Basis token reserve contract P2S address
+    pub fn basis_token_reserve_contract_p2s(&self) -> &str {
+        &self.ergo.basis_token_reserve_contract_p2s
+    }
+
+    /// Returns true when the tracker is configured to back reserves with a custom token.
+    pub fn is_token_reserve_mode(&self) -> bool {
+        self.ergo
+            .reserve_token_id
+            .as_ref()
+            .map(|id| !id.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Get the configured reserve token ID bytes, if any.
+    pub fn reserve_token_bytes(&self) -> Result<Option<Vec<u8>>, hex::FromHexError> {
+        match &self.ergo.reserve_token_id {
+            Some(id) if !id.is_empty() => hex::decode(id).map(Some),
+            _ => Ok(None),
+        }
     }
 
     /// Get the tracker NFT ID bytes (required - server will fail if not configured)
@@ -395,12 +439,17 @@ mod tests {
                 node: NodeConfig {
                     start_height: None,
                     reserve_contract_p2s: None,
+                    token_reserve_contract_p2s: None,
+                    reserve_token_id: None,
                     node_url: "http://localhost:9053".to_string(),
                     scan_name: None,
                     api_key: Some("test".to_string()),
                 },
                 basis_reserve_contract_p2s: "test".to_string(),
+                basis_token_reserve_contract_p2s: "test_token".to_string(),
                 tracker_nft_id: None,
+                reserve_token_id: None,
+                reserve_token_decimals: 0,
                 tracker_public_key: Some(
                     "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
                         .to_string(),

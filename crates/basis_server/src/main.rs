@@ -39,12 +39,17 @@ async fn main() {
                         node: NodeConfig {
                             start_height: None,
                             reserve_contract_p2s: None,
+                            token_reserve_contract_p2s: None,
+                            reserve_token_id: None,
                             node_url: "http://127.0.0.1:9053".to_string(),
                             scan_name: Some("Basis Reserve Scanner".to_string()),
                             api_key: None,
                         },
                         basis_reserve_contract_p2s: "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT".to_string(),
+                        basis_token_reserve_contract_p2s: String::new(),
                         tracker_nft_id: None,
+                        reserve_token_id: None,
+                        reserve_token_decimals: 0,
                         tracker_public_key: None,
                         tracker_secret_key: None,
                     },
@@ -88,6 +93,9 @@ async fn main() {
     // Create scanner configuration with actual reserve contract P2S
     let mut scanner_config = config.ergo.node.clone();
     scanner_config.reserve_contract_p2s = Some(config.ergo.basis_reserve_contract_p2s.clone());
+    scanner_config.token_reserve_contract_p2s =
+        Some(config.ergo.basis_token_reserve_contract_p2s.clone());
+    scanner_config.reserve_token_id = config.ergo.reserve_token_id.clone();
 
     // Create real scanner state with configured node URL and contract template
     let ergo_scanner = match ServerState::new(scanner_config, &data_dir) {
@@ -938,18 +946,49 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                             scan_box.additional_registers.get("R7"),
                         );
 
+                    let (collateral_amount, reserve_token_bytes) = if let Some(token_id) =
+                        config.ergo.reserve_token_id.as_ref()
+                    {
+                        let token_id_lower = token_id.to_ascii_lowercase();
+                        scan_box
+                                .assets
+                                .iter()
+                                .find(|a| a.token_id.to_ascii_lowercase() == token_id_lower)
+                                .map(|a| {
+                                    (
+                                        a.amount,
+                                        Some(hex::decode(token_id).unwrap_or_default()),
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    tracing::warn!(
+                                        "Reserve box {} missing configured reserve token {}; using ERG value",
+                                        scan_box.box_id,
+                                        token_id
+                                    );
+                                    (scan_box.value, None)
+                                })
+                    } else {
+                        (scan_box.value, None)
+                    };
+
                     let mut reserve_info = basis_store::ExtendedReserveInfo::new(
                         scan_box.box_id.as_bytes(),
                         &owner_pubkey,
-                        scan_box.value,
+                        collateral_amount,
                         tracker_nft_bytes_option.as_deref(),
                         scanner.last_scanned_height().await,
                         refund_initiation_height,
+                        reserve_token_bytes.as_deref(),
                     );
 
                     // Set contract address from configuration
-                    reserve_info
-                        .set_contract_address(config.basis_reserve_contract_p2s().to_string());
+                    let contract_address = if config.is_token_reserve_mode() {
+                        config.basis_token_reserve_contract_p2s()
+                    } else {
+                        config.basis_reserve_contract_p2s()
+                    };
+                    reserve_info.set_contract_address(contract_address.to_string());
 
                     if let Err(e) = tracker.update_reserve(reserve_info) {
                         tracing::warn!(
@@ -1017,6 +1056,7 @@ async fn process_reserve_event(
                     return Err("Invalid owner public key format".into());
                 }
             };
+            let reserve_token_bytes = config.reserve_token_bytes().ok().flatten();
             let mut reserve_info = basis_store::ExtendedReserveInfo::new(
                 box_id.as_bytes(),
                 &owner_pubkey_bytes,
@@ -1024,8 +1064,14 @@ async fn process_reserve_event(
                 tracker_nft_bytes_option.as_deref(),
                 height,
                 0, // Newly created reserves have no pending refund
+                reserve_token_bytes.as_deref(),
             );
-            reserve_info.set_contract_address(config.basis_reserve_contract_p2s().to_string());
+            let contract_address = if config.is_token_reserve_mode() {
+                config.basis_token_reserve_contract_p2s()
+            } else {
+                config.basis_reserve_contract_p2s()
+            };
+            reserve_info.set_contract_address(contract_address.to_string());
             tracker.update_reserve(reserve_info)?;
 
             TrackerEvent {

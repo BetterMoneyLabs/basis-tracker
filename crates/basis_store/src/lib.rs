@@ -164,7 +164,7 @@ pub type NoteKeyBytes = [u8; 32];
 /// Reserve information for a public key
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReserveInfo {
-    /// On-chain collateral amount
+    /// On-chain collateral amount (ERG nanoERG for ERG reserves, raw token units for token reserves)
     pub collateral_amount: u64,
     /// Last known block height
     pub last_updated_height: u64,
@@ -175,6 +175,9 @@ pub struct ReserveInfo {
     /// Refund initiation height from R7 register (0 if no refund pending)
     #[serde(default)]
     pub refund_initiation_height: u64,
+    /// Reserve token ID (hex-encoded) for token-backed reserves, or empty for ERG reserves.
+    #[serde(default)]
+    pub reserve_token_id: String,
 }
 
 /// Tracker box information for state commitment boxes

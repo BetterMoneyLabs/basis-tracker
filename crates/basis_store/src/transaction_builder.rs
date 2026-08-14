@@ -192,6 +192,15 @@ pub struct RedemptionTransactionData {
     /// Optional change output for leftover fee-input funds. If `None`, no change
     /// output is created (caller must ensure fee inputs exactly match fee).
     pub change_address: Option<String>,
+    /// Reserve token ID (hex-encoded, 32 bytes) for token-backed reserves.
+    /// When `None`, the reserve is treated as ERG-backed.
+    pub reserve_token_id: Option<String>,
+    /// Amount of reserve token in the input reserve box (raw token units).
+    /// Used only when `reserve_token_id` is set.
+    pub reserve_token_amount_in: u64,
+    /// Minimum ERG value placed in the recipient output for token redemptions
+    /// (covers Ergo min-box-value). Used only when `reserve_token_id` is set.
+    pub recipient_min_value: u64,
 }
 
 /// Builder for redemption transactions following the Basis contract specification
@@ -402,7 +411,95 @@ impl RedemptionTransactionBuilder {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             change_address: None,
+            reserve_token_id: None,
+            reserve_token_amount_in: 0,
+            recipient_min_value: 0,
         })
+    }
+
+    /// Build an unsigned token-backed redemption transaction.
+    ///
+    /// Similar to `build_unsigned_redemption_transaction`, but the collateral moved
+    /// to the recipient is the reserve token (token #1 in the reserve box), not ERG.
+    /// The reserve output preserves its ERG value; fee inputs must also cover the
+    /// recipient output's min-box-value.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_unsigned_token_redemption_transaction(
+        reserve_box_id: &str,
+        tracker_box_id: &str,
+        tracker_nft_id: &str,
+        reserve_token_id: &str,
+        reserve_token_amount_in: u64,
+        note: &crate::IouNote,
+        recipient_address: &str,
+        avl_proof: &[u8],
+        issuer_sig: &[u8],
+        tracker_sig: &[u8],
+        issuer_pubkey: &crate::PubKey,
+        context: &TxContext,
+        reserve_box_value: u64,
+        reserve_refund_initiation_height: u64,
+        reserve_lookup_proof: Option<Vec<u8>>,
+        tracker_lookup_proof: Vec<u8>,
+        redemption_amount: u64,
+        recipient_min_value: u64,
+    ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
+        if reserve_token_id.is_empty() {
+            return Err(TransactionBuilderError::Configuration(
+                "reserve_token_id is required for token redemption".to_string(),
+            ));
+        }
+        if hex::decode(reserve_token_id).is_err() {
+            return Err(TransactionBuilderError::Configuration(
+                "reserve_token_id must be valid hex".to_string(),
+            ));
+        }
+        if hex::decode(reserve_token_id).unwrap().len() != 32 {
+            return Err(TransactionBuilderError::Configuration(
+                "reserve_token_id must be 32 bytes".to_string(),
+            ));
+        }
+        if reserve_token_amount_in == 0 {
+            return Err(TransactionBuilderError::Configuration(
+                "reserve_token_amount_in must be greater than 0".to_string(),
+            ));
+        }
+        if redemption_amount > reserve_token_amount_in {
+            return Err(TransactionBuilderError::InsufficientFunds(format!(
+                "Redemption amount {} exceeds reserve token amount {}",
+                redemption_amount, reserve_token_amount_in
+            )));
+        }
+        if recipient_min_value == 0 {
+            return Err(TransactionBuilderError::Configuration(
+                "recipient_min_value must be greater than 0 for token redemption".to_string(),
+            ));
+        }
+
+        // Run the common validation/building logic through the ERG builder, then fix up token fields.
+        let mut tx_data = Self::build_unsigned_redemption_transaction(
+            reserve_box_id,
+            tracker_box_id,
+            tracker_nft_id,
+            note,
+            recipient_address,
+            avl_proof,
+            issuer_sig,
+            tracker_sig,
+            issuer_pubkey,
+            context,
+            reserve_box_value,
+            reserve_refund_initiation_height,
+            reserve_lookup_proof,
+            tracker_lookup_proof,
+            redemption_amount,
+        )?;
+
+        tx_data.reserve_token_id = Some(reserve_token_id.to_string());
+        tx_data.reserve_token_amount_in = reserve_token_amount_in;
+        tx_data.recipient_min_value = recipient_min_value;
+
+        Ok(tx_data)
     }
 
     /// Build a real Ergo redemption transaction
@@ -529,39 +626,89 @@ impl RedemptionTransactionBuilder {
         // Build transaction JSON following Ergo node API format
         let recipient_ergo_tree = format!("0008cd{}", hex::encode(&ctx.receiver_pubkey));
 
+        // Determine whether this is a token-backed redemption.
+        let token_reserve = tx_data.reserve_token_id.is_some();
+
         // Get the reserve contract ErgoTree (P2S) for the reserve output
-        let reserve_ergo_tree = crate::contract_compiler::get_basis_reserve_ergo_tree_hex()
-            .map_err(|e| {
+        let reserve_ergo_tree = if token_reserve {
+            crate::contract_compiler::get_basis_token_reserve_ergo_tree_hex().map_err(|e| {
+                TransactionBuilderError::TransactionBuilding(format!(
+                    "Failed to get token reserve contract: {}",
+                    e
+                ))
+            })?
+        } else {
+            crate::contract_compiler::get_basis_reserve_ergo_tree_hex().map_err(|e| {
                 TransactionBuilderError::TransactionBuilding(format!(
                     "Failed to get reserve contract: {}",
                     e
                 ))
-            })?;
+            })?
+        };
 
         // Reserve NFT ID from the transaction data (from reserve box R6)
         let reserve_nft_id = &tx_data.tracker_nft_id;
 
-        // The reserve output keeps the full original collateral minus the redeemed amount.
-        // The miner fee is paid by explicit fee inputs, not by reducing the reserve output.
-        let reserve_remaining = tx_data
-            .reserve_box_value
-            .saturating_sub(tx_data.redemption_amount);
+        // Compute reserve and recipient outputs.
+        // For ERG reserves: reserve ERG value decreases by redemption_amount.
+        // For token reserves: reserve ERG value is preserved; tokens move to recipient.
+        let (
+            reserve_output_value,
+            recipient_output_value,
+            reserve_output_assets,
+            recipient_output_assets,
+            required_from_fee_inputs,
+        ) = if token_reserve {
+            let token_id = tx_data.reserve_token_id.as_ref().unwrap();
+            let remaining_tokens = tx_data
+                .reserve_token_amount_in
+                .saturating_sub(tx_data.redemption_amount);
+            if remaining_tokens == 0 {
+                return Err(TransactionBuilderError::InsufficientFunds(
+                    "Reserve token output amount would be zero after redemption".to_string(),
+                ));
+            }
+            (
+                tx_data.reserve_box_value,
+                tx_data.recipient_min_value,
+                vec![
+                    serde_json::json!({ "tokenId": reserve_nft_id, "amount": 1 }),
+                    serde_json::json!({ "tokenId": token_id, "amount": remaining_tokens }),
+                ],
+                vec![
+                    serde_json::json!({ "tokenId": token_id, "amount": tx_data.redemption_amount }),
+                ],
+                tx_data.fee.saturating_add(tx_data.recipient_min_value),
+            )
+        } else {
+            let reserve_remaining = tx_data
+                .reserve_box_value
+                .saturating_sub(tx_data.redemption_amount);
+            if reserve_remaining == 0 {
+                return Err(TransactionBuilderError::InsufficientFunds(
+                    "Reserve output value would be zero after redemption".to_string(),
+                ));
+            }
+            (
+                reserve_remaining,
+                tx_data.redemption_amount,
+                vec![serde_json::json!({ "tokenId": reserve_nft_id, "amount": 1 })],
+                Vec::new(),
+                tx_data.fee,
+            )
+        };
 
-        if reserve_remaining == 0 {
-            return Err(TransactionBuilderError::InsufficientFunds(
-                "Reserve output value would be zero after redemption".to_string(),
-            ));
-        }
-
-        // Validate fee inputs cover the required fee.
-        if tx_data.fee_input_total_value < tx_data.fee {
+        // Validate fee inputs cover the required fee (plus recipient min-value for token reserves).
+        if tx_data.fee_input_total_value < required_from_fee_inputs {
             return Err(TransactionBuilderError::InsufficientFunds(format!(
-                "Fee inputs total {} is less than required fee {}",
-                tx_data.fee_input_total_value, tx_data.fee
+                "Fee inputs total {} is less than required {}",
+                tx_data.fee_input_total_value, required_from_fee_inputs
             )));
         }
 
-        let change_amount = tx_data.fee_input_total_value.saturating_sub(tx_data.fee);
+        let change_amount = tx_data
+            .fee_input_total_value
+            .saturating_sub(required_from_fee_inputs);
 
         // Build inputs array: reserve input first, followed by fee inputs with empty extensions.
         let mut inputs = vec![serde_json::json!({
@@ -579,14 +726,9 @@ impl RedemptionTransactionBuilder {
         // fee recipient output (index 2), optional change output last.
         let mut outputs = vec![
             serde_json::json!({
-                "value": reserve_remaining,
+                "value": reserve_output_value,
                 "ergoTree": reserve_ergo_tree,
-                "assets": [
-                    {
-                        "tokenId": reserve_nft_id,
-                        "amount": 1
-                    }
-                ],
+                "assets": reserve_output_assets,
                 "additionalRegisters": {
                     "R4": format!("07{}", hex::encode(&tx_data.issuer_pubkey)),
                     "R5": match &tx_data.updated_reserve_tree {
@@ -599,9 +741,9 @@ impl RedemptionTransactionBuilder {
                 "creationHeight": tx_data.current_height
             }),
             serde_json::json!({
-                "value": tx_data.redemption_amount,
+                "value": recipient_output_value,
                 "ergoTree": recipient_ergo_tree,
-                "assets": [],
+                "assets": recipient_output_assets,
                 "additionalRegisters": {},
                 "creationHeight": tx_data.current_height
             }),
@@ -736,6 +878,9 @@ mod tests {
             fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
             fee_input_total_value: 1000000,
             change_address: None,
+            reserve_token_id: None,
+            reserve_token_amount_in: 0,
+            recipient_min_value: 0,
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -813,6 +958,9 @@ mod tests {
                 fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
                 fee_input_total_value: 1000000,
                 change_address: None,
+                reserve_token_id: None,
+                reserve_token_amount_in: 0,
+                recipient_min_value: 0,
             };
 
             let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -885,6 +1033,9 @@ mod tests {
                 change_address: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),
+                reserve_token_id: None,
+                reserve_token_amount_in: 0,
+                recipient_min_value: 0,
             };
 
             let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -940,6 +1091,9 @@ mod tests {
             fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
             fee_input_total_value: 1000000,
             change_address: None,
+            reserve_token_id: None,
+            reserve_token_amount_in: 0,
+            recipient_min_value: 0,
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -978,6 +1132,9 @@ mod tests {
             fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
             fee_input_total_value: 1000000,
             change_address: None,
+            reserve_token_id: None,
+            reserve_token_amount_in: 0,
+            recipient_min_value: 0,
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -1026,6 +1183,9 @@ mod tests {
             fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
             fee_input_total_value: 1000000,
             change_address: None,
+            reserve_token_id: None,
+            reserve_token_amount_in: 0,
+            recipient_min_value: 0,
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -1045,5 +1205,81 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("f67858fe"));
+    }
+
+    #[test]
+    fn test_token_redemption_transaction_building() {
+        let reserve_token_id = "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669";
+        let tx_data = RedemptionTransactionData {
+            reserve_box_id: "token_reserve_box_1234567890abcdef".to_string(),
+            tracker_box_id: "token_tracker_box_abcdef1234567890".to_string(),
+            redemption_amount: 250,
+            recipient_address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
+            avl_proof: vec![0x01],
+            issuer_signature: vec![0u8; 65],
+            tracker_signature: vec![0u8; 65],
+            fee: 1000000,
+            tracker_nft_id: "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304"
+                .to_string(),
+            context_extension: Some(ContextExtension {
+                action: 0x00,
+                receiver_pubkey: vec![0x03; 33],
+                reserve_signature: vec![0u8; 65],
+                total_debt: 1000,
+                insert_proof: vec![0x01],
+                tracker_signature: vec![0u8; 65],
+                reserve_lookup_proof: None,
+                tracker_lookup_proof: vec![0x02],
+            }),
+            total_debt: 1000,
+            already_redeemed: 0,
+            is_first_redemption: true,
+            current_height: 1779469,
+            issuer_pubkey: vec![0x02; 33],
+            reserve_box_value: 10000000, // 0.01 ERG preserved in reserve
+            updated_reserve_tree: None,
+            reserve_refund_initiation_height: 0,
+            fee_input_box_ids: vec!["test_fee_input_1234567890abcdef".to_string()],
+            fee_input_total_value: 2000000, // fee + recipient min value
+            change_address: None,
+            reserve_token_id: Some(reserve_token_id.to_string()),
+            reserve_token_amount_in: 1000,
+            recipient_min_value: 1000000,
+        };
+
+        let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
+
+        assert!(
+            result.is_ok(),
+            "Failed to build token redemption transaction: {:?}",
+            result.err()
+        );
+        let tx_bytes = result.unwrap();
+        let tx_json: serde_json::Value =
+            serde_json::from_slice(&tx_bytes).expect("Should be valid JSON");
+
+        let outputs = &tx_json["tx"]["outputs"];
+        let reserve_output = &outputs[0];
+        let recipient_output = &outputs[1];
+
+        // Reserve output preserves ERG value and holds remaining tokens.
+        assert_eq!(reserve_output["value"].as_u64().unwrap(), 10000000);
+        let reserve_assets = reserve_output["assets"].as_array().unwrap();
+        assert_eq!(reserve_assets.len(), 2);
+        assert_eq!(
+            reserve_assets[1]["tokenId"].as_str().unwrap(),
+            reserve_token_id
+        );
+        assert_eq!(reserve_assets[1]["amount"].as_u64().unwrap(), 750);
+
+        // Recipient output receives redeemed tokens plus min-box-value ERG.
+        assert_eq!(recipient_output["value"].as_u64().unwrap(), 1000000);
+        let recipient_assets = recipient_output["assets"].as_array().unwrap();
+        assert_eq!(recipient_assets.len(), 1);
+        assert_eq!(
+            recipient_assets[0]["tokenId"].as_str().unwrap(),
+            reserve_token_id
+        );
+        assert_eq!(recipient_assets[0]["amount"].as_u64().unwrap(), 250);
     }
 }

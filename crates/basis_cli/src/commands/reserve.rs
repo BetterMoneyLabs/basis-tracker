@@ -21,6 +21,14 @@ pub enum ReserveCommands {
         #[arg(long)]
         amount: u64,
 
+        /// Amount of the reserve token to lock (raw token units). Requires --token-id.
+        #[arg(long)]
+        token_amount: Option<u64>,
+
+        /// Reserve token ID (hex-encoded, 64 chars). When set, creates a token-backed reserve.
+        #[arg(long)]
+        token_id: Option<String>,
+
         /// Submit the generated payload to the tracker's Ergo node for broadcast
         #[arg(long)]
         submit: bool,
@@ -45,6 +53,10 @@ pub struct ReserveCreateResult {
     pub nft_id: String,
     pub owner_pubkey: String,
     pub amount: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_amount: Option<u64>,
     /// Payload to submit to an Ergo wallet to create the reserve on-chain.
     pub payload: ReserveCreationResponse,
     /// Transaction id if the payload was submitted via the tracker node.
@@ -82,6 +94,8 @@ pub async fn create_reserve(
     nft_id: String,
     owner: Option<String>,
     amount: u64,
+    token_amount: Option<u64>,
+    token_id: Option<String>,
     submit: bool,
 ) -> Result<ReserveCreateResult> {
     // Get the owner public key from either the command line argument or current account
@@ -95,16 +109,25 @@ pub async fn create_reserve(
         ));
     }
 
+    let token_amount = token_amount.unwrap_or(0);
+    let token_id = token_id.unwrap_or_default();
+
     progress!("Creating reserve with:");
     progress!("  NFT ID: {}", nft_id);
     progress!("  Owner: {}", owner_pubkey);
-    progress!("  Amount: {} nanoERG", amount);
+    progress!("  ERG value: {} nanoERG", amount);
+    if !token_id.is_empty() {
+        progress!("  Token ID: {}", token_id);
+        progress!("  Token amount: {}", token_amount);
+    }
 
     // Create the reserve creation request
     let request = CreateReserveRequest {
         nft_id: nft_id.clone(),
         owner_pubkey: owner_pubkey.clone(),
         erg_amount: amount,
+        token_amount,
+        token_id: token_id.clone(),
     };
 
     // Call the API to create the reserve payload
@@ -120,6 +143,16 @@ pub async fn create_reserve(
         nft_id,
         owner_pubkey,
         amount,
+        token_id: if token_id.is_empty() {
+            None
+        } else {
+            Some(token_id)
+        },
+        token_amount: if token_amount == 0 {
+            None
+        } else {
+            Some(token_amount)
+        },
         payload,
         tx_id,
     })
@@ -160,10 +193,21 @@ pub async fn handle_reserve_command(
             nft_id,
             owner,
             amount,
+            token_amount,
+            token_id,
             submit,
         } => {
-            let result =
-                create_reserve(account_manager, client, nft_id, owner, amount, submit).await?;
+            let result = create_reserve(
+                account_manager,
+                client,
+                nft_id,
+                owner,
+                amount,
+                token_amount,
+                token_id,
+                submit,
+            )
+            .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
@@ -219,23 +263,32 @@ pub async fn handle_reserve_command(
             if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
+                let token_backed = status.reserve_token_id.is_some();
                 println!("Reserve Status for {}:", status.issuer_pubkey);
-                println!("  Total Debt: {} nanoERG", status.total_debt);
-                println!("  Collateral: {} nanoERG", status.collateral);
+                println!("  Total Debt: {} units", status.total_debt);
+                println!("  Collateral: {} units", status.collateral);
                 println!(
                     "  Collateralization Ratio: {:.2}",
                     status.collateralization_ratio
                 );
                 println!("  Note Count: {}", status.note_count);
                 println!("  Last Updated: {}", status.last_updated);
+                if token_backed {
+                    println!(
+                        "  Reserve Token ID: {}",
+                        status.reserve_token_id.as_ref().unwrap()
+                    );
+                }
 
-                // Calculate ERG values
-                let debt_erg = status.total_debt as f64 / 1_000_000_000.0;
-                let collateral_erg = status.collateral as f64 / 1_000_000_000.0;
+                if !token_backed {
+                    // Calculate ERG values
+                    let debt_erg = status.total_debt as f64 / 1_000_000_000.0;
+                    let collateral_erg = status.collateral as f64 / 1_000_000_000.0;
 
-                println!("\nIn ERG:");
-                println!("  Total Debt: {:.6} ERG", debt_erg);
-                println!("  Collateral: {:.6} ERG", collateral_erg);
+                    println!("\nIn ERG:");
+                    println!("  Total Debt: {:.6} ERG", debt_erg);
+                    println!("  Collateral: {:.6} ERG", collateral_erg);
+                }
             }
         }
         ReserveCommands::Collateralization { issuer } => {

@@ -131,6 +131,7 @@ pub fn create_test_reserve_info(
         None, // tracker_nft_id
         height,
         0,
+        None, // reserve_token_id
     )
 }
 

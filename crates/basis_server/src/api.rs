@@ -1582,6 +1582,15 @@ pub async fn get_key_status(
             (0, if total_debt > 0 { 0.0 } else { 999999.0 }, 0)
         };
 
+    let reserve_token_id = matching_reserves.first().and_then(|reserve| {
+        let id = &reserve.base_info.reserve_token_id;
+        if id.is_empty() {
+            None
+        } else {
+            Some(id.clone())
+        }
+    });
+
     let status = KeyStatusResponse {
         total_debt,
         collateral,
@@ -1590,6 +1599,7 @@ pub async fn get_key_status(
         last_updated,
         issuer_pubkey: pubkey_hex.clone(),
         has_pending_refund,
+        reserve_token_id,
     };
 
     tracing::info!(
@@ -3618,21 +3628,79 @@ pub async fn create_reserve_payload(
         );
     }
 
-    // Get the hardcoded reserve contract P2S address from configuration
-    let config = match crate::config::AppConfig::load() {
-        Ok(config) => config,
-        Err(e) => {
-            tracing::error!("Failed to load configuration: {}", e);
+    // Get the reserve contract P2S address from the server state configuration
+    let config = state.config.clone();
+
+    let token_reserve_mode = config.is_token_reserve_mode();
+
+    // In token-reserve mode the reserve token ID must be supplied and match config.
+    let reserve_token_id = if token_reserve_mode {
+        let configured = config
+            .ergo
+            .reserve_token_id
+            .as_ref()
+            .expect("reserve_token_id is set when token mode is active");
+        if !payload.token_id.is_empty() && payload.token_id != *configured {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "token_id must match configured reserve_token_id ({})",
+                    configured
+                ))),
+            );
+        }
+        let id = if payload.token_id.is_empty() {
+            configured.clone()
+        } else {
+            payload.token_id.clone()
+        };
+        let bytes = match hex::decode(&id) {
+            Ok(b) => b,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(
+                        "token_id must be valid hex".to_string(),
+                    )),
+                );
+            }
+        };
+        if bytes.len() != 32 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "token_id must be 32 bytes, got {}",
+                    bytes.len()
+                ))),
+            );
+        }
+        if payload.token_amount == 0 {
+            return (
+                StatusCode::BAD_REQUEST,
                 Json(crate::models::error_response(
-                    "Failed to load server configuration".to_string(),
+                    "token_amount must be greater than 0 in token-reserve mode".to_string(),
                 )),
             );
         }
+        Some(id)
+    } else {
+        if !payload.token_id.is_empty() || payload.token_amount != 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "token_id and token_amount are only valid when reserve_token_id is configured"
+                        .to_string(),
+                )),
+            );
+        }
+        None
     };
 
-    let reserve_contract_address = config.ergo.basis_reserve_contract_p2s;
+    let reserve_contract_address = if token_reserve_mode {
+        config.ergo.basis_token_reserve_contract_p2s.clone()
+    } else {
+        config.ergo.basis_reserve_contract_p2s.clone()
+    };
 
     // Build properly serialized register values following Ergo constant format
     // R4: GroupElement (owner pubkey) - prefix 07 + 33-byte compressed pubkey
@@ -3684,13 +3752,22 @@ pub async fn create_reserve_payload(
     registers.insert("R6".to_string(), r6_value);
     registers.insert("R7".to_string(), r7_value);
 
+    // Build the assets list: always the reserve NFT; in token mode also the reserve token.
+    let mut assets = vec![Asset {
+        token_id: payload.nft_id.clone(), // Reserve NFT (singleton)
+        amount: 1,
+    }];
+    if let Some(ref token_id) = reserve_token_id {
+        assets.push(Asset {
+            token_id: token_id.clone(),
+            amount: payload.token_amount,
+        });
+    }
+
     let payment_request = ReservePaymentRequest {
         address: reserve_contract_address,
         value: payload.erg_amount,
-        assets: vec![Asset {
-            token_id: payload.nft_id.clone(), // Reserve NFT (singleton)
-            amount: 1,
-        }],
+        assets,
         registers,
     };
 
@@ -3712,12 +3789,22 @@ pub async fn create_reserve_payload(
         change_address,
     };
 
-    tracing::info!(
-        "Successfully created reserve payload for {} with {} ERG and NFT {}",
-        payload.owner_pubkey,
-        payload.erg_amount,
-        &payload.nft_id
-    );
+    if token_reserve_mode {
+        tracing::info!(
+            "Successfully created token reserve payload for {} with {} token units of {} and NFT {}",
+            payload.owner_pubkey,
+            payload.token_amount,
+            reserve_token_id.as_ref().unwrap(),
+            &payload.nft_id
+        );
+    } else {
+        tracing::info!(
+            "Successfully created reserve payload for {} with {} ERG and NFT {}",
+            payload.owner_pubkey,
+            payload.erg_amount,
+            &payload.nft_id
+        );
+    }
 
     (
         StatusCode::OK,

@@ -419,6 +419,8 @@ impl BasisMcp {
                 params.nft_id,
                 None,
                 params.amount,
+                None,
+                None,
                 false,
             )
             .await,

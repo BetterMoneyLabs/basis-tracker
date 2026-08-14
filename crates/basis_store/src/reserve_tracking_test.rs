@@ -23,6 +23,8 @@ mod tests {
         let config = NodeConfig {
             start_height: Some(0),
             reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
+            token_reserve_contract_p2s: None,
+            reserve_token_id: None,
             node_url: "http://test-node:9053".to_string(),
             scan_name: Some("Test Reserve Scanner".to_string()),
             api_key: None,
@@ -239,6 +241,7 @@ mod tests {
             Some(b"nft_1"),
             1000,
             0,
+            None,
         );
 
         tracker.update_reserve(reserve_info).unwrap();
@@ -275,6 +278,8 @@ mod tests {
         let config = NodeConfig {
             start_height: Some(0),
             reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
+            token_reserve_contract_p2s: None,
+            reserve_token_id: None,
             node_url: "http://test:9053".to_string(),
             scan_name: Some("Test Scanner".to_string()),
             api_key: None,
