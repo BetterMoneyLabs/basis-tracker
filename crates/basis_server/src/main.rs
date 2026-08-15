@@ -812,6 +812,7 @@ async fn main() {
             "/config/reserve-contract-p2s",
             get(get_basis_reserve_contract_p2s),
         )
+        .route("/config/reserve-token", get(get_reserve_token_config))
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(

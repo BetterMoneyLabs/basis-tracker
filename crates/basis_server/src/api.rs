@@ -9,8 +9,8 @@ use crate::{
         NoteConfirmationSummary, NoteStateRequest, NoteStateResponse, PendingTxResponse,
         ProofResponse, RedeemRequest, RedeemResponse, RedemptionPreparationRequest,
         RedemptionPreparationResponse, ReserveCreationResponse, ReservePaymentRequest,
-        SerializableIouNote, TrackerEvent, TrackerSignatureRequest, TrackerSignatureResponse,
-        TrackerStateResponse, UploadPolicyRequest, UploadPolicyResponse,
+        ReserveTokenConfigResponse, SerializableIouNote, TrackerEvent, TrackerSignatureRequest,
+        TrackerSignatureResponse, TrackerStateResponse, UploadPolicyRequest, UploadPolicyResponse,
     },
     AppState, TrackerCommand,
 };
@@ -3965,6 +3965,28 @@ pub async fn get_basis_reserve_contract_p2s(
         Json(crate::models::success_response(
             reserve_contract_address.to_string(),
         )),
+    )
+}
+
+// Get the reserve-token configuration from server state.
+#[axum::debug_handler]
+pub async fn get_reserve_token_config(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<ApiResponse<ReserveTokenConfigResponse>>) {
+    tracing::debug!("Getting reserve token configuration");
+
+    let config = state.config.as_ref();
+    let response = ReserveTokenConfigResponse {
+        reserve_token_id: config.ergo.reserve_token_id.clone(),
+        reserve_token_decimals: config.ergo.reserve_token_decimals,
+        basis_token_reserve_contract_p2s: config.ergo.basis_token_reserve_contract_p2s.clone(),
+    };
+
+    tracing::info!("Reserve token config: {:?}", response);
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(response)),
     )
 }
 

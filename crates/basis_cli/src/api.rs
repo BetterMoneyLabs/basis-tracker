@@ -137,6 +137,14 @@ pub struct ReserveSubmissionResponse {
     pub tx_id: String,
 }
 
+/// Reserve-token configuration returned by the tracker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveTokenConfig {
+    pub reserve_token_id: Option<String>,
+    pub reserve_token_decimals: u8,
+    pub basis_token_reserve_contract_p2s: String,
+}
+
 // Tracker signature request/response for redemption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerSignatureRequest {
@@ -805,6 +813,27 @@ impl TrackerClient {
         } else {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to submit reserve: {}", error_text))
+        }
+    }
+
+    /// Fetch the tracker's reserve-token configuration.
+    pub async fn get_reserve_token_config(&self) -> Result<ReserveTokenConfig> {
+        let url = format!("{}/config/reserve-token", self.base_url);
+        let response = ureq::get(&url).call()?;
+
+        if response.status() == 200 {
+            let api_response: ApiResponse<ReserveTokenConfig> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get reserve token config: {}",
+                error_text
+            ))
         }
     }
 

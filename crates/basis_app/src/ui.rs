@@ -24,6 +24,75 @@ pub const _MAGENTA: &str = "\x1b[35m";
 pub const WHITE: &str = "\x1b[37m";
 pub const GRAY: &str = "\x1b[90m";
 
+// Token-reserve display helpers
+const USE_TOKEN_ID: &str = "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669";
+
+fn token_config(app: &App) -> Option<&basis_cli_lib::api::ReserveTokenConfig> {
+    app.reserve_token_config.as_ref()
+}
+
+fn is_token_mode_for(config: Option<&basis_cli_lib::api::ReserveTokenConfig>) -> bool {
+    config.is_some()
+}
+
+fn is_token_mode(app: &App) -> bool {
+    is_token_mode_for(token_config(app))
+}
+
+fn is_use_token_for(config: Option<&basis_cli_lib::api::ReserveTokenConfig>) -> bool {
+    config
+        .and_then(|c| c.reserve_token_id.as_deref())
+        .map(|id| id.eq_ignore_ascii_case(USE_TOKEN_ID))
+        .unwrap_or(false)
+}
+
+fn amount_label_for(config: Option<&basis_cli_lib::api::ReserveTokenConfig>) -> &'static str {
+    if is_token_mode_for(config) {
+        "units"
+    } else {
+        "nanoERG"
+    }
+}
+
+fn amount_label(app: &App) -> &'static str {
+    amount_label_for(token_config(app))
+}
+
+fn asset_label_for(config: Option<&basis_cli_lib::api::ReserveTokenConfig>) -> &'static str {
+    if is_use_token_for(config) {
+        "$"
+    } else if is_token_mode_for(config) {
+        "token"
+    } else {
+        "ERG"
+    }
+}
+
+fn asset_label(app: &App) -> &'static str {
+    asset_label_for(token_config(app))
+}
+
+fn decimals_for(config: Option<&basis_cli_lib::api::ReserveTokenConfig>) -> u8 {
+    config.map(|c| c.reserve_token_decimals).unwrap_or(9)
+}
+
+fn decimals(app: &App) -> u8 {
+    decimals_for(token_config(app))
+}
+
+fn format_units(amount: u64, decimals: u8) -> String {
+    if decimals == 0 {
+        amount.to_string()
+    } else {
+        let divisor = 10_f64.powi(decimals as i32);
+        format!(
+            "{:.precision$}",
+            amount as f64 / divisor,
+            precision = decimals as usize
+        )
+    }
+}
+
 pub async fn run(app: &mut App) -> Result<()> {
     clear_screen();
     if app.intro_account.is_some() {
@@ -144,31 +213,36 @@ fn draw_notification(app: &App) {
     }
 }
 
-fn draw_wallet_stats(stats: &WalletStats) {
+fn draw_wallet_stats(app: &App, stats: &WalletStats) {
     println!("{}  WALLET STATS{}", BOLD, RESET);
     println!("{}  ────────────{}", CYAN, RESET);
 
+    let d = decimals(app);
+    let label = asset_label(app);
+
     println!(
-        "  {}Assets:{}        {:.6} ERG ({} notes)",
+        "  {}Assets:{}        {} {} ({} notes)",
         BOLD,
         RESET,
-        stats.total_assets as f64 / 1_000_000_000.0,
+        format_units(stats.total_assets, d),
+        label,
         stats.asset_note_count
     );
     println!(
-        "  {}Liabilities:{}   {:.6} ERG ({} notes)",
+        "  {}Liabilities:{}   {} {} ({} notes)",
         BOLD,
         RESET,
-        stats.total_liabilities as f64 / 1_000_000_000.0,
+        format_units(stats.total_liabilities, d),
+        label,
         stats.liability_note_count
     );
 
-    let net_erg = stats.net_position as f64 / 1_000_000_000.0;
+    let net = stats.net_position as f64 / 10_f64.powi(d as i32);
     let net_color = if stats.net_position >= 0 { GREEN } else { RED };
     let net_sign = if stats.net_position >= 0 { "+" } else { "" };
     println!(
-        "  {}Net position:{}  {}{}{:.6} ERG{}",
-        BOLD, RESET, net_color, net_sign, net_erg, RESET
+        "  {}Net position:{}  {}{}{:.6} {}{}",
+        BOLD, RESET, net_color, net_sign, net, label, RESET
     );
 
     match stats.coverage_ratio {
@@ -233,7 +307,7 @@ async fn draw_main_menu(app: &mut App) -> Result<()> {
     println!("{}  ─────────{}\n", CYAN, RESET);
 
     if app.server_connected {
-        draw_wallet_stats(&app.compute_stats());
+        draw_wallet_stats(app, &app.compute_stats());
     } else {
         draw_wallet_stats_disconnected();
     }
@@ -593,32 +667,35 @@ async fn draw_notes(app: &mut App) -> Result<()> {
     println!("{}  NOTES (IOU Assets & Liabilities){}", BOLD, RESET);
     println!("{}  ─────────────────────────────{}\n", CYAN, RESET);
 
-    let issued_total_erg: f64 = app
+    let d = decimals(app);
+    let label = asset_label(app);
+
+    let issued_total: u64 = app
         .issued_notes
         .iter()
         .map(|n| n.amount.saturating_sub(n.redeemed))
-        .sum::<u64>() as f64
-        / 1_000_000_000.0;
-    let received_total_erg: f64 = app
+        .sum();
+    let received_total: u64 = app
         .received_notes
         .iter()
         .map(|n| n.amount.saturating_sub(n.redeemed))
-        .sum::<u64>() as f64
-        / 1_000_000_000.0;
+        .sum();
 
     println!(
-        "  {}[1]{} Notes Issued ({} notes, {:.6} ERG total liabilities)",
+        "  {}[1]{} Notes Issued ({} notes, {} {} total liabilities)",
         CYAN,
         RESET,
         app.issued_notes.len(),
-        issued_total_erg
+        format_units(issued_total, d),
+        label
     );
     println!(
-        "  {}[2]{} Notes Received ({} notes, {:.6} ERG total assets)\n",
+        "  {}[2]{} Notes Received ({} notes, {} {} total assets)\n",
         CYAN,
         RESET,
         app.received_notes.len(),
-        received_total_erg
+        format_units(received_total, d),
+        label
     );
 
     println!("  {}[c]{} Create Note", CYAN, RESET);
@@ -632,14 +709,18 @@ async fn draw_notes(app: &mut App) -> Result<()> {
             if app.issued_notes.is_empty() {
                 println!("  {}None{}\n", GRAY, RESET);
             } else {
+                let d = decimals(app);
+                let label = asset_label(app);
                 for (i, note) in app.issued_notes.iter().enumerate() {
                     let outstanding = note.amount.saturating_sub(note.redeemed);
                     println!(
-                        "  [{}] → {} | {} ERG ({} outstanding)",
+                        "  [{}] → {} | {} {} ({} {} outstanding)",
                         i + 1,
                         &note.recipient[..16],
-                        note.amount as f64 / 1_000_000_000.0,
-                        outstanding as f64 / 1_000_000_000.0
+                        format_units(note.amount, d),
+                        label,
+                        format_units(outstanding, d),
+                        label
                     );
                 }
                 println!();
@@ -651,14 +732,18 @@ async fn draw_notes(app: &mut App) -> Result<()> {
             if app.received_notes.is_empty() {
                 println!("  {}None{}\n", GRAY, RESET);
             } else {
+                let d = decimals(app);
+                let label = asset_label(app);
                 for (i, note) in app.received_notes.iter().enumerate() {
                     let outstanding = note.amount.saturating_sub(note.redeemed);
                     println!(
-                        "  [{}] ← {} | {} ERG ({} outstanding)",
+                        "  [{}] ← {} | {} {} ({} {} outstanding)",
                         i + 1,
                         &note.issuer[..16],
-                        note.amount as f64 / 1_000_000_000.0,
-                        outstanding as f64 / 1_000_000_000.0
+                        format_units(note.amount, d),
+                        label,
+                        format_units(outstanding, d),
+                        label
                     );
                 }
                 println!();
@@ -683,6 +768,7 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
     if let Some(ref reserve) = app.reserve_status {
         let ratio_color = ratio_color(reserve.ratio);
         let status = ratio_status(reserve.ratio);
+        let d = decimals(app);
 
         println!("  {}Issuer:{}", BOLD, RESET);
         println!(
@@ -691,20 +777,41 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
             &reserve.issuer[46..56]
         );
 
-        println!(
-            "  {}Total Liabilities:{}     {} nanoERG ({:.6} ERG)",
-            BOLD,
-            RESET,
-            reserve.total_debt,
-            reserve.total_debt as f64 / 1_000_000_000.0
-        );
-        println!(
-            "  {}Collateral:{}     {} nanoERG ({:.6} ERG)",
-            BOLD,
-            RESET,
-            reserve.collateral,
-            reserve.collateral as f64 / 1_000_000_000.0
-        );
+        if let Some(ref token_id) = reserve.reserve_token_id {
+            println!("  {}Reserve Token ID:{} {}", BOLD, RESET, token_id);
+            println!(
+                "  {}Total Liabilities:{}     {} units ({} {})",
+                BOLD,
+                RESET,
+                reserve.total_debt,
+                format_units(reserve.total_debt, d),
+                asset_label(app)
+            );
+            println!(
+                "  {}Collateral:{}     {} units ({} {})",
+                BOLD,
+                RESET,
+                reserve.collateral,
+                format_units(reserve.collateral, d),
+                asset_label(app)
+            );
+        } else {
+            println!(
+                "  {}Total Liabilities:{}     {} nanoERG ({:.6} ERG)",
+                BOLD,
+                RESET,
+                reserve.total_debt,
+                reserve.total_debt as f64 / 1_000_000_000.0
+            );
+            println!(
+                "  {}Collateral:{}     {} nanoERG ({:.6} ERG)",
+                BOLD,
+                RESET,
+                reserve.collateral,
+                reserve.collateral as f64 / 1_000_000_000.0
+            );
+        }
+
         println!(
             "  {}Ratio:{}          {}{}{}",
             BOLD, RESET, ratio_color, reserve.ratio, RESET
@@ -733,6 +840,14 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
         println!("  [{}{}{}]\n", ratio_color, bar, RESET);
     } else {
         println!("  {}No reserve data available.{}\n", GRAY, RESET);
+        if let Some(ref config) = app.reserve_token_config {
+            if let Some(ref token_id) = config.reserve_token_id {
+                println!(
+                    "  {}Token mode:{} reserve token id {}\n",
+                    BOLD, RESET, token_id
+                );
+            }
+        }
     }
 
     println!("  {}[c]{} Create Reserve", CYAN, RESET);
@@ -950,7 +1065,7 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
         }
     };
 
-    let amount_str = read_input("Amount (nanoERG): ");
+    let amount_str = read_input(&format!("Amount ({}): ", amount_label(app)));
     if amount_str.is_empty() {
         app.set_notification("Note creation cancelled".to_string(), false);
         app.navigate_to(Screen::Notes);
@@ -1077,13 +1192,16 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
 
     // Display received notes list
     println!("  {}Your Received Notes:{}", BOLD, RESET);
+    let d = decimals(app);
+    let label = asset_label(app);
     for (i, note) in app.received_notes.iter().enumerate() {
         let outstanding = note.amount.saturating_sub(note.redeemed);
         println!(
-            "  [{}] From: {}... | {} ERG outstanding",
+            "  [{}] From: {}... | {} {} outstanding",
             i + 1,
             &note.issuer[..16],
-            outstanding as f64 / 1_000_000_000.0
+            format_units(outstanding, d),
+            label
         );
     }
     println!();
@@ -1118,15 +1236,20 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
     // Show selected note details
     println!("\n  {}Selected Note:{}", BOLD, RESET);
     println!("  From: {}...", &issuer[..16]);
-    println!("  Amount: {} nanoERG", selected_note.amount);
-    println!("  Redeemed: {} nanoERG", selected_note.redeemed);
-    println!("  Outstanding: {} nanoERG", outstanding);
+    println!("  Amount: {} {}", selected_note.amount, amount_label(app));
+    println!(
+        "  Redeemed: {} {}",
+        selected_note.redeemed,
+        amount_label(app)
+    );
+    println!("  Outstanding: {} {}", outstanding, amount_label(app));
     println!();
 
     // Ask for redemption amount
     let amount_str = read_input(&format!(
-        "Amount to redeem (default: {} nanoERG, Press Enter for full): ",
-        outstanding
+        "Amount to redeem (default: {} {}, Press Enter for full): ",
+        outstanding,
+        amount_label(app)
     ));
 
     let amount = if amount_str.is_empty() {
@@ -1169,7 +1292,10 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
     match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp, false).await {
         Ok(tx_id) => {
             let short = &tx_id[..16.min(tx_id.len())];
-            app.set_notification(format!("Redeemed {} nanoERG, tx {}", amount, short), false);
+            app.set_notification(
+                format!("Redeemed {} {}, tx {}", amount, amount_label(app), short),
+                false,
+            );
             let _ = app.refresh_data().await;
         }
         Err(e) => {
@@ -1359,13 +1485,16 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
 
     // Display received notes list
     println!("  {}Your Received Notes:{}", BOLD, RESET);
+    let d = decimals(app);
+    let label = asset_label(app);
     for (i, note) in app.received_notes.iter().enumerate() {
         let outstanding = note.amount.saturating_sub(note.redeemed);
         println!(
-            "  [{}] From: {}... | {} ERG outstanding",
+            "  [{}] From: {}... | {} {} outstanding",
             i + 1,
             &note.issuer[..16],
-            outstanding as f64 / 1_000_000_000.0
+            format_units(outstanding, d),
+            label
         );
     }
     println!();
@@ -1400,15 +1529,20 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
     // Show selected note details
     println!("\n  {}Selected Note:{}", BOLD, RESET);
     println!("  From: {}...", &issuer[..16]);
-    println!("  Amount: {} nanoERG", selected_note.amount);
-    println!("  Redeemed: {} nanoERG", selected_note.redeemed);
-    println!("  Outstanding: {} nanoERG", outstanding);
+    println!("  Amount: {} {}", selected_note.amount, amount_label(app));
+    println!(
+        "  Redeemed: {} {}",
+        selected_note.redeemed,
+        amount_label(app)
+    );
+    println!("  Outstanding: {} {}", outstanding, amount_label(app));
     println!();
 
     // Ask for redemption amount
     let amount_str = read_input(&format!(
-        "Amount to redeem (default: {} nanoERG, Press Enter for full): ",
-        outstanding
+        "Amount to redeem (default: {} {}, Press Enter for full): ",
+        outstanding,
+        amount_label(app)
     ));
 
     let amount = if amount_str.is_empty() {
@@ -1470,7 +1604,12 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
         Ok(tx_id) => {
             let short = &tx_id[..16.min(tx_id.len())];
             app.set_notification(
-                format!("Emergency redeemed {} nanoERG, tx {}", amount, short),
+                format!(
+                    "Emergency redeemed {} {}, tx {}",
+                    amount,
+                    amount_label(app),
+                    short
+                ),
                 false,
             );
             let _ = app.refresh_data().await;
@@ -1505,12 +1644,26 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
         return Ok(());
     }
 
-    let amount_str = read_input("Amount (nanoERG): ");
+    let amount_str = read_input("ERG amount for reserve box (nanoERG): ");
     if amount_str.is_empty() {
         app.set_notification("Reserve creation cancelled".to_string(), false);
         app.navigate_to(Screen::Reserves);
         return Ok(());
     }
+
+    let token_mode = is_token_mode(app);
+    let (token_amount, token_id) = if token_mode {
+        let token_amount_str = read_input("Token amount to lock (raw units, Press Enter for 0): ");
+        let token_amount = token_amount_str.parse::<u64>().unwrap_or(0);
+        let token_id = app
+            .reserve_token_config
+            .as_ref()
+            .and_then(|c| c.reserve_token_id.clone())
+            .unwrap_or_default();
+        (token_amount, token_id)
+    } else {
+        (0, String::new())
+    };
 
     if nft_id.len() == 64 {
         if let Ok(amount) = amount_str.parse::<u64>() {
@@ -1520,8 +1673,8 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                 nft_id,
                 owner_pubkey: owner,
                 erg_amount: amount,
-                token_amount: 0,
-                token_id: "".to_string(),
+                token_amount,
+                token_id,
             };
 
             match app.client.create_reserve(request).await {
@@ -1828,8 +1981,10 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                         true,
                     );
                 } else {
-                    let debt_limit =
-                        read_input("Add debt limit? (nanoERG, Press Enter for none): ");
+                    let debt_limit = read_input(&format!(
+                        "Add debt limit? ({}, Press Enter for none): ",
+                        amount_label(app)
+                    ));
                     let max_debt = if debt_limit.is_empty() {
                         None
                     } else {
@@ -1852,8 +2007,9 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                     } else {
                         let limit_msg = match max_debt {
                             Some(limit) => format!(
-                                "✅ Added to whitelist (limit: {:.6} ERG) and uploaded",
-                                limit as f64 / 1_000_000_000.0
+                                "✅ Added to whitelist (limit: {} {}) and uploaded",
+                                format_units(limit, decimals(app)),
+                                asset_label(app)
                             ),
                             None => "✅ Added to whitelist (no limit) and uploaded".to_string(),
                         };
@@ -1872,7 +2028,11 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                 for (i, (name, pubkey, max_debt)) in whitelist.iter().enumerate() {
                     let limit_text = match max_debt {
                         Some(limit) => {
-                            format!(", limit: {:.6} ERG", *limit as f64 / 1_000_000_000.0)
+                            format!(
+                                ", limit: {} {}",
+                                format_units(*limit, decimals(app)),
+                                asset_label(app)
+                            )
                         }
                         None => ", no limit".to_string(),
                     };
@@ -2032,7 +2192,11 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                 for (i, (name, pubkey, max_debt)) in whitelist.iter().enumerate() {
                     let limit_text = match max_debt {
                         Some(limit) => {
-                            format!(", limit: {:.6} ERG", *limit as f64 / 1_000_000_000.0)
+                            format!(
+                                ", limit: {} {}",
+                                format_units(*limit, decimals(app)),
+                                asset_label(app)
+                            )
                         }
                         None => ", no limit".to_string(),
                     };
@@ -2085,7 +2249,10 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
                 };
 
                 if pubkey.len() == 66 {
-                    let debt_input = read_input("Test total debt (nanoERG, default 0): ");
+                    let debt_input = read_input(&format!(
+                        "Test total debt ({}, default 0): ",
+                        amount_label(app)
+                    ));
                     let total_debt = if debt_input.is_empty() {
                         0
                     } else {
@@ -2205,3 +2372,92 @@ async fn save_and_upload_policy(app: &mut App) -> Result<()> {
 }
 
 // Helper functions are now in crate::acceptance_policy module
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use basis_cli_lib::api::ReserveTokenConfig;
+
+    fn use_config() -> ReserveTokenConfig {
+        ReserveTokenConfig {
+            reserve_token_id: Some(
+                "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669".to_string(),
+            ),
+            reserve_token_decimals: 6,
+            basis_token_reserve_contract_p2s: String::new(),
+        }
+    }
+
+    fn other_token_config() -> ReserveTokenConfig {
+        ReserveTokenConfig {
+            reserve_token_id: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
+            reserve_token_decimals: 3,
+            basis_token_reserve_contract_p2s: String::new(),
+        }
+    }
+
+    #[test]
+    fn asset_label_erg_mode() {
+        assert_eq!(asset_label_for(None), "ERG");
+    }
+
+    #[test]
+    fn asset_label_use_token() {
+        assert_eq!(asset_label_for(Some(&use_config())), "$");
+    }
+
+    #[test]
+    fn asset_label_other_token() {
+        assert_eq!(asset_label_for(Some(&other_token_config())), "token");
+    }
+
+    #[test]
+    fn amount_label_token_mode() {
+        assert_eq!(amount_label_for(Some(&use_config())), "units");
+    }
+
+    #[test]
+    fn amount_label_erg_mode() {
+        assert_eq!(amount_label_for(None), "nanoERG");
+    }
+
+    #[test]
+    fn decimals_use_token() {
+        assert_eq!(decimals_for(Some(&use_config())), 6);
+    }
+
+    #[test]
+    fn decimals_default_to_erg() {
+        assert_eq!(decimals_for(None), 9);
+    }
+
+    #[test]
+    fn format_units_zero_decimals() {
+        assert_eq!(format_units(12345, 0), "12345");
+    }
+
+    #[test]
+    fn format_units_six_decimals() {
+        assert_eq!(format_units(1_000_000_000, 6), "1000.000000");
+    }
+
+    #[test]
+    fn format_units_three_decimals() {
+        assert_eq!(format_units(1234, 3), "1.234");
+    }
+
+    #[test]
+    fn use_token_id_case_insensitive() {
+        let mut cfg = use_config();
+        cfg.reserve_token_id =
+            Some("A55B8735ED1A99E46C2C89F8994AACDF4B1109BDCF682F1E5B34479C6E392669".to_string());
+        assert!(is_use_token_for(Some(&cfg)));
+    }
+
+    #[test]
+    fn non_use_token_not_special_cased() {
+        assert!(!is_use_token_for(Some(&other_token_config())));
+    }
+}

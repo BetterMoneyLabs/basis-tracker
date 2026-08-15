@@ -414,6 +414,15 @@ pub struct TrackerBoxIdResponse {
     pub height: u64,
 }
 
+// Reserve-token configuration exposed to clients so they can display and create
+// token-backed reserves with the correct token id and decimals.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReserveTokenConfigResponse {
+    pub reserve_token_id: Option<String>,
+    pub reserve_token_decimals: u8,
+    pub basis_token_reserve_contract_p2s: String,
+}
+
 // Tracker state response - shows local, confirmed and pending digests.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackerStateResponse {

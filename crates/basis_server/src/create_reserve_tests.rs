@@ -368,4 +368,35 @@ mod create_reserve_tests {
             .unwrap()
             .contains("must match configured"));
     }
+
+    #[tokio::test]
+    async fn test_get_reserve_token_config_erg_mode() {
+        let state = create_test_app_state();
+
+        let (status, response_json) = crate::api::get_reserve_token_config(State(state)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response_json.success);
+        let config = response_json.data.clone().unwrap();
+        assert!(config.reserve_token_id.is_none());
+        assert_eq!(config.reserve_token_decimals, 0);
+        assert_eq!(config.basis_token_reserve_contract_p2s, "test_token");
+    }
+
+    #[tokio::test]
+    async fn test_get_reserve_token_config_use_mode() {
+        let state = create_token_test_app_state();
+
+        let (status, response_json) = crate::api::get_reserve_token_config(State(state)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response_json.success);
+        let config = response_json.data.clone().unwrap();
+        assert_eq!(
+            config.reserve_token_id.unwrap(),
+            "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
+        );
+        assert_eq!(config.reserve_token_decimals, 6);
+        assert_eq!(config.basis_token_reserve_contract_p2s, "test_token");
+    }
 }

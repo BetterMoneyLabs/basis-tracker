@@ -116,6 +116,26 @@ For ERG-backed reserves the CLI also prints ERG-converted values; for token
 reserves it leaves conversion to the user (or UI) using
 `reserve_token_decimals`.
 
+## TUI Wallet Support
+
+The interactive TUI wallet (`crates/basis_app`) is token-reserve aware:
+
+- On refresh it fetches `GET /config/reserve-token` and caches the configured
+  token ID and decimals in `App::reserve_token_config`.
+- `My Reserves` shows the reserve token ID for token-backed reserves and
+  displays liabilities/collateral in raw token units plus a converted value
+  using `reserve_token_decimals`.
+- `Create Reserve` prompts for an ERG box-value amount and, when the tracker is
+  in token mode, an additional token amount to lock. The configured token ID is
+  sent automatically.
+- Wallet stats, note lists, note creation, redemption, and acceptance-policy
+  labels switch from "nanoERG"/"ERG" to "units"/"token" when the tracker is
+  configured for token reserves.
+- The USE token (`a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669`)
+  is displayed with the `$` symbol in the TUI (e.g. `1000.000000 $`). Other
+  custom tokens keep the generic "token" label. The display still uses the
+  configured `reserve_token_decimals` for unit conversion.
+
 ## Testing
 
 Relevant test suites:
@@ -124,6 +144,23 @@ Relevant test suites:
 cargo test -p basis_server create_reserve_tests -- --nocapture
 cargo test -p basis_store ergo_scanner -- --nocapture
 cargo test -p basis_store transaction_builder -- --nocapture
+```
+
+The TUI token-reserve display helpers have dedicated unit tests in
+`crates/basis_app/src/ui.rs` covering:
+
+- `asset_label` returns `$` for USE, `token` for other token modes, and `ERG`
+  for ERG mode.
+- `amount_label` returns `units` in token mode and `nanoERG` in ERG mode.
+- `decimals` falls back to 9 in ERG mode and respects
+  `reserve_token_decimals` in token mode.
+- `format_units` handles zero-decimal, 3-decimal, and 6-decimal conversions.
+- USE token ID matching is case-insensitive.
+
+Run the TUI helper tests with:
+
+```bash
+cargo test -p basis_app ui::tests -- --nocapture
 ```
 
 All workspace tests should pass after enabling token-reserve support:

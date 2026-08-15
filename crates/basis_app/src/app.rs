@@ -1,5 +1,9 @@
 use anyhow::Result;
-use basis_cli_lib::{account::AccountManager, api::TrackerClient, config::ConfigManager};
+use basis_cli_lib::{
+    account::AccountManager,
+    api::{ReserveTokenConfig, TrackerClient},
+    config::ConfigManager,
+};
 use basis_core::acceptance::AcceptanceConfig;
 use basis_store::ExtendedReserveInfo;
 use std::collections::HashMap;
@@ -111,6 +115,7 @@ pub struct App {
     /// screen displays its public key to the user before the main menu.
     pub intro_account: Option<AccountInfo>,
     pub reserve_status: Option<ReserveInfo>,
+    pub reserve_token_config: Option<ReserveTokenConfig>,
     pub issued_notes: Vec<NoteInfo>,
     pub received_notes: Vec<NoteInfo>,
     pub notification: Option<(String, bool)>,
@@ -176,6 +181,7 @@ pub struct ReserveInfo {
     pub note_count: usize,
     pub _last_updated: u64,
     pub has_pending_refund: bool,
+    pub reserve_token_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -271,6 +277,7 @@ impl App {
             current_account,
             intro_account,
             reserve_status: None,
+            reserve_token_config: None,
             issued_notes: Vec::new(),
             received_notes: Vec::new(),
             notification: None,
@@ -289,6 +296,9 @@ impl App {
     pub async fn refresh_data(&mut self) -> Result<()> {
         self.server_connected = self.client.health_check().await.unwrap_or(false);
 
+        // Refresh reserve-token configuration from the tracker
+        self.reserve_token_config = self.client.get_reserve_token_config().await.ok();
+
         // Refresh reserve status
         if let Some(ref acc) = self.current_account {
             if let Ok(status) = self.client.get_reserve_status(&acc.pubkey).await {
@@ -300,6 +310,7 @@ impl App {
                     note_count: status.note_count,
                     _last_updated: status.last_updated,
                     has_pending_refund: status.has_pending_refund,
+                    reserve_token_id: status.reserve_token_id,
                 });
             }
 
@@ -370,6 +381,7 @@ mod tests {
             note_count: 0,
             _last_updated: 0,
             has_pending_refund: false,
+            reserve_token_id: None,
         }
     }
 
