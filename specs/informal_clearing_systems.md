@@ -16,6 +16,9 @@ cryptographically signed IOUs;
 * a **parallel settlement infrastructure** that operates alongside conventional
 correspondent banking and can serve corridors that are de-risked,
 underbanked, or prohibitively expensive for small transfers;
+* a **regional clearing platform**, where banks or trade entities in different
+jurisdictions clear bilateral balances through token-backed reserves and
+tracker federation;
 * a **community clearing network** (LETS, mutual credit, agent economies) with
 programmable trust rules instead of institutional gatekeepers.
 
@@ -184,9 +187,85 @@ counterparty can monitor without trusting the node operator.
 
 ---
 
-## 3. Other Informal Clearing Systems
+## 3. Regional Clearing Platforms
 
-### 3.1 LETS and Mutual Credit
+### 3.1 What a Regional Clearing Platform Does
+
+Regional clearing platforms let banks, trade entities, or treasury vehicles in
+different jurisdictions clear trade balances without routing every payment
+through the global correspondent-banking network. A typical platform provides:
+
+* **Bilateral or multilateral trade-balance tracking.**
+* **Non-cash netting**, so only the net difference is settled periodically.
+* **A settlement asset** acceptable to all participants, often a trade currency,
+  commodity, or tokenized unit.
+* **Periodic reconciliation** to true-up balances.
+
+These platforms arise naturally when conventional rails are expensive,
+de-risked, or simply unavailable for a corridor — for example, trade settlement
+between countries that do not share a major correspondent-bank relationship.
+
+### 3.2 Basis Mapping for Regional Clearing
+
+| Regional Platform Concept | Basis Equivalent | Implementation |
+|---|---|---|
+| Participating bank / trade entity | Reserve owner and issuer | Locks collateral, issues notes to counterparties |
+| Bilateral clearing balance | Cumulative `issuer → recipient` IOU note | One note per counterparty pair |
+| Settlement asset | Token-backed reserve (`contract/basis-token.es`) | Trade token, stable unit, or commodity token |
+| Shared clearing ledger | Tracker or federation of trackers | AVL+ tree commitments on Ergo |
+| Periodic reconciliation | Debt transfer + on-chain redemption | Netting via novation, final settlement on-chain |
+
+A Russian importer and a Chinese exporter, for instance, could settle through a
+regional tracker: the importer's bank issues notes to the exporter's bank,
+tracker events record the accumulating balance, and at the end of a clearing
+cycle the net position is either settled through debt transfer to a third
+participant or redeemed against a token-backed reserve.
+
+### 3.3 Cross-Border Federation Pattern
+
+A single national tracker creates a centralization risk and a jurisdiction
+bottleneck. A more robust design uses a **federation of trackers**:
+
+* Each country or economic bloc runs its own tracker.
+* Gateway entities are trusted by multiple trackers and hold reserves recognized
+  on both sides.
+* Cross-tracker debt recognition lets obligations circulate between
+  jurisdictions without every transaction hitting the blockchain.
+
+This is the regional-platform equivalent of inter-clearinghouse links. Basis's
+future cross-tracker federation and multi-tracker reserve extensions
+(`specs/basis_protocol.md`) are the direct technical path to this architecture.
+
+### 3.4 Netting and Settlement Cycles
+
+Regional platforms operate in cycles:
+
+1. **Intra-cycle:** participants issue and accept notes, building bilateral
+   balances. Debt transfer can re-route obligations to optimize the network.
+2. **End-of-cycle:** the tracker computes net positions per participant.
+3. **Settlement:** net creditors redeem notes against token reserves; net debtors
+   top up reserves or roll balances into the next cycle.
+
+The tracker's FIFO fallback and collateralization checks
+(`specs/redemption_acceptance_policy.md`) provide orderly settlement even when a
+reserve becomes distressed.
+
+### 3.5 Technical Trade-Offs
+
+* **Auditability vs. confidentiality.** Signed notes and on-chain commitments
+  create a verifiable record, which is valuable for reconciliation but may
+  conflict with the desire to keep trade flows private.
+* **Reserve denomination.** A single trade token is simplest; a basket of
+  currencies or commodities better reflects multi-country trade but requires
+  pricing oracles.
+* **Tracker trust model.** A single operator is easiest to deploy; a federation
+  or sidechain reduces jurisdiction risk but adds coordination complexity.
+
+---
+
+## 4. Other Informal Clearing Systems
+
+### 4.1 LETS and Mutual Credit
 
 A Local Exchange Trading System (LETS) is a closed community in which members
 extend credit to each other and balances sum to zero. Basis already models this
@@ -199,7 +278,7 @@ with the LETS demo (`specs/tui_wallet_lets.md`):
 The same architecture can scale to larger informal clearing circles: villages,
 cooperatives, diaspora associations, or supply-chain networks.
 
-### 3.2 Community Currencies
+### 4.2 Community Currencies
 
 A community can issue a token-backed reserve (`contract/basis-token.es`) and
 run a local tracker. The token serves as the community's unit of account while
@@ -207,7 +286,7 @@ Basis provides the clearing machinery. Because notes are off-chain, the system
 can run on minimal infrastructure and even mesh networks with only occasional
 connectivity to the global Ergo chain.
 
-### 3.3 Agentic and Machine-to-Machine Clearing
+### 4.3 Agentic and Machine-to-Machine Clearing
 
 Autonomous agents can use Basis as a settlement layer for resource sharing,
 compute markets, and service payments. The acceptance policy becomes a
@@ -216,7 +295,7 @@ managers that meet its collateral or whitelist conditions. This is already
 demonstrated in `demo/agent_teams/` and `demo/agent_coop/`
 (`docs/AGENT_INTERFACE.md`).
 
-### 3.4 Cross-Tracker Gateways
+### 4.4 Cross-Tracker Gateways
 
 Multiple trackers can be linked through **multi-tracker reserves** or cross-tracker
 debt recognition. A broker who is trusted by two trackers can act as a bridge:
@@ -226,7 +305,7 @@ as a future extension in `specs/basis_protocol.md`.
 
 ---
 
-## 4. Protocol Extensions Required
+## 5. Protocol Extensions Required
 
 To mature Basis as an informal clearing platform, the following extensions are
 useful:
@@ -235,18 +314,21 @@ useful:
 |---|---|---|
 | **Token-backed reserves** | Collateral in local currencies, stable tokens, or commodities | Implemented (`contract/basis-token.es`) |
 | **Cross-tracker federation** | Inter-clearinghouse settlement and trust delegation | Future (`specs/basis_protocol.md`) |
+| **Cross-tracker state proofs** | Prove a note exists in another tracker's AVL tree | Not implemented |
 | **Multi-tracker reserves** | Gateways between tracker networks | Future |
+| **Multi-currency / basket reserves** | Denominate collateral in trade-currency baskets | Not implemented |
 | **Identity/reputation predicates** | Acceptance based on verifiable credentials or history | Not implemented |
 | **Offline/mesh sync** | Notes propagate without live internet, reconcile later | Not implemented |
 | **Stealth redemption addresses** | Privacy for final payout | Future (`specs/basis_protocol.md`) |
 | **Audit exports** | Operator-readable settlement reports from tracker events | Not implemented |
 | **Automatic netting cycles** | Periodic multilateral debt transfer across many parties | Not implemented |
+| **Privacy-preserving balance reporting** | Reveal net positions without exposing individual trades | Not implemented |
 
 ---
 
-## 5. Operational Considerations
+## 6. Operational Considerations
 
-### 5.1 Capital and Backing
+### 6.1 Capital and Backing
 
 A settlement node that issues notes must decide on backing strategy:
 
@@ -258,21 +340,21 @@ practice (`docs/free_banking.md`).
 * **Pure credit**: no collateral; relies entirely on whitelist and reputation.
 Lowest cost, highest trust requirement.
 
-### 5.2 Redemption Ordering and Distress
+### 6.2 Redemption Ordering and Distress
 
 When a reserve is undercollateralized, the tracker can enforce a FIFO queue:
 only the oldest outstanding note may redeem (`specs/redemption_acceptance_policy.md`).
 This converts a disorderly run into an orderly settlement queue. On-chain,
 first-come-first-served still applies if the tracker is bypassed.
 
-### 5.3 Refund Lockup as Settlement Notice
+### 6.3 Refund Lockup as Settlement Notice
 
 The reserve owner's two-phase refund (`specs/basis_protocol.md`) acts like a
 settlement notice. After initiating a refund, the owner must wait ~2 months
 before withdrawing collateral, giving creditors time to redeem or negotiate
 off-chain settlement.
 
-### 5.4 On/Off Ramps
+### 6.4 On/Off Ramps
 
 Parallel settlement is most useful when it can connect to conventional finance
 at the edges:
@@ -287,7 +369,7 @@ around the protocol.
 
 ---
 
-## 6. Implementation Roadmap
+## 7. Implementation Roadmap
 
 1. **Document and demonstrate Hawala mapping**
    - Add acceptance-policy examples for broker networks.
@@ -297,20 +379,25 @@ around the protocol.
    - Test `contract/basis-token.es` with community-currency tokens.
    - Evaluate pegging and redemption UX.
 
-3. **Prototype cross-tracker settlement**
+3. **Prototype regional clearing platform**
+   - Deploy token-backed reserves for a bilateral trade corridor.
+   - Demonstrate cross-tracker balance netting and end-of-cycle settlement.
+
+4. **Prototype cross-tracker settlement**
    - Design federation protocol (Oracle Pool or Rosen-style).
    - Implement multi-tracker reserve or gateway contract.
 
-4. **Add operator tooling**
+5. **Add operator tooling**
    - Audit exports from tracker event store.
    - Netting-cycle automation for broker networks.
 
-5. **Pilot with a real informal clearing use case**
-   - Diaspora remittance circle, community currency, or agent economy.
+6. **Pilot with a real informal clearing use case**
+   - Diaspora remittance circle, community currency, regional trade corridor, or
+     agent economy.
 
 ---
 
-## 7. References
+## 8. References
 
 * `specs/basis_protocol.md` — Basis protocol overview and contract actions.
 * `specs/spec.md` — Detailed payment, redemption, and debt-transfer flows.
@@ -323,3 +410,6 @@ around the protocol.
 * `contract/basis.es` — ERG-backed reserve contract.
 * `contract/basis-token.es` — Token-backed reserve contract.
 * `specs/SCHNORR_SIGNATURE_SPEC.md` — Signature format used for IOU notes.
+* [Russia and China’s Regional Clearing Platforms](https://fincrimecentral.com/russia-china-clearing-platforms-sanctions/) —
+  Example of bilateral regional clearing architecture outside conventional
+  correspondent banking.
