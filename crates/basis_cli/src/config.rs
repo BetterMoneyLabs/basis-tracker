@@ -9,6 +9,18 @@ pub struct CliConfig {
     pub current_account: Option<String>,
     pub accounts: HashMap<String, AccountConfig>,
     pub server_url: String,
+    /// Tracker authentication mode: `none`, `api_key`, or `signature`.
+    #[serde(default)]
+    pub server_auth_mode: Option<String>,
+    /// Shared API key when `server_auth_mode` is `api_key`.
+    #[serde(default)]
+    pub server_api_key: Option<String>,
+    /// Hex-encoded public key when `server_auth_mode` is `signature`.
+    #[serde(default)]
+    pub server_auth_pubkey: Option<String>,
+    /// Hex-encoded secret key when `server_auth_mode` is `signature`.
+    #[serde(default)]
+    pub server_auth_secret_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +59,10 @@ impl ConfigManager {
                 current_account: None,
                 accounts: HashMap::new(),
                 server_url: "http://127.0.0.1:3048".to_string(),
+                server_auth_mode: None, // default: anonymous
+                server_api_key: None,
+                server_auth_pubkey: None,
+                server_auth_secret_key: None,
             }
         };
 
@@ -170,6 +186,10 @@ mod tests {
                 map
             },
             server_url: "http://127.0.0.1:3048".to_string(),
+            server_auth_mode: None,
+            server_api_key: None,
+            server_auth_pubkey: None,
+            server_auth_secret_key: None,
         };
         fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
         ConfigManager::new(Some(path)).unwrap()

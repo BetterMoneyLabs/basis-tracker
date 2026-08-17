@@ -2,6 +2,8 @@
 
 pub mod acceptance;
 pub mod api;
+pub mod auth_middleware;
+pub mod authorization;
 pub mod config;
 pub mod models;
 pub mod redemption_build;

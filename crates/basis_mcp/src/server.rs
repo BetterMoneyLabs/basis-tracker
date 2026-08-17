@@ -3,6 +3,12 @@
 //! Wraps the typed command cores from `basis_cli_lib::commands::*` (the same
 //! functions backing `basis-cli --json`). Private keys never leave the process:
 //! there is deliberately no key-export tool, and signing happens in-process.
+//!
+//! Authentication credentials for the tracker server are read from environment
+//! variables (`BASIS_TRACKER_AUTH_MODE`, `BASIS_TRACKER_API_KEY`,
+//! `BASIS_TRACKER_AUTH_PUBKEY`, `BASIS_TRACKER_AUTH_SECRET_KEY`) so deployments
+//! can inject secrets without modifying the CLI config file. See
+//! `specs/server/authentication_authorization.md` for the supported modes.
 
 use std::sync::Arc;
 
@@ -11,7 +17,7 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 
 use basis_cli_lib::account::AccountManager;
-use basis_cli_lib::api::{TrackerClient, UploadPolicyRequest};
+use basis_cli_lib::api::{TrackerAuth, TrackerClient, UploadPolicyRequest};
 use basis_cli_lib::commands;
 use basis_cli_lib::config::ConfigManager;
 use basis_core::acceptance::AcceptanceConfig;
@@ -195,7 +201,8 @@ impl BasisMcp {
         let account_manager = AccountManager::new(config_manager.clone())?;
         let server_url =
             server_url.unwrap_or_else(|| config_manager.get_config().server_url.clone());
-        let client = TrackerClient::new(server_url);
+        let auth = tracker_auth_from_env_or_config(config_manager.get_config());
+        let client = TrackerClient::with_auth(server_url, auth);
         let ui_config = UiConfigManager::new()?;
 
         Ok(Self {
@@ -206,6 +213,67 @@ impl BasisMcp {
             })),
             tool_router: Self::tool_router(),
         })
+    }
+}
+
+/// Load tracker authentication credentials from environment variables, falling
+/// back to `~/.basis/cli.toml`.
+///
+/// Environment variables take precedence. When they are absent or empty, the
+/// corresponding fields from `CliConfig` are used.
+///
+/// - `BASIS_TRACKER_AUTH_MODE`: `none` (default), `api_key`, or `signature`.
+/// - `BASIS_TRACKER_API_KEY`: shared secret when mode is `api_key`.
+/// - `BASIS_TRACKER_AUTH_PUBKEY`: hex public key when mode is `signature`.
+/// - `BASIS_TRACKER_AUTH_SECRET_KEY`: hex secret key when mode is `signature`.
+fn tracker_auth_from_env_or_config(config: &basis_cli_lib::config::CliConfig) -> TrackerAuth {
+    let mode = std::env::var("BASIS_TRACKER_AUTH_MODE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| config.server_auth_mode.clone())
+        .unwrap_or_else(|| "none".to_string())
+        .to_lowercase();
+
+    match mode.as_str() {
+        "api_key" => {
+            let key = std::env::var("BASIS_TRACKER_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| config.server_api_key.clone());
+            match key {
+                Some(key) => TrackerAuth::api_key(key),
+                None => {
+                    tracing::warn!(
+                        "BASIS_TRACKER_AUTH_MODE=api_key but BASIS_TRACKER_API_KEY and \
+                         server_api_key are both empty"
+                    );
+                    TrackerAuth::None
+                }
+            }
+        }
+        "signature" => {
+            let pubkey = std::env::var("BASIS_TRACKER_AUTH_PUBKEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| config.server_auth_pubkey.clone());
+            let secret = std::env::var("BASIS_TRACKER_AUTH_SECRET_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| config.server_auth_secret_key.clone());
+            match (pubkey, secret) {
+                (Some(pubkey), Some(secret)) if !pubkey.is_empty() && !secret.is_empty() => {
+                    TrackerAuth::signature(pubkey, secret)
+                }
+                _ => {
+                    tracing::warn!(
+                        "BASIS_TRACKER_AUTH_MODE=signature but pubkey/secret env vars and \
+                         cli.toml fields are missing"
+                    );
+                    TrackerAuth::None
+                }
+            }
+        }
+        _ => TrackerAuth::None,
     }
 }
 

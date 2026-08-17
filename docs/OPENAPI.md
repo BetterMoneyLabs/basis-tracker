@@ -26,6 +26,55 @@ The Basis Tracker API provides RESTful endpoints for managing decentralized debt
 http://localhost:3048
 ```
 
+When TLS is configured, use `https://localhost:3048` instead.
+
+## Authentication
+
+The tracker server supports three authentication modes, configured under
+`[server.auth]` in `config/basis.toml`:
+
+- **`none`** (default): anonymous requests; suitable for local development only.
+- **`api_key`**: clients send a shared secret in the `Authorization: Bearer <key>`
+  or `X-API-Key: <key>` header. API-key clients are granted full (`Admin`) access.
+- **`signature`**: clients authenticate with per-request secp256k1 Schnorr
+  signatures. The server must list the client's public key and role under
+  `server.auth.authorized_clients`.
+
+### Signature mode
+
+For each request the client provides:
+
+| Header | Value |
+|--------|-------|
+| `X-Signature-Pubkey` | 66-character compressed secp256k1 public key |
+| `X-Signature` | 130-character Schnorr signature |
+| `X-Signature-Timestamp` | Unix timestamp in milliseconds |
+| `X-Signature-Nonce` | Unique nonce (required for replay protection) |
+
+The signature covers the canonical string:
+
+```text
+<METHOD>\n<PATH>\n<QUERY>\n<TIMESTAMP>\n<NONCE>\n<BODY_HASH>
+```
+
+where `BODY_HASH` is the lowercase hex SHA-256 of the raw request body. The
+`GET /` health check is always public.
+
+### Authorization
+
+When authentication is enabled, routes require the following roles:
+
+| Role | Access |
+|------|--------|
+| `Read` | All `GET` endpoints plus read-only `POST` endpoints (`/notes/state`, `/acceptance/check`) |
+| `Write` | `Read` access plus note creation, redemption, and `/tracker/signature` |
+| `Admin` | `Write` access plus `/reserves/create`, `/reserves/submit`, and `/acceptance/policy` |
+
+All three official clients support authentication:
+`basis_cli` and `basis_app` (TUI) read `server_auth_mode` and credentials from
+`~/.basis/cli.toml`; `basis_mcp` reads the same settings from environment
+variables first, falling back to `~/.basis/cli.toml`.
+
 ## Response Format
 
 All endpoints return a standardized response envelope:

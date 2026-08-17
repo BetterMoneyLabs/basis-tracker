@@ -82,11 +82,21 @@ Different modules handle various command categories. Each module exposes `pub` t
   - Event querying
   - Proof retrieval
 - Uses strongly-typed request/response structures
+- Supports three authentication schemes via `TrackerAuth`:
+  - `None`: anonymous (default, backward-compatible)
+  - `ApiKey(String)`: shared secret sent as `Authorization: Bearer <key>`
+  - `Signature { pubkey_hex, secret_key_hex }`: per-request secp256k1 Schnorr signatures using the canonical message format documented in `specs/server/authentication_authorization.md`
+- `TrackerClient::with_auth()` creates an authenticated client; `apply_auth()` attaches the correct headers to every `GET` and `POST` request.
 
 #### 5. Configuration Management (`config.rs`)
 - Manages CLI configuration in TOML format
 - Persists accounts and settings to `~/.basis/cli.toml`
 - Handles account configuration with key data
+- Stores server authentication settings:
+  - `server_auth_mode`: `"none"`, `"api_key"`, or `"signature"`
+  - `server_api_key`: shared secret for API-key mode
+  - `server_auth_pubkey`: hex-encoded public key for signature mode
+  - `server_auth_secret_key`: hex-encoded secret key for signature mode
 
 #### 6. Cryptographic Functions (`crypto.rs`)
 - Key generation and management using secp256k1
@@ -143,6 +153,7 @@ Different modules handle various command categories. Each module exposes `pub` t
 - User configuration stored in `~/.basis/cli.toml`
 - Support for custom configuration paths
 - Persistent account management between sessions
+- Server authentication settings (`server_auth_mode`, `server_api_key`, `server_auth_pubkey`, `server_auth_secret_key`) allow the CLI to connect to authenticated tracker servers; see `specs/server/authentication_authorization.md`. The TUI wallet (`basis_app`) also reads these same settings from `~/.basis/cli.toml`.
 
 ## Error Handling
 - Comprehensive error handling using `anyhow` crate

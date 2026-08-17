@@ -96,7 +96,8 @@ async fn run(cli: Cli) -> Result<()> {
     // Load configuration
     let config_manager = config::ConfigManager::new(cli.config)?;
     let mut account_manager = account::AccountManager::new(config_manager.clone())?;
-    let client = api::TrackerClient::new(cli.server_url);
+    let auth = api::TrackerAuth::from_config(config_manager.get_config());
+    let client = api::TrackerClient::with_auth(cli.server_url, auth);
 
     match cli.command {
         Commands::Account { cmd } => {

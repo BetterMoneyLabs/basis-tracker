@@ -227,6 +227,10 @@ mod tests {
                 map
             },
             server_url: "http://127.0.0.1:3048".to_string(),
+            server_auth_mode: None,
+            server_api_key: None,
+            server_auth_pubkey: None,
+            server_auth_secret_key: None,
         };
         fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
         let config_manager = ConfigManager::new(Some(path)).unwrap();

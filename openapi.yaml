@@ -22,7 +22,13 @@ info:
 
 servers:
   - url: http://localhost:3048
-    description: Local development server
+    description: Local development server (plaintext)
+  - url: https://localhost:3048
+    description: Local development server (TLS)
+
+security:
+  - ApiKeyAuth: []
+  - SignatureAuth: []
 
 paths:
   /:
@@ -32,6 +38,7 @@ paths:
       operationId: root
       tags:
         - Health
+      security: []
       responses:
         '200':
           description: Successful response
@@ -1066,6 +1073,22 @@ paths:
                 $ref: '#/components/schemas/ApiResponseError'
 
 components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Shared API key sent as `X-API-Key: <key>` or
+        `Authorization: Bearer <key>`. Grants `Admin` access.
+    SignatureAuth:
+      type: apiKey
+      in: header
+      name: X-Signature
+      description: |
+        Per-request secp256k1 Schnorr signature. Requires companion headers
+        `X-Signature-Pubkey`, `X-Signature-Timestamp`, and `X-Signature-Nonce`.
+
   schemas:
     # API Response Wrappers
     ApiResponse:

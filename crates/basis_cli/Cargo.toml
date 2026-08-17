@@ -30,6 +30,7 @@ rand = "0.8"
 toml = "0.8"
 num-bigint = "0.4"
 generic-array = "0.14"
+sha2 = "0.10"
 
 # Workspace dependencies
 basis_store = { path = "../basis_store" }

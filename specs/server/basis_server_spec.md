@@ -12,9 +12,11 @@ The `basis_server` crate is a Rust web server built with the Axum framework that
 2. **Reserve API Module**: Handles reserve-specific endpoints
 3. **Models Module**: Defines data structures for API requests/responses
 4. **Store Module**: Implements event storage functionality
-5. **Config Module**: Handles application configuration
-6. **Tracker Thread**: Background task that processes commands via message passing
-7. **AVL Tree Manager**: Manages the tracker's AVL tree state and proof generation
+5. **Auth Middleware**: Authentication middleware supporting anonymous, API-key, and secp256k1-signature modes
+6. **Authorization Middleware**: Role-based access control (RBAC) enforcing `Read`, `Write`, and `Admin` privileges per route
+7. **Config Module**: Handles application configuration, including TLS and authentication settings
+8. **Tracker Thread**: Background task that processes commands via message passing
+9. **AVL Tree Manager**: Manages the tracker's AVL tree state and proof generation
 
 ### Communication Pattern
 
@@ -255,6 +257,14 @@ Key configuration includes:
   scanner metadata). Defaults to `data` relative to the server's working directory.
   Can be overridden with the `BASIS_SERVER_DATA_DIR` environment variable.
   The legacy `server.database_url` field is kept for compatibility but is currently unused.
+- **`server.tls_cert_path` / `server.tls_key_path`**: Paths to PEM-encoded TLS certificate and key.
+  When both are set, the server listens on HTTPS. Strongly recommended whenever auth is enabled.
+- **`server.auth`**: Authentication and authorization settings:
+  - `mode`: `none`, `api_key`, or `signature`.
+  - `api_key`: shared secret used when `mode = "api_key"`.
+  - `authorized_clients`: list of `{ pubkey, role }` entries used when `mode = "signature"`.
+  - `allowed_origins`: CORS allow-list used when auth is enabled.
+  - `signature_timestamp_tolerance_ms`: maximum age of a request signature in milliseconds (default 30 s).
 - **Ergo node connection details** (required): The server will abort with exit code 1 if `ergo.node.node_url` is not provided in the configuration - no default localhost value is used
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)
@@ -267,6 +277,7 @@ Key configuration includes:
 2. The server requires access to an Ergo node with the Schnorr signing API (`/utils/schnorrSign`) enabled for endpoints that require tracker signatures. The tracker private key must be available in the Ergo node's wallet for signature generation.
 3. The tracker public key must be provided in the configuration for signature verification purposes.
 4. The tracker API key must be provided to authenticate requests to the Ergo node's signing API.
+5. When `server.auth.mode` is not `none`, configure TLS (`server.tls_cert_path` and `server.tls_key_path`) for production deployments so credentials and signatures are not sent in plaintext.
 
 ## Blockchain Integration
 
@@ -299,14 +310,43 @@ The server implements comprehensive error handling:
 - Emergency redemption timeout handling
 - Acceptance policy enforcement at redemption time: normal redemptions via `POST /redeem` and `POST /redemption/build` are rejected with HTTP 400 when they would newly violate another debt holder's acceptance policy (failure id `failed_policy_violation`) or, on a distressed reserve, when the redeemer does not hold the issuer's oldest outstanding note (failure id `failed_not_oldest_note`). Configurable via `[redemption] enforce_acceptance_policy` (default `true`); see `specs/redemption_acceptance_policy.md`
 
+## Authentication & Authorization
+
+The server supports three authentication modes configured under `[server.auth]`:
+
+- `none`: anonymous access (backward-compatible local development).
+- `api_key`: shared secret via `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+- `signature`: per-client secp256k1 Schnorr request signatures.
+
+Signature mode uses a canonical message:
+
+```text
+<METHOD>\n<PATH>\n<QUERY>\n<TIMESTAMP>\n<NONCE>\n<BODY_HASH>
+```
+
+where `BODY_HASH` is the lowercase hex SHA-256 of the raw request body. The server verifies signatures with `basis_offchain::schnorr::schnorr_verify`, enforces a timestamp tolerance (default 30 s), and rejects replayed `(pubkey, nonce)` pairs.
+
+Role-based access control assigns each request a role:
+
+- `Read`: `GET` endpoints and read-only `POST` queries (`/notes/state`, `/acceptance/check`).
+- `Write`: state-changing endpoints such as `/notes`, `/redeem`, `/redemption/prepare`, `/tracker/signature`.
+- `Admin`: reserve creation/submission (`/reserves/create`, `/reserves/submit`) and policy management (`/acceptance/policy`).
+
+In `none` and `api_key` modes all authenticated requests receive `Admin`. In `signature` mode the role is taken from the matching `authorized_clients` entry.
+
+TLS should be enabled (`tls_cert_path` / `tls_key_path`) whenever authentication is used in production, otherwise credentials and signatures travel in plaintext.
+
+For full details see `specs/server/authentication_authorization.md`.
+
 ## Security Considerations
 
-- CORS headers configured for cross-origin requests
+- CORS headers configured for cross-origin requests, with origin restriction when auth is enabled and `allowed_origins` is non-empty
 - Input validation for all public keys and amounts
 - Signature verification for note creation and debt transfer
 - Channel-based communication to ensure thread safety
 - Remote signature generation to protect private keys
 - AVL tree proof verification to prevent fraud
+- Authentication and RBAC on all endpoints except the health-check root (`GET /`)
 
 ## Blockchain Height Caching
 

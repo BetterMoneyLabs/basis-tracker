@@ -229,3 +229,66 @@ The tracker uses the `/scan` endpoints to efficiently monitor relevant boxes on 
 - `/scan/spentBoxes/{scanId}`: Retrieve spent boxes matching a scan
 
 These scanning capabilities enable the tracker to efficiently monitor both reserve boxes and tracker commitment boxes containing R4 (tracker public key) and R5 (AVL+ tree root digest) register values.
+
+## Changing the HTTP API
+
+When adding, removing, or modifying a tracker server endpoint, update the following artifacts and run the consistency checks:
+
+1. **Rust implementation** in `crates/basis_server/src/`.
+   - Add the handler and route in `main.rs`.
+   - Add or update request/response structs in `models.rs`, `reserve_api.rs`, or `redemption_build.rs`.
+2. **OpenAPI specification** in `openapi.yaml`.
+   - Add/update the path, operation, parameters, request body, and response schemas.
+   - Ensure every `$ref` points to a schema defined in `components/schemas`.
+3. **Human docs** in `docs/OPENAPI.md`.
+   - Update the endpoint list and any affected examples or tables.
+4. **CLI client** in `crates/basis_cli/src/api.rs`.
+   - Add/update `TrackerClient` methods and request/response types if the endpoint is consumed by the CLI or MCP server.
+5. **MCP server** in `crates/basis_mcp/src/server.rs`.
+   - Add or update MCP tool definitions and parameter structs if the operation should be exposed to MCP clients.
+6. **Run consistency checks** before committing:
+   ```bash
+   cargo test -p basis_server --test openapi_consistency -- --nocapture
+   python3 -c "import yaml; yaml.safe_load(open('openapi.yaml'))"
+   ```
+
+CI will fail if `openapi.yaml` does not match the routes registered in `crates/basis_server/src/main.rs` or if the YAML is invalid.
+
+## Server Authentication & TLS
+
+The tracker server supports optional TLS and three authentication modes
+(`none`, `api_key`, `signature`), configured under `[server]` and
+`[server.auth]` in `config/basis.toml`.
+
+When changing authentication behavior, update all of the following:
+
+1. **Server implementation** in `crates/basis_server/src/`.
+   - `config.rs` for `AuthConfig`, `AuthMode`, `ClientRole`, and defaults.
+   - `auth_middleware.rs` for credential verification and replay protection.
+   - `authorization.rs` for role-to-route mapping.
+   - `main.rs` for wiring middleware, CORS, and HTTPS serving.
+2. **CLI client** in `crates/basis_cli/src/api.rs`.
+   - `TrackerAuth` enum and header generation in `TrackerClient`.
+   - `config.rs` for persisting auth settings in `cli.toml`.
+3. **MCP server and TUI wallet** in `crates/basis_mcp/src/server.rs` and
+   `crates/basis_app/src/app.rs`.
+   - `tracker_auth_from_env_or_config()` for reading auth from environment
+     variables with a `~/.basis/cli.toml` fallback.
+   - `TrackerAuth::from_config()` for the TUI wallet.
+4. **OpenAPI specification** in `openapi.yaml`.
+   - `components/securitySchemes` and per-path `security` requirements.
+5. **Human docs** in `docs/OPENAPI.md` and `config/basis.toml.example`.
+
+### Signature mode canonical string
+
+Clients using signature authentication sign:
+
+```text
+<METHOD>\n<PATH>\n<QUERY>\n<TIMESTAMP>\n<NONCE>\n<BODY_HASH>
+```
+
+where `BODY_HASH` is the lowercase hex SHA-256 of the raw request body.
+
+## Future Direction
+
+The project intends to reduce manual duplication further by extracting shared API request/response types and deriving OpenAPI schemas from them. Until that work is complete, the consistency test above is the enforced guardrail.

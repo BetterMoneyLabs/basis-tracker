@@ -689,6 +689,9 @@ async fn create_test_app(
             port: 3048,
             data_dir: Some(server_temp_dir.path().to_string_lossy().to_string()),
             database_url: Some("sqlite::memory:".to_string()),
+            tls_cert_path: None,
+            tls_key_path: None,
+            auth: config::AuthConfig::default(),
         },
         ergo: config::ErgoConfig {
             node: NodeConfig {
@@ -781,6 +784,9 @@ async fn create_test_app_with_policy_routes(
             port: 3048,
             data_dir: Some(server_temp_dir.path().to_string_lossy().to_string()),
             database_url: Some("sqlite::memory:".to_string()),
+            tls_cert_path: None,
+            tls_key_path: None,
+            auth: config::AuthConfig::default(),
         },
         ergo: config::ErgoConfig {
             node: NodeConfig {
@@ -879,6 +885,9 @@ async fn create_test_app_with_all_routes(
             port: 3048,
             data_dir: Some(server_temp_dir.path().to_string_lossy().to_string()),
             database_url: Some("sqlite::memory:".to_string()),
+            tls_cert_path: None,
+            tls_key_path: None,
+            auth: config::AuthConfig::default(),
         },
         ergo: config::ErgoConfig {
             node: NodeConfig {

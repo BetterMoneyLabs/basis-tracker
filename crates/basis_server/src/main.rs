@@ -1,19 +1,33 @@
+//! Basis Tracker server binary.
+//!
+//! Loads configuration, starts the Ergo and tracker scanners, spawns the tracker
+//! state manager thread, builds the axum router with authentication /
+//! authorization middleware, and serves HTTP or HTTPS traffic.
+
 use axum::{
+    middleware::{from_fn, from_fn_with_state},
     routing::{get, post},
     Router,
 };
 use basis_server::{
-    api::*, build_redemption, reserve_api::*, store::EventStore, submit_redemption, AppConfig,
-    AppState, ErgoConfig, EventType, ServerConfig, SharedTrackerState, TrackerBoxUpdateConfig,
-    TrackerBoxUpdater, TrackerCommand, TrackerEvent, TransactionConfig,
+    api::*,
+    auth_middleware::{auth_middleware, AuthState},
+    authorization::authorization_middleware,
+    build_redemption,
+    reserve_api::*,
+    store::EventStore,
+    submit_redemption, AppConfig, AppState, ErgoConfig, EventType, ServerConfig,
+    SharedTrackerState, TrackerBoxUpdateConfig, TrackerBoxUpdater, TrackerCommand, TrackerEvent,
+    TransactionConfig,
 };
 use basis_store::{
     ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
     tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
     ReserveTracker,
 };
+use std::sync::Arc;
 use tokio::sync::Mutex;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -34,6 +48,9 @@ async fn main() {
                         port: 3048,
                         data_dir: Some("data".to_string()),
                         database_url: Some("sqlite:data/basis.db".to_string()),
+                        tls_cert_path: None,
+                        tls_key_path: None,
+                        auth: basis_server::config::AuthConfig::default(),
                     },
                     ergo: ErgoConfig {
                         node: NodeConfig {
@@ -739,6 +756,47 @@ async fn main() {
         policy_storage,
     };
 
+    // Build CORS layer based on auth configuration.
+    // When auth is enabled and an allow-list is provided, only those origins may
+    // send credentialed browser requests. Otherwise CORS is permissive but a
+    // warning is logged to remind operators to configure origins for production.
+    let auth_enabled = config.server.auth_enabled();
+    let cors_layer = if auth_enabled && !config.server.auth.allowed_origins.is_empty() {
+        let origins: Vec<_> = config
+            .server
+            .auth
+            .allowed_origins
+            .iter()
+            .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
+            .collect();
+        tracing::info!(
+            "Auth enabled: restricting CORS to {} origin(s)",
+            origins.len()
+        );
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        if auth_enabled {
+            tracing::warn!(
+                "Auth is enabled but server.auth.allowed_origins is empty; \
+                 CORS will allow any origin. Configure allowed_origins for browser clients."
+            );
+        }
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
+
+    // Auth/authorization state and layers.
+    // Auth runs first to identify the caller and attach an AuthContext;
+    // authorization runs next to enforce role-based route access.
+    let auth_state = Arc::new(AuthState::new(config.server.auth.clone()));
+    let auth_layer = from_fn_with_state(auth_state.clone(), auth_middleware);
+    let authz_layer = from_fn(authorization_middleware);
+
     // Build our application with routes - FIXED ROUTE ORDER
     let app = Router::new()
         // Root route
@@ -815,12 +873,12 @@ async fn main() {
         .route("/config/reserve-token", get(get_reserve_token_config))
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        );
+        // Authorization runs after auth so an AuthContext is always present.
+        .layer(authz_layer)
+        // Auth identifies the caller and must run before authorization.
+        .layer(auth_layer)
+        // CORS is the outermost layer so preflight requests are handled first.
+        .layer(cors_layer);
 
     tracing::debug!("Router built successfully");
     tracing::debug!("Registered routes:");
@@ -845,11 +903,13 @@ async fn main() {
     tracing::debug!("  GET /tracker/state");
     tracing::debug!("  GET /tracker/pending-tx");
 
-    // Run our app with hyper
+    // Run our app with hyper, optionally over TLS.
+    // When TLS is configured the auth credentials and signatures are encrypted
+    // in transit; otherwise a warning is emitted if auth is enabled.
     let addr = config.socket_addr();
     tracing::debug!("listening on {}", addr);
 
-    let listener = match tokio::net::TcpListener::bind(addr).await {
+    let std_listener = match std::net::TcpListener::bind(addr) {
         Ok(listener) => {
             tracing::info!("Server listening on {}", addr);
             listener
@@ -864,10 +924,67 @@ async fn main() {
     // No need for duplicate background scanner task
 
     tracing::info!("Starting axum server...");
-    if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!("Server error: {}", e);
-        std::process::exit(1);
+    if config.server.tls_enabled() {
+        serve_tls(std_listener, app, &config.server).await;
+    } else {
+        if config.server.auth_enabled() {
+            tracing::warn!(
+                "Authentication is enabled but TLS is not. Credentials and signatures \
+                 will be sent over plaintext. Configure tls_cert_path and tls_key_path \
+                 for production use."
+            );
+        }
+        let listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("Failed to convert TCP listener: {}", e);
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("Server error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Serve the app over HTTPS using the configured certificate and key.
+async fn serve_tls(listener: std::net::TcpListener, app: Router, server_config: &ServerConfig) {
+    let cert_path = server_config
+        .tls_cert_path
+        .as_deref()
+        .expect("tls_cert_path checked by tls_enabled");
+    let key_path = server_config
+        .tls_key_path
+        .as_deref()
+        .expect("tls_key_path checked by tls_enabled");
+
+    let tls_config =
+        match axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path).await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load TLS certificate/key from {} / {}: {}",
+                    cert_path,
+                    key_path,
+                    e
+                );
+                std::process::exit(1);
+            }
+        };
+
+    tracing::info!("Starting HTTPS server with TLS...");
+    let server = match axum_server::from_tcp_rustls(listener, tls_config) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to create TLS server: {}", e);
+            std::process::exit(1);
+        }
     };
+    if let Err(e) = server.serve(app.into_make_service()).await {
+        tracing::error!("HTTPS server error: {}", e);
+        std::process::exit(1);
+    }
 }
 
 /// Background task that continuously scans the blockchain for reserve events
