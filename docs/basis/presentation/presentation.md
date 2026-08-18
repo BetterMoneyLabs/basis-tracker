@@ -123,6 +123,28 @@ Disconnected Village
 
 ## P2P Interactions
 
+### LETS / Mutual Credit
+
+- Community members **whitelist** each other
+- Per-member `max_debt` caps negative balances
+- **No reserves**, no on-chain fees — pure trust
+- TUI wallet shows assets, liabilities, and net position in real time
+
+```
+LETS Circle
+┌──────┐    ┌──────┐    ┌──────┐
+│ Alice│◄──►│  Bob │◄──►│ Carol│
+└──────┘    └──────┘    └──────┘
+   │            │            │
+   └────────────┴────────────┘
+     Common credit money
+     (balances sum to zero)
+```
+
+---
+
+## P2P Interactions
+
 ### Micropayments for Content
 
 ```
@@ -153,6 +175,36 @@ B buys from C → A's debt transfers (with A's consent)
 No on-chain redemption needed!
 ```
 
+### Circular Netting
+
+```
+A → B: 10   B → C: 5   C → A: 3
+
+Net positions:
+A: -10 + 3 = -7   (owes 7)
+B: +10 - 5 = +5   (owed 5)
+C: +5 - 3 = +2    (owed 2)
+
+Settlement: A pays B 5, A pays C 2
+→ 0 on-chain transactions (vs 3 naive settlements)
+```
+
+---
+
+## Agent Economy Demo
+
+### Three Tiers of Money
+
+| Tier | Relationship | Backing |
+|------|--------------|---------|
+| **Pure credit** | Manager → own workers | Trust / whitelist |
+| **Collateralized credit** | Manager → rival workers | ≥ 50% reserve backing |
+| **Backed money** | Judge → winning manager | 100% backed, redeemed on-chain |
+
+- Competing agent teams run via `basis-mcp` MCP server
+- Same acceptance policies humans use
+- See `demo/agent_teams/` and `demo/agent_coop/`
+
 ---
 
 ## Why Ergo?
@@ -172,8 +224,14 @@ No on-chain redemption needed!
 * ERG (native)     
 * Bitcoin (via bridges/wrapping)          
 * Tokenized gold, silver, commodities      
-* Stablecoins                              
-* Basket tokens, and so on                 
+* Stablecoins / **token-backed reserves** (e.g. USE)
+* Community currencies / basket tokens
+
+### Trust as Policy
+
+- Acceptance predicates turn trust into **machine-readable rules**
+- Whitelist, collateralization, blacklist, refund-safe checks
+- Each participant decides whom to trust and under what terms
 
 
 ---
@@ -251,9 +309,11 @@ More users → More reserves → More ERG demand → Higher security
 ## Current Status
 
 ### ✅ Working
-- Reserve contract on Ergo
-- Tracker prototype
+- Reserve contract on Ergo (ERG-backed and **token-backed**)
+- Tracker prototype with acceptance policies
 - P2P payment flows tested
+- **LETS tutorial** and **agent co-op/teams** demos
+- **Circular netting / triangular debt transfer** demo
 
 ---
 
@@ -261,6 +321,7 @@ More users → More reserves → More ERG demand → Higher security
 - Rust implementation (production server)
 - Mesh network demos
 - Agent economy simulations
+- Cross-tracker settlement
 
 ---
 
