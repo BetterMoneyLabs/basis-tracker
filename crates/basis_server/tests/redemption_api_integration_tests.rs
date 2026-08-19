@@ -279,6 +279,9 @@ mod redemption_api_tests {
                 port: 3048,
                 data_dir: Some(data_dir.to_string_lossy().to_string()),
                 database_url: Some("sqlite::memory:".to_string()),
+                tls_cert_path: None,
+                tls_key_path: None,
+                auth: basis_server::config::AuthConfig::default(),
             },
             ergo: basis_server::config::ErgoConfig {
                 node: basis_store::ergo_scanner::NodeConfig {

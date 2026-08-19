@@ -1,7 +1,7 @@
 use anyhow::Result;
 use basis_cli_lib::{
     account::AccountManager,
-    api::{ReserveTokenConfig, TrackerClient},
+    api::{ReserveTokenConfig, TrackerAuth, TrackerClient},
     config::ConfigManager,
 };
 use basis_core::acceptance::AcceptanceConfig;
@@ -248,7 +248,8 @@ impl App {
         };
 
         let server_url = config_manager.get_config().server_url.clone();
-        let client = TrackerClient::new(server_url.clone());
+        let auth = TrackerAuth::from_config(config_manager.get_config());
+        let client = TrackerClient::with_auth(server_url.clone(), auth);
 
         let current_account = account_manager.get_current().map(|acc| AccountInfo {
             name: acc.name.clone(),

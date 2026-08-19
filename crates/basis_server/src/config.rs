@@ -40,6 +40,89 @@ pub struct ServerConfig {
     pub data_dir: Option<String>,
     /// Database path (legacy field, kept for config compatibility; currently unused).
     pub database_url: Option<String>,
+    /// Path to PEM-encoded TLS certificate chain. When both this and
+    /// `tls_key_path` are set, the server listens on HTTPS.
+    pub tls_cert_path: Option<String>,
+    /// Path to PEM-encoded TLS private key.
+    pub tls_key_path: Option<String>,
+    /// Authentication mode. When absent, the server accepts anonymous
+    /// requests (backward-compatible local development behavior).
+    #[serde(default)]
+    pub auth: AuthConfig,
+}
+
+/// Authentication configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// Authentication scheme.
+    #[serde(default)]
+    pub mode: AuthMode,
+    /// Shared API key for `Authorization: Bearer` or `X-API-Key` authentication.
+    /// Used only when `mode` is `ApiKey`.
+    pub api_key: Option<String>,
+    /// Public keys authorized to access the API. Used when `mode` is
+    /// `Signature`.
+    #[serde(default)]
+    pub authorized_clients: Vec<AuthorizedClient>,
+    /// Allowed CORS origins when auth is enabled. An empty list means only
+    /// non-browser/non-CORS callers can connect.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    /// Request signature timestamp tolerance in milliseconds.
+    #[serde(default = "default_signature_timestamp_tolerance_ms")]
+    pub signature_timestamp_tolerance_ms: u64,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            mode: AuthMode::default(),
+            api_key: None,
+            authorized_clients: Vec::new(),
+            allowed_origins: Vec::new(),
+            signature_timestamp_tolerance_ms: default_signature_timestamp_tolerance_ms(),
+        }
+    }
+}
+
+/// Authentication scheme.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// No authentication.
+    #[default]
+    None,
+    /// Shared API key checked from request headers.
+    ApiKey,
+    /// Per-client secp256k1 request signatures.
+    Signature,
+}
+
+/// Role granted to an authorized client.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientRole {
+    /// Read-only access.
+    #[default]
+    Read,
+    /// Read and write (create notes, redeem).
+    Write,
+    /// Full access including policy and reserve management.
+    Admin,
+}
+
+/// An authorized API client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorizedClient {
+    /// Hex-encoded 33-byte compressed secp256k1 public key (66 characters).
+    pub pubkey: String,
+    /// Access role.
+    #[serde(default)]
+    pub role: ClientRole,
+}
+
+fn default_signature_timestamp_tolerance_ms() -> u64 {
+    30_000 // 30 seconds
 }
 
 impl ServerConfig {
@@ -50,6 +133,24 @@ impl ServerConfig {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("data"))
+    }
+
+    /// Returns true when TLS is fully configured.
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_cert_path
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+            && self
+                .tls_key_path
+                .as_ref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+    }
+
+    /// Returns true when any authentication is configured.
+    pub fn auth_enabled(&self) -> bool {
+        self.auth.mode != AuthMode::None
     }
 }
 
@@ -154,6 +255,14 @@ impl AppConfig {
             .set_default("server.port", 3048)?
             .set_default("server.data_dir", "data")?
             .set_default("server.database_url", "sqlite:data/basis.db")?
+            // TLS configuration (empty = plain HTTP)
+            .set_default("server.tls_cert_path", "")?
+            .set_default("server.tls_key_path", "")?
+            // Authentication configuration
+            .set_default("server.auth.mode", "none")?
+            .set_default("server.auth.api_key", "")?
+            .set_default("server.auth.allowed_origins", Vec::<String>::new())?
+            .set_default("server.auth.signature_timestamp_tolerance_ms", 30_000)?
             // Node configuration defaults
             .set_default("ergo.node.start_height", "")?
             .set_default("ergo.node.reserve_contract_p2s", "")?
@@ -434,6 +543,9 @@ mod tests {
                 port: 3000,
                 data_dir: Some("test_data".to_string()),
                 database_url: Some("sqlite:test.db".to_string()),
+                tls_cert_path: None,
+                tls_key_path: None,
+                auth: AuthConfig::default(),
             },
             ergo: ErgoConfig {
                 node: NodeConfig {

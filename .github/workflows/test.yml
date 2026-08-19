@@ -43,6 +43,12 @@ jobs:
     - name: Run cargo test
       run: cargo test --all --verbose
 
+    - name: Run OpenAPI consistency tests
+      run: cargo test -p basis_server --test openapi_consistency -- --nocapture
+
+    - name: Validate OpenAPI YAML syntax
+      run: python3 -c "import yaml; yaml.safe_load(open('openapi.yaml'))"
+
     - name: Run cargo clippy
       run: cargo clippy --all -- -D warnings
 

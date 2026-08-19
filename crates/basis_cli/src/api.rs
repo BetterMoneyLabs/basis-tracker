@@ -1,5 +1,77 @@
+//! HTTP client for the Basis Tracker server.
+//!
+//! `TrackerClient` wraps `ureq` and exposes typed request/response helpers for
+//! every tracker endpoint. It also implements the three supported authentication
+//! schemes (anonymous, API-key, secp256k1 Schnorr signatures) and attaches the
+//! appropriate headers to each request automatically.
+//!
+//! The canonical signing format is documented in
+//! `specs/server/authentication_authorization.md`.
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
+
+/// Authentication scheme used by [`TrackerClient`] when talking to a tracker server.
+#[derive(Debug, Clone, Default)]
+pub enum TrackerAuth {
+    /// No authentication (default, backward-compatible).
+    #[default]
+    None,
+    /// Shared API key sent as `Authorization: Bearer <key>`.
+    ApiKey(String),
+    /// Per-request secp256k1 Schnorr signature.
+    Signature {
+        /// Hex-encoded 33-byte compressed public key (66 characters).
+        pubkey_hex: String,
+        /// Hex-encoded 32-byte secret key (64 characters).
+        secret_key_hex: String,
+    },
+}
+
+impl TrackerAuth {
+    /// Create an API-key auth config.
+    pub fn api_key(key: impl Into<String>) -> Self {
+        Self::ApiKey(key.into())
+    }
+
+    /// Create a secp256k1 signature auth config.
+    pub fn signature(pubkey_hex: impl Into<String>, secret_key_hex: impl Into<String>) -> Self {
+        Self::Signature {
+            pubkey_hex: pubkey_hex.into(),
+            secret_key_hex: secret_key_hex.into(),
+        }
+    }
+
+    /// Build auth settings from the CLI configuration.
+    pub fn from_config(config: &crate::config::CliConfig) -> Self {
+        match config
+            .server_auth_mode
+            .as_deref()
+            .map(|s| s.to_lowercase())
+            .as_deref()
+        {
+            Some("api_key") => config
+                .server_api_key
+                .as_ref()
+                .filter(|k| !k.is_empty())
+                .map(Self::api_key)
+                .unwrap_or_default(),
+            Some("signature") => {
+                match (
+                    config.server_auth_pubkey.as_ref(),
+                    config.server_auth_secret_key.as_ref(),
+                ) {
+                    (Some(pk), Some(sk)) if !pk.is_empty() && !sk.is_empty() => {
+                        Self::signature(pk, sk)
+                    }
+                    _ => Self::None,
+                }
+            }
+            _ => Self::None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateNoteRequest {
@@ -229,16 +301,84 @@ pub struct CheckAcceptanceResponse {
 #[derive(Debug)]
 pub struct TrackerClient {
     base_url: String,
+    auth: TrackerAuth,
 }
 
 impl TrackerClient {
     pub fn new(base_url: String) -> Self {
-        Self { base_url }
+        Self {
+            base_url,
+            auth: TrackerAuth::None,
+        }
+    }
+
+    /// Create a client with authentication credentials.
+    pub fn with_auth(base_url: String, auth: TrackerAuth) -> Self {
+        Self { base_url, auth }
+    }
+
+    /// Replace the authentication configuration.
+    pub fn set_auth(&mut self, auth: TrackerAuth) {
+        self.auth = auth;
+    }
+
+    /// Build a `ureq::Request` for a GET call, applying any configured auth.
+    fn get(&self, url: &str) -> Result<ureq::Request> {
+        self.apply_auth(ureq::get(url), "GET", url, None)
+    }
+
+    /// Build a `ureq::Request` for a POST call, applying any configured auth.
+    fn post(&self, url: &str, body: &serde_json::Value) -> Result<ureq::Request> {
+        self.apply_auth(ureq::post(url), "POST", url, Some(body))
+    }
+
+    /// Attach authentication headers to a `ureq::Request` according to the
+    /// configured `TrackerAuth` variant.
+    fn apply_auth(
+        &self,
+        request: ureq::Request,
+        method: &str,
+        full_url: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<ureq::Request> {
+        match &self.auth {
+            // No authentication: pass the request through unchanged.
+            TrackerAuth::None => Ok(request),
+            // API-key authentication: set a bearer token header.
+            TrackerAuth::ApiKey(key) => {
+                Ok(request.set("Authorization", &format!("Bearer {}", key)))
+            }
+            // Signature authentication: build the canonical message, sign it,
+            // and attach the pubkey, signature, timestamp, and nonce headers.
+            TrackerAuth::Signature {
+                pubkey_hex,
+                secret_key_hex,
+            } => {
+                let (path, query) = parse_relative_url(full_url, &self.base_url)?;
+                let body_bytes = match body {
+                    Some(v) => serde_json::to_vec(v)?,
+                    None => Vec::new(),
+                };
+                let body_hash = hex::encode(sha2::Sha256::digest(&body_bytes));
+                let timestamp = current_timestamp_ms();
+                let nonce = generate_nonce();
+                let canonical = format!(
+                    "{}\n{}\n{}\n{}\n{}\n{}",
+                    method, path, query, timestamp, nonce, body_hash
+                );
+                let signature = sign_canonical(&canonical, secret_key_hex, pubkey_hex)?;
+                Ok(request
+                    .set("X-Signature-Pubkey", pubkey_hex)
+                    .set("X-Signature", &signature)
+                    .set("X-Signature-Timestamp", &timestamp.to_string())
+                    .set("X-Signature-Nonce", &nonce))
+            }
+        }
     }
 
     pub async fn health_check(&self) -> Result<bool> {
         let url = format!("{}/", self.base_url);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         Ok(response.status() == 200)
     }
@@ -246,7 +386,8 @@ impl TrackerClient {
     // Note operations
     pub async fn create_note(&self, request: CreateNoteRequest) -> Result<()> {
         let url = format!("{}/notes", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+        let body = serde_json::to_value(request)?;
+        let response = self.post(&url, &body)?.send_json(body)?;
 
         if response.status() == 200 || response.status() == 201 {
             Ok(())
@@ -258,7 +399,7 @@ impl TrackerClient {
 
     pub async fn get_issuer_notes(&self, pubkey: &str) -> Result<Vec<SerializableIouNote>> {
         let url = format!("{}/notes/issuer/{}", self.base_url, pubkey);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<Vec<SerializableIouNote>> = response.into_json()?;
@@ -278,7 +419,7 @@ impl TrackerClient {
 
     pub async fn get_recipient_notes(&self, pubkey: &str) -> Result<Vec<SerializableIouNote>> {
         let url = format!("{}/notes/recipient/{}", self.base_url, pubkey);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<Vec<SerializableIouNote>> = response.into_json()?;
@@ -305,7 +446,7 @@ impl TrackerClient {
             "{}/notes/issuer/{}/recipient/{}",
             self.base_url, issuer, recipient
         );
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<Option<SerializableIouNote>> = response.into_json()?;
@@ -323,7 +464,7 @@ impl TrackerClient {
     // Reserve operations
     pub async fn get_reserve_status(&self, pubkey: &str) -> Result<KeyStatusResponse> {
         let url = format!("{}/key-status/{}", self.base_url, pubkey);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<KeyStatusResponse> = response.into_json()?;
@@ -344,7 +485,8 @@ impl TrackerClient {
     // Redemption
     pub async fn initiate_redemption(&self, request: RedeemRequest) -> Result<RedeemResponse> {
         let url = format!("{}/redeem", self.base_url);
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
+        let body = serde_json::to_value(request)?;
+        let response = match self.post(&url, &body)?.send_json(body) {
             Ok(resp) => resp,
             Err(ureq::Error::Status(code, resp)) => {
                 let error_text = resp
@@ -378,7 +520,8 @@ impl TrackerClient {
 
     pub async fn complete_redemption(&self, request: CompleteRedemptionRequest) -> Result<()> {
         let url = format!("{}/redeem/complete", self.base_url);
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
+        let body = serde_json::to_value(request)?;
+        let response = match self.post(&url, &body)?.send_json(body) {
             Ok(resp) => resp,
             Err(ureq::Error::Status(code, resp)) => {
                 let error_text = resp
@@ -424,7 +567,8 @@ impl TrackerClient {
         };
 
         let url = format!("{}/tracker/signature", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+        let body = serde_json::to_value(request)?;
+        let response = self.post(&url, &body)?.send_json(body)?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<TrackerSignatureResponse> = response.into_json()?;
@@ -558,7 +702,7 @@ impl TrackerClient {
             "{}/tracker/proof?issuer_pubkey={}&recipient_pubkey={}",
             self.base_url, issuer_pubkey, recipient_pubkey
         );
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<TrackerProofResponse> = response.into_json()?;
@@ -588,7 +732,7 @@ impl TrackerClient {
             "{}/reserve/proof?issuer_pubkey={}&recipient_pubkey={}&amount={}&timestamp={}",
             self.base_url, issuer_pubkey, recipient_pubkey, amount, timestamp
         );
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<ReserveProofResponse> = response.into_json()?;
@@ -627,7 +771,8 @@ impl TrackerClient {
         };
 
         let url = format!("{}/redemption/prepare", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+        let body = serde_json::to_value(request)?;
+        let response = self.post(&url, &body)?.send_json(body)?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<RedemptionPreparationResponse> = response.into_json()?;
@@ -657,7 +802,8 @@ impl TrackerClient {
         request: RedemptionBuildRequest,
     ) -> Result<RedemptionBuildResponse> {
         let url = format!("{}/redemption/build", self.base_url);
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
+        let body = serde_json::to_value(request)?;
+        let response = match self.post(&url, &body)?.send_json(body) {
             Ok(resp) => resp,
             Err(ureq::Error::Status(code, resp)) => {
                 let error_text = resp
@@ -705,7 +851,8 @@ impl TrackerClient {
             redeemed_amount,
             new_already_redeemed,
         };
-        let response = match ureq::post(&url).send_json(serde_json::to_value(request)?) {
+        let body = serde_json::to_value(request)?;
+        let response = match self.post(&url, &body)?.send_json(body) {
             Ok(resp) => resp,
             Err(ureq::Error::Status(code, resp)) => {
                 let error_text = resp
@@ -739,7 +886,7 @@ impl TrackerClient {
             "{}/events/paginated?page={}&page_size={}",
             self.base_url, page, page_size
         );
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<Vec<TrackerEvent>> = response.into_json()?;
@@ -756,7 +903,7 @@ impl TrackerClient {
 
     pub async fn get_recent_events(&self) -> Result<Vec<TrackerEvent>> {
         let url = format!("{}/events", self.base_url);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<Vec<TrackerEvent>> = response.into_json()?;
@@ -780,7 +927,8 @@ impl TrackerClient {
         request: CreateReserveRequest,
     ) -> Result<ReserveCreationResponse> {
         let url = format!("{}/reserves/create", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+        let body = serde_json::to_value(request)?;
+        let response = self.post(&url, &body)?.send_json(body)?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<ReserveCreationResponse> = response.into_json()?;
@@ -801,7 +949,8 @@ impl TrackerClient {
         payload: ReserveCreationResponse,
     ) -> Result<ReserveSubmissionResponse> {
         let url = format!("{}/reserves/submit", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(payload)?)?;
+        let body = serde_json::to_value(payload)?;
+        let response = self.post(&url, &body)?.send_json(body)?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<ReserveSubmissionResponse> = response.into_json()?;
@@ -819,7 +968,7 @@ impl TrackerClient {
     /// Fetch the tracker's reserve-token configuration.
     pub async fn get_reserve_token_config(&self) -> Result<ReserveTokenConfig> {
         let url = format!("{}/config/reserve-token", self.base_url);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<ReserveTokenConfig> = response.into_json()?;
@@ -844,7 +993,8 @@ impl TrackerClient {
         request: UploadPolicyRequest,
     ) -> Result<UploadPolicyResponse> {
         let url = format!("{}/acceptance/policy", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+        let body = serde_json::to_value(request)?;
+        let response = self.post(&url, &body)?.send_json(body)?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<UploadPolicyResponse> = response.into_json()?;
@@ -863,7 +1013,7 @@ impl TrackerClient {
     #[allow(dead_code)]
     pub async fn get_policy(&self, recipient_pubkey: &str) -> Result<GetPolicyResponse> {
         let url = format!("{}/acceptance/policy/{}", self.base_url, recipient_pubkey);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<GetPolicyResponse> = response.into_json()?;
@@ -895,7 +1045,8 @@ impl TrackerClient {
         };
 
         let url = format!("{}/acceptance/check", self.base_url);
-        let response = ureq::post(&url).send_json(serde_json::to_value(request)?)?;
+        let body = serde_json::to_value(request)?;
+        let response = self.post(&url, &body)?.send_json(body)?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<CheckAcceptanceResponse> = response.into_json()?;
@@ -997,7 +1148,7 @@ impl TrackerClient {
         pubkey: &str,
     ) -> Result<Vec<basis_store::ExtendedReserveInfo>> {
         let url = format!("{}/reserves/issuer/{}", self.base_url, pubkey);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<Vec<FlattenedReserveInfo>> = response.into_json()?;
@@ -1038,7 +1189,7 @@ impl TrackerClient {
 
     pub async fn get_latest_tracker_box_id(&self) -> Result<TrackerBoxIdResponse> {
         let url = format!("{}/tracker/latest-box-id", self.base_url);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<TrackerBoxIdResponse> = response.into_json()?;
@@ -1064,7 +1215,7 @@ impl TrackerClient {
     #[allow(dead_code)]
     pub async fn get_tracker_state(&self) -> Result<TrackerStateResponse> {
         let url = format!("{}/tracker/state", self.base_url);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<TrackerStateResponse> = response.into_json()?;
@@ -1085,7 +1236,7 @@ impl TrackerClient {
     /// Get the Basis reserve contract P2S address from the server configuration
     pub async fn get_basis_reserve_contract_p2s(&self) -> Result<String> {
         let url = format!("{}/config/reserve-contract-p2s", self.base_url);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<String> = response.into_json()?;
@@ -1279,7 +1430,7 @@ impl TrackerClient {
 
     pub async fn get_all_notes(&self) -> Result<Vec<SerializableIouNoteWithAge>> {
         let url = format!("{}/notes", self.base_url);
-        let response = ureq::get(&url).call()?;
+        let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
             let api_response: ApiResponse<Vec<SerializableIouNoteWithAge>> =
@@ -1293,6 +1444,89 @@ impl TrackerClient {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to get all notes: {}", error_text))
         }
+    }
+}
+
+// -------------------------------------------------------------------------
+// Tracker request auth helpers
+// -------------------------------------------------------------------------
+
+/// Extract the relative path and query string from a full request URL.
+///
+/// The canonical signing message on the server uses the path relative to the
+/// base URL, so the client must do the same.
+fn parse_relative_url(full_url: &str, base_url: &str) -> Result<(String, String)> {
+    let relative = full_url
+        .strip_prefix(base_url.trim_end_matches('/'))
+        .unwrap_or(full_url);
+    let relative = relative.strip_prefix('/').unwrap_or(relative);
+    match relative.split_once('?') {
+        Some((path, query)) => Ok((format!("/{}", path), query.to_string())),
+        None => Ok((format!("/{}", relative), String::new())),
+    }
+}
+
+fn current_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn generate_nonce() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Sign the canonical request string with the configured secp256k1 key.
+fn sign_canonical(canonical: &str, secret_key_hex: &str, pubkey_hex: &str) -> Result<String> {
+    let secret_bytes = hex::decode(secret_key_hex)
+        .map_err(|e| anyhow::anyhow!("Invalid secret key hex: {}", e))?;
+    let secret_key = secp256k1::SecretKey::from_slice(&secret_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid secret key: {}", e))?;
+
+    let pubkey_bytes =
+        hex::decode(pubkey_hex).map_err(|e| anyhow::anyhow!("Invalid public key hex: {}", e))?;
+    if pubkey_bytes.len() != 33 {
+        return Err(anyhow::anyhow!(
+            "Invalid public key length: expected 33 bytes, got {}",
+            pubkey_bytes.len()
+        ));
+    }
+    let mut pubkey_array = [0u8; 33];
+    pubkey_array.copy_from_slice(&pubkey_bytes);
+
+    let signature =
+        basis_offchain::schnorr::schnorr_sign(canonical.as_bytes(), &secret_key, &pubkey_array)
+            .map_err(|_| anyhow::anyhow!("Failed to sign request"))?;
+
+    Ok(hex::encode(signature))
+}
+
+#[cfg(test)]
+mod auth_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn parse_relative_url_splits_query() {
+        assert_eq!(
+            parse_relative_url(
+                "http://localhost:3048/notes?foo=bar",
+                "http://localhost:3048"
+            )
+            .unwrap(),
+            ("/notes".to_string(), "foo=bar".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_relative_url_no_query() {
+        assert_eq!(
+            parse_relative_url("http://localhost:3048/notes", "http://localhost:3048").unwrap(),
+            ("/notes".to_string(), String::new())
+        );
     }
 }
 

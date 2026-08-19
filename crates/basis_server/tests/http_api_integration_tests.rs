@@ -243,6 +243,9 @@ mod http_api_tests {
                 port: 3048,
                 data_dir: Some(data_dir.to_string_lossy().to_string()),
                 database_url: Some("sqlite::memory:".to_string()),
+                tls_cert_path: None,
+                tls_key_path: None,
+                auth: config::AuthConfig::default(),
             },
             ergo: config::ErgoConfig {
                 node: basis_store::ergo_scanner::NodeConfig {

@@ -22,14 +22,23 @@ info:
 
 servers:
   - url: http://localhost:3048
-    description: Local development server
+    description: Local development server (plaintext)
+  - url: https://localhost:3048
+    description: Local development server (TLS)
+
+security:
+  - ApiKeyAuth: []
+  - SignatureAuth: []
 
 paths:
   /:
     get:
       summary: Health check endpoint
-      description: Returns a simple message to verify the API is running
+      description: Returns a simple message to verify the API is running.
       operationId: root
+      tags:
+        - Health
+      security: []
       responses:
         '200':
           description: Successful response
@@ -44,6 +53,8 @@ paths:
       summary: Create a new IOU note
       description: Creates a new IOU note with the specified parameters. The note must be signed by the issuer.
       operationId: createNote
+      tags:
+        - Notes
       requestBody:
         required: true
         content:
@@ -69,12 +80,33 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
+    get:
+      summary: Get all IOU notes
+      description: Retrieve all IOU notes tracked by the server, including the age of each note in seconds.
+      operationId: getAllNotes
+      tags:
+        - Notes
+      responses:
+        '200':
+          description: Successfully retrieved notes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseNotesWithAge'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
 
   /notes/issuer/{pubkey}:
     get:
       summary: Get notes by issuer
-      description: Retrieve all IOU notes issued by a specific public key
+      description: Retrieve all IOU notes issued by a specific public key.
       operationId: getNotesByIssuer
+      tags:
+        - Notes
       parameters:
         - name: pubkey
           in: path
@@ -107,8 +139,10 @@ paths:
   /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}:
     get:
       summary: Get specific note by issuer and recipient
-      description: Retrieve a specific IOU note between an issuer and recipient
+      description: Retrieve a specific IOU note between an issuer and recipient.
       operationId: getNoteByIssuerAndRecipient
+      tags:
+        - Notes
       parameters:
         - name: issuer_pubkey
           in: path
@@ -152,11 +186,138 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
+  /notes/recipient/{pubkey}:
+    get:
+      summary: Get notes by recipient
+      description: Retrieve all IOU notes where the specified public key is the recipient.
+      operationId: getNotesByRecipient
+      tags:
+        - Notes
+      parameters:
+        - name: pubkey
+          in: path
+          required: true
+          description: Hex-encoded recipient public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "020202020202020202020202020202020202020202020202020202020202020202"
+      responses:
+        '200':
+          description: Successfully retrieved notes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseNotes'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /notes/state:
+    post:
+      summary: Get confirmation state for a single note
+      description: Retrieve local, confirmed, and pending total debt for a specific note, along with redeemable information.
+      operationId: getNoteState
+      tags:
+        - Notes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoteStateRequest'
+      responses:
+        '200':
+          description: Successfully retrieved note state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseNoteState'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /reserves:
+    get:
+      summary: Get all reserves
+      description: Retrieve all on-chain reserves tracked by the server regardless of issuer.
+      operationId: getAllReserves
+      tags:
+        - Reserves
+      responses:
+        '200':
+          description: Successfully retrieved reserves
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserves'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /reserves/{box_id}:
+    get:
+      summary: Get reserve by box ID
+      description: Retrieve a specific reserve by its box ID.
+      operationId: getReserveByBoxId
+      tags:
+        - Reserves
+      parameters:
+        - name: box_id
+          in: path
+          required: true
+          description: Hex-encoded reserve box ID
+          schema:
+            type: string
+            example: "f1e2d3c4b5a697887766554433221100ffeeddccbbaa99887766554433221100"
+      responses:
+        '200':
+          description: Successfully retrieved reserve
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserve'
+        '404':
+          description: Reserve not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseEmpty'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
   /reserves/issuer/{pubkey}:
     get:
       summary: Get reserves by issuer
-      description: Retrieve all reserves managed by a specific issuer
+      description: Retrieve all reserves managed by a specific issuer public key.
       operationId: getReservesByIssuer
+      tags:
+        - Reserves
       parameters:
         - name: pubkey
           in: path
@@ -186,11 +347,79 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
+  /reserves/create:
+    post:
+      summary: Create reserve transaction payload
+      description: Build an unsigned reserve creation transaction formatted for the Ergo node's /wallet/payment/send API.
+      operationId: createReservePayload
+      tags:
+        - Reserves
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReserveRequest'
+      responses:
+        '200':
+          description: Reserve payload created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserveCreation'
+        '400':
+          description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /reserves/submit:
+    post:
+      summary: Submit reserve creation transaction
+      description: Submit a signed reserve creation transaction to the tracker's Ergo node for broadcast.
+      operationId: submitReserveTransaction
+      tags:
+        - Reserves
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReserveCreationResponse'
+      responses:
+        '200':
+          description: Reserve transaction submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserveSubmission'
+        '400':
+          description: Bad request - invalid transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
   /events:
     get:
       summary: Get recent tracker events
-      description: Retrieve the 50 most recent tracker events including note updates, reserve changes, and system events
+      description: Retrieve the 50 most recent tracker events including note updates, reserve changes, and system events.
       operationId: getEvents
+      tags:
+        - Events
       responses:
         '200':
           description: Successfully retrieved events
@@ -208,8 +437,10 @@ paths:
   /events/paginated:
     get:
       summary: Get paginated tracker events
-      description: Retrieve paginated tracker events including note updates, reserve changes, and system events
+      description: Retrieve paginated tracker events including note updates, reserve changes, and system events.
       operationId: getEventsPaginated
+      tags:
+        - Events
       parameters:
         - name: page
           in: query
@@ -245,7 +476,7 @@ paths:
   /key-status/{pubkey}:
     get:
       summary: Get key status information
-      description: Retrieve comprehensive status information for a specific public key including debt, collateral, and collateralization ratio
+      description: Retrieve comprehensive status information for a specific public key including debt, collateral, and collateralization ratio.
       operationId: getKeyStatus
       tags:
         - Status
@@ -281,7 +512,7 @@ paths:
   /redeem:
     post:
       summary: Initiate redemption process
-      description: Initiate the redemption of an IOU note from a reserve
+      description: Initiate the redemption of an IOU note from a reserve.
       operationId: initiateRedemption
       tags:
         - Redemption
@@ -311,151 +542,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
-  /proof:
-    get:
-      summary: Get proof for a specific note
-      description: Generate and retrieve a proof for a specific IOU note against the current tracker state
-      operationId: getProof
-      tags:
-        - Proofs
-      parameters:
-        - name: issuer_pubkey
-          in: query
-          required: true
-          description: Hex-encoded issuer public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "010101010101010101010101010101010101010101010101010101010101010101"
-        - name: recipient_pubkey
-          in: query
-          required: true
-          description: Hex-encoded recipient public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "020202020202020202020202020202020202020202020202020202020202020202"
-      responses:
-        '200':
-          description: Successfully generated proof
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseProof'
-        '400':
-          description: Bad request - invalid public key format or missing parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-
-  /tracker/proof:
-    get:
-      summary: Get tracker lookup proof
-      description: |
-        Get AVL proof for totalDebt from tracker's AVL tree.
-        Returns proof for context extension variable #8 in redemption transactions.
-      operationId: getTrackerProof
-      tags:
-        - Proofs
-      parameters:
-        - name: issuer_pubkey
-          in: query
-          required: true
-          description: Hex-encoded issuer public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "010101010101010101010101010101010101010101010101010101010101010101"
-        - name: recipient_pubkey
-          in: query
-          required: true
-          description: Hex-encoded recipient public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "020202020202020202020202020202020202020202020202020202020202020202"
-      responses:
-        '200':
-          description: Successfully generated tracker proof
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TrackerProofData'
-        '400':
-          description: Bad request - invalid public key format
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-
-  /reserve/proof:
-    get:
-      summary: Get reserve lookup proof
-      description: |
-        Get AVL proof for already_redeemed from reserve's AVL tree.
-        Returns proof for context extension variable #7 in redemption transactions.
-        For first redemptions, returns proof: null (no lookup proof needed).
-      operationId: getReserveProof
-      tags:
-        - Proofs
-      parameters:
-        - name: issuer_pubkey
-          in: query
-          required: true
-          description: Hex-encoded issuer public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "010101010101010101010101010101010101010101010101010101010101010101"
-        - name: recipient_pubkey
-          in: query
-          required: true
-          description: Hex-encoded recipient public key (66 characters)
-          schema:
-            type: string
-            pattern: '^[0-9a-fA-F]{66}$'
-            example: "020202020202020202020202020202020202020202020202020202020202020202"
-      responses:
-        '200':
-          description: Successfully generated reserve proof
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ReserveProofData'
-        '400':
-          description: Bad request - invalid public key format
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-
-  /tracker/signature:
+  /redeem/complete:
     post:
-      summary: Request tracker signature for redemption
-      description: |
-        Request Schnorr signature from tracker for redemption.
-        The tracker signs: key || totalDebt || timestamp
-        where key = blake2b256(ownerKey || receiverKey)
-      operationId: requestTrackerSignature
+      summary: Complete a redemption
+      description: Mark a redemption as completed and update the note's redeemed amount.
+      operationId: completeRedemption
       tags:
         - Redemption
       requestBody:
@@ -463,16 +554,16 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/TrackerSignatureRequest'
+              $ref: '#/components/schemas/CompleteRedemptionRequest'
       responses:
         '200':
-          description: Successfully generated tracker signature
+          description: Redemption completed successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TrackerSignatureResponse'
+                $ref: '#/components/schemas/ApiResponseEmpty'
         '400':
-          description: Bad request - invalid public key format
+          description: Bad request - invalid input parameters
           content:
             application/json:
               schema:
@@ -486,10 +577,8 @@ paths:
 
   /proof/redemption:
     get:
-      summary: Get comprehensive redemption proof
-      description: |
-        Get all proofs needed for redemption in a single request.
-        Includes tracker lookup proof, reserve lookup proof, and reserve insert proof.
+      summary: Get redemption proof
+      description: Generate and retrieve a single AVL proof for a specific IOU note against the current tracker state.
       operationId: getRedemptionProof
       tags:
         - Proofs
@@ -520,13 +609,13 @@ paths:
             example: 500000000
       responses:
         '200':
-          description: Successfully generated redemption proof
+          description: Successfully generated proof
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RedemptionProofResponse'
+                $ref: '#/components/schemas/ApiResponseProof'
         '400':
-          description: Bad request - invalid parameters
+          description: Bad request - invalid public key format or missing parameters
           content:
             application/json:
               schema:
@@ -538,11 +627,650 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
+  /tracker/proof:
+    get:
+      summary: Get tracker lookup proof
+      description: |
+        Get AVL proof for totalDebt from the tracker's AVL tree.
+        Returns proof for context extension variable #8 in redemption transactions.
+      operationId: getTrackerProof
+      tags:
+        - Proofs
+      parameters:
+        - name: issuer_pubkey
+          in: query
+          required: true
+          description: Hex-encoded issuer public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "010101010101010101010101010101010101010101010101010101010101010101"
+        - name: recipient_pubkey
+          in: query
+          required: true
+          description: Hex-encoded recipient public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "020202020202020202020202020202020202020202020202020202020202020202"
+      responses:
+        '200':
+          description: Successfully generated tracker proof
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseTrackerProof'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /reserve/proof:
+    get:
+      summary: Get reserve lookup proof
+      description: |
+        Get AVL proof for already_redeemed from the reserve's AVL tree.
+        Returns proof for context extension variable #7 in redemption transactions.
+        For first redemptions, returns proof: null (no lookup proof needed).
+      operationId: getReserveProof
+      tags:
+        - Proofs
+      parameters:
+        - name: issuer_pubkey
+          in: query
+          required: true
+          description: Hex-encoded issuer public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "010101010101010101010101010101010101010101010101010101010101010101"
+        - name: recipient_pubkey
+          in: query
+          required: true
+          description: Hex-encoded recipient public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "020202020202020202020202020202020202020202020202020202020202020202"
+      responses:
+        '200':
+          description: Successfully generated reserve proof
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserveProof'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /tracker/signature:
+    post:
+      summary: Request tracker signature for redemption
+      description: |
+        Request a Schnorr signature from the tracker for redemption.
+        The tracker signs: key || totalDebt || timestamp
+        where key = blake2b256(ownerKey || receiverKey).
+      operationId: requestTrackerSignature
+      tags:
+        - Redemption
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrackerSignatureRequest'
+      responses:
+        '200':
+          description: Successfully generated tracker signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseTrackerSignature'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /tracker/state:
+    get:
+      summary: Get tracker state
+      description: Retrieve the current tracker AVL tree state, including local, confirmed, and pending digests.
+      operationId: getTrackerState
+      tags:
+        - Tracker
+      responses:
+        '200':
+          description: Successfully retrieved tracker state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseTrackerState'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /tracker/pending-tx:
+    get:
+      summary: Get pending tracker update transaction
+      description: Retrieve information about a pending tracker update transaction, if any.
+      operationId: getPendingTx
+      tags:
+        - Tracker
+      responses:
+        '200':
+          description: Successfully retrieved pending transaction information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponsePendingTx'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /tracker/latest-box-id:
+    get:
+      summary: Get latest tracker box ID
+      description: Retrieve the latest confirmed tracker box ID, timestamp, and blockchain height.
+      operationId: getLatestTrackerBoxId
+      tags:
+        - Tracker
+      responses:
+        '200':
+          description: Successfully retrieved latest tracker box ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseTrackerBoxId'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /redemption/prepare:
+    post:
+      summary: Prepare a redemption
+      description: |
+        Prepare a redemption by generating AVL proofs and tracker signature.
+        Returns the legacy preparation response containing a single combined AVL proof.
+      operationId: prepareRedemption
+      tags:
+        - Redemption
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedemptionPreparationRequest'
+      responses:
+        '200':
+          description: Redemption prepared successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseRedemptionPreparation'
+        '400':
+          description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /redemption/build:
+    post:
+      summary: Build a redemption transaction
+      description: |
+        Build an unsigned redemption transaction and a fee-signed partial transaction.
+        The client must add the reserve input's proveDlog proof and submit the signed result.
+      operationId: buildRedemption
+      tags:
+        - Redemption
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedemptionBuildRequest'
+      responses:
+        '200':
+          description: Redemption transaction built successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseRedemptionBuild'
+        '400':
+          description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /redemption/submit:
+    post:
+      summary: Submit a signed redemption transaction
+      description: Broadcast a fully signed redemption transaction to the Ergo network.
+      operationId: submitRedemption
+      tags:
+        - Redemption
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedemptionSubmitRequest'
+      responses:
+        '200':
+          description: Redemption transaction submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseRedemptionSubmit'
+        '400':
+          description: Bad request - invalid transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /acceptance/check:
+    post:
+      summary: Check note acceptance
+      description: Check whether a note from the given issuer and total debt is acceptable under current policies.
+      operationId: checkAcceptance
+      tags:
+        - Acceptance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckAcceptanceRequest'
+      responses:
+        '200':
+          description: Acceptance check completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseCheckAcceptance'
+        '400':
+          description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /acceptance/policy:
+    post:
+      summary: Upload acceptance policy
+      description: Upload or update a recipient's acceptance policy JSON, signed by the recipient.
+      operationId: uploadPolicy
+      tags:
+        - Acceptance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadPolicyRequest'
+      responses:
+        '200':
+          description: Policy uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseUploadPolicy'
+        '400':
+          description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /acceptance/policy/{pubkey}:
+    get:
+      summary: Get acceptance policy by recipient
+      description: Retrieve the uploaded acceptance policy for a specific recipient public key.
+      operationId: getPolicyByRecipient
+      tags:
+        - Acceptance
+      parameters:
+        - name: pubkey
+          in: path
+          required: true
+          description: Hex-encoded recipient public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+            example: "020202020202020202020202020202020202020202020202020202020202020202"
+      responses:
+        '200':
+          description: Successfully retrieved policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseGetPolicy'
+        '404':
+          description: Policy not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseEmpty'
+        '400':
+          description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /config/reserve-contract-p2s:
+    get:
+      summary: Get reserve contract P2S address
+      description: Retrieve the configured Basis reserve contract P2S address.
+      operationId: getBasisReserveContractP2s
+      tags:
+        - Config
+      responses:
+        '200':
+          description: Successfully retrieved reserve contract P2S address
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseString'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /config/reserve-token:
+    get:
+      summary: Get reserve token configuration
+      description: Retrieve reserve token configuration including token ID, decimals, and token-backed reserve contract P2S address.
+      operationId: getReserveTokenConfig
+      tags:
+        - Config
+      responses:
+        '200':
+          description: Successfully retrieved reserve token configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserveTokenConfig'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
 components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Shared API key sent as `X-API-Key: <key>` or
+        `Authorization: Bearer <key>`. Grants `Admin` access.
+    SignatureAuth:
+      type: apiKey
+      in: header
+      name: X-Signature
+      description: |
+        Per-request secp256k1 Schnorr signature. Requires companion headers
+        `X-Signature-Pubkey`, `X-Signature-Timestamp`, and `X-Signature-Nonce`.
+
   schemas:
-    # Request/Response Structures
+    # API Response Wrappers
+    ApiResponse:
+      type: object
+      description: Standard API response format
+      properties:
+        success:
+          type: boolean
+          description: Whether the request was successful
+        data:
+          type: object
+          nullable: true
+          description: Response data (null for error responses)
+        error:
+          type: string
+          nullable: true
+          description: Error message (null for successful responses)
+
+    ApiResponseEmpty:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: object
+              nullable: true
+              example: null
+
+    ApiResponseError:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            success:
+              type: boolean
+              example: false
+            data:
+              type: object
+              nullable: true
+              example: null
+            error:
+              type: string
+              example: "Invalid signature"
+
+    ApiResponseString:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: string
+              description: String response data
+
+    # Note Schemas
+    SerializableIouNote:
+      type: object
+      description: Serializable IOU note for API responses
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        amount_collected:
+          type: integer
+          format: uint64
+          description: Total cumulative debt amount collected on this note
+          example: 1000000000
+        amount_redeemed:
+          type: integer
+          format: uint64
+          description: Total amount already redeemed from this note
+          example: 250000000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Note creation timestamp (tracked for record-keeping, not used in signing)
+          example: 1234567890
+        signature:
+          type: string
+          description: Hex-encoded Schnorr signature (signs key || totalDebt || timestamp)
+          pattern: '^[0-9a-fA-F]{130}$'
+          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        confirmation:
+          $ref: '#/components/schemas/NoteConfirmationSummary'
+
+    SerializableIouNoteWithAge:
+      type: object
+      description: Serializable IOU note for API responses, including age
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        amount_collected:
+          type: integer
+          format: uint64
+          description: Total cumulative debt amount collected on this note
+          example: 1000000000
+        amount_redeemed:
+          type: integer
+          format: uint64
+          description: Total amount already redeemed from this note
+          example: 250000000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Note creation timestamp
+          example: 1234567890
+        signature:
+          type: string
+          description: Hex-encoded Schnorr signature (130 characters)
+          pattern: '^[0-9a-fA-F]{130}$'
+          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        age_seconds:
+          type: integer
+          format: uint64
+          description: Age of the note in seconds
+          example: 3600
+        confirmation:
+          $ref: '#/components/schemas/NoteConfirmationSummary'
+
+    NoteConfirmationSummary:
+      type: object
+      description: Confirmation summary attached to note responses
+      properties:
+        status:
+          type: string
+          description: Confirmation status (local_only, pending, confirmed)
+          example: "confirmed"
+        confirmed_total_debt:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Confirmed total debt amount
+          example: 1000000000
+        pending_total_debt:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Pending total debt amount
+          example: 1000000000
+        confirmed_box_id:
+          type: string
+          nullable: true
+          description: Box ID where the note was confirmed
+          example: "f1e2d3c4b5a697887766554433221100ffeeddccbbaa99887766554433221100"
+        confirmed_height:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Blockchain height at which the note was confirmed
+          example: 1250
+        pending_tx_id:
+          type: string
+          nullable: true
+          description: Transaction ID of the pending confirmation
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+        redeemable:
+          type: boolean
+          description: Whether the note is currently redeemable
+          example: true
+        redeemable_amount:
+          type: integer
+          format: uint64
+          description: Amount currently redeemable
+          example: 750000000
+
     CreateNoteRequest:
       type: object
+      description: Request body for creating a new IOU note
       required:
         - recipient_pubkey
         - amount
@@ -560,16 +1288,16 @@ components:
           format: uint64
           description: Total cumulative debt amount (used in signing message)
           minimum: 0
-          example: 1000
+          example: 1000000000
         timestamp:
           type: integer
           format: uint64
-          description: Unix timestamp when the note was created (tracked for record-keeping, not used in signing)
+          description: Unix timestamp when the note was created
           minimum: 0
           example: 1234567890
         signature:
           type: string
-          description: Hex-encoded Schnorr signature (130 characters)
+          description: Hex-encoded Schnorr signature (130 characters = 65 bytes)
           pattern: '^[0-9a-fA-F]{130}$'
           example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
         issuer_pubkey:
@@ -578,29 +1306,73 @@ components:
           pattern: '^[0-9a-fA-F]{66}$'
           example: "010101010101010101010101010101010101010101010101010101010101010101"
 
-    SerializableIouNote:
+    NoteStateRequest:
       type: object
-      description: Serializable IOU note for API responses
+      description: Request body for retrieving a single note's confirmation state
+      required:
+        - issuer_pubkey
+        - recipient_pubkey
       properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+
+    NoteStateResponse:
+      type: object
+      description: Response for a single note's confirmation state
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
         recipient_pubkey:
           type: string
           description: Hex-encoded recipient public key
           example: "020202020202020202020202020202020202020202020202020202020202020202"
-        amount:
+        local:
           type: integer
           format: uint64
-          description: Total cumulative debt amount
-          example: 1000
-        timestamp:
+          description: Local total debt amount
+          example: 1000000000
+        confirmed:
           type: integer
           format: uint64
-          description: Creation timestamp (tracked for record-keeping, not used in signing)
-          example: 1234567890
-        signature:
+          nullable: true
+          description: Confirmed total debt amount
+          example: 1000000000
+        pending:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Pending total debt amount
+          example: 1000000000
+        already_redeemed:
+          type: integer
+          format: uint64
+          description: Amount already redeemed
+          example: 250000000
+        redeemable:
+          type: boolean
+          description: Whether the note is redeemable
+          example: true
+        redeemable_amount:
+          type: integer
+          format: uint64
+          description: Amount currently redeemable
+          example: 750000000
+        status:
           type: string
-          description: Hex-encoded Schnorr signature (signs key || totalDebt || timestamp)
-          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+          description: Overall note status
+          example: "confirmed"
 
+    # Reserve Schemas
     SerializableReserveInfo:
       type: object
       description: Serializable reserve information
@@ -616,7 +1388,7 @@ components:
         collateral_amount:
           type: integer
           format: uint64
-          description: Amount of collateral in nanoERG
+          description: Amount of collateral in nanoERG or raw token units
           example: 2500000000
         total_debt:
           type: integer
@@ -625,8 +1397,7 @@ components:
           example: 1200000000
         tracker_nft_id:
           type: string
-          nullable: true
-          description: Optional tracker NFT ID
+          description: Tracker NFT ID (hex-encoded)
           example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
         last_updated_height:
           type: integer
@@ -643,18 +1414,928 @@ components:
           format: float
           description: Current collateralization ratio
           example: 2.08
+        refund_initiation_height:
+          type: integer
+          format: uint64
+          description: Blockchain height at which refund was initiated (0 if not initiated)
+          example: 0
 
+    CreateReserveRequest:
+      type: object
+      description: Request body for creating a reserve
+      required:
+        - nft_id
+        - owner_pubkey
+        - erg_amount
+      properties:
+        nft_id:
+          type: string
+          description: Hex-encoded reserve NFT ID
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+        owner_pubkey:
+          type: string
+          description: Hex-encoded owner public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        erg_amount:
+          type: integer
+          format: uint64
+          description: ERG value for the reserve box in nanoERG
+          example: 2500000000
+        token_amount:
+          type: integer
+          format: uint64
+          default: 0
+          description: Amount of reserve token to lock in the reserve (raw token units)
+          example: 1000000000
+        token_id:
+          type: string
+          default: ""
+          description: Reserve token ID (hex-encoded, 32 bytes) for token-backed reserves
+          example: "b1c2d3e4f5061728394051627384950617283940516273849506172839405162"
+
+    ReserveCreationResponse:
+      type: object
+      description: Response for reserve creation formatted for Ergo node's /wallet/payment/send API
+      properties:
+        requests:
+          type: array
+          description: Payment requests for the reserve creation transaction
+          items:
+            $ref: '#/components/schemas/ReservePaymentRequest'
+        fee:
+          type: integer
+          format: uint64
+          description: Transaction fee in nanoERG
+          example: 1100000
+        change_address:
+          type: string
+          description: Change address for leftover funds
+          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
+
+    ReservePaymentRequest:
+      type: object
+      description: Individual payment request for reserve creation
+      properties:
+        address:
+          type: string
+          description: Target P2S address for the reserve box
+          example: "2Z4YBkDsDvQj8BX7xiySF9jLUCuYUHjbkY78Zn7aQGjftGPKvUvtbNE7"
+        value:
+          type: integer
+          format: uint64
+          description: Box value in nanoERG
+          example: 2500000000
+        assets:
+          type: array
+          description: Assets to include in the reserve box
+          items:
+            $ref: '#/components/schemas/Asset'
+        registers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Register values for the reserve box
+          example:
+            R4: "010101010101010101010101010101010101010101010101010101010101010101"
+            R5: "64abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+    Asset:
+      type: object
+      description: Asset in a reserve payment request
+      properties:
+        token_id:
+          type: string
+          description: Hex-encoded token ID
+          example: "b1c2d3e4f5061728394051627384950617283940516273849506172839405162"
+        amount:
+          type: integer
+          format: uint64
+          description: Token amount in raw units
+          example: 1000000000
+
+    ReserveSubmissionResponse:
+      type: object
+      description: Response for reserve transaction submission
+      properties:
+        tx_id:
+          type: string
+          description: Transaction ID of the submitted reserve creation transaction
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+
+    # Redemption Schemas
+    RedeemRequest:
+      type: object
+      description: Redemption request
+      required:
+        - issuer_pubkey
+        - recipient_pubkey
+        - amount
+        - timestamp
+        - issuer_signature
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        amount:
+          type: integer
+          format: uint64
+          description: Amount to redeem in nanoERG
+          example: 500000000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Timestamp of the note being redeemed
+          example: 1234567890
+        reserve_box_id:
+          type: string
+          default: ""
+          description: Reserve box ID (optional - server will lookup if not provided)
+          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        recipient_address:
+          type: string
+          default: ""
+          description: Recipient address for redemption output (optional - server will derive from pubkey if not provided)
+          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
+        issuer_signature:
+          type: string
+          description: Hex-encoded Schnorr signature from issuer (130 characters = 65 bytes)
+          pattern: '^[0-9a-fA-F]{130}$'
+          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        emergency:
+          type: boolean
+          default: false
+          description: Whether this is an emergency redemption
+          example: false
+
+    CompleteRedemptionRequest:
+      type: object
+      description: Request body for completing a redemption
+      required:
+        - redemption_id
+        - issuer_pubkey
+        - recipient_pubkey
+        - redeemed_amount
+      properties:
+        redemption_id:
+          type: string
+          description: Unique redemption identifier
+          example: "redeem_0101010101010101_0202020202020202"
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        redeemed_amount:
+          type: integer
+          format: uint64
+          description: Amount redeemed in this transaction
+          example: 500000000
+        new_already_redeemed:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Optional explicit cumulative reserve-tree value
+          example: 500000000
+
+    RedeemResponse:
+      type: object
+      description: Redemption response
+      properties:
+        redemption_id:
+          type: string
+          description: Unique redemption identifier
+          example: "redeem_0101010101010101_0202020202020202"
+        amount:
+          type: integer
+          format: uint64
+          description: Amount being redeemed
+          example: 500000000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Redemption timestamp
+          example: 1672531200
+        proof_available:
+          type: boolean
+          description: Whether proof is available
+          example: true
+        transaction_pending:
+          type: boolean
+          description: Whether redemption transaction is pending
+          example: false
+        transaction_data:
+          $ref: '#/components/schemas/TransactionData'
+        transaction_bytes:
+          type: string
+          nullable: true
+          description: Raw Ergo transaction JSON (hex encoded) that can be signed and submitted
+          example: "a1b2c3d4e5f6"
+
+    TransactionData:
+      type: object
+      description: Transaction data that can be submitted to an Ergo node
+      properties:
+        address:
+          type: string
+          description: Target address for the transaction
+          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
+        value:
+          type: integer
+          format: uint64
+          description: Value in nanoERG
+          example: 500000000
+        registers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Register values
+          example:
+            R4: "010101010101010101010101010101010101010101010101010101010101010101"
+        assets:
+          type: array
+          description: Assets to include in transaction
+          items:
+            $ref: '#/components/schemas/TokenData'
+        fee:
+          type: integer
+          format: uint64
+          description: Transaction fee
+          example: 1100000
+
+    TokenData:
+      type: object
+      description: Token/asset data for a transaction
+      properties:
+        token_id:
+          type: string
+          description: Hex-encoded token ID
+          example: "b1c2d3e4f5061728394051627384950617283940516273849506172839405162"
+        amount:
+          type: integer
+          format: uint64
+          description: Token amount in raw units
+          example: 1000000000
+
+    # Tracker Signature Schemas
+    TrackerSignatureRequest:
+      type: object
+      description: Request for tracker signature on redemption
+      required:
+        - issuer_pubkey
+        - recipient_pubkey
+        - total_debt
+        - timestamp
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        total_debt:
+          type: integer
+          format: uint64
+          description: Total cumulative debt amount
+          example: 1000000000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Payment timestamp in milliseconds since Unix epoch
+          example: 1234567890000
+        emergency:
+          type: boolean
+          default: false
+          description: Whether this is an emergency redemption
+          example: false
+
+    TrackerSignatureResponse:
+      type: object
+      description: Tracker signature response
+      properties:
+        success:
+          type: boolean
+          description: Whether signature generation was successful
+          example: true
+        tracker_signature:
+          type: string
+          description: Hex-encoded Schnorr signature (130 characters)
+          pattern: '^[0-9a-fA-F]{130}$'
+          example: "0404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404"
+        tracker_pubkey:
+          type: string
+          description: Hex-encoded tracker public key
+          example: "030303030303030303030303030303030303030303030303030303030303030303"
+        message_signed:
+          type: string
+          description: Hex-encoded message that was signed
+          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        is_emergency:
+          type: boolean
+          nullable: true
+          description: Whether this was an emergency redemption
+          example: false
+
+    # Proof Schemas
+    ProofResponse:
+      type: object
+      description: Proof response for a specific IOU note
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        proof_data:
+          type: string
+          description: Hex-encoded AVL proof data
+          example: "0102030405060708"
+        tracker_state_digest:
+          type: string
+          description: Tracker state digest at proof generation
+          example: "64abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        block_height:
+          type: integer
+          format: uint64
+          description: Blockchain height when proof was generated
+          example: 1500
+        timestamp:
+          type: integer
+          format: uint64
+          description: Proof generation timestamp
+          example: 1672531200
+
+    TrackerProofData:
+      type: object
+      description: Tracker lookup proof data
+      properties:
+        key:
+          type: string
+          description: Hex-encoded AVL tree key (blake2b256(ownerKey || receiverKey))
+          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        value:
+          type: string
+          description: 'Hex-encoded value: totalDebt as 8-byte big-endian'
+          example: "000000003b9aca00"
+        proof:
+          type: string
+          description: Hex-encoded AVL proof bytes
+          example: "0102030405060708"
+        total_debt:
+          type: integer
+          format: uint64
+          description: Total debt as integer
+          example: 1000000000
+        tracker_state_digest:
+          type: string
+          description: Current tracker state digest (R5 register value)
+          example: "64abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+    ReserveProofData:
+      type: object
+      description: Reserve lookup proof data
+      properties:
+        key:
+          type: string
+          description: Hex-encoded AVL tree key (blake2b256(ownerKey || receiverKey))
+          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        value:
+          type: string
+          description: 'Hex-encoded value: already_redeemed as 8-byte big-endian'
+          example: "000000003b9aca00"
+        proof:
+          type: string
+          nullable: true
+          description: Hex-encoded AVL proof bytes (null for first redemption)
+          example: "0102030405060708"
+        already_redeemed:
+          type: integer
+          format: uint64
+          description: Already redeemed amount as integer
+          example: 500000000
+        is_first_redemption:
+          type: boolean
+          description: Whether this is the first redemption (no lookup proof needed)
+          example: false
+        insert_proof:
+          type: string
+          description: Hex-encoded AVL insert proof for the new already_redeemed amount
+          example: "0807060504030201"
+        new_reserve_state_digest:
+          type: string
+          description: Updated reserve state digest after the insert operation (R5 register value)
+          example: "64fedcba0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+    RedemptionPreparationRequest:
+      type: object
+      description: Request for redemption preparation
+      required:
+        - issuer_pubkey
+        - recipient_pubkey
+        - amount
+        - timestamp
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        amount:
+          type: integer
+          format: uint64
+          description: Amount to redeem in nanoERG
+          example: 500000000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Note payment timestamp in milliseconds since Unix epoch
+          example: 1234567890000
+
+    RedemptionPreparationResponse:
+      type: object
+      description: Legacy redemption preparation response
+      properties:
+        redemption_id:
+          type: string
+          description: Unique redemption identifier
+          example: "redeem_0101010101010101_0202020202020202"
+        avl_proof:
+          type: string
+          description: Hex-encoded combined AVL proof
+          example: "0102030405060708"
+        tracker_signature:
+          type: string
+          description: Hex-encoded tracker Schnorr signature
+          example: "0404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404"
+        tracker_pubkey:
+          type: string
+          description: Hex-encoded tracker public key
+          example: "030303030303030303030303030303030303030303030303030303030303030303"
+        tracker_state_digest:
+          type: string
+          description: Tracker state digest
+          example: "64abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        block_height:
+          type: integer
+          format: uint64
+          description: Current blockchain height
+          example: 1500
+
+    RedemptionBuildRequest:
+      type: object
+      description: Request to build a redemption transaction
+      required:
+        - issuer_pubkey
+        - recipient_pubkey
+        - amount
+        - timestamp
+        - issuer_signature
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer (reserve owner) public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient (creditor) public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        amount:
+          type: integer
+          format: uint64
+          description: Amount to redeem in nanoERG
+          example: 500000000
+        timestamp:
+          type: integer
+          format: uint64
+          description: Note payment timestamp in milliseconds since Unix epoch
+          example: 1234567890000
+        issuer_signature:
+          type: string
+          description: Hex-encoded issuer's 65-byte Schnorr signature
+          pattern: '^[0-9a-fA-F]{130}$'
+          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        emergency:
+          type: boolean
+          default: false
+          description: Whether this is an emergency redemption
+          example: false
+        tracker_box_id:
+          type: string
+          nullable: true
+          description: Optional tracker box id; fetched from storage if omitted
+          example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        change_address:
+          type: string
+          nullable: true
+          description: Optional change address; derived from the selected fee box if omitted
+          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
+
+    RedemptionBuildResponse:
+      type: object
+      description: Response for a built redemption transaction
+      properties:
+        unsigned_tx:
+          type: object
+          description: Node-canonical unsigned transaction JSON
+        partial_tx:
+          type: object
+          description: Fee-signed transaction JSON (reserve input proof empty)
+        input_box_binaries:
+          type: array
+          description: Sigma-serialized input boxes (hex), in transaction-input order
+          items:
+            type: string
+          example: ["a1b2c3d4", "e5f60718"]
+        data_box_binaries:
+          type: array
+          description: Sigma-serialized data-input boxes (hex)
+          items:
+            type: string
+          example: ["91a2b3c4"]
+        headers:
+          type: array
+          description: Last 10 block headers for deriving PreHeader and ErgoStateContext
+          items:
+            type: object
+        reserve_box_id:
+          type: string
+          description: Reserve box ID used as input
+          example: "f1e2d3c4b5a697887766554433221100ffeeddccbbaa99887766554433221100"
+        tracker_box_id:
+          type: string
+          description: Tracker box ID used as data input
+          example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        reserve_output_value:
+          type: integer
+          format: uint64
+          description: Value of the reserve output box after redemption
+          example: 2000000000
+        recipient_output_value:
+          type: integer
+          format: uint64
+          description: Value sent to the recipient output
+          example: 500000000
+        total_debt:
+          type: integer
+          format: uint64
+          description: Total debt for the note
+          example: 1000000000
+        change_amount:
+          type: integer
+          format: uint64
+          description: Change amount returned to the tracker
+          example: 123900000
+        change_address:
+          type: string
+          description: Address receiving change
+          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
+        recipient_address:
+          type: string
+          description: Recipient address for the redemption output
+          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
+        is_first_redemption:
+          type: boolean
+          description: Whether this is the first redemption for this note
+          example: false
+        fee:
+          type: integer
+          format: uint64
+          description: Transaction fee
+          example: 1100000
+        new_already_redeemed:
+          type: integer
+          format: uint64
+          description: Cumulative already_redeemed value this redemption inserts into the reserve tree
+          example: 500000000
+
+    RedemptionSubmitRequest:
+      type: object
+      description: Request to submit a fully signed redemption transaction
+      required:
+        - signed_tx
+        - issuer_pubkey
+        - recipient_pubkey
+        - redeemed_amount
+        - new_already_redeemed
+      properties:
+        signed_tx:
+          type: object
+          description: Fully signed transaction JSON
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        redeemed_amount:
+          type: integer
+          format: uint64
+          description: Amount redeemed by this transaction in nanoERG
+          example: 500000000
+        new_already_redeemed:
+          type: integer
+          format: uint64
+          description: Cumulative reserve-tree already_redeemed value from the build response
+          example: 500000000
+
+    RedemptionSubmitResponse:
+      type: object
+      description: Response for a submitted redemption transaction
+      properties:
+        tx_id:
+          type: string
+          description: Transaction ID of the broadcast redemption transaction
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+
+    # Status / Tracker Schemas
+    KeyStatusResponse:
+      type: object
+      description: Key status information
+      properties:
+        total_debt:
+          type: integer
+          format: uint64
+          description: Total debt issued by this key
+          example: 1500000000
+        collateral:
+          type: integer
+          format: uint64
+          description: Total collateral backing the debt
+          example: 3000000000
+        collateralization_ratio:
+          type: number
+          format: float
+          description: Current collateralization ratio
+          example: 2.0
+        note_count:
+          type: integer
+          description: Number of outstanding notes
+          example: 5
+        last_updated:
+          type: integer
+          format: uint64
+          description: Last update timestamp
+          example: 1672531200
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        has_pending_refund:
+          type: boolean
+          description: Whether the reserve has a pending refund
+          example: false
+        reserve_token_id:
+          type: string
+          nullable: true
+          description: Reserve token ID (hex-encoded) when the issuer's reserve is token-backed
+          example: "b1c2d3e4f5061728394051627384950617283940516273849506172839405162"
+
+    TrackerBoxIdResponse:
+      type: object
+      description: Latest confirmed tracker box ID
+      properties:
+        tracker_box_id:
+          type: string
+          description: Latest tracker box ID
+          example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        timestamp:
+          type: integer
+          format: uint64
+          description: Timestamp when the box was confirmed
+          example: 1672531200
+        height:
+          type: integer
+          format: uint64
+          description: Blockchain height when the box was confirmed
+          example: 1500
+
+    TrackerStateResponse:
+      type: object
+      description: Tracker state response showing local, confirmed, and pending digests
+      properties:
+        local_digest:
+          type: string
+          description: Local tracker AVL tree digest
+          example: "64abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        confirmed_digest:
+          type: string
+          nullable: true
+          description: Confirmed tracker AVL tree digest
+          example: "64abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        confirmed_box_id:
+          type: string
+          nullable: true
+          description: Box ID of the confirmed tracker box
+          example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        confirmed_height:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Blockchain height at which the tracker box was confirmed
+          example: 1500
+        pending_digest:
+          type: string
+          nullable: true
+          description: Pending tracker AVL tree digest
+          example: "64fedcba0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        pending_tx_id:
+          type: string
+          nullable: true
+          description: Transaction ID of the pending tracker update
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+        pending_submitted_height:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Height at which the pending transaction was submitted
+          example: 1501
+        tracker_box_id:
+          type: string
+          nullable: true
+          description: Latest tracker box ID
+          example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+    PendingTxResponse:
+      type: object
+      description: Pending tracker update transaction response
+      properties:
+        pending_tx_id:
+          type: string
+          nullable: true
+          description: Pending transaction ID
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+        pending_digest:
+          type: string
+          nullable: true
+          description: Pending tracker digest
+          example: "64fedcba0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        submitted_height:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Height at which the pending transaction was submitted
+          example: 1501
+
+    # Acceptance Schemas
+    CheckAcceptanceRequest:
+      type: object
+      description: Request for checking note acceptance
+      required:
+        - issuer_pubkey
+        - total_debt
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (33 bytes)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        total_debt:
+          type: integer
+          format: uint64
+          description: Total cumulative debt amount
+          example: 1000000000
+        recipient_pubkey:
+          type: string
+          nullable: true
+          description: Optional hex-encoded recipient public key for per-recipient policy lookup
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+
+    CheckAcceptanceResponse:
+      type: object
+      description: Response for checking note acceptance
+      properties:
+        acceptable:
+          type: boolean
+          description: Whether the note is acceptable
+          example: true
+        reason:
+          type: string
+          nullable: true
+          description: Optional reason for rejection
+          example: "Collateralization ratio below threshold"
+
+    UploadPolicyRequest:
+      type: object
+      description: Request for uploading an acceptance policy
+      required:
+        - recipient_pubkey
+        - policy_json
+        - signature
+      properties:
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (33 bytes)
+          pattern: '^[0-9a-fA-F]{66}$'
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        policy_json:
+          type: string
+          description: Policy JSON string (serialized AcceptanceConfig)
+          example: '{"max_debt_per_issuer": 10000000000, "min_collateralization_ratio": 1.5}'
+        signature:
+          type: string
+          description: Schnorr signature over policy_json (65 bytes, hex encoded)
+          pattern: '^[0-9a-fA-F]{130}$'
+          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+
+    UploadPolicyResponse:
+      type: object
+      description: Response for uploading an acceptance policy
+      properties:
+        uploaded_at:
+          type: integer
+          format: uint64
+          description: Unix timestamp when the policy was uploaded
+          example: 1672531200
+        policy_hash:
+          type: string
+          description: Hash of the policy for verification
+          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+    GetPolicyResponse:
+      type: object
+      description: Response for getting a recipient's acceptance policy
+      properties:
+        recipient_pubkey:
+          type: string
+          description: Recipient public key (hex encoded)
+          example: "020202020202020202020202020202020202020202020202020202020202020202"
+        policy_json:
+          type: string
+          description: Policy JSON string
+          example: '{"max_debt_per_issuer": 10000000000, "min_collateralization_ratio": 1.5}'
+        signature:
+          type: string
+          description: Hex-encoded Schnorr signature (130 characters = 65 bytes)
+          pattern: '^[0-9a-fA-F]{130}$'
+          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        uploaded_at:
+          type: integer
+          format: uint64
+          description: Unix timestamp when the policy was uploaded
+          example: 1672531200
+
+    # Event Schemas
     EventType:
-      type: string
-      description: Type of tracker event
-      enum:
-        - NoteUpdated
-        - ReserveCreated
-        - ReserveToppedUp
-        - ReserveRedeemed
-        - ReserveSpent
-        - Commitment
-        - CollateralAlert
+      oneOf:
+        - type: object
+          description: Generic tracker event type
+          required:
+            - type
+          properties:
+            type:
+              type: string
+              enum:
+                - NoteUpdated
+                - ReserveCreated
+                - ReserveToppedUp
+                - ReserveRedeemed
+                - ReserveSpent
+                - Commitment
+              example: "NoteUpdated"
+        - type: object
+          description: Collateral alert event with ratio
+          required:
+            - type
+            - ratio
+          properties:
+            type:
+              type: string
+              enum:
+                - CollateralAlert
+              example: "CollateralAlert"
+            ratio:
+              type: number
+              format: float
+              description: Collateralization ratio that triggered the alert
+              example: 0.8
+      description: Tagged enum representing the type of tracker event
 
     TrackerEvent:
       type: object
@@ -665,7 +2346,7 @@ components:
           format: uint64
           description: Event ID
           example: 1
-        type:
+        event_type:
           $ref: '#/components/schemas/EventType'
         timestamp:
           type: integer
@@ -712,372 +2393,26 @@ components:
           description: Blockchain height when event occurred
           example: 1000
 
-    KeyStatusResponse:
+    # Config Schemas
+    ReserveTokenConfigResponse:
       type: object
-      description: Key status information
+      description: Reserve token configuration response
       properties:
-        total_debt:
-          type: integer
-          format: uint64
-          description: Total debt issued by this key
-          example: 1500000000
-        collateral:
-          type: integer
-          format: uint64
-          description: Total collateral backing the debt
-          example: 3000000000
-        collateralization_ratio:
-          type: number
-          format: float
-          description: Current collateralization ratio
-          example: 2.0
-        note_count:
-          type: integer
-          description: Number of outstanding notes
-          example: 5
-        last_updated:
-          type: integer
-          format: uint64
-          description: Last update timestamp
-          example: 1672531200
-        issuer_pubkey:
-          type: string
-          description: Hex-encoded issuer public key
-          example: "010101010101010101010101010101010101010101010101010101010101010101"
-
-    RedeemRequest:
-      type: object
-      description: Redemption request
-      required:
-        - issuer_pubkey
-        - recipient_pubkey
-        - amount
-        - timestamp
-        - issuer_signature
-      properties:
-        issuer_pubkey:
-          type: string
-          description: Hex-encoded issuer public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "010101010101010101010101010101010101010101010101010101010101010101"
-        recipient_pubkey:
-          type: string
-          description: Hex-encoded recipient public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "020202020202020202020202020202020202020202020202020202020202020202"
-        amount:
-          type: integer
-          format: uint64
-          description: Amount to redeem
-          example: 500000000
-        timestamp:
-          type: integer
-          format: uint64
-          description: Timestamp of the note being redeemed
-          example: 1234567890
-        reserve_box_id:
-          type: string
-          description: Reserve box ID (optional - server will lookup if not provided)
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        tracker_box_id:
-          type: string
-          description: Tracker box ID (optional - server will fetch if not provided)
-          example: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-        tracker_nft_id:
-          type: string
-          description: Tracker NFT ID (optional - server will fetch if not provided)
-          example: "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
-        current_height:
-          type: integer
-          format: uint64
-          description: Current blockchain height (optional - server will fetch if not provided)
-          example: 1000000
-        recipient_address:
-          type: string
-          description: Recipient address (optional - server will derive from pubkey if not provided)
-          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
-        change_address:
-          type: string
-          description: Change address (optional - server will derive from tracker pubkey if not provided)
-          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
-        issuer_signature:
-          type: string
-          description: Hex-encoded Schnorr signature from issuer (130 characters = 65 bytes)
-          pattern: '^[0-9a-fA-F]{130}$'
-          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
-        emergency:
-          type: boolean
-          description: Whether this is an emergency redemption (after 3 days tracker unavailability)
-          default: false
-          example: false
-        tracker_signature:
-          type: string
-          description: Hex-encoded Schnorr signature from tracker (optional - server will generate if not provided)
-          pattern: '^[0-9a-fA-F]{130}$'
-          example: "0404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404"
-
-    RedeemResponse:
-      type: object
-      description: Redemption response
-      properties:
-        redemption_id:
-          type: string
-          description: Unique redemption identifier
-          example: "redeem_0101010101010101_0202020202020202"
-        amount:
-          type: integer
-          format: uint64
-          description: Amount being redeemed
-          example: 500000000
-        timestamp:
-          type: integer
-          format: uint64
-          description: Redemption timestamp
-          example: 1672531200
-        proof_available:
-          type: boolean
-          description: Whether proof is available
-          example: true
-        transaction_pending:
-          type: boolean
-          description: Whether redemption transaction is pending
-          example: false
-
-    ProofResponse:
-      type: object
-      description: Proof response
-      properties:
-        issuer_pubkey:
-          type: string
-          description: Hex-encoded issuer public key
-          example: "010101010101010101010101010101010101010101010101010101010101010101"
-        recipient_pubkey:
-          type: string
-          description: Hex-encoded recipient public key
-          example: "020202020202020202020202020202020202020202020202020202020202020202"
-        proof_data:
-          type: string
-          description: Hex-encoded proof data
-          example: "proof_0101010101010101_0202020202020202"
-        tracker_state_digest:
-          type: string
-          description: Tracker state digest at proof generation
-          example: "mock_digest_1234567890abcdef"
-        block_height:
-          type: integer
-          format: uint64
-          description: Blockchain height when proof was generated
-          example: 1500
-        timestamp:
-          type: integer
-          format: uint64
-          description: Proof generation timestamp
-          example: 1672531200
-
-    # API Response Wrappers
-    ApiResponse:
-      type: object
-      description: Standard API response format
-      properties:
-        success:
-          type: boolean
-          description: Whether the request was successful
-        data:
-          type: object
-          nullable: true
-          description: Response data (null for error responses)
-        error:
+        reserve_token_id:
           type: string
           nullable: true
-          description: Error message (null for successful responses)
-
-    # Tracker Signature Request/Response
-    TrackerSignatureRequest:
-      type: object
-      description: Request for tracker signature on redemption
-      required:
-        - issuer_pubkey
-        - recipient_pubkey
-        - total_debt
-      properties:
-        issuer_pubkey:
-          type: string
-          description: Hex-encoded issuer public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "010101010101010101010101010101010101010101010101010101010101010101"
-        recipient_pubkey:
-          type: string
-          description: Hex-encoded recipient public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "020202020202020202020202020202020202020202020202020202020202020202"
-        total_debt:
+          description: Reserve token ID (hex-encoded) if configured
+          example: "b1c2d3e4f5061728394051627384950617283940516273849506172839405162"
+        reserve_token_decimals:
           type: integer
-          format: uint64
-          description: Total cumulative debt amount
-          example: 1000000000
-        emergency:
-          type: boolean
-          description: Whether this is an emergency redemption
-          default: false
-          example: false
+          description: Number of decimals for the reserve token
+          example: 6
+        basis_token_reserve_contract_p2s:
+          type: string
+          description: P2S address for the token-backed reserve contract
+          example: "2Z4YBkDsDvQj8BX7xiySF9jLUCuYUHjbkY78Zn7aQGjftGPKvUvtbNE7"
 
-    TrackerSignatureResponse:
-      type: object
-      description: Tracker signature response
-      properties:
-        success:
-          type: boolean
-          description: Whether signature generation was successful
-          example: true
-        tracker_signature:
-          type: string
-          description: Hex-encoded Schnorr signature (130 characters)
-          example: "0404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404"
-        tracker_pubkey:
-          type: string
-          description: Hex-encoded tracker public key
-          example: "030303030303030303030303030303030303030303030303030303030303030303"
-        message_signed:
-          type: string
-          description: Hex-encoded message that was signed
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        is_emergency:
-          type: boolean
-          description: Whether this was an emergency redemption
-          example: false
-
-    # Proof Data Structures
-    TrackerProofData:
-      type: object
-      description: Tracker lookup proof data
-      properties:
-        key:
-          type: string
-          description: Hex-encoded AVL tree key
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        value:
-          type: string
-          description: 'Hex-encoded value: totalDebt as 8-byte big-endian'
-          example: "000000003b9aca00"
-        proof:
-          type: string
-          description: Hex-encoded AVL proof bytes
-          example: "0102030405060708"
-        total_debt:
-          type: integer
-          format: uint64
-          description: Total debt as integer
-          example: 1000000000
-        tracker_state_digest:
-          type: string
-          description: Current tracker state digest (R5 register value)
-          example: "64abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-
-    ReserveProofData:
-      type: object
-      description: Reserve lookup proof data
-      properties:
-        key:
-          type: string
-          description: Hex-encoded AVL tree key
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        value:
-          type: string
-          description: 'Hex-encoded value: already_redeemed as 8-byte big-endian'
-          example: "000000003b9aca00"
-        proof:
-          type: string
-          nullable: true
-          description: Hex-encoded AVL proof bytes (null for first redemption)
-          example: "0102030405060708"
-        already_redeemed:
-          type: integer
-          format: uint64
-          description: Already redeemed amount as integer
-          example: 500000000
-        is_first_redemption:
-          type: boolean
-          description: Whether this is the first redemption (no lookup proof needed)
-          example: false
-
-    RedemptionProofResponse:
-      type: object
-      description: Comprehensive redemption proof response
-      properties:
-        success:
-          type: boolean
-          description: Whether proof generation was successful
-          example: true
-        data:
-          type: object
-          description: Proof data
-          properties:
-            tracker_lookup_proof:
-              type: string
-              description: Hex-encoded tracker lookup proof
-              example: "0102030405060708"
-            reserve_lookup_proof:
-              type: string
-              nullable: true
-              description: Hex-encoded reserve lookup proof (null for first redemption)
-              example: "0102030405060708"
-            reserve_insert_proof:
-              type: string
-              description: Hex-encoded reserve insert proof
-              example: "0102030405060708"
-            tracker_state_digest:
-              type: string
-              description: Tracker state digest
-              example: "64abcdef"
-            reserve_state_digest:
-              type: string
-              description: Reserve state digest
-              example: "64fedcba"
-            total_debt:
-              type: integer
-              format: uint64
-              description: Total debt amount
-              example: 1000000000
-            already_redeemed:
-              type: integer
-              format: uint64
-              description: Already redeemed amount
-              example: 0
-            proof_valid:
-              type: boolean
-              description: Whether the proof is valid
-              example: true
-            is_first_redemption:
-              type: boolean
-              description: Whether this is the first redemption
-              example: true
-
-    ApiResponseEmpty:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              type: object
-              nullable: true
-              example: null
-
-    ApiResponseError:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            success:
-              type: boolean
-              example: false
-            data:
-              type: object
-              nullable: true
-              example: null
-            error:
-              type: string
-              example: "Invalid signature"
-
+    # Response Wrappers
     ApiResponseNotes:
       allOf:
         - $ref: '#/components/schemas/ApiResponse'
@@ -1088,6 +2423,16 @@ components:
               items:
                 $ref: '#/components/schemas/SerializableIouNote'
 
+    ApiResponseNotesWithAge:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/SerializableIouNoteWithAge'
+
     ApiResponseNote:
       allOf:
         - $ref: '#/components/schemas/ApiResponse'
@@ -1095,6 +2440,14 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/SerializableIouNote'
+
+    ApiResponseNoteState:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/NoteStateResponse'
 
     ApiResponseReserves:
       allOf:
@@ -1105,6 +2458,30 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/SerializableReserveInfo'
+
+    ApiResponseReserve:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/SerializableReserveInfo'
+
+    ApiResponseReserveCreation:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ReserveCreationResponse'
+
+    ApiResponseReserveSubmission:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ReserveSubmissionResponse'
 
     ApiResponseEvents:
       allOf:
@@ -1139,6 +2516,110 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/ProofResponse'
+
+    ApiResponseTrackerProof:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/TrackerProofData'
+
+    ApiResponseReserveProof:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ReserveProofData'
+
+    ApiResponseTrackerSignature:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/TrackerSignatureResponse'
+
+    ApiResponseRedemptionPreparation:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/RedemptionPreparationResponse'
+
+    ApiResponseRedemptionBuild:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/RedemptionBuildResponse'
+
+    ApiResponseRedemptionSubmit:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/RedemptionSubmitResponse'
+
+    ApiResponseTrackerState:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/TrackerStateResponse'
+
+    ApiResponsePendingTx:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/PendingTxResponse'
+
+    ApiResponseTrackerBoxId:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/TrackerBoxIdResponse'
+
+    ApiResponseCheckAcceptance:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/CheckAcceptanceResponse'
+
+    ApiResponseUploadPolicy:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/UploadPolicyResponse'
+
+    ApiResponseGetPolicy:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/GetPolicyResponse'
+
+    ApiResponseReserveTokenConfig:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ReserveTokenConfigResponse'
 
   responses:
     BadRequest:
@@ -1175,3 +2656,9 @@ tags:
     description: Note redemption operations
   - name: Proofs
     description: Proof generation and verification
+  - name: Acceptance
+    description: Acceptance policy management
+  - name: Tracker
+    description: Tracker state and operations
+  - name: Config
+    description: Server configuration

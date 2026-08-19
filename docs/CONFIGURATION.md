@@ -22,9 +22,39 @@ host = "0.0.0.0"        # Host address to bind to
 port = 3048             # Port to listen on
 data_dir = "data"       # Base directory for all on-disk storage (databases, indices, scanner metadata)
 database_url = "sqlite:data/basis.db"  # Legacy field, kept for compatibility (currently unused)
+# tls_cert_path = "server.crt"  # PEM-encoded TLS certificate chain (enable for production auth)
+# tls_key_path = "server.key"   # PEM-encoded TLS private key
 ```
 
 `data_dir` controls where the server writes all persistent state. It defaults to a `data/` directory relative to the working directory from which the server is launched. You can override it with the `BASIS_SERVER_DATA_DIR` environment variable.
+
+### Server Authentication & TLS
+
+The tracker server supports optional TLS and three authentication modes under
+`[server.auth]`:
+
+| Mode | Description |
+|---|---|
+| `none` | Anonymous requests (default, local development only) |
+| `api_key` | Shared secret via `Authorization: Bearer <key>` or `X-API-Key: <key>` |
+| `signature` | Per-request secp256k1 Schnorr signatures |
+
+```toml
+[server.auth]
+mode = "signature"
+# api_key = "change-me"
+# [[server.auth.authorized_clients]]
+# pubkey = "020202020202020202020202020202020202020202020202020202020202020202"
+# role = "admin"
+allowed_origins = []
+signature_timestamp_tolerance_ms = 30000
+```
+
+When auth is enabled, configure TLS (`tls_cert_path` / `tls_key_path`) so
+credentials and signatures are not sent in plaintext. Clients authenticate with
+the same `server_auth_*` fields in `~/.basis/cli.toml`; the MCP server can also
+read them from environment variables. See `specs/server/authentication_authorization.md`
+for the full signature scheme and RBAC rules.
 
 ### Ergo Blockchain Configuration
 
@@ -184,10 +214,18 @@ If no configuration file is found, the server uses these defaults:
 
 ```toml
 [server]
-host = "127.0.0.1"
+host = "0.0.0.0"
 port = 3048
 data_dir = "data"
 database_url = "sqlite:data/basis.db"
+# tls_cert_path = "server.crt"
+# tls_key_path = "server.key"
+
+[server.auth]
+mode = "none"
+api_key = ""
+allowed_origins = []
+signature_timestamp_tolerance_ms = 30000
 
 [ergo]
 basis_reserve_contract_p2s = ""

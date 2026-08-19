@@ -62,6 +62,9 @@ mod create_reserve_tests {
                 port: 3048,
                 data_dir: Some(data_dir.to_string_lossy().to_string()),
                 database_url: Some("sqlite::memory:".to_string()),
+                tls_cert_path: None,
+                tls_key_path: None,
+                auth: crate::config::AuthConfig::default(),
             },
             ergo: crate::config::ErgoConfig {
                 node: NodeConfig {

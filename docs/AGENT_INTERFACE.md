@@ -227,6 +227,17 @@ error message — the server never exits on a tool error.
   but only returns the account name and public key.
 - **Signing stays in-process**: note creation, redemption, and policy upload
   are signed locally by the wallet; keys never leave the `basis-mcp` process.
+- **Tracker-server authentication**: when the tracker server requires
+  authentication, `basis-mcp` reads credentials from environment variables
+  first, then falls back to `~/.basis/cli.toml`:
+  - `BASIS_TRACKER_AUTH_MODE`: `none`, `api_key`, or `signature`
+  - `BASIS_TRACKER_API_KEY`: shared secret for API-key mode
+  - `BASIS_TRACKER_AUTH_PUBKEY`: hex public key for signature mode
+  - `BASIS_TRACKER_AUTH_SECRET_KEY`: hex secret key for signature mode
+
+  For signature mode the private key is used only to sign HTTP requests to the
+  tracker server; it is not the user's wallet key. See
+  `specs/server/authentication_authorization.md` for the full scheme.
 
 ### Client configuration
 
@@ -250,6 +261,23 @@ With a server-URL override:
     "basis": {
       "command": "/path/to/basis-mcp",
       "args": ["--server-url", "http://127.0.0.1:3048"]
+    }
+  }
+}
+```
+
+With tracker-server authentication via environment variables:
+
+```json
+{
+  "mcpServers": {
+    "basis": {
+      "command": "/path/to/basis-mcp",
+      "env": {
+        "BASIS_TRACKER_AUTH_MODE": "signature",
+        "BASIS_TRACKER_AUTH_PUBKEY": "020202...",
+        "BASIS_TRACKER_AUTH_SECRET_KEY": "..."
+      }
     }
   }
 }
