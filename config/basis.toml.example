@@ -18,8 +18,8 @@ tracker_nft_id = "your_tracker_nft_token_id_here"
 # Example for USE (Dexy USD): a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669
 reserve_token_id = ""
 # Decimal places of the reserve token, for display only. Raw on-chain amounts are always integer units.
-# USE uses 6 decimals.
-reserve_token_decimals = 0
+# USE uses 3 decimals (as reported by the Ergo node token registry).
+reserve_token_decimals = 3
 # Tracker public key - can be hex-encoded public key or P2PK address
 tracker_public_key = "your_tracker_public_key_or_p2pk_address_here"
 # Tracker secret key for local signing (hex-encoded, 32 bytes)

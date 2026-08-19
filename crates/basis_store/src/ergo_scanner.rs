@@ -352,55 +352,87 @@ impl ServerState {
     }
 
     /// Get unspent reserve boxes via `POST /blockchain/box/unspent/byAddress`.
+    /// Queries both the ERG-backed and token-backed reserve contract addresses when
+    /// configured, merging the results and removing duplicates.
     pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ScanBox>, ScannerError> {
-        let reserve_contract_p2s = self.config.reserve_contract_p2s.as_ref().ok_or_else(|| {
-            ScannerError::Generic("Reserve contract P2S not configured".to_string())
-        })?;
-
-        let url = format!("{}/blockchain/box/unspent/byAddress", self.config.node_url);
-        info!("Fetching unspent reserve boxes from: {}", url);
-
-        let response = self
-            .request_builder(reqwest::Method::POST, &url)
-            .json(reserve_contract_p2s)
-            .send()
-            .await
-            .map_err(|e| {
-                ScannerError::HttpError(format!("Failed to fetch reserve boxes: {}", e))
-            })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let response_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unable to read response".to_string());
-            error!(
-                "Failed to get reserve boxes with status {}: {}",
-                status, response_text
-            );
-            return Err(ScannerError::NodeError(format!(
-                "Failed to get reserve boxes with status: {}",
-                status
-            )));
+        let mut addresses = Vec::new();
+        if let Some(ref p2s) = self.config.reserve_contract_p2s {
+            if !p2s.is_empty() {
+                addresses.push(p2s.clone());
+            }
+        }
+        if let Some(ref p2s) = self.config.token_reserve_contract_p2s {
+            if !p2s.is_empty() {
+                addresses.push(p2s.clone());
+            }
         }
 
-        let parsed: ByAddressResponse = crate::http::read_json_capped(response)
-            .await
-            .map_err(|e| {
-                ScannerError::JsonError(format!("Failed to parse reserve boxes response: {}", e))
-            })
-            .and_then(|value| {
-                serde_json::from_value(value).map_err(|e| {
+        if addresses.is_empty() {
+            warn!("No reserve contract P2S specified, scanner will have no boxes to fetch");
+            return Ok(Vec::new());
+        }
+
+        let url = format!("{}/blockchain/box/unspent/byAddress", self.config.node_url);
+        let mut all_boxes: Vec<ScanBox> = Vec::new();
+
+        for address in addresses {
+            info!("Fetching unspent reserve boxes for contract: {}", address);
+
+            let response = self
+                .request_builder(reqwest::Method::POST, &url)
+                .json(&address)
+                .send()
+                .await
+                .map_err(|e| {
+                    ScannerError::HttpError(format!(
+                        "Failed to fetch reserve boxes for {}: {}",
+                        address, e
+                    ))
+                })?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let response_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unable to read response".to_string());
+                error!(
+                    "Failed to get reserve boxes for {} with status {}: {}",
+                    address, status, response_text
+                );
+                return Err(ScannerError::NodeError(format!(
+                    "Failed to get reserve boxes for {} with status: {}",
+                    address, status
+                )));
+            }
+
+            let parsed: ByAddressResponse = crate::http::read_json_capped(response)
+                .await
+                .map_err(|e| {
                     ScannerError::JsonError(format!(
-                        "Failed to parse reserve boxes response: {}",
-                        e
+                        "Failed to parse reserve boxes response for {}: {}",
+                        address, e
                     ))
                 })
-            })?;
+                .and_then(|value| {
+                    serde_json::from_value(value).map_err(|e| {
+                        ScannerError::JsonError(format!(
+                            "Failed to parse reserve boxes response for {}: {}",
+                            address, e
+                        ))
+                    })
+                })?;
 
-        info!("Found {} reserve boxes", parsed.len());
-        Ok(parsed.into_iter().map(Into::into).collect())
+            info!("Found {} reserve boxes for {}", parsed.len(), address);
+            all_boxes.extend(parsed.into_iter().map(Into::into));
+        }
+
+        // Deduplicate by box_id in case both contracts somehow return the same box.
+        let mut seen = std::collections::HashSet::new();
+        all_boxes.retain(|b| seen.insert(b.box_id.clone()));
+
+        info!("Total unique reserve boxes: {}", all_boxes.len());
+        Ok(all_boxes)
     }
 
     /// Check if scanner is active
@@ -414,7 +446,9 @@ impl ServerState {
     pub async fn start_scanning(&mut self) -> Result<(), ScannerError> {
         info!("Starting Ergo blockchain scanner for reserves");
 
-        if self.config.reserve_contract_p2s.is_none() {
+        if self.config.reserve_contract_p2s.is_none()
+            && self.config.token_reserve_contract_p2s.is_none()
+        {
             warn!("No reserve contract P2S specified, scanner will have no boxes to fetch");
         }
 
@@ -545,8 +579,9 @@ impl ServerState {
             (value, None)
         };
 
+        let box_id_bytes = hex::decode(&box_id).unwrap_or_else(|_| box_id.as_bytes().to_vec());
         let reserve_info = ExtendedReserveInfo::new(
-            box_id.as_bytes(),
+            &box_id_bytes,
             &owner_pubkey_bytes,
             collateral_amount,
             Some(&tracker_nft_id_bytes),

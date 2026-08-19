@@ -45,9 +45,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android_system_properties"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
+checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
 dependencies = [
  "libc",
 ]
@@ -739,10 +739,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "core3"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cbcb5224cf18d0beaecf52c52a58b248213de007fa72bc212d916224e26ceb8"
+name = "core2"
+version = "0.4.0"
 dependencies = [
  "memchr",
 ]
@@ -1095,7 +1093,7 @@ dependencies = [
  "base16",
  "base64 0.22.1",
  "bounded-integer",
- "core3",
+ "core2",
  "derive_more",
  "elliptic-curve",
  "k256",
@@ -1195,7 +1193,7 @@ dependencies = [
  "blake2",
  "bounded-vec",
  "bytes",
- "core3",
+ "core2",
  "derive_more",
  "elliptic-curve",
  "ergo-chain-types",
@@ -1227,7 +1225,7 @@ dependencies = [
  "bnum",
  "bounded-vec",
  "bs58",
- "core3",
+ "core2",
  "derive_more",
  "elliptic-curve",
  "ergo-chain-types",
@@ -1382,9 +1380,9 @@ dependencies = [
 
 [[package]]
 name = "futures-io"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4577ecaa3c4f96589d473f679a71b596316f6641bc350038b962a5daf0085d7a"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
 name = "futures-macro"
@@ -3220,7 +3218,7 @@ version = "0.19.0"
 dependencies = [
  "bitvec",
  "bounded-vec",
- "core3",
+ "core2",
  "thiserror 2.0.16",
 ]
 

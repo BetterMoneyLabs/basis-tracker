@@ -936,8 +936,33 @@ Both redemptions confirmed on mainnet. The reserve collateral decreased from 0.3
 
 ---
 
+## Eleventh Redemption Test: Real USE (DexyUSD) Token Reserve, Four 0.1 USD Redemptions with Tracker Restart
+
+A full report for this run is maintained in [redemption_test_report_real_use_4x.md](redemption_test_report_real_use_4x.md). Highlights:
+
+- **Network:** Ergo mainnet
+- **Reserve token:** USE (DexyUSD), `a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669`
+- **Reserve:** 500 raw USE (0.5 USD) + 3,000,000 nanoERG
+- **Note:** 400 raw USE (0.4 USD)
+- **Redemptions:** four × 100 raw USE (0.1 USD each)
+- **Restart:** Tracker server restarted after redemption #2
+
+### Main-chain redemption transaction IDs
+
+1. `684fc8286b116899b6f827761d3e5c7bc463b5ac5b2a984d6b1fc2e4041e8e15`
+2. `e406f61f3f076ea6640d1c8fa3c177808de1660c41d2be220e73d93409e0161c`
+3. `740860e2288f979d9ac263e0eb727292614797fb80e8ea241aa8585ff14abfb0`
+4. `70a017f71580043dd76047a2ada2e9b7d994f26bafb8ed4474e995727a380e1e`
+
+### Result
+
+All four redemptions confirmed. Final reserve collateral: 100 raw USE; note fully redeemed. Key operational findings are documented in the dedicated report.
+
+---
+
 - [Tracker Box Update Specification](server/tracker_box_update_spec.md)
 - [Redemption Transaction Format Specification](server/redemption_transaction_format_spec.md)
 - [Redemption State Specification](server/redemption_state_spec.md)
+- [Real USE 4-Redemption Test Report](redemption_test_report_real_use_4x.md)
 - [Interactive Demo](interactive_demo.md)
 - Ergo node API: `/wallet/transaction/sign`, `/transactions`, `/wallet/getPrivateKey`

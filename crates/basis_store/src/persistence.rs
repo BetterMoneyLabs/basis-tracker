@@ -21,6 +21,7 @@ pub struct NoteStorage {
     issuer_index: fjall::Partition,
     recipient_index: fjall::Partition,
     confirmations_partition: fjall::Partition,
+    reserve_avl_journal_partition: fjall::Partition,
 }
 
 /// Database storage for scanner metadata
@@ -182,11 +183,21 @@ impl NoteStorage {
                 NoteError::StorageError(format!("Failed to open confirmations partition: {}", e))
             })?;
 
+        let reserve_avl_journal_partition = keyspace
+            .open_partition("reserve_avl_journal", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!(
+                    "Failed to open reserve AVL journal partition: {}",
+                    e
+                ))
+            })?;
+
         Ok(Self {
             notes_partition,
             issuer_index,
             recipient_index,
             confirmations_partition,
+            reserve_avl_journal_partition,
         })
     }
 
@@ -686,6 +697,42 @@ impl NoteStorage {
         Ok(notes_with_issuer)
     }
 
+    /// Retrieve an IOU note by its 32-byte note key.
+    pub fn get_note_by_key(&self, note_key: &NoteKey) -> Result<Option<IouNote>, NoteError> {
+        let key_bytes = note_key.to_bytes();
+
+        match self.notes_partition.get(&key_bytes) {
+            Ok(Some(value_bytes)) => {
+                if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+                    return Err(NoteError::StorageError(
+                        "Invalid stored note format".to_string(),
+                    ));
+                }
+
+                let amount_collected =
+                    u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+                let amount_redeemed =
+                    u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+                let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
+                let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
+                let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+
+                Ok(Some(IouNote {
+                    recipient_pubkey,
+                    amount_collected,
+                    amount_redeemed,
+                    timestamp,
+                    signature,
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get note by key: {}",
+                e
+            ))),
+        }
+    }
+
     /// Delete a note and update indices
     pub fn delete_note(
         &self,
@@ -705,6 +752,82 @@ impl NoteStorage {
         Self::remove_from_index(&self.recipient_index, recipient_pubkey, &key)?;
 
         Ok(())
+    }
+
+    /// Append a reserve AVL tree update to the journal.
+    ///
+    /// The journal key is ordered by a nanosecond timestamp so that replaying entries
+    /// in storage order reproduces the exact sequence of tree operations.
+    pub fn append_reserve_avl_update(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        timestamp: u64,
+        already_redeemed: u64,
+    ) -> Result<(), NoteError> {
+        let note_key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| NoteError::StorageError(format!("Failed to get system time: {}", e)))?
+            .as_nanos();
+
+        let mut key = Vec::with_capacity(16 + 33 + 32);
+        key.extend_from_slice(&nanos.to_be_bytes());
+        key.extend_from_slice(issuer_pubkey);
+        key.extend_from_slice(&note_key.to_bytes());
+
+        let mut value = Vec::with_capacity(16);
+        value.extend_from_slice(&timestamp.to_be_bytes());
+        value.extend_from_slice(&already_redeemed.to_be_bytes());
+
+        self.reserve_avl_journal_partition
+            .insert(&key, &value)
+            .map_err(|e| {
+                NoteError::StorageError(format!(
+                    "Failed to append reserve AVL journal entry: {}",
+                    e
+                ))
+            })?;
+
+        Ok(())
+    }
+
+    /// Iterate the reserve AVL journal in operation order.
+    ///
+    /// Returns a vector of (issuer_pubkey, note_key, timestamp, already_redeemed) tuples.
+    pub fn iter_reserve_avl_updates(
+        &self,
+    ) -> Result<Vec<(PubKey, NoteKey, u64, u64)>, NoteError> {
+        let mut updates = Vec::new();
+
+        for item in self.reserve_avl_journal_partition.iter() {
+            let (key, value) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate reserve AVL journal: {}", e))
+            })?;
+
+            if key.len() != 16 + 33 + 32 || value.len() != 16 {
+                tracing::warn!(
+                    "Skipping malformed reserve AVL journal entry: key_len={}, value_len={}",
+                    key.len(),
+                    value.len()
+                );
+                continue;
+            }
+
+            let issuer_pubkey: PubKey = key[16..49].try_into().map_err(|_| {
+                NoteError::StorageError("Invalid issuer pubkey in reserve AVL journal".to_string())
+            })?;
+            let note_key_bytes: [u8; 32] = key[49..81].try_into().unwrap();
+            let note_key = NoteKey::from_bytes(&note_key_bytes);
+
+            let timestamp = u64::from_be_bytes(value[0..8].try_into().unwrap());
+            let already_redeemed = u64::from_be_bytes(value[8..16].try_into().unwrap());
+
+            updates.push((issuer_pubkey, note_key, timestamp, already_redeemed));
+        }
+
+        Ok(updates)
     }
 }
 

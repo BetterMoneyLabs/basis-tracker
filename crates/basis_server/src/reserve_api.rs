@@ -52,6 +52,7 @@ pub async fn get_all_reserves(
                         collateral_amount: info.base_info.collateral_amount,
                         total_debt: info.total_debt,
                         tracker_nft_id: info.base_info.tracker_nft_id.clone(),
+                        reserve_token_id: info.base_info.reserve_token_id.clone(),
                         last_updated_height: info.base_info.last_updated_height,
                         last_updated_timestamp: info.last_updated_timestamp,
                         collateralization_ratio,
@@ -102,6 +103,7 @@ pub async fn get_reserves_by_issuer(
                         collateral_amount: info.base_info.collateral_amount,
                         total_debt: info.total_debt,
                         tracker_nft_id: info.base_info.tracker_nft_id.clone(),
+                        reserve_token_id: info.base_info.reserve_token_id.clone(),
                         last_updated_height: info.base_info.last_updated_height,
                         last_updated_timestamp: info.last_updated_timestamp,
                         collateralization_ratio,
@@ -155,6 +157,7 @@ pub async fn get_reserve_by_box_id(
                 collateral_amount: reserve_info.base_info.collateral_amount,
                 total_debt: reserve_info.total_debt,
                 tracker_nft_id: reserve_info.base_info.tracker_nft_id.clone(),
+                reserve_token_id: reserve_info.base_info.reserve_token_id.clone(),
                 last_updated_height: reserve_info.base_info.last_updated_height,
                 last_updated_timestamp: reserve_info.last_updated_timestamp,
                 collateralization_ratio,
@@ -192,6 +195,9 @@ pub struct SerializableReserveInfo {
     pub collateral_amount: u64,
     pub total_debt: u64,
     pub tracker_nft_id: String, // Tracker NFT ID from R6 register (hex-encoded serialized SColl(SByte) format following byte_array_register_serialization.md spec)
+    /// Reserve token ID (hex-encoded) for token-backed reserves, or empty for ERG reserves.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub reserve_token_id: String,
     pub last_updated_height: u64,
     pub last_updated_timestamp: u64,
     pub collateralization_ratio: f64,

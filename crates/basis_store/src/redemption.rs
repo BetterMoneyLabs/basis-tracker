@@ -1039,8 +1039,10 @@ mod tests {
             )
             .expect("reference update");
         assert_eq!(
-            redemption_manager.tracker.reserve_state_digest(),
-            reference.reserve_state_digest(),
+            redemption_manager
+                .tracker
+                .reserve_state_digest(&issuer_pubkey),
+            reference.reserve_state_digest(&issuer_pubkey),
             "reserve tree must use pre-refresh timestamp and cumulative amount"
         );
 
@@ -1060,8 +1062,10 @@ mod tests {
             )
             .expect("reference update 2");
         assert_eq!(
-            redemption_manager.tracker.reserve_state_digest(),
-            reference2.reserve_state_digest(),
+            redemption_manager
+                .tracker
+                .reserve_state_digest(&issuer_pubkey),
+            reference2.reserve_state_digest(&issuer_pubkey),
             "second redemption must accumulate with the note's pre-second-refresh timestamp"
         );
     }
@@ -1139,10 +1143,106 @@ mod tests {
             )
             .expect("reference update");
         assert_eq!(
-            redemption_manager.tracker.reserve_state_digest(),
-            reference.reserve_state_digest(),
+            redemption_manager
+                .tracker
+                .reserve_state_digest(&issuer_pubkey),
+            reference.reserve_state_digest(&issuer_pubkey),
             "reserve tree must use the explicit on-chain cumulative value"
         );
+    }
+
+    /// The reserve AVL journal must survive a TrackerStateManager restart so that
+    /// a third redemption can generate lookup/insert proofs without manual repair.
+    #[test]
+    fn test_reserve_avl_journal_survives_restart() {
+        use std::fs;
+
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let issuer_pubkey =
+            secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret).serialize();
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[8u8; 32]).unwrap();
+        let recipient_pubkey =
+            secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret).serialize();
+
+        let total_debt: u64 = 300_000_000;
+        let payment_timestamp: u64 = 1_787_094_048_335;
+
+        let message = crate::schnorr::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            total_debt,
+            payment_timestamp,
+        );
+        let signature =
+            crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
+                .expect("sign note");
+
+        let note = IouNote {
+            recipient_pubkey,
+            amount_collected: total_debt,
+            amount_redeemed: 0,
+            timestamp: payment_timestamp,
+            signature,
+        };
+
+        // Create a manager with on-disk storage so we can reopen it.
+        let storage_path = std::env::temp_dir().join(format!(
+            "basis_reserve_avl_restart_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&storage_path);
+
+        {
+            let mut manager = TrackerStateManager::new(&storage_path);
+            manager
+                .add_note(&issuer_pubkey, &note)
+                .expect("add note");
+
+            // First redemption: 100M
+            manager
+                .update_already_redeemed(
+                    &issuer_pubkey,
+                    &recipient_pubkey,
+                    payment_timestamp,
+                    100_000_000,
+                )
+                .expect("first update");
+
+            // Second redemption: cumulative 200M (timestamp from after first refresh).
+            manager
+                .update_already_redeemed(
+                    &issuer_pubkey,
+                    &recipient_pubkey,
+                    payment_timestamp + 1,
+                    200_000_000,
+                )
+                .expect("second update");
+
+            let proof = manager
+                .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey)
+                .expect("lookup proof before restart");
+            let already_before = u64::from_be_bytes(proof.value[8..16].try_into().unwrap());
+            assert_eq!(already_before, 200_000_000);
+        }
+
+        // Reopen storage with a fresh manager (simulating server restart).
+        let mut restarted = TrackerStateManager::new(&storage_path);
+        let proof = restarted
+            .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey)
+            .expect("lookup proof after restart");
+        let already_after = u64::from_be_bytes(proof.value[8..16].try_into().unwrap());
+        assert_eq!(
+            already_after, 200_000_000,
+            "reserve AVL journal must be replayed after restart"
+        );
+
+        // Clean up.
+        let _ = fs::remove_dir_all(&storage_path);
     }
 }
 

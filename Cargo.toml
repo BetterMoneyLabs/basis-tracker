@@ -25,3 +25,6 @@ ergotree-interpreter = { path = "/home/kushti/ergo/sigma-rust/ergotree-interpret
 # insert-or-update) so the Basis reserve contract can be reduced locally for
 # sequential redemptions.
 ergo_avltree_rust = { path = "temp/vendors/ergo_avltree_rust" }
+# Vendored copy of yanked core2 0.4.0 to keep the local build working while
+# crates.io marks the published version as yanked.
+core2 = { path = "temp/vendors/core2-0.4.0" }

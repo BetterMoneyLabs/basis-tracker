@@ -67,7 +67,7 @@ pub struct ErgoConfig {
     /// Reserve token ID (hex-encoded, 32 bytes). When set, the tracker operates in
     /// token-reserve mode and uses `basis_token_reserve_contract_p2s` for new reserves.
     pub reserve_token_id: Option<String>,
-    /// Number of decimal places for the reserve token (e.g. 6 for USE/DexyUSD).
+    /// Number of decimal places for the reserve token (e.g. 3 for USE/DexyUSD).
     /// Used for display/conversion only; on-chain amounts are always raw token units.
     #[serde(default = "default_reserve_token_decimals")]
     pub reserve_token_decimals: u8,

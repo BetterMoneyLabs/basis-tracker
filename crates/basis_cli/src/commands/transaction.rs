@@ -20,6 +20,8 @@ use basis_offchain::signing::{add_input_proof, redemption_signing_message};
 const NODE_URL: &str = "http://127.0.0.1:9053";
 const API_KEY: &str = "hello";
 const TRANSACTION_FEE: u64 = 1_000_000;
+/// Minimum ERG value for the recipient output box when redeeming token-backed reserves.
+const TOKEN_RECIPIENT_MIN_VALUE_NANOERG: u64 = 1_000_000;
 
 /// Encode an unsigned integer using Ergo's VLQ (Variable-Length Quantity) encoding.
 /// Bytes are emitted least-significant group first (little-endian VLQ).
@@ -61,16 +63,31 @@ fn serialize_ergo_byte(value: u8) -> String {
     format!("02{:02x}", value)
 }
 
-/// Decode a server-returned box id that may be double hex-encoded.
+/// Decode a server-returned box id that may be (double) hex-encoded.
+///
+/// The tracker's reserve DB sometimes stores the 64-char box id itself hex-encoded (a 128-char
+/// string whose hex bytes are ASCII hex chars). This unwraps up to two levels of such encoding and
+/// returns the canonical box id; a plain box id is returned unchanged.
 fn decode_box_id(raw: &str) -> String {
-    if raw.len() == 96 {
-        if let Ok(bytes) = hex::decode(raw) {
-            if bytes.len() == 48 && bytes.iter().all(|b| b.is_ascii_hexdigit()) {
-                return String::from_utf8(bytes).unwrap_or_else(|_| raw.to_string());
+    let mut cur = raw.to_string();
+    for _ in 0..2 {
+        if !cur.len().is_multiple_of(2) {
+            break;
+        }
+        match hex::decode(&cur) {
+            Ok(bytes) if bytes.iter().all(|b| b.is_ascii_hexdigit()) => {
+                match String::from_utf8(bytes) {
+                    Ok(s) if s.len() < cur.len() => {
+                        cur = s;
+                        continue;
+                    }
+                    _ => break,
+                }
             }
+            _ => break,
         }
     }
-    raw.to_string()
+    cur
 }
 
 #[derive(Subcommand)]
@@ -360,24 +377,32 @@ async fn build_redemption_tx(
 
     progress!("🔍 Retrieving issuer's reserve box...");
     let reserves_response = client.get_reserves_by_issuer(issuer_pubkey).await?;
-    const MIN_RESERVE_REMAINDER: u64 = 1_000_000; // 0.001 ERG min box value
-    let required = amount.saturating_add(MIN_RESERVE_REMAINDER);
+    const MIN_RESERVE_REMAINDER_NANOERG: u64 = 1_000_000; // 0.001 ERG min box value
     let reserve_box = reserves_response
         .iter()
-        .filter(|r| r.base_info.collateral_amount >= required)
+        .filter(|r| {
+            // Token-backed reserves report collateral in token units; ERG-backed
+            // reserves report collateral in nanoERG.
+            let is_token_reserve = !r.base_info.reserve_token_id.is_empty();
+            if is_token_reserve {
+                r.base_info.collateral_amount >= amount
+            } else {
+                r.base_info.collateral_amount >= amount.saturating_add(MIN_RESERVE_REMAINDER_NANOERG)
+            }
+        })
         .filter(|r| r.base_info.tracker_nft_id == expected_tracker_nft_id)
-        .min_by(|a, b| {
+        .max_by(|a, b| {
             a.base_info
-                .collateral_amount
-                .cmp(&b.base_info.collateral_amount)
-                .then_with(|| b.base_info.last_updated_height.cmp(&a.base_info.last_updated_height))
+                .last_updated_height
+                .cmp(&b.base_info.last_updated_height)
+                .then_with(|| a.base_info.collateral_amount.cmp(&b.base_info.collateral_amount))
         })
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No reserve box with sufficient collateral and matching tracker NFT {} found for issuer {} (need >= {} nanoERG)",
+                "No reserve box with sufficient collateral and matching tracker NFT {} found for issuer {} (need >= {} units)",
                 expected_tracker_nft_id,
                 issuer_pubkey,
-                required
+                amount
             )
         })?;
 
@@ -424,25 +449,31 @@ async fn build_redemption_tx(
     let r5_bytes = build_savl_tree_from_digest(&reserve_proof.new_reserve_state_digest);
     let r5_hex = hex::encode(&r5_bytes);
 
-    // Get the reserve contract P2S address from the server configuration
-    progress!("🔍 Retrieving reserve contract P2S address from server configuration...");
-    let reserve_contract_p2s = client.get_basis_reserve_contract_p2s().await.map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to retrieve reserve contract P2S address from server: {}",
-            e
-        )
-    })?;
+    let is_token_reserve = !reserve_box.base_info.reserve_token_id.is_empty();
 
-    let reserve_output_value = reserve_box
-        .base_info
-        .collateral_amount
-        .saturating_sub(amount);
-    if reserve_output_value == 0 {
-        return Err(anyhow::anyhow!(
-            "Reserve output value would be zero after redemption"
-        ));
-    }
-    let recipient_output_value = amount;
+    // Get the reserve contract P2S address from the server configuration.
+    // Token-backed reserves must use the token reserve contract; ERG-backed
+    // reserves use the standard ERG reserve contract.
+    progress!("🔍 Retrieving reserve contract P2S address from server configuration...");
+    let reserve_contract_p2s = if is_token_reserve {
+        client
+            .get_reserve_token_config()
+            .await
+            .map(|cfg| cfg.basis_token_reserve_contract_p2s)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to retrieve token reserve contract P2S address from server: {}",
+                    e
+                )
+            })?
+    } else {
+        client.get_basis_reserve_contract_p2s().await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to retrieve reserve contract P2S address from server: {}",
+                e
+            )
+        })?
+    };
 
     let is_first_redemption = note.amount_redeemed == 0;
     let (reserve_lookup_proof, reserve_insert_proof) = if is_first_redemption {
@@ -490,6 +521,62 @@ async fn build_redemption_tx(
         .map(|asset| asset.token_id.clone())
         .unwrap_or_else(|| tracker_nft_id.clone());
 
+    // For token-backed reserves the collateral is held in the reserve token.
+    // The reserve output keeps the original ERG value and reduces the token
+    // amount; the recipient receives the redeemed tokens in a new box funded
+    // by the fee inputs. ERG-backed reserves reduce the reserve's ERG value
+    // and send it to the recipient as before.
+    let (
+        reserve_output_value,
+        reserve_output_assets,
+        recipient_output_value,
+        recipient_output_assets,
+        fee_input_required,
+    ) = if is_token_reserve {
+        let reserve_token_id = reserve_box.base_info.reserve_token_id.clone();
+        let token_amount_in = reserve_box_details
+            .assets
+            .iter()
+            .find(|a| a.token_id == *reserve_token_id)
+            .map(|a| a.amount)
+            .ok_or_else(|| anyhow::anyhow!("Reserve box missing configured reserve token"))?;
+        let token_amount_out = token_amount_in.saturating_sub(amount);
+        if token_amount_out == 0 {
+            return Err(anyhow::anyhow!(
+                "Reserve token amount would be zero after redemption"
+            ));
+        }
+        let reserve_assets = json!([
+            { "tokenId": reserve_nft_id, "amount": 1 },
+            { "tokenId": reserve_token_id, "amount": token_amount_out }
+        ]);
+        let recipient_assets = json!([{ "tokenId": reserve_token_id, "amount": amount }]);
+        (
+            reserve_box_details.value,
+            reserve_assets,
+            TOKEN_RECIPIENT_MIN_VALUE_NANOERG,
+            recipient_assets,
+            TRANSACTION_FEE.saturating_add(TOKEN_RECIPIENT_MIN_VALUE_NANOERG),
+        )
+    } else {
+        let reserve_output_value = reserve_box_details
+            .value
+            .saturating_sub(amount);
+        if reserve_output_value == 0 {
+            return Err(anyhow::anyhow!(
+                "Reserve output value would be zero after redemption"
+            ));
+        }
+        let reserve_assets = json!([{ "tokenId": reserve_nft_id, "amount": 1 }]);
+        (
+            reserve_output_value,
+            reserve_assets,
+            amount,
+            json!([]),
+            TRANSACTION_FEE,
+        )
+    };
+
     let refund_initiation_height = basis_store::ergo_scanner::decode_ergo_long_register(
         reserve_box_details.additional_registers.get("R7"),
     );
@@ -518,14 +605,14 @@ async fn build_redemption_tx(
 
     let (fee_inputs, fee_input_total) = select_fee_inputs(
         &wallet_boxes,
-        TRANSACTION_FEE,
+        fee_input_required,
         &reserve_box_id,
         &tracker_box_id,
         target_tree.as_deref(),
     )
     .ok_or_else(|| anyhow::anyhow!(
         "No wallet boxes covering {} nanoERG fee found. Ensure the wallet is synced and has at least {} nanoERG available.",
-        TRANSACTION_FEE, TRANSACTION_FEE
+        fee_input_required, fee_input_required
     ))?;
 
     progress!(
@@ -615,18 +702,19 @@ async fn build_redemption_tx(
     })];
     inputs.extend(fee_input_json);
 
-    let change_amount = fee_input_total.saturating_sub(TRANSACTION_FEE);
+    let change_amount = if is_token_reserve {
+        fee_input_total
+            .saturating_sub(TRANSACTION_FEE)
+            .saturating_sub(recipient_output_value)
+    } else {
+        fee_input_total.saturating_sub(TRANSACTION_FEE)
+    };
     let mut outputs = vec![
         json!({
             "value": reserve_output_value,
             "ergoTree": reserve_ergo_tree,
             "creationHeight": current_height,
-            "assets": [
-                {
-                    "tokenId": reserve_nft_id,
-                    "amount": 1
-                }
-            ],
+            "assets": reserve_output_assets,
             "additionalRegisters": {
                 "R4": format!("07{}", issuer_pubkey),
                 "R5": r5_hex,
@@ -638,7 +726,7 @@ async fn build_redemption_tx(
             "value": recipient_output_value,
             "ergoTree": recipient_ergo_tree,
             "creationHeight": current_height,
-            "assets": [],
+            "assets": recipient_output_assets,
             "additionalRegisters": {}
         }),
         json!({

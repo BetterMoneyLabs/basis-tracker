@@ -302,8 +302,14 @@ pub struct TrackerStateManager {
     avl_state: basis_trees::BasisAvlTree,
     current_state: TrackerState,
     storage: persistence::NoteStorage,
-    /// Reserve AVL tree tracking hash(ownerKey || receiverKey) -> already_redeemed (8 bytes BE)
-    reserve_avl_state: basis_trees::BasisAvlTree,
+    /// Per-issuer reserve AVL trees tracking hash(ownerKey || receiverKey) ->
+    /// (timestamp, already_redeemed) (16 bytes BE). Each issuer has its own tree so that
+    /// a fresh reserve for a new issuer starts from the empty tree digest and first
+    /// redemptions succeed even if other issuers have redemption history.
+    ///
+    /// NOTE: Each on-chain reserve box has its own R5 digest. This design assumes one
+    /// reserve per issuer; multi-reserve issuers would need per-reserve tracking.
+    reserve_avl_states: std::collections::HashMap<PubKey, basis_trees::BasisAvlTree>,
     /// Per-note confirmation records, keyed by note key (32 bytes).
     confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,
 }
@@ -347,17 +353,8 @@ impl TrackerStateManager {
             }
         };
 
-        // Create reserve AVL tree for tracking already_redeemed
-        let reserve_avl_state = match basis_trees::BasisAvlTree::new() {
-            Ok(tree) => {
-                tracing::debug!("Reserve AVL tree created successfully");
-                tree
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize reserve AVL tree: {:?}", e);
-                panic!("Failed to initialize reserve AVL tree: {:?}", e);
-            }
-        };
+        // Per-issuer reserve AVL trees start empty; they are populated as redemptions complete.
+        let reserve_avl_states = std::collections::HashMap::new();
 
         // Rebuild AVL tree from all stored notes to ensure consistency after restart
         let mut manager = Self {
@@ -368,7 +365,7 @@ impl TrackerStateManager {
                 last_update_timestamp: 0,
             },
             storage,
-            reserve_avl_state,
+            reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
         };
 
@@ -379,6 +376,12 @@ impl TrackerStateManager {
         // Rebuild confirmation records from storage and mark every stored note as
         // LocalOnly until the updater confirms otherwise.
         manager.rebuild_confirmations();
+
+        // Rebuild per-issuer reserve AVL trees from the persisted journal so that
+        // redemptions can continue after a server restart without manual repair.
+        if let Err(e) = manager.rebuild_reserve_avl_trees() {
+            tracing::warn!("Failed to rebuild reserve AVL trees from storage: {:?}", e);
+        }
 
         tracing::debug!("TrackerStateManager created successfully");
         manager
@@ -508,17 +511,8 @@ impl TrackerStateManager {
             }
         };
 
-        // Create reserve AVL tree for tracking already_redeemed
-        let reserve_avl_state = match basis_trees::BasisAvlTree::new() {
-            Ok(tree) => {
-                tracing::debug!("Reserve AVL tree created successfully");
-                tree
-            }
-            Err(e) => {
-                tracing::error!("Failed to initialize reserve AVL tree: {:?}", e);
-                panic!("Failed to initialize reserve AVL tree: {:?}", e);
-            }
-        };
+        // Per-issuer reserve AVL trees start empty in test instances.
+        let reserve_avl_states = std::collections::HashMap::new();
 
         tracing::debug!("TrackerStateManager created successfully");
         let mut manager = Self {
@@ -529,7 +523,7 @@ impl TrackerStateManager {
                 last_update_timestamp: 0,
             },
             storage,
-            reserve_avl_state,
+            reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
         };
 
@@ -948,6 +942,26 @@ impl TrackerStateManager {
         })
     }
 
+    /// Get or create the mutable reserve AVL tree for an issuer. Trees are created lazily so a
+    /// fresh issuer starts from the empty tree digest, matching a newly created reserve's R5.
+    fn reserve_tree_mut(
+        &mut self,
+        issuer_pubkey: &PubKey,
+    ) -> Result<&mut basis_trees::BasisAvlTree, NoteError> {
+        match self.reserve_avl_states.entry(*issuer_pubkey) {
+            std::collections::hash_map::Entry::Occupied(e) => Ok(e.into_mut()),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let tree = basis_trees::BasisAvlTree::new().map_err(|e| {
+                    NoteError::StorageError(format!(
+                        "Failed to create reserve AVL tree for issuer: {:?}",
+                        e
+                    ))
+                })?;
+                Ok(e.insert(tree))
+            }
+        }
+    }
+
     /// Get the already_redeemed amount for a specific (issuer, receiver) pair from the reserve AVL tree
     /// Returns the cumulative redeemed amount stored in the reserve's AVL tree
     pub fn get_already_redeemed(
@@ -958,8 +972,13 @@ impl TrackerStateManager {
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
-        // Lookup value in reserve AVL tree
-        let value_bytes = match self.reserve_avl_state.get(&key_bytes) {
+        let reserve_tree = match self.reserve_avl_states.get(issuer_pubkey) {
+            Some(tree) => tree,
+            None => return Ok(0u64), // Fresh issuer: no reserve tree yet, first redemption.
+        };
+
+        // Lookup value in issuer's reserve AVL tree
+        let value_bytes = match reserve_tree.get(&key_bytes) {
             Some(bytes) => bytes,
             None => return Ok(0u64), // First redemption - no already_redeemed amount
         };
@@ -998,7 +1017,20 @@ impl TrackerStateManager {
         let mut value_bytes = Vec::with_capacity(16);
         // For lookup, use the stored timestamp if available; otherwise 0 for first redemption.
         // The persistent tree stores timestamp || already_redeemed, so retrieve the actual value.
-        let stored_value = self.reserve_avl_state.get(&key_bytes).unwrap_or_else(|| {
+        let reserve_tree = match self.reserve_avl_states.get(issuer_pubkey) {
+            Some(tree) => tree,
+            None => {
+                // Fresh issuer: value is 0 || already_redeemed.
+                value_bytes.extend_from_slice(&0u64.to_be_bytes());
+                value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
+                return Ok(ReserveLookupProof {
+                    key: key_bytes,
+                    value: value_bytes,
+                    proof: None, // Omitted for first redemption
+                });
+            }
+        };
+        let stored_value = reserve_tree.get(&key_bytes).unwrap_or_else(|| {
             let mut empty_value = vec![0u8; 8]; // timestamp = 0
             empty_value.extend_from_slice(&already_redeemed.to_be_bytes());
             empty_value
@@ -1018,10 +1050,20 @@ impl TrackerStateManager {
                 proof: None, // Omitted for first redemption
             })
         } else {
-            // Generate AVL proof for the lookup of this specific key
-            let (avl_proof, _returned_value) = self
-                .reserve_avl_state
-                .generate_lookup_proof(key_bytes.to_vec());
+            // Generate AVL proof for the lookup of this specific key from the issuer's tree
+            let reserve_tree = match self.reserve_avl_states.get_mut(issuer_pubkey) {
+                Some(tree) => tree,
+                None => {
+                    // No tree means no prior redemptions; this should have been a first redemption.
+                    return Ok(ReserveLookupProof {
+                        key: key_bytes,
+                        value: value_bytes,
+                        proof: None,
+                    });
+                }
+            };
+            let (avl_proof, _returned_value) =
+                reserve_tree.generate_lookup_proof(key_bytes.to_vec());
 
             Ok(ReserveLookupProof {
                 key: key_bytes,
@@ -1056,9 +1098,32 @@ impl TrackerStateManager {
         value_bytes.extend_from_slice(&timestamp.to_be_bytes());
         value_bytes.extend_from_slice(&new_already_redeemed.to_be_bytes());
 
+        // Use the issuer's reserve tree (or an empty one if this is the first redemption for
+        // the issuer). The proof's starting digest must match the on-chain reserve R5.
+        let reserve_tree = match self.reserve_avl_states.get(issuer_pubkey) {
+            Some(tree) => tree,
+            None => {
+                // Fresh issuer: generate proof against an empty tree.
+                let empty_tree = basis_trees::BasisAvlTree::new().map_err(|e| {
+                    NoteError::StorageError(format!(
+                        "Failed to create empty reserve tree for issuer: {:?}",
+                        e
+                    ))
+                })?;
+                let (insert_proof, updated_digest) = empty_tree
+                    .generate_insert_proof(key_bytes, value_bytes)
+                    .map_err(|e| {
+                        NoteError::StorageError(format!(
+                            "Reserve AVL tree insert proof failed: {}",
+                            e
+                        ))
+                    })?;
+                return Ok((insert_proof, updated_digest.to_vec()));
+            }
+        };
+
         // Use the non-mutating proof generator so repeated calls return the same proof.
-        let (insert_proof, updated_digest) = self
-            .reserve_avl_state
+        let (insert_proof, updated_digest) = reserve_tree
             .generate_insert_proof(key_bytes, value_bytes)
             .map_err(|e| {
                 NoteError::StorageError(format!("Reserve AVL tree insert proof failed: {}", e))
@@ -1067,13 +1132,96 @@ impl TrackerStateManager {
         Ok((insert_proof, updated_digest.to_vec()))
     }
 
-    /// Current reserve AVL tree root digest (33 bytes). The on-chain reserve box being spent must
-    /// have exactly this R5 digest for the insert proof to verify on-chain.
-    pub fn reserve_state_digest(&self) -> Vec<u8> {
-        self.reserve_avl_state.root_digest().to_vec()
+    /// Current reserve AVL tree root digest (33 bytes) for the given issuer. The on-chain reserve
+    /// box being spent must have exactly this R5 digest for the insert proof to verify on-chain.
+    pub fn reserve_state_digest(&self, issuer_pubkey: &PubKey) -> Vec<u8> {
+        match self.reserve_avl_states.get(issuer_pubkey) {
+            Some(tree) => tree.root_digest().to_vec(),
+            None => {
+                // Fresh issuer: return the empty-tree digest.
+                basis_trees::BasisAvlTree::new()
+                    .map(|t| t.root_digest().to_vec())
+                    .unwrap_or_else(|_| vec![0u8; 33])
+            }
+        }
     }
 
-    /// Update the already_redeemed amount in the reserve AVL tree.
+    /// Apply a reserve AVL tree update in memory without writing to the journal.
+    /// Used during journal replay on startup.
+    fn apply_reserve_avl_update(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        timestamp: u64,
+        already_redeemed: u64,
+    ) -> Result<(), NoteError> {
+        let reserve_tree = self.reserve_tree_mut(issuer_pubkey)?;
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+        let mut value_bytes = Vec::with_capacity(16);
+        value_bytes.extend_from_slice(&timestamp.to_be_bytes());
+        value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
+
+        reserve_tree.update(key_bytes, value_bytes).map_err(|e| {
+            NoteError::StorageError(format!("Reserve AVL tree update failed: {}", e))
+        })
+    }
+
+    /// Rebuild per-issuer reserve AVL trees from the persisted journal.
+    /// This must be called after `rebuild_avl_tree` so the note keys exist, but
+    /// it only operates on the reserve trees, not the note tracker tree.
+    pub fn rebuild_reserve_avl_trees(&mut self) -> Result<(), NoteError> {
+        tracing::info!("Rebuilding reserve AVL trees from journal...");
+
+        let updates = self
+            .storage
+            .iter_reserve_avl_updates()
+            .map_err(|e| NoteError::StorageError(format!("Failed to read reserve AVL journal: {:?}", e)))?;
+
+        if updates.is_empty() {
+            tracing::info!("No reserve AVL journal entries found");
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Replaying {} reserve AVL journal entries...",
+            updates.len()
+        );
+
+        for (issuer_pubkey, note_key, timestamp, already_redeemed) in updates {
+            // Reconstruct recipient pubkey from the note key. The note key is
+            // blake2b256(issuer_pubkey || recipient_pubkey), so we look up the
+            // stored note to obtain the recipient pubkey.
+            let note = match self.storage.get_note_by_key(&note_key)? {
+                Some(note) => note,
+                None => {
+                    tracing::warn!(
+                        "Reserve AVL journal references unknown note key {}; skipping",
+                        hex::encode(&note_key.to_bytes())
+                    );
+                    continue;
+                }
+            };
+
+            if let Err(e) = self.apply_reserve_avl_update(
+                &issuer_pubkey,
+                &note.recipient_pubkey,
+                timestamp,
+                already_redeemed,
+            ) {
+                tracing::warn!(
+                    "Failed to replay reserve AVL update for issuer {}: {:?}",
+                    hex::encode(&issuer_pubkey),
+                    e
+                );
+            }
+        }
+
+        tracing::info!("Reserve AVL trees rebuilt successfully");
+        Ok(())
+    }
+
+    /// Update the already_redeemed amount in the issuer's reserve AVL tree.
     /// Called after a successful redemption to prevent double-spending.
     /// Value format: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes total
     pub fn update_already_redeemed(
@@ -1083,20 +1231,15 @@ impl TrackerStateManager {
         timestamp: u64,
         already_redeemed: u64,
     ) -> Result<(), NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
-        let key_bytes = key.to_bytes();
-        let mut value_bytes = Vec::with_capacity(16);
-        value_bytes.extend_from_slice(&timestamp.to_be_bytes());
-        value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
+        self.apply_reserve_avl_update(issuer_pubkey, recipient_pubkey, timestamp, already_redeemed)?;
 
-        // Update reserve AVL tree
-        self.reserve_avl_state
-            .update(key_bytes, value_bytes)
-            .map_err(|e| {
-                NoteError::StorageError(format!("Reserve AVL tree update failed: {}", e))
-            })?;
-
-        Ok(())
+        // Persist the update so the reserve tree can be rebuilt after a restart.
+        self.storage.append_reserve_avl_update(
+            issuer_pubkey,
+            recipient_pubkey,
+            timestamp,
+            already_redeemed,
+        )
     }
 
     /// Generate proof for a specific note

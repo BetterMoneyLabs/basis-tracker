@@ -157,8 +157,8 @@ mod redemption_api_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GenerateProof {
-                        issuer_pubkey,
-                        recipient_pubkey,
+                        issuer_pubkey: _,
+                        recipient_pubkey: _,
                         response_tx,
                     } => {
                         let mock_proof = basis_store::NoteProof {
@@ -248,8 +248,13 @@ mod redemption_api_tests {
                         let result = redemption_manager.tracker.revert_pending_notes();
                         let _ = response_tx.send(result);
                     }
-                    TrackerCommand::GetReserveStateDigest { response_tx } => {
-                        let digest = redemption_manager.tracker.reserve_state_digest();
+                    TrackerCommand::GetReserveStateDigest {
+                        issuer_pubkey,
+                        response_tx,
+                    } => {
+                        let digest = redemption_manager
+                            .tracker
+                            .reserve_state_digest(&issuer_pubkey);
                         let _ = response_tx.send(digest);
                     }
                     TrackerCommand::ReconcileWithConfirmedDigest {
@@ -436,7 +441,8 @@ mod redemption_api_tests {
     /// redemption, so the digest equals that of a fresh, empty tree.
     fn reserve_r5_matching_tracker() -> String {
         let digest = hex::encode(
-            basis_store::TrackerStateManager::new_with_temp_storage().reserve_state_digest(),
+            basis_store::TrackerStateManager::new_with_temp_storage()
+                .reserve_state_digest(&[1u8; 33]),
         );
         format!("64{}00", digest)
     }

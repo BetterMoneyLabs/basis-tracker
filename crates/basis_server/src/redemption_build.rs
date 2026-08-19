@@ -386,7 +386,10 @@ async fn build_redemption_inner(
             let (tx, rx) = tokio::sync::oneshot::channel();
             if state
                 .tx
-                .send(TrackerCommand::GetReserveStateDigest { response_tx: tx })
+                .send(TrackerCommand::GetReserveStateDigest {
+                    issuer_pubkey,
+                    response_tx: tx,
+                })
                 .await
                 .is_err()
             {

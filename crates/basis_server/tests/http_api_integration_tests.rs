@@ -223,8 +223,13 @@ mod http_api_tests {
                             .reconcile_with_confirmed_digest(&digest, &box_id, height);
                         let _ = response_tx.send(result);
                     }
-                    TrackerCommand::GetReserveStateDigest { response_tx } => {
-                        let digest = redemption_manager.tracker.reserve_state_digest();
+                    TrackerCommand::GetReserveStateDigest {
+                        issuer_pubkey,
+                        response_tx,
+                    } => {
+                        let digest = redemption_manager
+                            .tracker
+                            .reserve_state_digest(&issuer_pubkey);
                         let _ = response_tx.send(digest);
                     }
                 }

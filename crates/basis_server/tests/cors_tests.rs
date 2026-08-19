@@ -212,8 +212,13 @@ mod cors_tests {
                         let result = redemption_manager.tracker.revert_pending_notes();
                         let _ = response_tx.send(result);
                     }
-                    TrackerCommand::GetReserveStateDigest { response_tx } => {
-                        let digest = redemption_manager.tracker.reserve_state_digest();
+                    TrackerCommand::GetReserveStateDigest {
+                        issuer_pubkey,
+                        response_tx,
+                    } => {
+                        let digest = redemption_manager
+                            .tracker
+                            .reserve_state_digest(&issuer_pubkey);
                         let _ = response_tx.send(digest);
                     }
                     TrackerCommand::ReconcileWithConfirmedDigest {

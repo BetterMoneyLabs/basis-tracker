@@ -281,35 +281,6 @@ async fn main() {
 
         let mut redemption_manager = RedemptionManager::new(tracker);
 
-        // Temporary startup repair: allow re-inserting a lost reserve AVL tree entry
-        // from the environment so a restarted server can continue a redemption sequence.
-        if let (Ok(issuer_hex), Ok(recipient_hex), Ok(ts_str), Ok(already_str)) = (
-            std::env::var("REPAIR_RESERVE_ISSUER"),
-            std::env::var("REPAIR_RESERVE_RECIPIENT"),
-            std::env::var("REPAIR_RESERVE_TIMESTAMP"),
-            std::env::var("REPAIR_RESERVE_ALREADY_REDEEMED"),
-        ) {
-            if let (Ok(ts), Ok(already)) = (ts_str.parse::<u64>(), already_str.parse::<u64>()) {
-                let issuer = hex::decode(&issuer_hex)
-                    .ok()
-                    .and_then(|v| v.try_into().ok());
-                let recipient = hex::decode(&recipient_hex)
-                    .ok()
-                    .and_then(|v| v.try_into().ok());
-                if let (Some(issuer), Some(recipient)) = (issuer, recipient) {
-                    match redemption_manager
-                        .tracker
-                        .update_already_redeemed(&issuer, &recipient, ts, already)
-                    {
-                        Ok(_) => tracing::info!(
-                            "Reserve tree repaired: ts={ts}, already_redeemed={already}"
-                        ),
-                        Err(e) => tracing::warn!("Failed to repair reserve tree: {e:?}"),
-                    }
-                }
-            }
-        }
-
         while let Some(cmd) = rx.blocking_recv() {
             tracing::debug!("Tracker thread received command: {:?}", cmd);
             match cmd {
@@ -448,8 +419,13 @@ async fn main() {
                     );
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::GetReserveStateDigest { response_tx } => {
-                    let digest = redemption_manager.tracker.reserve_state_digest();
+                TrackerCommand::GetReserveStateDigest {
+                    issuer_pubkey,
+                    response_tx,
+                } => {
+                    let digest = redemption_manager
+                        .tracker
+                        .reserve_state_digest(&issuer_pubkey);
                     let _ = response_tx.send(digest);
                 }
                 TrackerCommand::GetConfirmation {
@@ -529,14 +505,23 @@ async fn main() {
     // Use mainnet network prefix for address encoding
     let _network_prefix = ergo_lib::ergotree_ir::chain::address::NetworkPrefix::Mainnet;
 
+    let tracker_update_interval = std::env::var("BASIS_TRACKER_UPDATE_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(600);
+
     let tracker_box_config = TrackerBoxUpdateConfig {
         node_url: config.ergo.node.node_url.clone(),
         api_key: config.ergo.node.api_key.clone(),
-        update_interval_seconds: 600, // 10 minutes
+        update_interval_seconds: tracker_update_interval,
         fee: config.transaction.fee,
         change_address: config.get_change_address().ok(),
         tracker_secret_key: config.tracker_secret_key_bytes(),
         min_confirmation_depth: config.confirmation.min_depth,
+        reserve_contract_addresses: vec![
+            config.ergo.basis_reserve_contract_p2s.clone(),
+            config.ergo.basis_token_reserve_contract_p2s.clone(),
+        ],
     };
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 

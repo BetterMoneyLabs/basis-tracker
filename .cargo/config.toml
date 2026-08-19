@@ -1,0 +1,8 @@
+# Disable Cargo's use of the ALL_PROXY/HTTP_PROXY environment variables for this
+# workspace. The parent shell currently sets ALL_PROXY to an unreachable SOCKS
+# proxy (socks://192.168.1.100:1080/), which breaks all crates.io traffic.
+[http]
+proxy = ""
+
+[https]
+proxy = ""

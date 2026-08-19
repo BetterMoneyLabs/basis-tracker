@@ -186,6 +186,10 @@ pub struct TrackerBoxUpdateConfig {
     /// tracker box update is treated as confirmed and pending notes are
     /// promoted to `Confirmed`.
     pub min_confirmation_depth: u64,
+    /// Reserve contract addresses (P2S) to exclude when searching for the
+    /// tracker box. Token-backed reserves store the tracker NFT in R6, so
+    /// they are returned by `byTokenId` queries and must be filtered out.
+    pub reserve_contract_addresses: Vec<String>,
 }
 
 impl Default for TrackerBoxUpdateConfig {
@@ -198,6 +202,7 @@ impl Default for TrackerBoxUpdateConfig {
             change_address: None,
             tracker_secret_key: None,
             min_confirmation_depth: 2,
+            reserve_contract_addresses: Vec::new(),
         }
     }
 }
@@ -235,6 +240,9 @@ pub struct ErgoBoxApi {
     pub assets: Vec<AssetApi>,
     pub additional_registers: std::collections::HashMap<String, String>,
     pub creation_height: u32,
+    /// Box address (P2PK or P2S). Present on `/blockchain/box/unspent/byTokenId`
+    /// responses but not on `/wallet/boxes/unspent` inner `box` objects.
+    pub address: Option<String>,
 }
 
 /// Asset in an Ergo box
@@ -568,14 +576,18 @@ impl TrackerBoxUpdater {
         Ok((tx_id.to_string(), 0))
     }
 
-    /// Find the tracker box on chain using the tracker NFT ID
+    /// Find the tracker box on chain using the tracker NFT ID.
+    ///
+    /// Boxes whose `address` matches a configured reserve contract are skipped,
+    /// because reserves store the tracker NFT in R6 and therefore appear in the
+    /// `byTokenId` results.
     async fn find_tracker_box(
         config: &TrackerBoxUpdateConfig,
         tracker_nft_id: &str,
     ) -> Result<ErgoBoxApi, TrackerBoxUpdaterError> {
         let client = basis_store::http::bounded_client();
         let url = format!(
-            "{}/blockchain/box/unspent/byTokenId/{}?limit=5",
+            "{}/blockchain/box/unspent/byTokenId/{}?limit=20",
             config.node_url.trim_end_matches('/'),
             tracker_nft_id
         );
@@ -608,21 +620,36 @@ impl TrackerBoxUpdater {
                 })
             })?;
 
-        if boxes.is_empty() {
+        let excluded: std::collections::HashSet<&str> = config
+            .reserve_contract_addresses
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let candidates: Vec<ErgoBoxApi> = boxes
+            .into_iter()
+            .filter(|b| {
+                let addr = b.address.as_deref().unwrap_or("");
+                !excluded.contains(addr)
+            })
+            .collect();
+
+        if candidates.is_empty() {
             return Err(TrackerBoxUpdaterError::NoTrackerBoxFound);
         }
 
-        if boxes.len() > 1 {
+        if candidates.len() > 1 {
             warn!(
-                "Found {} tracker boxes for NFT {} - expected at most 1. \
+                "Found {} non-reserve tracker boxes for NFT {} - expected at most 1. \
                  Using the first box (box_id={}).",
-                boxes.len(),
+                candidates.len(),
                 tracker_nft_id,
-                boxes[0].box_id
+                candidates[0].box_id
             );
         }
 
-        Ok(boxes.into_iter().next().unwrap())
+        Ok(candidates.into_iter().next().unwrap())
     }
 
     /// Fetch wallet-owned unspent boxes from the Ergo node.
@@ -925,6 +952,10 @@ impl TrackerBoxUpdater {
         let mut output_registers = tracker_box.additional_registers.clone();
         output_registers.insert("R4".to_string(), r4_value);
         output_registers.insert("R5".to_string(), r5_value);
+        // R6 stores the tracker NFT ID as a Coll[Byte] constant so the tracker
+        // scanner can identify the box reliably.
+        let r6_value = format!("0e20{}", tracker_nft_id);
+        output_registers.insert("R6".to_string(), r6_value);
 
         let change_address = match &config.change_address {
             Some(addr) if !addr.is_empty() => addr.clone(),

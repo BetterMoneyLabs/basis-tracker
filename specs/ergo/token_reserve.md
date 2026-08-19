@@ -8,7 +8,7 @@ both at the same time.
 The first supported example token is **USE (Dexy USD)**:
 
 - Token ID: `a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669`
-- Decimals: `6`
+- Decimals: `3` (as reported by the Ergo node token registry)
 
 All on-chain amounts remain raw token units; `reserve_token_decimals` is used
 only for display/conversion helpers in the CLI and UI.
@@ -29,7 +29,7 @@ basis_token_reserve_contract_p2s = "96HrjMftJd4NbjzufhMHXyZqzaUbdc5zUqtSySUnyEZo
 reserve_token_id = "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
 
 # Decimal places of the reserve token, used for display only.
-reserve_token_decimals = 6
+reserve_token_decimals = 3
 ```
 
 ### Semantics
@@ -56,7 +56,7 @@ built using the configured token contract and token collateral.
   "nft_id": "<64-hex reserve NFT ID>",
   "owner_pubkey": "<66-hex issuer public key>",
   "erg_amount": 2000000,
-  "token_amount": 1000000000,
+  "token_amount": 1000000,
   "token_id": "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
 }
 ```
@@ -73,7 +73,7 @@ basis-cli reserve create \
   --owner <owner-pubkey> \
   --amount 2000000 \
   --token-id a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669 \
-  --token-amount 1000000000
+  --token-amount 1000000
 ```
 
 Add `--submit` to broadcast the generated payload through the tracker's Ergo
@@ -81,8 +81,8 @@ node.
 
 ### Example for USE
 
-Locking `1 000.000000 USE` requires `--token-amount 1000000000` because USE has
-6 decimals. The CLI status view will display this as `1000.000000 USE`.
+Locking `1 000.000 USE` requires `--token-amount 1000000` because USE has
+3 decimals. The CLI status view will display this as `1000.000 USE`.
 
 ## Scanning and Collateral
 

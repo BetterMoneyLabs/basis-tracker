@@ -124,8 +124,9 @@ pub enum TrackerCommand {
         response_tx:
             tokio::sync::oneshot::Sender<Result<(Vec<u8>, Vec<u8>), basis_store::NoteError>>,
     },
-    /// Get the current reserve AVL tree root digest (33 bytes).
+    /// Get the current reserve AVL tree root digest (33 bytes) for the given issuer.
     GetReserveStateDigest {
+        issuer_pubkey: basis_store::PubKey,
         response_tx: tokio::sync::oneshot::Sender<Vec<u8>>,
     },
     /// Get the confirmation record for a single note.

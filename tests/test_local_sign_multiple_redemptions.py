@@ -298,6 +298,32 @@ def issue_reserve_nft(wallet_address: str) -> str:
     fail("Could not find issued NFT token ID in transaction outputs")
 
 
+def find_reserve_nft_box(reserve_nft_id: str, tracker_nft_id: str) -> dict:
+    """Return the unspent wallet box holding the reserve NFT (and not the tracker NFT)."""
+    wallet_boxes = node_api("GET", "/wallet/boxes/unspent")
+    candidates = []
+    for entry in wallet_boxes:
+        box = entry.get("box", entry)
+        assets = box.get("assets", [])
+        # Exclude the tracker box
+        if any(
+            a.get("tokenId") == tracker_nft_id and a.get("amount", 0) >= 1
+            for a in assets
+        ):
+            continue
+        # Must contain the reserve NFT
+        if any(
+            a.get("tokenId") == reserve_nft_id and a.get("amount", 0) >= 1
+            for a in assets
+        ):
+            candidates.append(box)
+    if not candidates:
+        fail(f"Could not find a wallet box containing reserve NFT {reserve_nft_id}")
+    # Prefer the box with the largest value (most likely the issuance output)
+    candidates.sort(key=lambda b: b["value"], reverse=True)
+    return candidates[0]
+
+
 def create_reserve(nft_id: str, issuer_pubkey: str, amount: int) -> str:
     print("🏦 Creating reserve payload...")
     payload = tracker_api(
@@ -317,12 +343,25 @@ def create_reserve(nft_id: str, issuer_pubkey: str, amount: int) -> str:
         }
     ]
     tracker_nft_id = get_tracker_nft_id()
+
+    # The reserve NFT box MUST be an input because the reserve output carries the NFT.
+    reserve_nft_box = find_reserve_nft_box(nft_id, tracker_nft_id)
+    reserve_nft_binary = _fetch_inputs_raw([reserve_nft_box])[0]
+    reserve_nft_value = reserve_nft_box["value"]
+
+    # Need enough ERG besides the reserve NFT box to cover the reserve output value + fee.
+    # The reserve NFT box contributes its full value; any shortfall is covered by other inputs,
+    # and excess becomes change.
     required = req["value"] + 1_000_000 + 1_000_000  # reserve value + fee + margin
-    inputs_raw, _ = select_spendable_inputs(required, tracker_nft_id)
+    extra_needed = max(0, required - reserve_nft_value)
+    extra_inputs_raw = []
+    if extra_needed > 0:
+        extra_inputs_raw, _ = select_spendable_inputs(extra_needed, tracker_nft_id)
+
     body = {
         "fee": 1_000_000,
         "requests": payment,
-        "inputsRaw": inputs_raw,
+        "inputsRaw": [reserve_nft_binary] + extra_inputs_raw,
     }
     txid = node_api("POST", "/wallet/transaction/send", body)
     print(f"   Reserve creation tx: {txid}")
@@ -380,6 +419,24 @@ def run_local_sign_redemption(config_path: str, issuer: str, recipient: str, amo
     print(f"   Redemption tx: {txid}")
     wait_for_tx(txid, "redemption")
     return txid
+
+
+def wait_for_reserve_updated(issuer: str, expected_collateral: int):
+    print(f"⏳ Waiting for reserve scanner to update to collateral={expected_collateral}...")
+    start = time.time()
+    while time.time() - start < WAIT_TIMEOUT:
+        try:
+            reserves = tracker_api("GET", f"/reserves/issuer/{issuer}") or []
+            for r in reserves:
+                if r.get("collateral_amount") == expected_collateral:
+                    print(f"✅ Reserve updated (collateral={expected_collateral})")
+                    return r
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"   reserve lookup error: {e}")
+        time.sleep(5)
+    fail(f"Timed out waiting for reserve collateral to update to {expected_collateral}")
 
 
 def complete_redemption(issuer: str, recipient: str, redeemed: int, already: int):
@@ -471,7 +528,8 @@ def main():
 
         tx_ids = []
         cumulative = 0
-        for i in range(1, 3):
+        num_redemptions = int(os.environ.get("NUM_REDEMPTIONS", "3"))
+        for i in range(1, num_redemptions + 1):
             print(f"\n=== Redemption {i} ===")
             txid = run_local_sign_redemption(
                 config_path, issuer_pubkey, recipient_pubkey, REDEEM_AMOUNT
@@ -481,6 +539,11 @@ def main():
             complete_redemption(
                 issuer_pubkey, recipient_pubkey, REDEEM_AMOUNT, cumulative
             )
+            # Wait for the reserve scanner to register the spent reserve and its
+            # new unspent successor before the next redemption reuses it.
+            remaining_collateral = RESERVE_AMOUNT - cumulative
+            if remaining_collateral > 0 and i < num_redemptions:
+                wait_for_reserve_updated(issuer_pubkey, remaining_collateral)
 
         print("\n🔍 Final note state:")
         final = tracker_api(
@@ -490,14 +553,14 @@ def main():
         )
         print(json.dumps(final, indent=2))
         if final.get("redeemable") or final.get("redeemable_amount", 0) > 0:
-            fail(f"Note still redeemable after both redemptions: {final}")
+            fail(f"Note still redeemable after all redemptions: {final}")
 
         print("\n✅ Integration test passed.")
         print("\nTransactions:")
         print(f"  Reserve NFT:      {reserve_nft_id}")
         print(f"  Reserve box:      {reserve_box_id}")
-        print(f"  Redemption 1 tx:  {tx_ids[0]}")
-        print(f"  Redemption 2 tx:  {tx_ids[1]}")
+        for i, txid in enumerate(tx_ids, start=1):
+            print(f"  Redemption {i} tx:  {txid}")
 
     finally:
         import shutil
