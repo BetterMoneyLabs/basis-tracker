@@ -27,8 +27,9 @@ The **BasisTracker** is the off-chain component that:
 basis-tracker-rust/
 ├── README.md                           ← You are here
 ├── contract/
-│   ├── basis.es                        ← On-chain reserve contract (ErgoScript)
-│   └── basis-es-rust-notes.md          ← Rust-specific implementation notes
+│   └── basis.es                        ← On-chain reserve contract (ErgoScript, repo root)
+├── specs/ergo/
+│   └── basis_contract_rust_notes.md    ← Rust-specific implementation notes
 ├── specs/
 │   ├── basis.md                        ← Protocol specification
 │   └── tracker.md                      ← Tracker architecture
@@ -67,7 +68,7 @@ basis-tracker-rust/
 
 **Key Files:**
 - `reference/message-formats.md` - Complete format specifications
-- `contract/basis-es-rust-notes.md` - Rust-specific notes
+- `../specs/ergo/basis_contract_rust_notes.md` - Rust-specific notes
 - `demo/note.json` - Real test vectors
 
 **Steps:**
@@ -294,7 +295,7 @@ fn transfer_debt(
 **Goal:** Commit state to Ergo blockchain and support redemption
 
 **Key Files:**
-- `contract/basis.es` - On-chain contract
+- `../contract/basis.es` - On-chain contract
 - `demo/src/BasisNoteRedeemer.scala` - Redemption reference
 - `demo/sign_request.json` - Transaction example
 
@@ -422,7 +423,7 @@ impl NostrPublisher {
 
 ## Critical Contract Rules
 
-From `contract/basis.es`, the on-chain contract enforces:
+From `../contract/basis.es`, the on-chain contract enforces:
 
 ### Redemption Checks (ALL must pass)
 
@@ -526,7 +527,7 @@ cat demo/note.json | jq .
 ## Resources
 
 ### In This Package
-- `contract/basis-es-rust-notes.md` - Rust implementation notes
+- `../specs/ergo/basis_contract_rust_notes.md` - Rust implementation notes
 - `reference/message-formats.md` - Complete format specifications
 - `specs/basis.md` - Full protocol specification
 - `specs/tracker.md` - Tracker architecture
@@ -579,7 +580,7 @@ See `reference/message-formats.md#13-common-pitfalls` for detailed list.
 ## Getting Help
 
 1. Check `specs/basis.md` for protocol details
-2. Check `contract/basis-es-rust-notes.md` for contract logic
+2. Check `../specs/ergo/basis_contract_rust_notes.md` for contract logic
 3. Check `reference/message-formats.md` for data formats
 4. Run `tests/BasisSpec.scala` to verify against reference
 5. Use `demo/note.json` as test vector
@@ -588,4 +589,4 @@ See `reference/message-formats.md#13-common-pitfalls` for detailed list.
 
 **Last Updated:** April 9, 2026  
 **Protocol Version:** 1.0  
-**Contract:** `contract/basis.es`
+**Contract:** `../contract/basis.es`

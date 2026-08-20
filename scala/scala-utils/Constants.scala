@@ -31,7 +31,8 @@ object Constants {
   }
 
   def readContract(path: String, substitutionMap: Map[String, String] = Map.empty) = {
-    val contract = scala.io.Source.fromFile("contracts/" + path, "utf-8").getLines.mkString("\n")
+    // The scala/ subproject is one level below the repo root, so contracts live in ../contract/
+    val contract = scala.io.Source.fromFile("../contract/" + path, "utf-8").getLines.mkString("\n")
     substitute(contract, substitutionMap)
   }
 
@@ -69,12 +70,12 @@ object Constants {
 
   // Basis contracts
 
-  val basisContract = readContract("offchain/basis.es", Map())
+  val basisContract = readContract("basis.es", Map())
   val basisErgoTree = compile(basisContract)
   val basisAddress = getAddressFromErgoTree(basisErgoTree)
 
   // Basis-token contract (token-based reserve)
-  val basisTokenContract = readContract("offchain/basis-token.es", Map())
+  val basisTokenContract = readContract("basis-token.es", Map())
   val basisTokenErgoTree = compile(basisTokenContract)
   val basisTokenAddress = getAddressFromErgoTree(basisTokenErgoTree)
 

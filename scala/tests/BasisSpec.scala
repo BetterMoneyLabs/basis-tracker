@@ -1211,14 +1211,14 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
   }
 
   // ========== CONTRACT LINKAGE VERIFICATION ==========
-  // Verifies tests use the exact contract from contracts/offchain/basis.es
+  // Verifies tests use the exact contract from ../contract/basis.es
 
-  property("Constants.basisContract matches contracts/offchain/basis.es (text-equivalent)") {
+  property("Constants.basisContract matches ../contract/basis.es (text-equivalent)") {
     import java.nio.charset.StandardCharsets
     import java.nio.file.{Files, Paths}
     // Anchor to project root via user.dir (sbt sets this to project root)
     val projectRoot = Paths.get(sys.props("user.dir"))
-    val contractPath = projectRoot.resolve("contracts/offchain/basis.es")
+    val contractPath = projectRoot.resolve("../contract/basis.es")
     require(Files.exists(contractPath), s"Missing contract file: $contractPath (user.dir=${sys.props("user.dir")})")
     val fileBytes = Files.readAllBytes(contractPath)
     val fileText = new String(fileBytes, StandardCharsets.UTF_8)

@@ -11,8 +11,9 @@
 basis-tracker-rust/
 ├── README.md                          ⭐ START HERE - Implementation guide
 ├── contract/
-│   ├── basis.es                       ← On-chain reserve contract
-│   └── basis-es-rust-notes.md         ← Rust-specific annotations
+│   └── basis.es                       ← On-chain reserve contract (repo root)
+├── specs/ergo/
+│   └── basis_contract_rust_notes.md   ← Rust-specific annotations
 ├── specs/
 │   ├── basis.md                       ← Protocol specification
 │   └── tracker.md                     ← Tracker architecture
@@ -49,7 +50,7 @@ basis-tracker-rust/
 1. `reference/message-formats.md` - Section 3 (Signatures)
 2. `demo/note.json` - Test vectors
 3. `scala-utils/SigUtils.scala` - Reference implementation
-4. `contract/basis-es-rust-notes.md` - Section 3
+4. `../specs/ergo/basis_contract_rust_notes.md` - Section 3
 
 ### Building AVL Tree Operations
 1. `reference/message-formats.md` - Section 5 (AVL Trees)
@@ -65,13 +66,13 @@ basis-tracker-rust/
 
 ### Building Redemption Transactions
 1. `reference/message-formats.md` - Section 6-7 (Boxes, Context vars)
-2. `contract/basis.es` - Contract logic
+2. `../contract/basis.es` - Contract logic
 3. `demo/sign_request.json` - Transaction example
 4. `demo/src/BasisNoteRedeemer.scala` - Reference code
 
 ### Understanding Contract Logic
-1. `contract/basis.es` - Full contract
-2. `contract/basis-es-rust-notes.md` - Rust annotations
+1. `../contract/basis.es` - Full contract
+2. `../specs/ergo/basis_contract_rust_notes.md` - Rust annotations
 3. `specs/basis.md` - Protocol spec
 4. `demo/ANALYSIS.md` - Compatibility analysis
 
@@ -134,7 +135,7 @@ flags: InsertOnly (0x01)
 ### For Rust Implementation
 1. `README.md` - Overview and phases
 2. `reference/message-formats.md` - Data structures
-3. `contract/basis-es-rust-notes.md` - Contract logic
+3. `../specs/ergo/basis_contract_rust_notes.md` - Contract logic
 4. `specs/basis.md` - Protocol details
 5. `specs/tracker.md` - Tracker architecture
 

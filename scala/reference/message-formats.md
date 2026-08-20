@@ -660,4 +660,4 @@ struct TrackerBox {
 ---
 
 **Last Updated:** April 9, 2026  
-**See Also:** `../contract/basis-es-rust-notes.md`, `../specs/basis.md`
+**See Also:** `../specs/ergo/basis_contract_rust_notes.md`, `../specs/basis.md`
