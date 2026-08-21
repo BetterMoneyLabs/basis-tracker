@@ -79,7 +79,7 @@ content is pretty-printed JSON.
 | `account_import` | `name`, `private_key_hex` (64 hex chars) | — | `{name, pubkey_hex, ...}`; the key is persisted, never returned |
 | `note_create` | `recipient`, `amount` (nanoERG) | — | `{issuer_pubkey, recipient_pubkey, amount, timestamp, signature, reserve_status_before, reserve_status_after}`; signed with the **current** account |
 | `note_redeem` | `issuer`, `amount` (nanoERG) | `destructiveHint` | redemption result incl. `tx_id` on broadcast; local-signing path (current account = recipient) |
-| `reserve_create` | `nft_id` (64 hex), `amount` (nanoERG) | — | reserve-creation payload (requests, fee, change address) to submit on-chain |
+| `reserve_create` | `nft_id` (64 hex), `amount` (nanoERG), `token_amount` (optional raw token units), `token_id` (optional 64 hex) | — | reserve-creation payload; pass `token_amount` and `token_id` to create a token-backed reserve such as USE stablecoin |
 | `policy_set` | `policy` (JSON object matching `AcceptanceConfig`) | `destructiveHint` | `{saved, uploaded, policy_hash, uploaded_at}` |
 
 `policy_set` saves to `~/.basis/ui.toml` **and** uploads to the tracker signed with the

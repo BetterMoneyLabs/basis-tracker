@@ -98,6 +98,37 @@ export TRACKER_NFT_ID=... JUDGE_RESERVE_NFT_ID=... \
 unlocked, funded wallet (≥ ~0.35 ERG) and four NFTs. See
 [demo/agent_teams/README.md](agent_teams/README.md) for details.
 
+## 4. Celaut + USE Stablecoin Demo — Agentic Credit with On-Chain Redemption
+
+**Directory:** `agent_celaut_use/`
+**Launcher:** `run.sh`
+**Documentation:** [demo/agent_celaut_use/README.md](agent_celaut_use/README.md)
+
+A Celaut-style service economy where a node maintainer runs deterministic
+services for users, settling payments in USE-stablecoin-denominated Basis IOU
+notes. It demonstrates agentic credit decisions and on-chain redemption against
+a token-backed reserve (`basis-token.es`).
+
+**Three-tier money spectrum:**
+
+- **Pure credit** — a trusted user (`user_charlie`) pays the node maintainer
+  (`node_bob`) via a whitelist policy, with no reserve.
+- **Collateralized credit** — a new user (`user_dave`) is rejected until his
+  USE-backed reserve covers ≥ 100% of liabilities.
+- **Backed money** — `node_bob` redeems `user_dave`'s IOU on-chain for real USE
+  tokens.
+
+**Quick Start:**
+```bash
+export USE_TOKEN_ID=... DAVE_RESERVE_NFT_ID=... TRACKER_NFT_ID=...
+./demo/agent_celaut_use/run.sh --check   # preflight
+./demo/agent_celaut_use/run.sh           # full demo
+```
+
+**Prerequisites:** Rust toolchain, Python 3, `curl`, a running Ergo node with an
+unlocked, funded wallet (≥ ~0.05 ERG and ≥ 0.5 USE), and two NFTs. See
+[demo/agent_celaut_use/README.md](agent_celaut_use/README.md) for details.
+
 ## References
 
 - [Agent Integration Spec](../specs/agent_integration.md)

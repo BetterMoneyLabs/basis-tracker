@@ -185,7 +185,14 @@ pub struct ReserveCreateParams {
     /// Reserve NFT ID (hex-encoded, 64 chars) - identifies this reserve instance.
     pub nft_id: String,
     /// Amount of ERG to put into the reserve (in nanoERG).
+    /// In token-reserve mode this is mainly for storage rent / fees; the token amount is what backs the reserve.
     pub amount: u64,
+    /// Amount of the reserve token to lock (raw token units). Required when the tracker is configured for token-backed reserves.
+    #[serde(default)]
+    pub token_amount: Option<u64>,
+    /// Reserve token ID (hex-encoded, 64 chars). When set, creates a token-backed reserve (e.g., USE stablecoin).
+    #[serde(default)]
+    pub token_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -467,7 +474,7 @@ impl BasisMcp {
                 &state.client,
                 &params.issuer,
                 params.amount,
-                false,
+                true, // server-side signing so the recipient can redeem without the issuer key
             )
             .await,
         )
@@ -487,8 +494,8 @@ impl BasisMcp {
                 params.nft_id,
                 None,
                 params.amount,
-                None,
-                None,
+                params.token_amount,
+                params.token_id,
                 false,
             )
             .await,
