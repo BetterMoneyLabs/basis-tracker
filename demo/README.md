@@ -129,6 +129,31 @@ export USE_TOKEN_ID=... DAVE_RESERVE_NFT_ID=... TRACKER_NFT_ID=...
 unlocked, funded wallet (≥ ~0.05 ERG and ≥ 0.5 USE), and two NFTs. See
 [demo/agent_celaut_use/README.md](agent_celaut_use/README.md) for details.
 
+## 5. Sovereign Agent Demo — Metabolism + Growth, No Human in the Loop
+
+**Directory:** `agent_sovereign/`
+**Launcher:** `run.sh`
+**Documentation:** [demo/agent_sovereign/README.md](agent_sovereign/README.md)
+
+A self-sovereign agent economy: the protagonist agent buys its own compute from an
+infrastructure provider, earns hash-verified bounties from an escrow-backed board,
+settles income on-chain in USE, reinvests surplus into a skill pack + compute-tier
+upgrade, and survives a price-shock round by downgrading — with zero human actions.
+Its collateralization ratio against a fixed seed reserve is the survival variable,
+and credit emerges from behavior when infra whitelists it after clean rounds.
+
+**Quick Start:**
+```bash
+export USE_TOKEN_ID=... TRACKER_NFT_ID=... \
+       SOVEREIGN_RESERVE_NFT_ID=... BOUNTY_ESCROW_NFT_ID=...
+./demo/agent_sovereign/run.sh --check   # preflight
+./demo/agent_sovereign/run.sh           # full demo
+```
+
+**Prerequisites:** Rust toolchain, Python 3, `curl`, a running Ergo node with an
+unlocked, funded wallet (≥ ~0.15 ERG and ≥ 1.7 USE) and three NFTs. See
+[demo/agent_sovereign/README.md](agent_sovereign/README.md) for details.
+
 ## References
 
 - [Agent Integration Spec](../specs/agent_integration.md)

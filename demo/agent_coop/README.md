@@ -5,6 +5,35 @@ Three scripted agents exchange services and settle with signed off-chain notes t
 [`basis-mcp`](../README.md#mcp-server) MCP server. No reserves, collateral, or on-chain
 redemption are required — this demo focuses on the simplest possible credit-based payment flow.
 
+## Why mutual credit?
+
+The agentic economy will not run on pre-funded wallets alone. Agents produce value and consume
+resources at different rhythms, across different principals and jurisdictions, often before revenue
+is realized. The natural financial relationship between two agents that repeatedly exchange services
+is therefore not an immediate token swap, but a running balance of mutual obligations — mutual credit.
+One agent delivers compute, data, or judgment today; the other settles the obligation tomorrow, next
+week, or against a reserve when trust has not yet been earned. This is how real economies actually
+function at the edge: trade precedes money, and money itself historically emerged to settle
+imbalances that had first been recorded as credit.
+
+Mutual credit is also the architecture that scales correctly with trust. Among agents that know
+each other or share a common principal, pure credit can move instantly and cheaply, bounded only by
+programmable limits. When agents are strangers, the same instrument can be collateralized by
+on-chain reserves, converting unsecured trust into a verifiable ratio. When final settlement is
+required, those reserves can be redeemed for bearer assets. This three-layer spectrum — credit,
+collateralized credit, backed money — lets the system be as fast as a tweet for trusted
+counterparties and as safe as a vault for unknown ones, without forcing every interaction through
+the cost and latency of on-chain settlement.
+
+What makes mutual credit the correct architecture for autonomous agents is that it is both
+self-sovereign and inspectable. Agents can issue and accept credit without a human signing each
+transaction, while acceptance predicates act as transparent, machine-enforced prudential rules:
+collateral floors, debt ceilings, and reputation-weighted limits. The resulting credit graph is
+signed, attributable, and committed on-chain as a state root, giving principals and regulators a
+view into what would otherwise be a dark pool of invisible agent obligations. In short, mutual credit
+turns the agentic economy's unavoidable need for deferred payment from a shadow-banking risk into
+a structured, scalable financial layer.
+
 ## Agents
 
 | Agent | Role |
