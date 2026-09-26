@@ -810,8 +810,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "core2"
-version = "0.4.0"
+name = "core3"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cbcb5224cf18d0beaecf52c52a58b248213de007fa72bc212d916224e26ceb8"
 dependencies = [
  "memchr",
 ]
@@ -1170,7 +1172,7 @@ dependencies = [
  "base16",
  "base64 0.22.1",
  "bounded-integer",
- "core2",
+ "core3",
  "derive_more",
  "elliptic-curve",
  "k256",
@@ -1270,7 +1272,7 @@ dependencies = [
  "blake2",
  "bounded-vec",
  "bytes",
- "core2",
+ "core3",
  "derive_more",
  "elliptic-curve",
  "ergo-chain-types",
@@ -1302,7 +1304,7 @@ dependencies = [
  "bnum",
  "bounded-vec",
  "bs58",
- "core2",
+ "core3",
  "derive_more",
  "elliptic-curve",
  "ergo-chain-types",
@@ -3386,7 +3388,7 @@ version = "0.19.0"
 dependencies = [
  "bitvec",
  "bounded-vec",
- "core2",
+ "core3",
  "thiserror 2.0.16",
 ]
 
@@ -4746,3 +4748,7 @@ dependencies = [
  "quote",
  "syn 2.0.106",
 ]
+
+[[patch.unused]]
+name = "core2"
+version = "0.4.0"
