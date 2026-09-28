@@ -709,10 +709,8 @@ impl NoteStorage {
                     ));
                 }
 
-                let amount_collected =
-                    u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                let amount_redeemed =
-                    u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
+                let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
+                let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
                 let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
                 let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
                 let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
@@ -796,9 +794,7 @@ impl NoteStorage {
     /// Iterate the reserve AVL journal in operation order.
     ///
     /// Returns a vector of (issuer_pubkey, note_key, timestamp, already_redeemed) tuples.
-    pub fn iter_reserve_avl_updates(
-        &self,
-    ) -> Result<Vec<(PubKey, NoteKey, u64, u64)>, NoteError> {
+    pub fn iter_reserve_avl_updates(&self) -> Result<Vec<(PubKey, NoteKey, u64, u64)>, NoteError> {
         let mut updates = Vec::new();
 
         for item in self.reserve_avl_journal_partition.iter() {

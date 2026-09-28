@@ -10,12 +10,15 @@ fn bench_note_creation(c: &mut Criterion) {
         let recipient_pubkey = [2u8; 33];
 
         b.iter(|| {
+            // Unwrap inside the measured body: a silently-discarded Result would let the
+            // benchmark time a failure path instead of real signing work.
             let note = IouNote::create_and_sign(
                 black_box(recipient_pubkey),
                 black_box(1000),
                 black_box(1234567890),
-                black_box(&secret.secret_bytes()),
-            );
+                black_box(&secret),
+            )
+            .unwrap();
             black_box(note);
         });
     });
@@ -26,13 +29,12 @@ fn bench_signature_verification(c: &mut Criterion) {
         let (secret, issuer_pubkey) = generate_keypair();
         let recipient_pubkey = [2u8; 33];
 
-        let note =
-            IouNote::create_and_sign(recipient_pubkey, 1000, 1234567890, &secret.secret_bytes())
-                .unwrap();
+        let note = IouNote::create_and_sign(recipient_pubkey, 1000, 1234567890, &secret).unwrap();
 
         b.iter(|| {
-            let result = note.verify_signature(black_box(&issuer_pubkey));
-            black_box(result);
+            // verify_signature returns Result<(), _>; unwrapping keeps the verification
+            // (and makes a failure panic) without black_boxing a unit value.
+            note.verify_signature(black_box(&issuer_pubkey)).unwrap();
         });
     });
 }
@@ -43,11 +45,9 @@ fn bench_schnorr_signature(c: &mut Criterion) {
         let message = b"benchmark message for schnorr signing";
 
         b.iter(|| {
-            let signature = schnorr::schnorr_sign(
-                black_box(message),
-                black_box(&secret.into()),
-                black_box(&pubkey),
-            );
+            let signature =
+                schnorr::schnorr_sign(black_box(message), black_box(&secret), black_box(&pubkey))
+                    .unwrap();
             black_box(signature);
         });
     });
@@ -56,15 +56,16 @@ fn bench_schnorr_signature(c: &mut Criterion) {
         let (secret, pubkey) = generate_keypair();
         let message = b"benchmark message for schnorr verification";
 
-        let signature = schnorr::schnorr_sign(message, &secret.into(), &pubkey).unwrap();
+        let signature = schnorr::schnorr_sign(message, &secret, &pubkey).unwrap();
 
         b.iter(|| {
-            let result = schnorr::schnorr_verify(
+            // schnorr_verify returns Result<(), _>; see bench_signature_verification.
+            schnorr::schnorr_verify(
                 black_box(&signature),
                 black_box(message),
                 black_box(&pubkey),
-            );
-            black_box(result);
+            )
+            .unwrap();
         });
     });
 }
@@ -111,7 +112,7 @@ fn bench_bulk_note_operations(c: &mut Criterion) {
                         [i as u8; 33],
                         1000 + i as u64,
                         1234567890 + i as u64,
-                        &secret.secret_bytes(),
+                        &secret,
                     )
                     .unwrap();
                     notes.push(black_box(note));

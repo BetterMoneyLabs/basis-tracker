@@ -1199,9 +1199,7 @@ mod tests {
 
         {
             let mut manager = TrackerStateManager::new(&storage_path);
-            manager
-                .add_note(&issuer_pubkey, &note)
-                .expect("add note");
+            manager.add_note(&issuer_pubkey, &note).expect("add note");
 
             // First redemption: 100M
             manager

@@ -1162,9 +1162,9 @@ impl TrackerStateManager {
         value_bytes.extend_from_slice(&timestamp.to_be_bytes());
         value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
 
-        reserve_tree.update(key_bytes, value_bytes).map_err(|e| {
-            NoteError::StorageError(format!("Reserve AVL tree update failed: {}", e))
-        })
+        reserve_tree
+            .update(key_bytes, value_bytes)
+            .map_err(|e| NoteError::StorageError(format!("Reserve AVL tree update failed: {}", e)))
     }
 
     /// Rebuild per-issuer reserve AVL trees from the persisted journal.
@@ -1173,20 +1173,16 @@ impl TrackerStateManager {
     pub fn rebuild_reserve_avl_trees(&mut self) -> Result<(), NoteError> {
         tracing::info!("Rebuilding reserve AVL trees from journal...");
 
-        let updates = self
-            .storage
-            .iter_reserve_avl_updates()
-            .map_err(|e| NoteError::StorageError(format!("Failed to read reserve AVL journal: {:?}", e)))?;
+        let updates = self.storage.iter_reserve_avl_updates().map_err(|e| {
+            NoteError::StorageError(format!("Failed to read reserve AVL journal: {:?}", e))
+        })?;
 
         if updates.is_empty() {
             tracing::info!("No reserve AVL journal entries found");
             return Ok(());
         }
 
-        tracing::info!(
-            "Replaying {} reserve AVL journal entries...",
-            updates.len()
-        );
+        tracing::info!("Replaying {} reserve AVL journal entries...", updates.len());
 
         for (issuer_pubkey, note_key, timestamp, already_redeemed) in updates {
             // Reconstruct recipient pubkey from the note key. The note key is
@@ -1231,7 +1227,12 @@ impl TrackerStateManager {
         timestamp: u64,
         already_redeemed: u64,
     ) -> Result<(), NoteError> {
-        self.apply_reserve_avl_update(issuer_pubkey, recipient_pubkey, timestamp, already_redeemed)?;
+        self.apply_reserve_avl_update(
+            issuer_pubkey,
+            recipient_pubkey,
+            timestamp,
+            already_redeemed,
+        )?;
 
         // Persist the update so the reserve tree can be rebuilt after a restart.
         self.storage.append_reserve_avl_update(

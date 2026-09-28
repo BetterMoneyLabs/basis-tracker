@@ -42,6 +42,13 @@ proptest = "1.0"
 criterion = "0.5"
 tempfile = "3.10.0"
 
+# Criterion benchmarks. `harness = false` is required: without it cargo treats
+# benches/*.rs as libtest targets, so `cargo bench` reports "running 0 tests" and
+# the benchmark functions are never executed.
+[[bench]]
+name = "note_operations_bench"
+harness = false
+
 [features]
 default = ["ergo_scanner"]
 ergo_scanner = ["reqwest"]  # Ergo scanner using /scan and /blockchain APIs
