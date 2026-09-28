@@ -16,7 +16,6 @@ serde_json = { workspace = true }
 blake2 = { workspace = true }
 generic-array = "0.14"
 secp256k1 = { version = "0.27", features = ["rand-std"] }
-num-bigint = "0.4.6"
 rand = "0.8"
 hex = "0.4"
 basis_core = { path = "../basis_core" }

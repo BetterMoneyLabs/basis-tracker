@@ -93,7 +93,18 @@ see Issue H4. Only the three `sigma-rust` paths are machine-local.
 
 ---
 
-### 2. Remote Panic in `POST /redemption/prepare` — Slice Before Length Check 🔴
+### 2. Panic in `POST /redemption/prepare` — Slice Before Length Check 🔴
+
+**Status:** ✅ **FIXED** (2026-09-27) — see "Fix Applied" below.
+
+> **Severity correction (2026-09-27).** An earlier revision of this audit described the two panic
+> issues (#2, #3) as "unauthenticated remote crash" that "kills the server". **That was
+> overstated.** Both handlers carry `#[axum::debug_handler]` (`api.rs:2947`, `:1384`) and the
+> workspace sets no `[profile]` overrides, so `panic = "unwind"` is in effect. The panics are
+> therefore caught and surface as **500 responses with an ERROR-level log**, not process aborts.
+> They remain genuine bugs worth fixing — unauthenticated 500s, wasted work, log noise, and
+> inconsistent state for anything mutated before the panic — but they are availability
+> *degradation*, not a DoS kill switch. Re-rated accordingly; see the Risk Assessment.
 
 **File:** `crates/basis_server/src/api.rs:2989-2994` (route registered at `main.rs:820`)
 
@@ -122,17 +133,47 @@ POST /redemption/prepare
 ```
 `hex::decode("aa")` succeeds, then `&"aa"[..8]` panics: `byte index 8 is out of bounds`.
 
-**Impact:** Unauthenticated remote crash. The route requires only `ClientRole::Write`
-(`authorization.rs:64`), which `AuthMode::None` grants to everyone (see Issue H1).
+**Impact:** Unauthenticated 500 from `POST /redemption/prepare`. The route requires only
+`ClientRole::Write` (`authorization.rs:64`), which `AuthMode::None` grants to everyone (see
+Issue H1). Previously assessed as a remote crash; corrected above.
 
-**Fix:** Validate decoded length before any slicing — move the `len() == 33` checks above
-`api.rs:2989`, or slice only after `try_into()` to `[u8; 33]` succeeds.
+**Fix Applied (2026-09-27):**
+1. ✅ Replaced the decodability-only check with a combined decode **and** 33-byte length
+   validation for both keys, performed up front before anything indexes the input strings.
+2. ✅ Removed the fixed-offset slicing entirely. The redemption-ID prefix is now derived from the
+   already-validated bytes via `hex::encode(&bytes[..4])`, which is byte-identical to the first
+   8 hex characters of a well-formed 66-character pubkey — so the ID format is unchanged for
+   valid input, but the panic class is eliminated rather than merely made safe.
+3. ✅ Removed the now-duplicated decode blocks further down the handler.
+4. ✅ Distinct error messages preserved (`Invalid hex encoding for public keys`,
+   `issuer_pubkey must be 33 bytes hex-encoded`, `recipient_pubkey must be 33 bytes hex-encoded`)
+   so existing client-visible behaviour is unchanged.
 
-**Priority:** 🔴 CRITICAL
+**Regression tests added** (`crates/basis_server/tests/redemption_api_integration_tests.rs`):
+- `test_prepare_redemption_short_hex_does_not_panic` — `"aa"` / `"aa"`
+- `test_prepare_redemption_short_recipient_does_not_panic` — valid issuer + `"aa"` recipient,
+  asserting the recipient-specific message
+- `test_prepare_redemption_empty_pubkey_does_not_panic` — empty strings
+
+All three were confirmed to **fail against the unfixed handler** (returning 500) and pass after
+the fix. Note that the recipient test deliberately uses `"aa"` rather than `"0"`: an odd-length
+string such as `"0"` is rejected by the *old* decodability check before reaching the slice, so it
+would pass without ever exercising the panic.
+
+**Verification:** `cargo test -p basis_server` — 217 passed, 0 failed. `cargo fmt` reports no
+diff in either changed file (the only diff is pre-existing, in `redemption_build.rs:477`).
+
+**Priority:** ✅ RESOLVED
 
 ---
 
-### 3. Remote Panic in `GET /events/paginated` — Unbounded Slice 🔴
+### 3. Panic in `GET /events/paginated` — Unbounded Slice 🔴
+
+> **Severity correction (2026-09-27).** Same correction as Issue #2: `get_events_paginated` is
+> `#[axum::debug_handler]` (`api.rs:1384`) and `panic = "unwind"` applies, so this yields a 500,
+> not a process abort. Unauthenticated and trivially triggerable, but not a crash. Still 🔴
+> because it is unauthenticated input reaching an out-of-bounds slice, and because
+> `?page_size=999999999` forces a large allocation on every request.
 
 **File:** `crates/basis_server/src/store.rs:44-46`
 
@@ -159,12 +200,14 @@ let page_size = params.get("page_size").and_then(|ps| ps.parse().ok()).unwrap_or
 - `?page_size=18446744073709551615` → `start + page_size` overflows → `end < start` → slice panic.
 - `?page_size=999999999` → unbounded `Vec` allocation per request.
 
-**Impact:** Unauthenticated remote crash and memory pressure.
+**Impact:** Unauthenticated 500 from `GET /events/paginated`, plus unbounded allocation via a
+large `page_size`.
 
 **Fix:** Clamp `page_size` to a sane maximum (e.g. 200), compute `start` with
-`saturating_mul`, and return an empty `Vec` when `start >= events.len()`.
+`saturating_mul`, and return an empty `Vec` when `start >= events.len()`. Add regression tests
+for `?page=1` against an empty store and for a maximal `page_size`.
 
-**Priority:** 🔴 CRITICAL
+**Priority:** 🔴 CRITICAL — next in sequence after Issue #2.
 
 ---
 
@@ -954,6 +997,15 @@ These remain fixed and should not be re-litigated:
 
 - [ ] Vendor the three `sigma-rust` crates into `temp/vendors/` or repoint the patches to a git
       ref (Issue #1).
+- [ ] **Verified 2026-09-27:** the fix requires bumping the *declared versions*, not just the
+      paths. The code needs `ergo_lib::ergotree_ir::chain::{context, context_extension}`
+      (`crates/basis_offchain/src/signing.rs:21-22`), which only exist at sigma-rust ≥ `dc6c41c6`,
+      by which point the crates are **0.29.0**. Declared `0.28.0` (`Cargo.toml:16`,
+      `crates/basis_store/Cargo.toml:32-33`) makes cargo **silently drop** the `[patch]` entries,
+      which is why the committed `Cargo.lock` shows `ergo-lib 0.28.0` from crates.io with zero
+      sigma-rust references. Bumping all three to `0.29.0` was confirmed to compile and to make
+      the path patches apply — but the **absolute paths must still be replaced** (git `rev`, or
+      vendored) or CI stays red.
 - [ ] Confirm `cargo build --workspace` from a clean checkout on a machine without
       `/home/kushti/ergo/sigma-rust`.
 - [ ] Get CI green; confirm the OpenAPI consistency test and `sbt test` actually execute.
@@ -962,10 +1014,10 @@ These remain fixed and should not be re-litigated:
 
 ### Phase 1: Remote Crash Fixes (half day)
 
-- [ ] Hoist the `len() == 33` checks above the slice in `api.rs:2989` (Issue #2).
-- [ ] Clamp `page` / `page_size` and guard the empty case in `store.rs:44-46` (Issue #3).
-- [ ] Add regression tests for both; assert no panic on `{"issuer_pubkey":"aa"}` and on
-      `?page=1` with an empty store.
+- [x] Hoist the `len() == 33` checks above the slice in `api.rs:2989`; remove fixed-offset
+      slicing entirely (Issue #2) — **done 2026-09-27**, 3 regression tests added
+- [ ] Clamp `page` / `page_size` and guard the empty case in `store.rs:44-46` (Issue #3)
+- [ ] Add regression tests for Issue #3; assert no panic on `?page=1` with an empty store
 
 ### Phase 2: Redemption Integrity (1-2 days)
 
@@ -1075,7 +1127,7 @@ These remain fixed and should not be re-litigated:
 - [ ] Reorg handling (deferred per `specs/pr12_triage.md:79-80`)
 
 ### Error Handling
-- [ ] No panics reachable from request handlers (Issues #2, #3)
+- [ ] No panics reachable from request handlers (Issue #3 remains; #2 fixed)
 - [x] Proper error responses (not panics) — for handled error paths
 - [ ] No startup panics on bad config or storage failure (Issue M5)
 - [ ] CLI surfaces server errors instead of panicking (Issue L1)
@@ -1112,9 +1164,11 @@ has been exercised on mainnet, but three things block deployment:
 1. **Nothing is verified.** CI has been red on every push since at least 2026-08-21 because
    `[patch.crates-io]` points at absolute local paths. No test, lint, format check, OpenAPI
    consistency check, or Scala contract test has run in weeks.
-2. **The server can be crashed anonymously.** `POST /redemption/prepare` and
-   `GET /events/paginated` both panic on short input, and the default auth mode grants `Admin` to
-   every unauthenticated caller.
+2. **The server returns 500 on attacker-controlled input in two handlers.** `POST /redemption/prepare`
+   and `GET /events/paginated` both panic on short or out-of-range input, and the default auth
+   mode grants `Admin` to every unauthenticated caller. Note these surface as caught 500s
+   (`#[axum::debug_handler]` + `panic = "unwind"`), not process aborts. Issue #2 is fixed;
+   Issue #3 remains.
 3. **Redemption completion trusts the caller.** Debt is credited from the request body with no
    outstanding-debt cap, no idempotency, and no confirmation-depth gate — and the collateralization
    monitor that should catch over-issuance is inert because `total_debt` is hardcoded to `0`.

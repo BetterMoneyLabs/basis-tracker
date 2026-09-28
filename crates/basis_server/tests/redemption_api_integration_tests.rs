@@ -1346,6 +1346,93 @@ mod redemption_api_tests {
     }
 
     // ============================================================================
+    // Regression tests: short-but-valid hex must not panic
+    // ============================================================================
+
+    /// Regression test for the `&payload.issuer_pubkey[..8]` slice panic.
+    ///
+    /// The handler used to validate only that the pubkeys were *decodable* hex and then
+    /// slice the first 8 characters to build a redemption ID. A well-formed hex string
+    /// shorter than 8 characters (e.g. "aa", which decodes to 1 byte) passed that check
+    /// and then panicked on the slice, aborting the request task.
+    #[tokio::test]
+    async fn test_prepare_redemption_short_hex_does_not_panic() {
+        let state = create_mock_app_state().await;
+
+        let request = RedemptionPreparationRequest {
+            issuer_pubkey: "aa".to_string(),
+            recipient_pubkey: "aa".to_string(),
+            amount: 1000,
+            timestamp: 0,
+        };
+
+        // Must return a 400 rather than panicking.
+        let response =
+            prepare_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let body = &response.1;
+        assert!(!body.success);
+        assert!(body.error.is_some());
+    }
+
+    /// A short-but-valid-hex *recipient* key must not panic, even when the issuer key is
+    /// valid and long enough for the old fixed-offset issuer slice to succeed.
+    ///
+    /// Note the recipient value must be well-formed hex: an odd-length string such as "0"
+    /// would be rejected by the old decodability check *before* reaching the slice, so the
+    /// test would pass without ever exercising the panic. "aa" decodes to one byte and
+    /// therefore reaches the slice on the unfixed code.
+    #[tokio::test]
+    async fn test_prepare_redemption_short_recipient_does_not_panic() {
+        let state = create_mock_app_state().await;
+
+        let request = RedemptionPreparationRequest {
+            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
+                .to_string(),
+            recipient_pubkey: "aa".to_string(),
+            amount: 1000,
+            timestamp: 0,
+        };
+
+        // The issuer key is valid, so only the recipient length is at fault: expect the
+        // recipient-specific message rather than the generic hex error.
+        let response =
+            prepare_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let body = &response.1;
+        assert!(!body.success);
+        let msg = body.error.clone().unwrap_or_default();
+        assert!(
+            msg.contains("recipient_pubkey must be 33 bytes"),
+            "expected recipient length error, got: {}",
+            msg
+        );
+    }
+
+    /// An empty string must not panic.
+    #[tokio::test]
+    async fn test_prepare_redemption_empty_pubkey_does_not_panic() {
+        let state = create_mock_app_state().await;
+
+        let request = RedemptionPreparationRequest {
+            issuer_pubkey: String::new(),
+            recipient_pubkey: String::new(),
+            amount: 1000,
+            timestamp: 0,
+        };
+
+        let response =
+            prepare_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        let body = &response.1;
+        assert!(!body.success);
+        assert!(body.error.is_some());
+    }
+
+    // ============================================================================
     // Request/response model validation tests
     // ============================================================================
 

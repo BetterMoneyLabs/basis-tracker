@@ -2951,17 +2951,51 @@ pub async fn prepare_redemption(
 ) -> (StatusCode, Json<ApiResponse<RedemptionPreparationResponse>>) {
     tracing::debug!("Preparing redemption: {:?}", payload);
 
-    // Validate public keys
-    if hex::decode(&payload.issuer_pubkey).is_err()
-        || hex::decode(&payload.recipient_pubkey).is_err()
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(crate::models::error_response(
-                "Invalid hex encoding for public keys".to_string(),
-            )),
-        );
-    }
+    // Validate public keys: both must be 33-byte hex-encoded compressed secp256k1 keys.
+    //
+    // Decodability and length are validated together, up front, so that no later code path
+    // can slice or index these input strings before their length is known to be 66 hex
+    // characters. Validating decodability alone is not sufficient: a short but well-formed
+    // hex string such as "aa" decodes successfully and would panic on a fixed-offset slice.
+    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes hex-encoded".to_string(),
+                )),
+            );
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid hex encoding for public keys".to_string(),
+                )),
+            );
+        }
+    };
+
+    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
+        Ok(bytes) if bytes.len() == 33 => bytes,
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "recipient_pubkey must be 33 bytes hex-encoded".to_string(),
+                )),
+            );
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid hex encoding for public keys".to_string(),
+                )),
+            );
+        }
+    };
 
     // Get tracker public key from configuration
     let tracker_pubkey_bytes = match state.config.tracker_public_key_bytes() {
@@ -2985,38 +3019,18 @@ pub async fn prepare_redemption(
         }
     };
 
-    // Generate a unique redemption ID
+    // Generate a unique redemption ID.
+    //
+    // The key prefixes are taken from the already-validated 33-byte keys rather than by
+    // slicing the raw request strings. `hex::encode(&bytes[..4])` yields the same 8 hex
+    // characters as the first 8 characters of a well-formed 66-character pubkey, so the ID
+    // format is unchanged for valid input — but it cannot panic on short input.
     let redemption_id = format!(
         "redemption_{}_{}_{}",
-        &payload.issuer_pubkey[..8],
-        &payload.recipient_pubkey[..8],
+        hex::encode(&issuer_pubkey_bytes[..4]),
+        hex::encode(&recipient_pubkey_bytes[..4]),
         payload.timestamp
     );
-
-    // Decode public keys for message generation
-    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
-        Ok(bytes) if bytes.len() == 33 => bytes,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "issuer_pubkey must be 33 bytes hex-encoded".to_string(),
-                )),
-            );
-        }
-    };
-
-    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
-        Ok(bytes) if bytes.len() == 33 => bytes,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "recipient_pubkey must be 33 bytes hex-encoded".to_string(),
-                )),
-            );
-        }
-    };
 
     // Create message to be signed matching the deployed Basis reserve contract.
     // message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) (48 bytes)
