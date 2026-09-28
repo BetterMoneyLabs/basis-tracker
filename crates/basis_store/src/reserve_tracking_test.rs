@@ -16,7 +16,7 @@ mod tests {
         let storage_path = temp_dir.path().join("scanner_metadata");
 
         // Create scanner metadata storage
-        let metadata_storage = ScannerMetadataStorage::open(&storage_path)
+        let _metadata_storage = ScannerMetadataStorage::open(&storage_path)
             .expect("Failed to create scanner metadata storage");
 
         // Create a test configuration
@@ -32,7 +32,7 @@ mod tests {
 
         // Create reserve storage
         let reserve_storage_path = temp_dir.path().join("reserves");
-        let reserve_storage =
+        let _reserve_storage =
             ReserveStorage::open(&reserve_storage_path).expect("Failed to create reserve storage");
 
         // Create server state
@@ -272,7 +272,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let storage_path = temp_dir.path().join("scanner_metadata");
 
-        let metadata_storage = ScannerMetadataStorage::open(&storage_path)
+        let _metadata_storage = ScannerMetadataStorage::open(&storage_path)
             .expect("Failed to create scanner metadata storage");
 
         let config = NodeConfig {
@@ -287,7 +287,7 @@ mod tests {
 
         // Create reserve storage for the second test
         let reserve_storage_path = temp_dir.path().join("reserves_comprehensive");
-        let reserve_storage =
+        let _reserve_storage =
             ReserveStorage::open(&reserve_storage_path).expect("Failed to create reserve storage");
 
         let state =

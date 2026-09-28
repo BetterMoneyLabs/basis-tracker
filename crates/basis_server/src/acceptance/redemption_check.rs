@@ -1118,4 +1118,141 @@ mod tests {
             other => panic!("expected NotOldestNote, got {:?}", other),
         }
     }
+
+    // ========================================================================
+    // resolve_effective_policy — policy-resolution precedence
+    //
+    // These pin the resolution order and the fail-open / fail-closed asymmetries flagged in
+    // specs/PRODUCTION_READINESS_AUDIT.md (Issue H3).
+    // ========================================================================
+
+    fn global_config_with_default(default: DefaultPolicy) -> AcceptanceConfig {
+        AcceptanceConfig {
+            default,
+            root: None,
+            predicates: vec![],
+        }
+    }
+
+    /// A well-collateralized environment, so the only variable under test is which policy wins.
+    fn relaxed_env() -> EvalEnv<'static> {
+        static ISSUER_KEY: PubKey = [0x02u8; 33];
+        EvalEnv {
+            issuer_pubkey: &ISSUER_KEY,
+            refund_pending: false,
+            collateral: 1_000,
+            debt: 100,
+            holder_total_debt: 100,
+        }
+    }
+
+    #[test]
+    fn test_no_stored_policy_falls_back_to_global_default() {
+        let store = test_storage();
+        let global = global_config_with_default(DefaultPolicy::Accept);
+
+        let resolved = resolve_effective_policy(&store.storage, &test_pubkey(HOLDER_A), &global);
+
+        assert!(
+            resolved.acceptable(&relaxed_env()),
+            "with no stored policy the global default (Accept) must apply"
+        );
+    }
+
+    #[test]
+    fn test_no_stored_policy_honours_global_reject_default() {
+        let store = test_storage();
+        let global = global_config_with_default(DefaultPolicy::Reject);
+
+        let resolved = resolve_effective_policy(&store.storage, &test_pubkey(HOLDER_A), &global);
+
+        assert!(
+            !resolved.acceptable(&relaxed_env()),
+            "with no stored policy the global default (Reject) must apply"
+        );
+    }
+
+    /// Characterisation test for the fail-open path (audit Issue H3).
+    ///
+    /// `resolve_effective_policy` handles a *storage read error* by returning `global()`,
+    /// which can resolve to `DefaultPolicy::Accept` — so a transient DB failure flips a
+    /// holder's Reject policy to accept. The `Err(_)` arm is not reachable without fault
+    /// injection into `AcceptancePolicyStorage`, so this pins the behaviour of the very same
+    /// `global()` fallback that arm returns, reached here via `Ok(None)`.
+    ///
+    /// If that arm is ever changed to fail closed (the fix the audit recommends), this test
+    /// still passes; a companion test asserting closed behaviour belongs at that point.
+    #[test]
+    fn test_global_fallback_resolves_to_accept_when_default_is_accept() {
+        let store = test_storage();
+        let global = global_config_with_default(DefaultPolicy::Accept);
+
+        let resolved = resolve_effective_policy(&store.storage, &test_pubkey(HOLDER_A), &global);
+
+        match &resolved {
+            EffectivePolicy::Default(DefaultPolicy::Accept) => {}
+            _ => panic!("expected the global fallback to resolve to Default(Accept)"),
+        }
+    }
+
+    #[test]
+    fn test_corrupt_stored_policy_fails_closed() {
+        // Contrast with the read-error arm: a policy that exists but cannot be parsed rejects
+        // rather than falling back to the global default.
+        let store = test_storage();
+        let global = global_config_with_default(DefaultPolicy::Accept);
+
+        store
+            .storage
+            .store_policy(&test_pubkey(HOLDER_A), "not json at all {{{", "sig")
+            .expect("store corrupt policy");
+
+        let resolved = resolve_effective_policy(&store.storage, &test_pubkey(HOLDER_A), &global);
+
+        assert!(
+            !resolved.acceptable(&relaxed_env()),
+            "a corrupt stored policy must fail closed even when the global default is Accept"
+        );
+    }
+
+    #[test]
+    fn test_empty_stored_policy_fails_closed() {
+        let store = test_storage();
+        let global = global_config_with_default(DefaultPolicy::Accept);
+
+        store
+            .storage
+            .store_policy(&test_pubkey(HOLDER_A), "{\"predicates\":[]}", "sig")
+            .expect("store empty policy");
+
+        let resolved = resolve_effective_policy(&store.storage, &test_pubkey(HOLDER_A), &global);
+
+        assert!(
+            !resolved.acceptable(&relaxed_env()),
+            "an empty stored policy must fail closed even when the global default is Accept"
+        );
+    }
+
+    #[test]
+    fn test_new_stored_policy_reject_overrides_permissive_global() {
+        // A holder with an explicit Reject policy must be rejected even though the global
+        // default is Accept.
+        let store = test_storage();
+        let global = global_config_with_default(DefaultPolicy::Accept);
+
+        store
+            .storage
+            .store_policy(
+                &test_pubkey(HOLDER_A),
+                "{\"default\":\"reject\",\"predicates\":[]}",
+                "sig",
+            )
+            .expect("store holder policy");
+
+        let resolved = resolve_effective_policy(&store.storage, &test_pubkey(HOLDER_A), &global);
+        assert!(
+            !resolved.acceptable(&relaxed_env()),
+            "a per-holder reject must win over a permissive global default"
+        );
+    }
 }

@@ -139,3 +139,74 @@ mod integration_tests {
         assert!(result.is_err(), "Should error when node is unreachable");
     }
 }
+
+/// Tests for `confirmation_depth` — the gate that decides whether a pending tracker-box
+/// update may promote notes to `Confirmed`.
+///
+/// This function previously had no test coverage at all, despite being the only thing standing
+/// between a mempool-accepted transaction and confirmed on-chain state (see
+/// specs/PRODUCTION_READINESS_AUDIT.md). All heights are inclusive, so a transaction included in
+/// the current tip has depth 1.
+mod confirmation_depth_tests {
+    use basis_server::confirmation_depth;
+
+    #[test]
+    fn test_depth_is_one_at_the_tip() {
+        assert_eq!(
+            confirmation_depth(1000, 1000),
+            1,
+            "a transaction in the current tip must have depth 1, not 0"
+        );
+    }
+
+    #[test]
+    fn test_depth_increments_with_each_new_block() {
+        assert_eq!(confirmation_depth(1001, 1000), 2);
+        assert_eq!(confirmation_depth(1002, 1000), 3);
+        assert_eq!(confirmation_depth(1010, 1000), 11);
+    }
+
+    #[test]
+    fn test_zero_inclusion_height_means_unknown() {
+        // Height 0 is the sentinel for "we do not know the inclusion height", so depth must be
+        // 0 — never a computed value that could accidentally satisfy a min_depth threshold.
+        assert_eq!(confirmation_depth(1000, 0), 0);
+        assert_eq!(confirmation_depth(0, 0), 0);
+        assert_eq!(confirmation_depth(u64::MAX, 0), 0);
+    }
+
+    #[test]
+    fn test_default_min_depth_of_two_is_not_met_at_tip() {
+        // This is the actual production default (config.rs::default_min_confirmation_depth).
+        const MIN_DEPTH: u64 = 2;
+        let depth_at_tip = confirmation_depth(1000, 1000);
+        assert!(
+            depth_at_tip < MIN_DEPTH,
+            "a freshly included tx must NOT satisfy min_depth=2, got depth {}",
+            depth_at_tip
+        );
+        assert!(
+            confirmation_depth(1001, 1000) >= MIN_DEPTH,
+            "one confirmation later the tx must satisfy min_depth=2"
+        );
+    }
+
+    #[test]
+    fn test_inclusion_height_above_tip_yields_one() {
+        // Characterisation test for the saturating_sub edge case: if the reported inclusion
+        // height is somehow ahead of the tip, `saturating_sub` clamps to 0 and the `+ 1`
+        // makes the result 1. Under min_depth=2 this still blocks promotion, but under a
+        // min_depth of 1 it would pass. Pinned so the behaviour is visible if the formula
+        // ever changes.
+        assert_eq!(confirmation_depth(1000, 1005), 1);
+    }
+
+    #[test]
+    fn test_far_future_inclusion_height_saturates() {
+        assert_eq!(
+            confirmation_depth(1, u64::MAX),
+            1,
+            "saturating_sub must not panic or wrap on an absurd inclusion height"
+        );
+    }
+}

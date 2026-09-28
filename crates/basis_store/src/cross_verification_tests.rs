@@ -8,7 +8,7 @@ mod tests {
 
     #[test]
     fn test_state_consistency_verification() {
-        let mut reserve_tracker = ReserveTracker::new();
+        let reserve_tracker = ReserveTracker::new();
 
         // Create test reserve info
         let reserve_info = ExtendedReserveInfo::new(
@@ -25,7 +25,7 @@ mod tests {
         reserve_tracker.update_reserve(reserve_info).unwrap();
 
         // Simulate on-chain event
-        let on_chain_event = ReserveEvent::ReserveCreated {
+        let _on_chain_event = ReserveEvent::ReserveCreated {
             box_id: "test_reserve_box_1".to_string(),
             owner_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
                 .to_string(),
@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn test_reserve_tracking_accuracy() {
-        let mut reserve_tracker = ReserveTracker::new();
+        let reserve_tracker = ReserveTracker::new();
 
         // Add multiple reserves
         let reserves = vec![
@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn test_collateralization_ratio_monitoring() {
-        let mut reserve_tracker = ReserveTracker::new();
+        let reserve_tracker = ReserveTracker::new();
 
         // Add reserve with 1 ERG collateral
         let reserve_info = ExtendedReserveInfo::new(
@@ -124,10 +124,10 @@ mod tests {
 
     #[test]
     fn test_reserve_event_processing() {
-        let mut reserve_tracker = ReserveTracker::new();
+        let reserve_tracker = ReserveTracker::new();
 
         // Process reserve creation event
-        let create_event = ReserveEvent::ReserveCreated {
+        let _create_event = ReserveEvent::ReserveCreated {
             box_id: "box_1".to_string(),
             owner_pubkey: "issuer_1".to_string(),
             collateral_amount: 1000000000,
@@ -192,10 +192,10 @@ mod tests {
 
     #[test]
     fn test_error_conditions() {
-        let mut reserve_tracker = ReserveTracker::new();
+        let reserve_tracker = ReserveTracker::new();
 
         // Test processing event for non-existent reserve
-        let topup_event = ReserveEvent::ReserveToppedUp {
+        let _topup_event = ReserveEvent::ReserveToppedUp {
             box_id: "non_existent_box".to_string(),
             additional_collateral: 500000000,
             height: 1000,

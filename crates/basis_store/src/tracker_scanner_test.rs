@@ -2,14 +2,13 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::{
         ergo_scanner::{BoxAsset, ScanBox},
         persistence::{ScannerMetadataStorage, TrackerStorage},
         tracker_scanner::{create_tracker_server_state, TrackerNodeConfig},
     };
     use std::collections::HashMap;
-    use std::path::Path;
 
     #[tokio::test]
     async fn test_tracker_scan_registration_payload() {

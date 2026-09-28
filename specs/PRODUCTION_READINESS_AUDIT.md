@@ -881,10 +881,36 @@ the original signature. It calls `build_unsigned_redemption_transaction` directl
 properly via the real `basis_cli transaction generate-redemption --local-sign` flow, so this is a
 unit-test-only limitation.
 
-**e. The multi-redemption proptest is near-vacuous.**
-`crates/basis_store/src/property_tests.rs:357-418` runs 1..10 sequential redemptions, but at
-`:404` it uses `if result.is_ok()`, silently tolerating failures, and the signatures are
-`"01".repeat(65)` / `"02".repeat(65)`.
+**e. The multi-redemption proptest was near-vacuous — and hid a real bug.** ✅ FIXED 2026-09-28
+`crates/basis_store/src/property_tests.rs` used `if result.is_ok() { ... }`, so every
+`initiate_redemption` failure was swallowed, `total_redeemed` stayed `0`, and all three trailing
+assertions were trivially true.
+
+Making it assert revealed a genuine limitation, previously documented only in a code comment at
+`redemption_blockchain_tests.rs:1043-1046` and **not in any spec**:
+
+> Only the **first** redemption of a note can go through `POST /redeem`
+> (`RedemptionManager::initiate_redemption`). `complete_redemption` refreshes
+> `note.timestamp` to keep it monotonically increasing (`redemption.rs:366-369`), which
+> invalidates the signature produced by `IouNote::create_and_sign`. Any subsequent
+> `initiate_redemption` for the same `(issuer, recipient)` pair therefore fails with
+> `InvalidNoteSignature` at `redemption.rs:137-139`.
+
+This does **not** contradict the mainnet multi-redemption results: the harnesses in `tests/` use
+`generate-redemption --local-sign`, which never calls `/redeem` (Issue M14b) — it fetches
+`/tracker/proof` and `/reserve/proof` and builds client-side. So the on-chain flow supports N
+redemptions, but the **server-side `POST /redeem` path supports exactly one per note**.
+
+The proptest is now a characterization test: it asserts the first redemption succeeds, asserts
+subsequent ones are rejected with `InvalidNoteSignature`, and will **fail loudly** if the
+signature-refresh behaviour is ever fixed. Case count is capped at 24 (real keygen + AVL proof
+per case; the default 256 took ~67 s).
+
+**Follow-up worth considering:** either re-sign the note on completion, or have
+`initiate_redemption` verify against the note's *stored* signature rather than re-deriving the
+message from the mutated timestamp. Until then, a client using `POST /redeem` for a second
+redemption gets a confusing `InvalidNoteSignature` rather than a clear "already partially
+redeemed" error.
 
 **Fix:** Add a Scala property that performs a genuine second redemption — build a non-empty reserve
 tree, derive `mkLookupProof` against it, reduce it through the real interpreter — and wire it into
@@ -1096,6 +1122,30 @@ These remain fixed and should not be re-litigated:
       an unimplemented `POST /debt/transfer` endpoint, documented all 30 registered routes, brought
       the CLI command table current (including the undocumented `redeem-assisted` subcommand), and
       documented the `none` auth default.
+- [x] Test hygiene pass: enabled `local_sign_v3` (was `#[ignore]`d on ergo-lib 0.28, passes on
+      0.29), deleted the one-off `fix_note_state.rs` repair script and the uncalled
+      `basis_trees/src/test_helpers.rs`, tightened a loose `assert_ne!(OK)` to a specific 400 +
+      message, cleared all 46 unused imports, and de-vacuumed the multi-redemption proptest —
+      which surfaced a previously undocumented limitation (Issue M13e). 617 tests pass.
+- [x] Coverage pass (2026-09-29), +51 tests → **668 passing, 0 ignored**:
+  - **Tier 1** — `crates/basis_store/src/avl_queries_tests.rs` (21 tests) covers
+    `get_total_debt`, `update_already_redeemed`, `generate_reserve_insert_proof`,
+    `normalize_public_key`, and the register accessors / `decode_ergo_long_register`;
+    6 `confirmation_depth` tests in `tracker_box_updater_integration.rs`; 6
+    `resolve_effective_policy` tests pinning the H3 fail-open / fail-closed asymmetry.
+  - **Tier 2** — `crates/basis_server/tests/untested_handlers_tests.rs` (18 tests) covers the
+    8 handlers no test had ever invoked, including `POST /redemption/submit`. The
+    `submit_redemption` test is a **characterisation test for Issue #4**: a node stub that
+    accepts any broadcast is enough to advance tracker state from the request body, with no
+    confirmation depth and no inspection of the transaction.
+
+  Two behaviours were pinned that the audit had not previously recorded:
+  - `GET /tracker/latest-box-id` returns **404** (not 200 with an empty id) before the first
+    updater cycle.
+  - `POST /redemption/submit` returns **200 OK even when the tracker thread drops the
+    completion command** — the state-sync failure is logged and swallowed (Issue H9). This was
+    discovered when a first draft of the test failed: the mock's tracker thread did not handle
+    `CompleteRedemption`, and the endpoint still reported success.
 
 ### Phase 7: Remaining Validation
 

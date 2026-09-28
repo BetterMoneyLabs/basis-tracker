@@ -1285,7 +1285,7 @@ mod redemption_api_tests {
 
     #[tokio::test]
     async fn test_prepare_redemption_wrong_length_pubkey() {
-        // Test that wrong-length pubkey returns error (400 or 500 depending on validation stage)
+        // A decodable hex pubkey of the wrong length must be rejected with 400.
         let state = create_mock_app_state().await;
 
         // 32 bytes instead of 33
@@ -1302,13 +1302,19 @@ mod redemption_api_tests {
         let response =
             prepare_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
 
-        // The handler validates hex first (passes for wrong_length since it's valid hex),
-        // then later validates length which may return 500 (internal error) or 400
-        // depending on where the validation happens. We just assert it doesn't succeed.
-        assert_ne!(response.0, StatusCode::OK);
+        // The handler decodes and length-checks both keys up front, so this is a
+        // deterministic 400 with a specific message. Asserting the exact status and
+        // message (rather than merely "not OK") means a regression that reintroduces a
+        // 500 or a different failure path will be caught here.
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
         let body = &response.1;
         assert!(!body.success);
-        assert!(body.error.is_some());
+        let msg = body.error.clone().unwrap_or_default();
+        assert!(
+            msg.contains("issuer_pubkey must be 33 bytes"),
+            "expected issuer length error, got: {}",
+            msg
+        );
     }
 
     #[tokio::test]

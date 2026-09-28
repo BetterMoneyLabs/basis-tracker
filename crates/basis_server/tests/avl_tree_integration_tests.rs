@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod avl_tree_integration_tests {
-    use basis_store::{IouNote, NoteKey, PubKey, Signature, TrackerStateManager};
+    use basis_store::{IouNote, NoteKey, PubKey, TrackerStateManager};
     use secp256k1;
 
     /// Helper function to generate a test public key

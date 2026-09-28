@@ -122,8 +122,7 @@ pub fn schnorr_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basis_core::impls::SchnorrVerifier;
-    use basis_core::traits::SignatureVerifier;
+
     use secp256k1::{Secp256k1, SecretKey};
 
     #[test]

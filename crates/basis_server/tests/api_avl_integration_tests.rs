@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod api_avl_integration_tests {
-    use basis_store::{IouNote, PubKey, Signature, TrackerStateManager};
+    use basis_store::{IouNote, PubKey, TrackerStateManager};
     use secp256k1;
-    use std::sync::Arc;
 
     /// Helper to generate a test public key
     fn generate_test_pubkey(seed: u8) -> PubKey {

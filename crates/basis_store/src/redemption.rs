@@ -456,8 +456,8 @@ mod tests {
 
     #[test]
     fn test_redemption_validation() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
-        let redemption_manager = RedemptionManager::new(tracker);
+        let tracker = TrackerStateManager::new_with_temp_storage();
+        let _redemption_manager = RedemptionManager::new(tracker);
 
         // Test public key parsing
         let valid_pubkey = "02".to_string() + &"0".repeat(64); // 33 bytes hex
@@ -477,14 +477,14 @@ mod tests {
 
     #[test]
     fn test_build_unsigned_redemption_transaction_invalid_issuer_pubkey() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         // Create a valid note first
         let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
         let secp = secp256k1::Secp256k1::new();
         let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret);
-        let issuer_pubkey_bytes = issuer_pubkey.serialize();
+        let _issuer_pubkey_bytes = issuer_pubkey.serialize();
 
         let recipient_secret = secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
         let recipient_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret);
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_build_unsigned_redemption_transaction_invalid_recipient_pubkey() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_build_unsigned_redemption_transaction_empty_reserve_box_id() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_build_unsigned_redemption_transaction_empty_tracker_box_id() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_build_unsigned_redemption_transaction_invalid_issuer_signature_length() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
@@ -830,7 +830,7 @@ mod tests {
 
     #[test]
     fn test_build_unsigned_redemption_transaction_zero_amount() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn test_build_unsigned_redemption_transaction_excessive_amount() {
-        let mut tracker = TrackerStateManager::new_with_temp_storage();
+        let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         let issuer_secret = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();

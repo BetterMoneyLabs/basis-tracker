@@ -393,18 +393,17 @@ pub fn run_schnorr_test_vectors() -> Result<(), String> {
 /// Comprehensive tests for Schnorr signature implementation
 #[cfg(test)]
 mod comprehensive_tests {
-    use super::*;
     use crate::schnorr;
     use secp256k1::Secp256k1;
 
     #[test]
     fn test_comprehensive_schnorr_operations() {
-        let secp = Secp256k1::new();
+        let _secp = Secp256k1::new();
 
         // Generate multiple key pairs
         let (alice_secret, alice_pubkey) = schnorr::generate_keypair();
-        let (bob_secret, bob_pubkey) = schnorr::generate_keypair();
-        let (charlie_secret, charlie_pubkey) = schnorr::generate_keypair();
+        let (_bob_secret, bob_pubkey) = schnorr::generate_keypair();
+        let (_charlie_secret, charlie_pubkey) = schnorr::generate_keypair();
 
         // Test data for IOU notes
         let test_cases = vec![
@@ -483,7 +482,7 @@ mod comprehensive_tests {
         assert!(schnorr::validate_public_key(&invalid_pubkey).is_err());
 
         // Test invalid signature (wrong length)
-        let short_signature = [0u8; 64];
+        let _short_signature = [0u8; 64];
         // Note: We can't directly test this since Signature is fixed at 65 bytes
     }
 

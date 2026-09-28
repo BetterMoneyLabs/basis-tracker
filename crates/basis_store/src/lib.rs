@@ -1,5 +1,7 @@
 //! Core data structures for Basis tracker
 
+#[cfg(test)]
+pub mod avl_queries_tests;
 pub mod avl_tree;
 
 pub mod contract_compiler;

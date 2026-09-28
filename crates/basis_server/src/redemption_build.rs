@@ -477,7 +477,12 @@ async fn build_redemption_inner(
             match node.box_details(box_id).await {
                 Ok(b) if b.value >= min_box_value => match b.r5_digest_hex() {
                     Some(d) if d == tracker_reserve_digest => {
-                        found = Some((box_id.clone(), *collateral, *refund_height, reserve_token_id.clone()));
+                        found = Some((
+                            box_id.clone(),
+                            *collateral,
+                            *refund_height,
+                            reserve_token_id.clone(),
+                        ));
                         break;
                     }
                     Some(d) => {

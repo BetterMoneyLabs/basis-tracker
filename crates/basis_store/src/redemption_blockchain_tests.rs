@@ -21,7 +21,7 @@
 //! - Mock contract validator simulates basis.es validation logic
 
 use crate::{
-    schnorr::{self, generate_keypair},
+    schnorr::{self},
     IouNote, PubKey, RedemptionManager, RedemptionRequest, Signature, TrackerStateManager,
 };
 use blake2::{Blake2b, Digest};
@@ -208,7 +208,7 @@ mod tests {
 
         // Setup keys (deterministic for reproducibility)
         let (alice_secret, alice_pubkey) = deterministic_keypair("alice_seed");
-        let (bob_secret, bob_pubkey) = deterministic_keypair("bob_seed");
+        let (_bob_secret, bob_pubkey) = deterministic_keypair("bob_seed");
         let (tracker_secret, tracker_pubkey) = deterministic_keypair("tracker_seed");
 
         println!("Alice pubkey: {}", hex::encode(alice_pubkey));
@@ -233,7 +233,7 @@ mod tests {
             .expect("Failed to add note");
 
         // Verify note was stored
-        let stored_note = redemption_manager
+        let _stored_note = redemption_manager
             .tracker
             .lookup_note(&alice_pubkey, &bob_pubkey)
             .expect("Note not found");
@@ -353,7 +353,7 @@ mod tests {
     fn test_invalid_issuer_signature_rejected() {
         println!("=== Test 2: Invalid Issuer Signature Rejected ===");
 
-        let (alice_secret, alice_pubkey) = deterministic_keypair("alice_seed");
+        let (_alice_secret, alice_pubkey) = deterministic_keypair("alice_seed");
         let (_, bob_pubkey) = deterministic_keypair("bob_seed");
         let (tracker_secret, tracker_pubkey) = deterministic_keypair("tracker_seed");
 
@@ -400,7 +400,7 @@ mod tests {
 
         let (alice_secret, alice_pubkey) = deterministic_keypair("alice_seed");
         let (_, bob_pubkey) = deterministic_keypair("bob_seed");
-        let (tracker_secret, tracker_pubkey) = deterministic_keypair("tracker_seed");
+        let (_tracker_secret, tracker_pubkey) = deterministic_keypair("tracker_seed");
 
         let total_debt = 50_000_000u64;
         let timestamp = 1_000_000_000u64;
@@ -490,7 +490,7 @@ mod tests {
 
         let (alice_secret, alice_pubkey) = deterministic_keypair("alice_seed");
         let (_, bob_pubkey) = deterministic_keypair("bob_seed");
-        let (tracker_secret, tracker_pubkey) = deterministic_keypair("tracker_seed");
+        let (_tracker_secret, tracker_pubkey) = deterministic_keypair("tracker_seed");
 
         let total_debt = 50_000_000u64;
         let timestamp = 1_000_000_000u64;
@@ -540,7 +540,7 @@ mod tests {
 
         let (alice_secret, alice_pubkey) = deterministic_keypair("alice_seed");
         let (_, bob_pubkey) = deterministic_keypair("bob_seed");
-        let (tracker_secret, tracker_pubkey) = deterministic_keypair("tracker_seed");
+        let (_tracker_secret, tracker_pubkey) = deterministic_keypair("tracker_seed");
 
         let total_debt = 50_000_000u64;
         let timestamp = 1_000_000_000u64;

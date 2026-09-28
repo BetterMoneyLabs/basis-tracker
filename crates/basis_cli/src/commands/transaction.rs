@@ -559,9 +559,7 @@ async fn build_redemption_tx(
             TRANSACTION_FEE.saturating_add(TOKEN_RECIPIENT_MIN_VALUE_NANOERG),
         )
     } else {
-        let reserve_output_value = reserve_box_details
-            .value
-            .saturating_sub(amount);
+        let reserve_output_value = reserve_box_details.value.saturating_sub(amount);
         if reserve_output_value == 0 {
             return Err(anyhow::anyhow!(
                 "Reserve output value would be zero after redemption"

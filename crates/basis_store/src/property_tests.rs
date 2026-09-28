@@ -1,7 +1,7 @@
 use crate::{
     schnorr::{self, generate_keypair},
     transaction_builder::{RedemptionTransactionBuilder, TxContext},
-    IouNote, RedemptionManager, RedemptionRequest, TrackerStateManager,
+    IouNote, RedemptionError, RedemptionManager, RedemptionRequest, TrackerStateManager,
 };
 
 #[cfg(test)]
@@ -353,6 +353,16 @@ mod property_tests {
 
             prop_assert!(result.is_err(), "Transaction building should fail when redemption amount {} exceeds outstanding debt {}", redemption_amount, note_amount);
         }
+    }
+
+    // Case count is bounded because each case performs real key generation, Schnorr
+    // signing/verification and AVL proof generation. At proptest's default 256 cases
+    // this test took ~67s; 24 cases keeps meaningful coverage at ~6s.
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 24,
+            .. ProptestConfig::default()
+        })]
 
         #[test]
         fn test_multiple_redemption_sequence_proptest(
@@ -400,21 +410,83 @@ mod property_tests {
             reserve_refund_initiation_height: 0,
         };
 
+                // NOTE: this test previously used `if result.is_ok() { ... }`, which silently
+                // swallowed every failure and made the whole property vacuous (total_redeemed
+                // stayed 0, so every assertion below was trivially true).
+                //
+                // The real behaviour is that only the FIRST redemption of a note can go through
+                // `initiate_redemption`: `complete_redemption` refreshes `note.timestamp`
+                // (redemption.rs:366-369) to keep it monotonically increasing, which invalidates
+                // the note signature created by `IouNote::create_and_sign`. Any subsequent
+                // `initiate_redemption` for the same (issuer, recipient) pair therefore fails
+                // with `InvalidNoteSignature` at redemption.rs:137-139.
+                //
+                // This is asserted explicitly rather than swallowed, so that:
+                //   - the first-redemption success path is genuinely covered, and
+                //   - if the signature-refresh behaviour is ever fixed, this test FAILS and
+                //     prompts an update, instead of silently continuing to prove nothing.
+                //
+                // See specs/PRODUCTION_READINESS_AUDIT.md Issue #6 (multi-redemption coverage).
                 let result = redemption_manager.initiate_redemption(&request);
-                if result.is_ok() {
+                if i == 0 {
+                    prop_assert!(
+                        result.is_ok(),
+                        "first redemption must succeed, got: {:?}",
+                        result.err()
+                    );
+                    let data = result.unwrap();
+                    prop_assert!(!data.transaction_bytes.is_empty());
                     total_redeemed += redeem_amount;
-                    let _ = redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount, None);
+                    redemption_manager
+                        .complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount, None)
+                        .expect("complete_redemption should succeed for the first redemption");
+                } else {
+                    // Documented limitation: subsequent redemptions via initiate_redemption
+                    // are rejected because complete_redemption invalidated the note signature.
+                    prop_assert!(
+                        matches!(result, Err(RedemptionError::InvalidNoteSignature)),
+                        "redemption {} should be rejected with InvalidNoteSignature \
+                         (note signature invalidated by complete_redemption), got: {:?}",
+                        i,
+                        result.err()
+                    );
+                    // Stop early: without completing, further iterations add nothing.
+                    break;
                 }
             }
 
-            // Verify that total redeemed never exceeds initial amount
-            prop_assert!(total_redeemed <= initial_amount, "Total redeemed {} should not exceed initial amount {}", total_redeemed, initial_amount);
+            // Only the first redemption completes (see the note above), so the accounting
+            // invariants are now actually meaningful rather than trivially satisfied by a
+            // total_redeemed of 0.
+            prop_assert!(
+                total_redeemed > 0,
+                "the first redemption should have been credited"
+            );
+            prop_assert!(
+                total_redeemed <= initial_amount,
+                "Total redeemed {} should not exceed initial amount {}",
+                total_redeemed,
+                initial_amount
+            );
 
-            // Verify final state
-            let final_note = redemption_manager.tracker.lookup_note(&issuer_pubkey, &recipient_pubkey).unwrap();
-            prop_assert_eq!(final_note.amount_redeemed, total_redeemed, "Final redeemed amount should match total redeemed");
-            prop_assert!(final_note.outstanding_debt() == initial_amount - total_redeemed || final_note.outstanding_debt() == 0,
-                "Outstanding debt should be initial - total_redeemed or 0");
+            let final_note = redemption_manager
+                .tracker
+                .lookup_note(&issuer_pubkey, &recipient_pubkey)
+                .unwrap();
+
+            prop_assert_eq!(
+                final_note.amount_redeemed, total_redeemed,
+                "Final redeemed amount should match total redeemed"
+            );
+            prop_assert_eq!(
+                final_note.outstanding_debt(),
+                initial_amount - total_redeemed,
+                "Outstanding debt should be initial - total_redeemed"
+            );
+            prop_assert!(
+                !final_note.is_fully_redeemed(),
+                "note should not be fully redeemed after a single partial redemption"
+            );
         }
     }
 }

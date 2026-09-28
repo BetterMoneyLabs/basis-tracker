@@ -11,9 +11,6 @@ pub mod state;
 pub mod storage;
 
 #[cfg(test)]
-pub mod test_helpers;
-
-#[cfg(test)]
 pub mod avl_tree_tests;
 
 // Re-export main types for easy access

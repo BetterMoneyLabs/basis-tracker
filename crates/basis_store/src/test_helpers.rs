@@ -13,7 +13,7 @@ pub fn generate_test_keypair() -> ([u8; 32], [u8; 33]) {
 /// Generate multiple test keypairs with different patterns
 pub fn generate_test_keypairs(count: usize) -> Vec<([u8; 32], [u8; 33])> {
     (0..count)
-        .map(|i| {
+        .map(|_i| {
             let (secret, pubkey) = generate_keypair();
             (secret, pubkey)
         })

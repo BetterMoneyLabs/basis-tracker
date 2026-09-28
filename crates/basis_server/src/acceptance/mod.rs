@@ -726,7 +726,7 @@ mod tests {
     fn test_no_pending_refund_accepts_no_refund() {
         use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount: 1000,
@@ -769,7 +769,7 @@ mod tests {
     fn test_no_pending_refund_rejects_pending_refund() {
         use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount: 1000,
@@ -862,7 +862,7 @@ mod tests {
     fn tracker_with_reserve(collateral_amount: u64) -> basis_store::ReserveTracker {
         use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount,

@@ -584,9 +584,9 @@ mod tests {
 
     #[test]
     fn test_collateralization_with_reserve() {
-        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount: 150,
@@ -637,9 +637,9 @@ mod tests {
 
     #[test]
     fn test_collateralization_under_collateralized() {
-        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount: 50, // Less than debt
@@ -691,9 +691,9 @@ mod tests {
 
     #[test]
     fn test_collateralization_exactly_at_threshold() {
-        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount: 100, // Exactly equal to debt
@@ -745,9 +745,9 @@ mod tests {
 
     #[test]
     fn test_collateralization_high_threshold() {
-        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount: 250, // 2.5x debt
@@ -799,9 +799,9 @@ mod tests {
 
     #[test]
     fn test_collateralization_zero_debt() {
-        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount: 100,
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn test_collateralization_missing_reserve() {
-        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        use basis_store::ReserveTracker;
 
         // Empty tracker - no reserve for this issuer
         let tracker = ReserveTracker::new();
@@ -888,9 +888,9 @@ mod tests {
 
     #[test]
     fn test_collateralization_different_issuer() {
-        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         // Reserve for issuer 1
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
@@ -957,9 +957,9 @@ mod tests {
 
     #[test]
     fn test_collateralization_low_threshold() {
-        use basis_store::{PubKey, ReserveInfo, ReserveTracker};
+        use basis_store::{ReserveInfo, ReserveTracker};
 
-        let mut tracker = ReserveTracker::new();
+        let tracker = ReserveTracker::new();
         let reserve = basis_store::reserve_tracker::ExtendedReserveInfo {
             base_info: ReserveInfo {
                 collateral_amount: 51, // Just barely over 50% of debt

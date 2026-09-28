@@ -16,7 +16,7 @@
 #[cfg(test)]
 mod tests {
     use crate::schnorr::{
-        self, generate_keypair, pubkey_from_hex, pubkey_to_hex, schnorr_sign, schnorr_verify,
+        generate_keypair, pubkey_from_hex, pubkey_to_hex, schnorr_sign, schnorr_verify,
         signature_from_hex, signature_to_hex,
     };
     use crate::{IouNote, NoteKey, PubKey, TrackerStateManager};
@@ -329,7 +329,7 @@ mod tests {
     fn invalid_tracker_signature_rejected() {
         let (owner_secret, owner_pk) = random_keypair();
         let (_, receiver_pk) = random_keypair();
-        let (tracker_secret, tracker_pk) = random_keypair();
+        let (_tracker_secret, tracker_pk) = random_keypair();
         let (_, wrong_pk) = random_keypair(); // Wrong key (e.g., receiver's)
 
         let total_debt: u64 = 500_000_000;
@@ -377,7 +377,7 @@ mod tests {
     /// Reserve signature signed with trackerSecret instead of ownerSecret
     #[test]
     fn invalid_reserve_owner_signature_rejected() {
-        let (owner_secret, owner_pk) = random_keypair();
+        let (_owner_secret, owner_pk) = random_keypair();
         let (_, receiver_pk) = random_keypair();
         let (tracker_secret, tracker_pk) = random_keypair();
 
@@ -537,7 +537,7 @@ mod tests {
     /// Reserve has only 3 ERG collateral, trying to redeem 5 ERG debt
     #[test]
     fn insufficient_collateral_detection() {
-        let (owner_secret, owner_pk) = random_keypair();
+        let (owner_secret, _owner_pk) = random_keypair();
         let (_, receiver_pk) = random_keypair();
 
         let total_debt: u64 = 5_000_000_000; // 5 ERG debt

@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn generate_insert_proof_does_not_mutate_state() {
-        let mut tree = BasisAvlTree::new().unwrap();
+        let tree = BasisAvlTree::new().unwrap();
         let key = vec![1u8; 32];
         let value = vec![2u8; 16];
 

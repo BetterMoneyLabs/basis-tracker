@@ -1,8 +1,6 @@
 //! Simple integration tests that work with the reserves-only scanner implementation
 
-use crate::ergo_scanner::{
-    create_default_scanner, NodeConfig, ReserveEvent, ScannerError, ServerState,
-};
+use crate::ergo_scanner::{create_default_scanner, ScannerError, ServerState};
 
 /// Simple integration test suite that works with the reserves-only scanner
 pub struct SimpleIntegrationTestSuite {

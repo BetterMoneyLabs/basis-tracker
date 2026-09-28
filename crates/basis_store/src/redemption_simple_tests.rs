@@ -46,7 +46,7 @@ fn test_time_lock_validation() {
     println!("=== Test 2: Time Lock Validation ===");
 
     // Generate test keypairs
-    let (issuer_secret, issuer_pubkey) = generate_keypair();
+    let (issuer_secret, _issuer_pubkey) = generate_keypair();
     let (_, recipient_pubkey) = generate_keypair();
 
     // Create a note with recent timestamp
@@ -56,7 +56,7 @@ fn test_time_lock_validation() {
         .unwrap()
         .as_millis() as u64;
 
-    let recent_note = IouNote::create_and_sign(
+    let _recent_note = IouNote::create_and_sign(
         recipient_pubkey,
         amount_collected,
         recent_timestamp,
@@ -66,7 +66,7 @@ fn test_time_lock_validation() {
 
     // Create a note with old timestamp
     let old_timestamp = 1672531200; // Jan 1, 2023
-    let old_note = IouNote::create_and_sign(
+    let _old_note = IouNote::create_and_sign(
         recipient_pubkey,
         amount_collected,
         old_timestamp,

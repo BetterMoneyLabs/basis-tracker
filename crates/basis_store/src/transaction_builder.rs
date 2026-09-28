@@ -823,7 +823,6 @@ fn address_to_ergo_tree(address_str: &str) -> Result<String, TransactionBuilderE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schnorr::generate_keypair;
 
     #[test]
     fn test_transaction_context() {
