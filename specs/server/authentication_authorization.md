@@ -18,6 +18,20 @@ The server is configured under `[server.auth]` with `mode` set to one of:
 
 When auth is enabled, the server also logs a warning if TLS is not configured, because credentials and signatures would travel over plaintext.
 
+### Default Mode
+
+**The default authentication mode is `none`** (`crates/basis_server/src/config.rs`, which sets
+`server.auth.mode` to `"none"` when the key is absent; `config/basis.toml.example` states the same).
+
+In `none` mode the middleware attaches `ClientRole::Admin` to **every request, including
+unauthenticated ones**. Out of the box this leaves all state-mutating endpoints open to the
+network, including `POST /redeem/complete`, `POST /reserves/create`, `POST /reserves/submit`, and
+`POST /acceptance/policy`.
+
+The example below uses `mode = "signature"` because that is the recommended production
+configuration — **it is not the default.** Do not read it as an out-of-the-box baseline. See
+`specs/PRODUCTION_READINESS_AUDIT.md` Issue H1.
+
 ### Configuration Example
 
 ```toml
@@ -29,7 +43,7 @@ tls_cert_path = "server.crt"
 tls_key_path = "server.key"
 
 [server.auth]
-mode = "signature"
+mode = "signature"          # RECOMMENDED. The built-in default is "none".
 # Shared secret used only when mode = "api_key".
 # api_key = "change-me"
 
@@ -48,6 +62,11 @@ allowed_origins = ["https://tracker.example.com"]
 # Request signature timestamp tolerance in milliseconds (signature mode only).
 signature_timestamp_tolerance_ms = 30000
 ```
+
+> **Replay protection caveat.** Nonce replay protection (rejecting a reused
+> `(pubkey, nonce)` pair within the tolerance window) is implemented **only** in
+> `signature` mode. `api_key` and `none` modes have no replay protection at all. The
+> `signature` example above is recommended partly for this reason.
 
 ## Signature Mode Details
 
@@ -169,6 +188,8 @@ When auth is enabled, the server restricts CORS origins if `allowed_origins` is 
 
 ## Security Checklist
 
+- **Set an explicit `mode` before exposing the server.** The default is `none`, which grants
+  `Admin` to every unauthenticated request. Do not rely on the default.
 - Never run `mode = "none"` or `api_key` over plaintext in production; configure TLS.
 - Keep `signature_timestamp_tolerance_ms` small (default 30 s) to limit replay windows.
 - Always provide a unique `X-Signature-Nonce` per request in signature mode.

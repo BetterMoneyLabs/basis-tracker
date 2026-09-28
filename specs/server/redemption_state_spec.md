@@ -505,7 +505,11 @@ The current compiled reserve contract uses `insertOrUpdate` for the reserve AVL 
 - `RedemptionRequest` carries `reserve_refund_initiation_height` and the transaction builder preserves the value in the updated reserve output's `R7` register.
 - Acceptance policies can include a `no_pending_refund` predicate to reject notes backed by a reserve with a non-zero R7 refund height.
 
-Deploying systems should ensure the configured reserve contract P2S matches the contract they intend to use; the tracker will emit the correct transaction format for either, but the strict-insert contract cannot support consecutive redemptions. The legacy P2S begins with `4ZhBzJfN...`; the current default P2S begins with `3PQnJ92K...`. Both constants are maintained in `crates/basis_store/src/contract_compiler.rs`.
+Deploying systems should ensure the configured reserve contract P2S matches the contract they intend to use; the tracker will emit the correct transaction format for either, but the strict-insert contract cannot support consecutive redemptions.
+
+The current default reserve P2S begins with `3PQnJ92K...` and is returned by `get_basis_reserve_contract_p2s()` in `crates/basis_store/src/contract_compiler.rs`. The token-collateralized variant is `get_basis_token_reserve_contract_p2s()` in the same file.
+
+> **Note:** an earlier revision of this document also named a legacy strict-insert P2S beginning with `4ZhBzJfN...` and stated that both constants were maintained in `contract_compiler.rs`. That legacy address is **not** present in the codebase — only the current `3PQnJ92K...` address and the token-collateralized variant are defined. The compiled ErgoTree hex for the current contract is likewise available from `get_basis_reserve_ergo_tree_hex()`.
 
 ## Integration with Blockchain Scanner
 

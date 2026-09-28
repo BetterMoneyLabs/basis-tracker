@@ -46,24 +46,56 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `GET /notes/issuer/{pubkey}` - Get all notes issued by a public key
 - `GET /notes/recipient/{pubkey}` - Get all notes received by a public key
 - `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get specific note between two parties
+- `POST /notes/state` - Get the confirmation state of a single note (`confirmed` / `pending` / `local_only`) and whether it is currently redeemable
 - `POST /redeem` - Initiate redemption process
-- `POST /redeem/complete` - Complete redemption process
+- `POST /redeem/complete` - Complete redemption process (see the caveat below — this endpoint
+  advances local state from the request body and does **not** verify against the chain)
 - `POST /tracker/signature` - Request tracker signature for redemption (real Schnorr signature generation)
 - `POST /redemption/prepare` - Prepare redemption with all necessary data (real AVL proofs + tracker signature)
+- `POST /redemption/build` - Tracker-assisted redemption step 1: build the unsigned redemption
+  transaction and sign the fee inputs
+- `POST /redemption/submit` - Tracker-assisted redemption step 2: broadcast a signed redemption
+  transaction and sync local state
 - `GET /proof/redemption` - Get redemption-specific proof with tracker state digest
+
+### Tracker State and Proof Endpoints
+
+- `GET /tracker/proof` - Get an AVL lookup proof from the tracker tree for a note
+- `GET /tracker/state` - Get the tracker's current state (including the AVL root digest)
+- `GET /tracker/pending-tx` - Get the currently pending tracker-box update transaction, if any
+- `GET /tracker/latest-box-id` - Get the id of the most recent tracker box
+- `GET /reserve/proof` - Get an AVL proof from a reserve's tree, proving `already_redeemed`
 
 ### Reserve Endpoints
 
 - `GET /reserves` - Get all reserve information
 - `GET /reserves/issuer/{pubkey}` - Get reserves for a specific issuer
+- `GET /reserves/{box_id}` - Get a single reserve by its box id
 - `GET /key-status/{pubkey}` - Get status information for a public key
 - `POST /reserves/create` - Create a reserve creation payload for Ergo node's `/wallet/payment/send` API
 - `POST /reserves/submit` - Submit a reserve creation payload to the tracker's configured Ergo node for broadcast
+
+### Acceptance Policy Endpoints
+
+- `POST /acceptance/check` - Check whether a hypothetical note would be accepted by the issuer's policy
+- `POST /acceptance/policy` - Upload or replace an acceptance policy
+- `GET /acceptance/policy/{pubkey}` - Get the stored acceptance policy for a public key
+
+### Configuration Endpoints
+
+- `GET /config/reserve-contract-p2s` - Get the configured reserve contract P2S address
+- `GET /config/reserve-token` - Get the configured reserve token id (for token-collateralized reserves)
 
 ### Event Tracking
 
 - `GET /events` - Get recent tracker events
 - `GET /events/paginated?page=0&page_size=20` - Get paginated events
+
+> **Endpoint inventory note (2026-09-28).** The list above was verified against the routes
+> registered in `crates/basis_server/src/main.rs`. All 30 registered routes are now documented.
+> Two operational caveats: `GET /events/paginated` does not currently validate `page`/`page_size`
+> bounds, and the event store is seeded with hardcoded demo events at startup — see
+> `specs/PRODUCTION_READINESS_AUDIT.md` (Issues #3 and H9).
 
 ## Data Models
 
@@ -227,21 +259,19 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
     - `503 Service Unavailable` if no Ergo node is configured.
     - `502 Bad Gateway` if the Ergo node returns an error or is unreachable.
 
-### Debt Transfer Support
+### Debt Transfer Support — NOT IMPLEMENTED
 
-The server supports debt transfer (novation) operations:
+**There is no debt-transfer (novation) endpoint on this server.** An earlier revision of this
+document described a `POST /debt/transfer` endpoint with a full request schema and stated that
+"The server supports debt transfer (novation) operations." That endpoint has never existed in
+`crates/basis_server/src/main.rs`; the description was aspirational and has been removed.
 
-- `POST /debt/transfer` - Request debt transfer from one creditor to another
-  - Request structure:
-    - `debtor_pubkey`: Public key of the debtor (hex-encoded)
-    - `current_creditor_pubkey`: Public key of the current creditor (hex-encoded)
-    - `new_creditor_pubkey`: Public key of the new creditor (hex-encoded)
-    - `transfer_amount`: Amount to transfer in nanoERG
-  - Process:
-    1. Server verifies debtor has sufficient debt to current creditor
-    2. Server requests debtor's signature on transfer message
-    3. Server atomically updates both debt records
-    4. Server posts updated AVL tree commitment
+For the current design and rollout options for moving a debt obligation between creditors or
+between trackers, see [`../cross_tracker_debt_transfer.md`](../cross_tracker_debt_transfer.md).
+That document is a design proposal, not a description of shipped behaviour.
+
+Debt obligations are currently moved **off-chain** by creating a new note to the new creditor and
+cancelling or reducing the old one, under the ordinary note workflow documented above.
 
 ## Configuration
 

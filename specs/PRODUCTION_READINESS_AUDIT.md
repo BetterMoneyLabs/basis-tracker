@@ -82,12 +82,30 @@ landed on master unnoticed.
 which is committed and therefore *does* travel with the repo. That patch is genuinely required —
 see Issue H4. Only the three `sigma-rust` paths are machine-local.
 
+**Root cause is a version mismatch, not just the paths.** The patch is silently dropped unless the
+patched version satisfies the declared requirement. The workspace declares `ergo-lib = "0.28.0"`
+(`Cargo.toml:16`, and `ergotree-ir`/`ergotree-interpreter` at `crates/basis_store/Cargo.toml:32-33`),
+but the local `sigma-rust` checkout is at **0.29.0**, so cargo discards all three `[patch]` entries
+and falls back to crates.io. Proof: the committed `Cargo.lock` pins `ergo-lib 0.28.0` from
+crates.io with **zero** `sigma-rust` references. The code genuinely requires 0.29.0 —
+`crates/basis_offchain/src/signing.rs:21-22` imports `ergo_lib::ergotree_ir::chain::{context,
+context_extension}`, which only exist at sigma-rust ≥ `dc6c41c6`, by which point the crates are
+0.29.0. Pinning to `635bbaca` (the last 0.28.0 commit) does **not** work; `context_extension` is
+absent there.
+
 **Fix Required:**
-1. Vendor `ergo-lib`, `ergotree-ir`, and `ergotree-interpreter` into `temp/vendors/` (matching the
-   existing `ergo_avltree_rust` pattern), or point the patches at a git ref/tag of a fork.
+1. Bump the declared versions to `0.29.0` (all three), **and** replace the absolute paths with a
+   git ref or vendored copy. Bumping versions alone makes the patch apply locally but leaves CI
+   red; replacing paths alone leaves the patch silently ignored.
 2. Confirm `cargo build --workspace` succeeds from a clean checkout on a machine without
    `/home/kushti/ergo/sigma-rust`.
 3. Re-run CI and confirm the OpenAPI consistency test and Scala contract tests actually pass.
+
+**Status:** 🟡 **PARTIALLY FIXED (uncommitted).** The version bumps to `0.29.0` have been applied
+and verified — the patch now applies, `cargo check --workspace --all-targets` reports 0 errors, and
+`cargo test --workspace` passes 616 tests. The **absolute paths remain**, so CI is still red. The
+dead `core2` patch and its 18 vendored files (224K) were also removed after confirming it is
+unreachable under any feature combination.
 
 **Priority:** 🔴 CRITICAL — blocks verification of every other fix.
 
@@ -995,17 +1013,8 @@ These remain fixed and should not be re-litigated:
 
 ### Phase 0: Restore Verification (blocking, ~1 day)
 
-- [ ] Vendor the three `sigma-rust` crates into `temp/vendors/` or repoint the patches to a git
-      ref (Issue #1).
-- [ ] **Verified 2026-09-27:** the fix requires bumping the *declared versions*, not just the
-      paths. The code needs `ergo_lib::ergotree_ir::chain::{context, context_extension}`
-      (`crates/basis_offchain/src/signing.rs:21-22`), which only exist at sigma-rust ≥ `dc6c41c6`,
-      by which point the crates are **0.29.0**. Declared `0.28.0` (`Cargo.toml:16`,
-      `crates/basis_store/Cargo.toml:32-33`) makes cargo **silently drop** the `[patch]` entries,
-      which is why the committed `Cargo.lock` shows `ergo-lib 0.28.0` from crates.io with zero
-      sigma-rust references. Bumping all three to `0.29.0` was confirmed to compile and to make
-      the path patches apply — but the **absolute paths must still be replaced** (git `rev`, or
-      vendored) or CI stays red.
+- [ ] Replace the three absolute `sigma-rust` paths with a git `rev` or a vendored copy. **This is
+      the only remaining blocker for CI** — see Issue #1 for the full root-cause analysis.
 - [ ] Confirm `cargo build --workspace` from a clean checkout on a machine without
       `/home/kushti/ergo/sigma-rust`.
 - [ ] Get CI green; confirm the OpenAPI consistency test and `sbt test` actually execute.
@@ -1066,10 +1075,27 @@ These remain fixed and should not be re-litigated:
 - [ ] Replace the two startup `panic!`s and `socket_addr().expect(...)` (Issue M5).
 - [ ] Fail closed in `redemption_check.rs:215-222` and stop skipping the policy check on
       undecodable pubkeys (Issues H3, H4).
-- [ ] Default to a fail-closed auth mode (Issue H1).
+- [ ] Default to a fail-closed auth mode (Issue H1). Interim mitigation: the spec
+      `specs/server/authentication_authorization.md` now states the `none` default explicitly and
+      warns that it grants `Admin` to unauthenticated callers.
 - [ ] Fix the replay-cache ordering and cap the request body (Issue H11).
 - [ ] Add rate limiting (Issue H12).
 - [ ] Fix the 17 CLI `data.unwrap()` panics and the TUI `unwrap()`s (Issues L1, L2).
+
+### Completed Alongside Earlier Work
+
+- [x] Remove 19 unused direct dependencies across all 7 crates, and delete the unreachable
+      `core2` patch plus 18 vendored files. Verified: 0 errors on
+      `cargo check --workspace --all-targets`, 616 tests pass.
+- [x] Fix the broken `basis_store` benchmark — three `secret.secret_bytes()` compile errors
+      (`generate_keypair()` already returns `[u8; 32]`), plus the deeper issue that no crate
+      declared `[[bench]] harness = false`, so `cargo bench` reported "running 0 tests" and never
+      executed the benchmarks. All 10 benchmarks now run.
+- [x] Issue #2 (`/redemption/prepare` slice panic) — fixed with 3 regression tests.
+- [x] Spec accuracy pass over `specs/`: corrected a phantom `4ZhBzJfN` contract constant, removed
+      an unimplemented `POST /debt/transfer` endpoint, documented all 30 registered routes, brought
+      the CLI command table current (including the undocumented `redeem-assisted` subcommand), and
+      documented the `none` auth default.
 
 ### Phase 7: Remaining Validation
 

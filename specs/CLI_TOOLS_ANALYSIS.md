@@ -47,15 +47,41 @@ src/
 
 | Command | Subcommands | Description |
 |---------|------------|-------------|
-| `account` | `create <name>`, `list`, `switch <name>`, `info`, `export <name>`, `import <name> <key>` | Account management with persistent storage |
+| `account` | `create <name>`, `list`, `switch <name>`, `info`, `export <name>`, `import <name> <key>`, `delete <name>` | Account management with persistent storage |
 | `generate-keypair` | - | Generate secp256k1 keypair (33-byte pubkey, 32-byte privkey) |
 | `note` | `create --recipient <pubkey> --amount <amount> [--demo]`, `list --issuer\|--recipient`, `get --issuer <pubkey> --recipient <pubkey>`, `redeem --issuer <pubkey> --amount <amount>` | IOU note lifecycle management |
 | `reserve` | `create --nft-id <id> [--owner <pubkey>] --amount <amount>`, `status [--issuer <pubkey>]`, `collateralization [--issuer <pubkey>]` | Reserve creation and monitoring |
-| `transaction` | `generate-redemption --issuer-pubkey <hex> --recipient-pubkey <hex> --amount <nanoERG> [--output-file <path>] [--emergency]` | Generate unsigned redemption transactions with Ergo node integration |
+| `transaction` | `generate-redemption`, `redeem-assisted` | Redemption transaction generation — see the two flows below |
 | `acceptance` | `upload --policy-file <path>`, `check --issuer <hex> --recipient <hex> --total-debt <nanoERG>` | Acceptance policy upload and note-acceptance testing |
 | `test` | `test-redemption [--output-file <path>] [--amount <nanoERG>] [--poll-interval <secs>]` | Polling-based redemption test utility |
 | `interactive` | - | REPL mode with account-aware prompt |
 | `status` | - | Check server health and display recent events |
+
+#### Redemption flows (`basis_cli transaction`)
+
+The `transaction` command has two distinct subcommands, using different server endpoints:
+
+| Subcommand | Server endpoints | Signing | Notes |
+|---|---|---|---|
+| `generate-redemption` | `GET /tracker/proof`, `GET /reserve/proof`, `GET /config/*` | Client-side by default with `--local-sign`; otherwise emits an unsigned tx for the node wallet | Does **not** call `POST /redeem`, so the server does not verify the issuer signature for this path — the reserve contract is the enforcement point |
+| `redeem-assisted` | `POST /redemption/build` then `POST /redemption/submit` | Tracker signs the fee inputs; CLI signs the issuer message and adds the reserve `proveDlog(recipient)` | The 2-phase "new" server flow |
+
+Both accept `--issuer-pubkey <hex> --recipient-pubkey <hex> --amount <nanoERG>`.
+
+`generate-redemption` flags: `--output-file <path>`, `--emergency`, `--local-sign`,
+`--recipient-secret <hex>`, `--fee-secret <hex>`, `--tracker-box-id <id>`,
+`--change-address <addr>`.
+
+`redeem-assisted` flags: `--recipient-secret <hex>`.
+
+Global flags on every subcommand: `--json`, `--config <path>`, `--server-url <url>`.
+
+> **Coverage caveat (2026-09-28).** The four mainnet integration harnesses in `tests/`
+> (`test_mainnet_02erg_3redemptions.sh`, `test_mainnet_04erg_3redemptions_restart.sh`,
+> `test_mainnet_use_token_3redemptions_restart.sh`, `test_local_sign_multiple_redemptions.sh`)
+> all drive **`generate-redemption --local-sign`**. `redeem-assisted` — and therefore
+> `POST /redemption/build` and `POST /redemption/submit` — has no real-chain coverage. See
+> `specs/PRODUCTION_READINESS_AUDIT.md` Issue M14.
 
 #### Key Features
 - **Account Management**: Persistent accounts stored in `~/.basis/cli.toml` with private keys
