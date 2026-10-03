@@ -4,6 +4,7 @@
 //! state manager thread, builds the axum router with authentication /
 //! authorization middleware, and serves HTTP or HTTPS traffic.
 
+use axum::extract::DefaultBodyLimit;
 use axum::{
     middleware::{from_fn, from_fn_with_state},
     routing::{get, post},
@@ -26,7 +27,6 @@ use basis_store::{
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use axum::extract::DefaultBodyLimit;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 /// Maximum accepted request body size (8 MiB).

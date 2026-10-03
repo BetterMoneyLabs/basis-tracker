@@ -30,7 +30,11 @@ pub enum ReserveTrackerError {
          to a specific reserve, so it would redeem in full from each one. Close or point the tracker \
          at a single reserve per owner."
     )]
-    MultipleReservesForOwner { owner: String, count: usize, boxes: String },
+    MultipleReservesForOwner {
+        owner: String,
+        count: usize,
+        boxes: String,
+    },
 }
 
 /// Extended reserve information with debt tracking
@@ -161,7 +165,9 @@ impl ReserveTracker {
         owner_pubkey: &str,
     ) -> Result<ExtendedReserveInfo, ReserveTrackerError> {
         match self.get_reserves_by_owner(owner_pubkey).as_slice() {
-            [] => Err(ReserveTrackerError::ReserveNotFound(owner_pubkey.to_string())),
+            [] => Err(ReserveTrackerError::ReserveNotFound(
+                owner_pubkey.to_string(),
+            )),
             [only] => Ok(only.clone()),
             many => Err(ReserveTrackerError::MultipleReservesForOwner {
                 owner: owner_pubkey.to_string(),

@@ -95,7 +95,7 @@ ergo:
   tracker_public_key: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
   
   node:
-    node_url: "http://159.89.116.15:11088"
+    node_url: "http://127.0.0.1:9053"   # default is localhost, not a third-party host
     api_key: "hello"
     scan_name: "Basis Tracker Scanner"
 

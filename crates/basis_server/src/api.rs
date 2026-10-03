@@ -304,7 +304,10 @@ pub async fn create_note(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
-                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
                     "Cumulative debt cannot decrease without the creditor's consent \
                      (existing {}, requested {})",
                     previous, requested
@@ -435,7 +438,10 @@ pub async fn get_notes_by_issuer(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
-                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
                     "Cumulative debt cannot decrease without the creditor's consent \
                      (existing {}, requested {})",
                     previous, requested
@@ -552,7 +558,10 @@ pub async fn get_notes_by_recipient(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
-                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
                     "Cumulative debt cannot decrease without the creditor's consent \
                      (existing {}, requested {})",
                     previous, requested
@@ -707,7 +716,10 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
-                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
                     "Cumulative debt cannot decrease without the creditor's consent \
                      (existing {}, requested {})",
                     previous, requested
@@ -806,7 +818,10 @@ pub async fn get_all_notes(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
-                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
                     "Cumulative debt cannot decrease without the creditor's consent \
                      (existing {}, requested {})",
                     previous, requested
@@ -2682,7 +2697,10 @@ async fn lookup_stored_note(
     recipient_pubkey_bytes: &[u8],
 ) -> Result<
     basis_store::IouNote,
-    (StatusCode, Json<ApiResponse<crate::models::TrackerSignatureResponse>>),
+    (
+        StatusCode,
+        Json<ApiResponse<crate::models::TrackerSignatureResponse>>,
+    ),
 > {
     let mut issuer: basis_store::PubKey = [0u8; 33];
     issuer.copy_from_slice(issuer_pubkey_bytes);
@@ -2804,12 +2822,11 @@ pub async fn request_tracker_signature(
     // A request whose figures disagree with stored state is REJECTED rather than silently
     // overwritten, so a client working from stale state gets a clear error instead of a signature
     // for something it did not ask for.
-    let stored_note = match lookup_stored_note(&state, &issuer_pubkey_bytes, &recipient_pubkey_bytes)
-        .await
-    {
-        Ok(note) => note,
-        Err(response) => return response,
-    };
+    let stored_note =
+        match lookup_stored_note(&state, &issuer_pubkey_bytes, &recipient_pubkey_bytes).await {
+            Ok(note) => note,
+            Err(response) => return response,
+        };
     if payload.total_debt != stored_note.amount_collected
         || payload.timestamp != stored_note.timestamp
     {

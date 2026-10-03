@@ -47,6 +47,10 @@ mode = "signature"
 # pubkey = "020202020202020202020202020202020202020202020202020202020202020202"
 # role = "admin"
 allowed_origins = []
+# With auth enabled and this list empty, NO CORS layer is installed: browsers cannot
+# call the tracker cross-origin. There is no wildcard origin.
+# auth.mode = "none" is refused on a non-loopback bind address unless:
+# allow_anonymous_non_loopback = false
 signature_timestamp_tolerance_ms = 30000
 ```
 
@@ -77,7 +81,7 @@ tracker_nft_id = ""
 tracker_public_key = ""
 
 [ergo.node]
-url = "http://159.89.116.15:11088"   # Ergo node URL
+url = "http://127.0.0.1:9053"   # Ergo node URL (default is localhost)
 api_key = "hello"                    # API key for authenticated nodes
 timeout_secs = 30                    # Request timeout in seconds
 ```
@@ -225,6 +229,10 @@ database_url = "sqlite:data/basis.db"
 mode = "none"
 api_key = ""
 allowed_origins = []
+# With auth enabled and this list empty, NO CORS layer is installed: browsers cannot
+# call the tracker cross-origin. There is no wildcard origin.
+# auth.mode = "none" is refused on a non-loopback bind address unless:
+# allow_anonymous_non_loopback = false
 signature_timestamp_tolerance_ms = 30000
 
 [ergo]
@@ -233,7 +241,9 @@ start_height = 0
 tracker_nft_id = ""
 
 [ergo.node]
-url = "http://159.89.116.15:11088"
+# Any public node works, but note the default is LOCALHOST. A plaintext remote node means the
+# node api_key -- which grants full wallet access -- crosses the network unencrypted.
+url = "http://127.0.0.1:9053"
 api_key = "hello"
 timeout_secs = 30
 

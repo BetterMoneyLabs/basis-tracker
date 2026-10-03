@@ -33,13 +33,14 @@ impl From<NoteError> for RedemptionError {
                 RedemptionError::StorageError("Future timestamp".to_string())
             }
             NoteError::PastTimestamp => RedemptionError::StorageError("Past timestamp".to_string()),
-            NoteError::DebtDecreaseNotPermitted { previous, requested } => {
-                RedemptionError::StorageError(format!(
-                    "Cumulative debt cannot decrease without the creditor's consent \
+            NoteError::DebtDecreaseNotPermitted {
+                previous,
+                requested,
+            } => RedemptionError::StorageError(format!(
+                "Cumulative debt cannot decrease without the creditor's consent \
                      (existing {}, requested {})",
-                    previous, requested
-                ))
-            }
+                previous, requested
+            )),
             NoteError::RedemptionTooEarly => RedemptionError::RedemptionTooEarly(0, 0),
             NoteError::StorageError(msg) => RedemptionError::StorageError(msg),
             _ => RedemptionError::StorageError(format!("{:?}", err)),
@@ -372,9 +373,7 @@ impl RedemptionManager {
         // `redeemed_amount` arrives from the request body (`/redeem/complete`,
         // `/redemption/submit`), and a plain `+=` would accept more than was ever owed, permanently
         // consuming the note's headroom.
-        let outstanding = note
-            .amount_collected
-            .saturating_sub(note.amount_redeemed);
+        let outstanding = note.amount_collected.saturating_sub(note.amount_redeemed);
         if redeemed_amount > outstanding {
             return Err(RedemptionError::StorageError(format!(
                 "redemption of {} exceeds the outstanding debt of {} for this note \

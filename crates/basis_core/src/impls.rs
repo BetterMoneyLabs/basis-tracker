@@ -258,7 +258,8 @@ mod tests {
         let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let pubkey = public_key.serialize();
 
-        let message = crate::types::signing_message(&pubkey, &pubkey, 1_000_000_000u64, 1743379200000u64);
+        let message =
+            crate::types::signing_message(&pubkey, &pubkey, 1_000_000_000u64, 1743379200000u64);
         let mut signature = schnorr_sign(&message, &secret_key.secret_bytes(), &pubkey)
             .expect("Signing should succeed");
 
@@ -301,16 +302,21 @@ mod tests {
         let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let pubkey = public_key.serialize();
         for i in 0..25u64 {
-            let message =
-                crate::types::signing_message(&pubkey, &pubkey, 1_000_000_000u64 + i, 1743379200000u64);
-            let signature =
-                schnorr_sign(&message, &secret_key.secret_bytes(), &pubkey).expect("signing should succeed");
+            let message = crate::types::signing_message(
+                &pubkey,
+                &pubkey,
+                1_000_000_000u64 + i,
+                1743379200000u64,
+            );
+            let signature = schnorr_sign(&message, &secret_key.secret_bytes(), &pubkey)
+                .expect("signing should succeed");
 
             assert!(
                 is_contract_compatible_be32(&signature[33..65]),
                 "signer emitted a z the contract would read as negative"
             );
-            let e = compute_challenge(&signature[0..33], &message, &pubkey).expect("challenge should parse");
+            let e = compute_challenge(&signature[0..33], &message, &pubkey)
+                .expect("challenge should parse");
             assert!(
                 is_contract_compatible_be32(&e.to_be_bytes()),
                 "signer emitted a challenge the contract would read as negative"

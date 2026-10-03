@@ -552,8 +552,7 @@ mod tests {
                 let mut b = [0u8; 8];
                 b.copy_from_slice(&z[24..32]);
                 b
-            })
-            >> 1
+            }) >> 1
                 > 0,
             "z must be non-zero"
         );

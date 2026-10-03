@@ -289,7 +289,10 @@ pub enum NoteError {
     PastTimestamp,
     /// A note tried to lower the committed cumulative debt for an existing (issuer, recipient)
     /// pair. Only the creditor can consent to that; the debtor's signature is not enough.
-    DebtDecreaseNotPermitted { previous: u64, requested: u64 },
+    DebtDecreaseNotPermitted {
+        previous: u64,
+        requested: u64,
+    },
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
@@ -312,8 +315,15 @@ pub struct TrackerStateManager {
     /// a fresh reserve for a new issuer starts from the empty tree digest and first
     /// redemptions succeed even if other issuers have redemption history.
     ///
-    /// NOTE: Each on-chain reserve box has its own R5 digest. This design assumes one
-    /// reserve per issuer; multi-reserve issuers would need per-reserve tracking.
+    /// NOTE: Each on-chain reserve box has its own R5 digest, so this design assumes ONE reserve per
+    /// issuer. That assumption is load-bearing, not cosmetic: a note's signed message is only
+    /// `hash(owner || receiver) || totalDebt || timestamp` and is not bound to a reserve box, so with two
+    /// reserves under the same owner and tracker the SAME note redeems in full against EACH of them --
+    /// overpaying the creditor and draining the owner's other reserves to do it.
+    ///
+    /// This cannot be fixed here (the redemption state lives in the contract's per-box R5), so the
+    /// tracker fails closed instead: see `ReserveTracker::resolve_issuer_reserve` and the collateral
+    /// endpoint, both of which return an error for a multi-reserve issuer. See specs/pr14_triage.md (C3).
     reserve_avl_states: std::collections::HashMap<PubKey, basis_trees::BasisAvlTree>,
     /// Per-note confirmation records, keyed by note key (32 bytes).
     confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,

@@ -58,6 +58,19 @@ Anyone (presumably, owner in most cases) can top the reserve up.
   4. C can now redeem A->C note from A's reserve
  This enables efficient multi-party settlements without on-chain transactions.
 
+ **WARNING — step 3 is not safe as written, and is currently rejected by the tracker.** Lowering the
+ committed cumulative debt for an existing (A, B) pair requires B's consent, not just A's: the contract
+ pins every redemption to the tracker tree, so a lowered totalDebt makes all of B's existing notes fail
+ `trackerDebtCorrect` permanently (the emergency path requires the same tree match). Worse, B could
+ redeem 10 ERG before the change is committed and C could then redeem 5 ERG, so A pays 15; and if B had
+ already redeemed 8, "remaining 5" is meaningless against a cumulative redeemedDebt of 8.
+
+ As of PR #14 the tracker therefore **refuses any note that lowers the committed debt** for an existing
+ pair (`NoteError::DebtDecreaseNotPermitted`), and `amount_redeemed` carries forward instead of resetting.
+ Transferring debt to a *different* creditor is unaffected, because that is a different key in the tree.
+ Reviving the flow above requires a creditor co-signature endpoint that does not exist yet; until then a
+ debt transfer must be settled as redemption plus re-issuance. See specs/pr14_triage.md (S3).
+
 ## Basis Contract
 
 A basic contract corresponding to the design outlined in the previous section, is available @ [basis.es](../contract/basis.es).
@@ -164,6 +177,13 @@ Tracker can simply go offline, but then the latest state committed on-chain is s
 
 Tracker may remove debt notes of protocol participants. This problem can be tackled with the anti-censorship protection
 from "Future Extensions" section.
+
+**This is not implemented.** In the current contracts every redemption path, the emergency path included, requires
+`trackerTree[key] == totalDebt`, so a tracker that omits a note from its committed tree -- or lowers its value --
+blocks that note permanently. The 3-day emergency branch is not a remedy: it relaxes only the tracker's *signature*
+requirement, not the tree match, and it only becomes available once the tracker box is more than 3 days old.
+A tracker that recreates its box regularly therefore never triggers it. README.md was corrected to say so;
+see specs/pr14_triage.md for the full trust-model notes.
 
 Tracker may collude with a reserve holder to inject a note with fake timestamp in the past to redeem immediately. 
 Tracker would be caught in this case. For making this case impossible with contract, technique similar to anti-censorship 

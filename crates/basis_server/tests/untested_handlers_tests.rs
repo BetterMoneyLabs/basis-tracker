@@ -502,9 +502,11 @@ mod untested_handlers {
             registers: std::collections::HashMap::new(),
         }];
 
-        let (status, body) =
-            submit_reserve_transaction(axum::extract::State(state.clone()), axum::extract::Json(payload))
-                .await;
+        let (status, body) = submit_reserve_transaction(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(payload),
+        )
+        .await;
 
         assert_eq!(
             status,
@@ -523,9 +525,11 @@ mod untested_handlers {
         let payload = submitted_payload(&state);
 
         // First use reaches the node (no node configured here, so it fails later, at the node call).
-        let (first_status, _) =
-            submit_reserve_transaction(axum::extract::State(state.clone()), axum::extract::Json(payload.clone()))
-                .await;
+        let (first_status, _) = submit_reserve_transaction(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(payload.clone()),
+        )
+        .await;
         assert_ne!(
             first_status,
             StatusCode::FORBIDDEN,

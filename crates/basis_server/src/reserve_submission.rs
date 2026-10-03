@@ -111,7 +111,8 @@ impl PermitRegistry {
 /// the entries changes the digest.
 pub fn fingerprint_of<T: serde::Serialize>(payload: &T) -> Result<PayloadFingerprint, String> {
     use sha2::Digest as _;
-    let bytes = serde_json::to_vec(payload).map_err(|e| format!("failed to serialize payload: {e}"))?;
+    let bytes =
+        serde_json::to_vec(payload).map_err(|e| format!("failed to serialize payload: {e}"))?;
     Ok(sha2::Sha256::digest(&bytes).into())
 }
 
@@ -140,8 +141,13 @@ mod tests {
         // Rather than sleeping for PERMIT_TTL, insert an entry that is already older than the TTL.
         let registry = PermitRegistry::new();
         let fp: PayloadFingerprint = [9u8; 32];
-        registry.lock().insert(fp, Instant::now() - PERMIT_TTL - Duration::from_secs(1));
-        assert!(!registry.consume(fp), "an expired permit must not be usable");
+        registry
+            .lock()
+            .insert(fp, Instant::now() - PERMIT_TTL - Duration::from_secs(1));
+        assert!(
+            !registry.consume(fp),
+            "an expired permit must not be usable"
+        );
     }
 
     #[test]
@@ -182,7 +188,11 @@ mod tests {
         };
 
         // Same content hashed twice must agree, so a permit issued for a payload verifies later.
-        let p1 = Payload { address: "addr".into(), value: 5, registers: registers() };
+        let p1 = Payload {
+            address: "addr".into(),
+            value: 5,
+            registers: registers(),
+        };
         assert_eq!(fingerprint_of(&p1).unwrap(), fingerprint_of(&p1).unwrap());
 
         // Changing ANY field the node would act on must change the digest, otherwise a caller could
@@ -194,9 +204,12 @@ mod tests {
             registers: registers(),
         })
         .unwrap();
-        let value_changed =
-            fingerprint_of(&Payload { address: "addr".into(), value: 6, registers: registers() })
-                .unwrap();
+        let value_changed = fingerprint_of(&Payload {
+            address: "addr".into(),
+            value: 6,
+            registers: registers(),
+        })
+        .unwrap();
         let register_changed = fingerprint_of(&Payload {
             address: "addr".into(),
             value: 5,

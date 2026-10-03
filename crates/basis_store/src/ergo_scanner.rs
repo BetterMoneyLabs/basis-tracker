@@ -796,7 +796,11 @@ impl Default for NodeConfig {
             reserve_contract_p2s: None,
             token_reserve_contract_p2s: None,
             reserve_token_id: None,
-            node_url: "http://159.89.116.15:11088".to_string(), // Your Ergo node
+            // SECURITY: default to a LOCAL node. This was a third-party public mainnet node over
+            // plaintext HTTP, so an operator who did not set `node_url` sent every request --
+            // including the node api_key, which grants full wallet access -- to somebody else's
+            // machine, unencrypted. Matches the server config default.
+            node_url: "http://127.0.0.1:9053".to_string(),
             scan_name: Some("Basis Reserve Scanner".to_string()),
             api_key: None,
         }

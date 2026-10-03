@@ -1,7 +1,7 @@
 use crate::{
     schnorr::{self, generate_keypair},
     transaction_builder::{RedemptionTransactionBuilder, TxContext},
-    IouNote, RedemptionError, RedemptionManager, RedemptionRequest, TrackerStateManager,
+    IouNote, RedemptionManager, RedemptionRequest, TrackerStateManager,
 };
 
 #[cfg(test)]

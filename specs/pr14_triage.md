@@ -300,6 +300,20 @@ Fixed with a shared predicate `is_contract_compatible_be32`, applied to `z` in
 `validate_signature_format` and to the recomputed challenge in `verify_signature`. Tests cover both
 rejections and assert that 25 consecutive signatures from our own signer satisfy both rules.
 
+**The same hole existed in the Scala reference signer, and the test fixtures were proof.**
+`SigUtils.sign` only retried on `z.bitLength > 255` and never looked at the challenge, so roughly half
+the signatures it produced were unusable on-chain. The existing cross-validation vectors were supposed
+to catch exactly this class of problem, and instead two of them were themselves invalid: **TV003**
+("Valid tracker signature", `should_verify: true`) and **TV009** ("Maximum u64 values") both have
+challenges whose first byte is `0xf7` and `0xc1`. TV005 and TV008 have the same defect but were already
+negative vectors. All four are now `should_verify: false` and kept as regression coverage, and
+`SigUtils.sign` enforces the challenge rule. `specs/SCHNORR_SIGNATURE_SPEC.md` and `AGENTS.md` are
+updated.
+
+Lesson worth recording: a hardcoded vector asserted `should_verify: true` and the verifier honoured it,
+so a vector can encode a bug as "expected". The vectors were only re-examined because the verifier fix
+made them fail.
+
 ### S6 — tracker-built redemptions fail without an attacker (High, liveness) — 1 of 4 fixed
 
 | Sub-cause | Status |
@@ -342,6 +356,27 @@ committed snapshot.
 repository does not unpublish them.
 
 ---
+
+## Regression tests added
+
+The PoC specs from PR #14 are **not** merged: they assert that attacks are *accepted*, load the patched
+contract from a cwd-relative path, and duplicate `basis.es` where it will drift. The scenarios were
+re-encoded as negative tests against the real `contract/` files.
+
+| Spec | Properties | Covers |
+|---|---|---|
+| `BasisSecuritySpec` | 7 | C1 replay (attack + honest first-redemption control), C2 top-up merge, C2 redemption merge, C2 per-transaction-scope control, C5 remainder, C5 older-timestamp control |
+| `BasisTokenSecuritySpec` | 4 | C6 top-up ERG drain, C6 honest-top-up control, C6 redemption ERG drain, C6 reserve-NFT inflation |
+
+Each attack property was verified to **fail against the pre-fix contract** by temporarily reverting
+`contract/basis.es` and `contract/basis-token.es`: reverting `basis.es` fails C1, both C2 properties and
+C5; reverting `basis-token.es` fails all three C6 attacks.
+
+One PoC scenario was deliberately **not** ported. The PR included a "mutual clearing" case with two
+reserves and two tracker data inputs in one transaction; the contract reads only
+`CONTEXT.dataInputs(0)`, so such a transaction can never satisfy both reserves regardless of the fixes.
+It was replaced with a control that verifies `uniqueReserveInput` is scoped per transaction rather than
+per owner, which is the property that actually matters.
 
 ## Deferred
 
