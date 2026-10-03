@@ -23,7 +23,17 @@ pub struct SchnorrTestVector {
 /// Cross-validation test vectors for Schnorr signature verification
 ///
 /// Generated with deterministic keypairs and Scala-compatible bitLength constraint.
-/// All valid signatures (should_verify=true) have z.bitLength <= 255.
+///
+/// Every signature with `should_verify = true` satisfies BOTH rules the reserve contract needs when
+/// it reads the values with the signed `byteArrayToBigInt`:
+///
+/// * `z.bitLength <= 255`
+/// * the Fiat-Shamir challenge's top bit is clear
+///
+/// TV003, TV005, TV008 and TV009 are historically generated vectors whose challenges have the top
+/// bit set. All four are retained with `should_verify = false` as regression coverage: the Rust
+/// verifier used to accept them, and the Scala signer used to produce such signatures, so a note
+/// carrying one could be pinned by the tracker and still be unredeemable on-chain.
 pub const SCHNORR_TEST_VECTORS: &[SchnorrTestVector] = &[
     SchnorrTestVector {
         id: "TV001",
@@ -49,14 +59,24 @@ pub const SCHNORR_TEST_VECTORS: &[SchnorrTestVector] = &[
     },
     SchnorrTestVector {
         id: "TV003",
-        description: "Valid tracker signature",
+        // SECURITY: this vector was originally labelled "Valid tracker signature", but its
+        // Fiat-Shamir challenge starts with 0xf7. The contract reads the challenge with
+        // `byteArrayToBigInt`, a SIGNED conversion, so 0xf7.. becomes negative and
+        // `pubKey.exp(negative)` throws. The signature is mathematically valid and WAS accepted by
+        // the Rust verifier, which checked only `z` -- meaning a note carrying it could be accepted
+        // and pinned by the tracker yet never redeemed on-chain.
+        //
+        // It is kept (rather than regenerated) as regression coverage for exactly that gap: the
+        // Scala signer had the same hole, since SigUtils.sign only checked `z.bitLength <= 255`.
+        // Both signers now enforce the challenge rule too.
+        description: "SIGNATURE_WITH_INCOMPATIBLE_CHALLENGE",
         issuer_pubkey_hex: "037c3f0429768437a942f1818ef1616c609b7a6d8a8dd245e179c8c0838e7d169d",
         recipient_pubkey_hex: "02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82",
         amount: 500000000u64,
         timestamp: 1743379201000u64,
         message_hex: "07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000001dcd650000000195e97f7be8",
         signature_hex: "024900b6f2a6c83c9158420e7e15bc211e761f5157fe84f2a25499340e731c420624c6b3f14a59b811d50ab0492e53784b541a53688452898924142a313cb64a37",
-        should_verify: true,
+        should_verify: false,
     },
     SchnorrTestVector {
         id: "TV004",
@@ -115,14 +135,19 @@ pub const SCHNORR_TEST_VECTORS: &[SchnorrTestVector] = &[
     },
     SchnorrTestVector {
         id: "TV009",
-        description: "Maximum u64 values",
+        // Same class as TV003: `z` satisfies bitLength <= 255, but the challenge's first byte is
+        // 0xc1, so `byteArrayToBigInt` reads it as negative and the contract's `pubKey.exp(e)`
+        // throws. Its original purpose was exercising maximum-u64 amount/timestamp encoding, which
+        // the message hex still does; only the signature is unusable on-chain. See TV003 and
+        // specs/pr14_triage.md (S5).
+        description: "SIGNATURE_WITH_INCOMPATIBLE_CHALLENGE (max u64 message)",
         issuer_pubkey_hex: "0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0",
         recipient_pubkey_hex: "02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82",
         amount: 18446744073709551615u64,
         timestamp: 18446744073709551615u64,
         message_hex: "07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220bffffffffffffffffffffffffffffffff",
         signature_hex: "03ac2d20f2aceedc94fd621ce5fa0f42926da94d6b673296e24c4a63c7f5178c6f7645dd84cd50f6c5bed74a8aeaacceba442a5008ca0eeb17c8008ae7d3c58dec",
-        should_verify: true,
+        should_verify: false,
     },
     SchnorrTestVector {
         id: "TV010",

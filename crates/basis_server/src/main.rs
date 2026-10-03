@@ -725,6 +725,9 @@ async fn main() {
         tracker_storage,
         acceptance_predicate,
         policy_storage,
+        reserve_submission_permits: std::sync::Arc::new(
+            basis_server::reserve_submission::PermitRegistry::new(),
+        ),
     };
 
     // Build CORS layer based on auth configuration.

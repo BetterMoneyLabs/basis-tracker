@@ -1472,6 +1472,17 @@ components:
           type: string
           description: Change address for leftover funds
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
+        submission_permit:
+          type: string
+          description: >-
+            Single-use permit proving this exact payload came from POST /reserves/create.
+            POST /reserves/submit forwards the payload to the tracker's Ergo node
+            (/wallet/payment/send) with the node api_key, so the node signs it with the tracker's
+            wallet key. The server therefore only accepts a payload whose fingerprint matches a
+            live, unused permit, which prevents a caller from substituting their own destination
+            address, value, assets or registers. Echo it back unchanged; permits are valid for 30
+            minutes and can be used once.
+          example: "3f2a1c9e5b7d4081a2c3e4f5061728394a5b6c7d8e9f00112233445566778899"
 
     ReservePaymentRequest:
       type: object

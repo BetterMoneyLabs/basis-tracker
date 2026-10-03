@@ -961,6 +961,50 @@ impl TrackerStateManager {
         }
     }
 
+    /// Record that `amount_redeemed` was redeemed against an existing note.
+    ///
+    /// This is redemption accounting, NOT a debt update, so it deliberately bypasses
+    /// `update_note`'s requirements:
+    ///
+    /// * `update_note` demands a strictly newer timestamp and a valid issuer signature, because it
+    ///   represents a new signed note that changes the committed cumulative debt. A redemption
+    ///   changes neither the debt nor the signature.
+    /// * The timestamp is part of the signed message, so refreshing it here invalidated the stored
+    ///   issuer signature and left the creditor's note unredeemable. It is now preserved exactly.
+    /// * `amount_collected` -- the value committed in the AVL tree and checked by the contract --
+    ///   is untouched, so no AVL write is needed.
+    ///
+    /// The cumulative redeemed amount may only grow; going backwards would let a caller reset a
+    /// note's headroom and redeem the same debt again.
+    pub fn record_redemption(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        new_amount_redeemed: u64,
+    ) -> Result<(), NoteError> {
+        let mut note = self
+            .lookup_note(issuer_pubkey, recipient_pubkey)
+            .map_err(|_| NoteError::StorageError("note not found".to_string()))?;
+
+        if new_amount_redeemed < note.amount_redeemed {
+            return Err(NoteError::StorageError(format!(
+                "cumulative redeemed amount cannot decrease (stored {}, requested {})",
+                note.amount_redeemed, new_amount_redeemed
+            )));
+        }
+        // Redeeming more than was ever recorded as owed would leave the note permanently unusable.
+        if new_amount_redeemed > note.amount_collected {
+            return Err(NoteError::AmountOverflow);
+        }
+
+        if new_amount_redeemed == note.amount_redeemed {
+            return Ok(());
+        }
+
+        note.amount_redeemed = new_amount_redeemed;
+        self.storage.store_note(issuer_pubkey, &note)
+    }
+
     /// Get the total debt for a specific (issuer, receiver) pair from the AVL tree
     /// Returns the cumulative debt amount (totalDebt) stored in the tracker's AVL tree
     pub fn get_total_debt(

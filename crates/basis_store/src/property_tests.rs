@@ -428,31 +428,27 @@ mod property_tests {
                 //
                 // See specs/PRODUCTION_READINESS_AUDIT.md Issue #6 (multi-redemption coverage).
                 let result = redemption_manager.initiate_redemption(&request);
-                if i == 0 {
-                    prop_assert!(
-                        result.is_ok(),
-                        "first redemption must succeed, got: {:?}",
-                        result.err()
-                    );
-                    let data = result.unwrap();
-                    prop_assert!(!data.transaction_bytes.is_empty());
-                    total_redeemed += redeem_amount;
-                    redemption_manager
-                        .complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount, None)
-                        .expect("complete_redemption should succeed for the first redemption");
-                } else {
-                    // Documented limitation: subsequent redemptions via initiate_redemption
-                    // are rejected because complete_redemption invalidated the note signature.
-                    prop_assert!(
-                        matches!(result, Err(RedemptionError::InvalidNoteSignature)),
-                        "redemption {} should be rejected with InvalidNoteSignature \
-                         (note signature invalidated by complete_redemption), got: {:?}",
-                        i,
-                        result.err()
-                    );
-                    // Stop early: without completing, further iterations add nothing.
-                    break;
-                }
+                // SECURITY (PR #14 S4): EVERY redemption in the sequence must now succeed.
+                //
+                // This previously asserted that redemptions after the first were rejected with
+                // InvalidNoteSignature, documenting a bug as expected behaviour:
+                // `complete_redemption` refreshed the note's timestamp, which is part of the signed
+                // message, so the stored issuer signature stopped verifying and the creditor could
+                // only ever redeem once per note. `complete_redemption` no longer touches the
+                // timestamp (it records redemptions via `record_redemption`), so the sequence works
+                // end to end.
+                prop_assert!(
+                    result.is_ok(),
+                    "redemption {} must succeed, got: {:?}",
+                    i,
+                    result.err()
+                );
+                let data = result.unwrap();
+                prop_assert!(!data.transaction_bytes.is_empty());
+                total_redeemed += redeem_amount;
+                redemption_manager
+                    .complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount, None)
+                    .unwrap_or_else(|e| panic!("complete_redemption {} should succeed: {:?}", i, e));
             }
 
             // Only the first redemption completes (see the note above), so the accounting

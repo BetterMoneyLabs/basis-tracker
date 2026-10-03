@@ -305,6 +305,9 @@ mod cors_tests {
             tracker_storage,
             acceptance_predicate: None,
             policy_storage,
+            reserve_submission_permits: std::sync::Arc::new(
+                basis_server::reserve_submission::PermitRegistry::new(),
+            ),
         };
 
         // Build the app with CORS enabled (same as main server)

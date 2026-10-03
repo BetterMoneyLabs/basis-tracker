@@ -130,9 +130,19 @@ Tests require `scala/secrets/participants.csv` with valid `name,address,secret_h
 - **Module structure**: Schnorr operations extracted to dedicated `schnorr.rs` module
 
 ### Scala Compatibility
-- **bitLength constraint**: Both Scala and Rust implementations enforce `z.bitLength <= 255`
-- **Retry logic**: Signatures with `z.bitLength > 255` are automatically regenerated with a new nonce (no retry limit)
-- **Cross-validation**: All signatures verified against hardcoded Scala test vectors (see specs/SCHNORR_SIGNATURE_SPEC.md)
+- **Two signed-BigInt constraints**: The contract reads both the response `z` and the Fiat-Shamir
+  challenge `e` with ErgoScript's `byteArrayToBigInt`, which is a **signed** big-endian conversion.
+  A 32-byte value with the top bit set becomes negative and `.exp(negative)` throws, so both must be
+  below 2^255 for the contract to be able to evaluate the signature at all.
+  - `z.bitLength <= 255`
+  - the challenge's first byte is `< 0x80` (`is_contract_compatible_be32` / `SigUtils.isContractCompatible`)
+- **Retry logic**: Both Scala and Rust signers regenerate the nonce when either constraint fails (no
+  retry limit). The Rust **verifier** rejects such signatures too — otherwise the tracker accepts and
+  pins a note the node will refuse, permanently stranding the creditor's funds (see `specs/pr14_triage.md` S5).
+- **Cross-validation**: All signatures verified against hardcoded Scala test vectors (see
+  specs/SCHNORR_SIGNATURE_SPEC.md). Four historical vectors (TV003, TV005, TV008, TV009) have
+  contract-incompatible challenges and are kept with `should_verify: false` as regression coverage —
+  the Scala signer previously emitted them.
 - **Ergo node compatibility**: Basis server signatures are compatible with ErgoScript contract verification
 
 ## Ergo Blockchain Scanner
