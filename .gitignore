@@ -67,3 +67,7 @@ test_tracker/
 
 # Test policies directories (created during acceptance tests)
 test_policies_*/
+
+# Python bytecode
+__pycache__/
+*.pyc
