@@ -34,6 +34,13 @@ use tokio::sync::Mutex;
 
 use crate::config::{AuthConfig, AuthMode, ClientRole};
 
+/// Upper bound on the body buffered while computing the signature's body hash.
+///
+/// The signature covers a hash of the raw body, so the middleware must read it in full. This is a
+/// backstop for direct callers; in the running server `main.rs` also installs a
+/// `DefaultBodyLimit` on the router.
+const MAX_SIGNATURE_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 /// State shared by the auth middleware.
 #[derive(Clone)]
 pub struct AuthState {
@@ -213,26 +220,25 @@ async fn verify_signature(
         return Err("Request signature timestamp is in the future".to_string());
     }
 
-    // Replay protection: reject reused (pubkey, nonce) pairs within the TTL.
-    // If the client does not send a nonce we fall back to (pubkey, timestamp),
-    // which allows at most one request per pubkey per timestamp tick.
+    // Replay cache key.
+    //
+    // SECURITY: keyed on the PARSED timestamp, not the raw header string. `u64` parsing accepts
+    // leading zeros, so a captured request could be replayed with `X-Signature-Timestamp: 0<ts>`:
+    // the signature still verified (the canonical message uses the parsed value) but the cache key
+    // differed, so the request was accepted again and again until the TTL expired. When a nonce is
+    // supplied we key on it, which is the stronger form.
     let cache_key = if nonce.is_empty() {
-        (pubkey_hex.to_lowercase(), timestamp_str)
+        (pubkey_hex.to_lowercase(), format!("ts:{timestamp_ms}"))
     } else {
-        (pubkey_hex.to_lowercase(), nonce.clone())
+        (pubkey_hex.to_lowercase(), format!("nonce:{nonce}"))
     };
-    {
-        let mut cache = state.replay_cache.lock().await;
-        prune_cache(&mut cache, state.replay_ttl());
-        if cache.contains_key(&cache_key) {
-            return Err("Replayed signature nonce/timestamp".to_string());
-        }
-        cache.insert(cache_key, Instant::now());
-    }
 
     // Build canonical message and verify signature.
     let (parts, body) = request.into_parts();
-    let body_bytes = to_bytes(body, usize::MAX)
+    // The router installs a DefaultBodyLimit, so this read is bounded; the explicit bound here is
+    // the second line of defence for a body that arrives without one (for example in unit tests
+    // that call the middleware directly).
+    let body_bytes = to_bytes(body, MAX_SIGNATURE_BODY_BYTES)
         .await
         .map_err(|e| format!("Failed to read request body: {}", e))?;
     let body_hash = hex::encode(Sha256::digest(&body_bytes));
@@ -263,6 +269,20 @@ async fn verify_signature(
 
     basis_offchain::schnorr::schnorr_verify(&signature_array, canonical.as_bytes(), &pubkey_array)
         .map_err(|_| "Invalid request signature")?;
+
+    // SECURITY: record the nonce only AFTER the signature verified.
+    //
+    // This insert used to happen before the body was read and before the signature was checked, so
+    // anybody could burn a client's nonce with a single forged request -- and a body that failed to
+    // read or a malformed signature consumed the slot too, denying the legitimate client its turn.
+    {
+        let mut cache = state.replay_cache.lock().await;
+        prune_cache(&mut cache, state.replay_ttl());
+        if cache.contains_key(&cache_key) {
+            return Err("Replayed signature nonce/timestamp".to_string());
+        }
+        cache.insert(cache_key, Instant::now());
+    }
 
     let request = Request::from_parts(parts, Body::from(body_bytes));
     Ok((

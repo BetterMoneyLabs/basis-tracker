@@ -31,6 +31,21 @@ impl SignatureVerifier for SchnorrVerifier {
         let a_bytes = &signature[0..33];
         let z_bytes = &signature[33..65];
 
+        // Contract compatibility: the reserve contract reads `z` and the challenge `e` with
+        // ErgoScript's `byteArrayToBigInt`, which is a SIGNED big-endian conversion. A value with
+        // the top bit set becomes negative there, and `g.exp(negative)` throws -- so such a
+        // signature is unusable on-chain even though it is mathematically valid. The signer
+        // (schnorr_sign) already retries until both values are below 2^255; the verifier must
+        // reject them too, otherwise the tracker accepts and pins a note whose redemption can
+        // never be executed, permanently locking the creditor's funds.
+        //
+        // This check covers both entry points (z and the recomputed challenge e) and mirrors
+        // scala/src/main/scala/basis/offchain/SigUtils.scala plus the contract's verification
+        // expressions.
+        if z_bytes[0] & 0x80 != 0 {
+            return Err(CryptoError::InvalidSignature);
+        }
+
         // Parse the compressed public key (issuer key)
         let issuer_key =
             PublicKey::from_slice(public_key).map_err(|_| CryptoError::InvalidPublicKey)?;
@@ -40,6 +55,9 @@ impl SignatureVerifier for SchnorrVerifier {
 
         // Compute challenge e = H(a || message || issuer_pubkey)
         let e_scalar = compute_challenge(a_bytes, message, public_key)?;
+        if !is_contract_compatible_be32(&e_scalar.to_be_bytes()) {
+            return Err(CryptoError::InvalidSignature);
+        }
 
         // Parse z as a scalar (32 bytes)
         let z_scalar = SecretKey::from_slice(z_bytes).map_err(|_| CryptoError::InvalidSignature)?;
@@ -110,7 +128,28 @@ pub fn validate_signature_format(signature: &Signature) -> Result<(), CryptoErro
         return Err(CryptoError::InvalidSignatureFormat);
     }
 
+    // Reject a z whose top bit is set: the contract's `byteArrayToBigInt` would read it as
+    // negative and `g.exp(negative)` throws. Kept as a format error because it is a structural
+    // property of the encoding, not of this particular message or key.
+    if !is_contract_compatible_be32(z_bytes) {
+        return Err(CryptoError::InvalidSignatureFormat);
+    }
+
     Ok(())
+}
+
+/// Whether a big-endian value keeps the same sign when ErgoScript reads it with
+/// `byteArrayToBigInt`.
+///
+/// `byteArrayToBigInt` is a SIGNED two's-complement conversion, so a value whose top bit is set
+/// becomes negative. The reserve contract feeds both the response `z` and the Fiat-Shamir challenge
+/// `e` through that function and then calls `.exp(...)`, which throws for a negative exponent. Such
+/// a signature is therefore rejected by the node while being mathematically valid.
+///
+/// `schnorr_sign` retries nonces until both `z` and `e` satisfy this; `SchnorrVerifier` rejects them,
+/// so the tracker can never pin a note that the chain would refuse to redeem.
+pub fn is_contract_compatible_be32(bytes: &[u8]) -> bool {
+    matches!(bytes.first(), Some(b) if *b < 0x80)
 }
 
 /// Compute the challenge e = H(a || message || issuer_pubkey)
@@ -205,6 +244,81 @@ mod tests {
             result.is_err(),
             "Verification should fail with tampered message"
         );
+    }
+
+    /// Regression test for the verifier/contract mismatch: the contract reads `z` with the SIGNED
+    /// `byteArrayToBigInt`, so a response whose top bit is set is negative there and `g.exp()`
+    /// throws. The signer never emits such a value, but a third-party debtor signing without the
+    /// same retry rule would produce one that this verifier used to accept -- after which the
+    /// tracker would pin the note and the creditor could never redeem it.
+    #[test]
+    fn verify_rejects_z_with_top_bit_set() {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
+        let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let pubkey = public_key.serialize();
+
+        let message = crate::types::signing_message(&pubkey, &pubkey, 1_000_000_000u64, 1743379200000u64);
+        let mut signature = schnorr_sign(&message, &secret_key.secret_bytes(), &pubkey)
+            .expect("Signing should succeed");
+
+        // Force the top bit of z, keeping the signature 65 bytes.
+        signature[33] |= 0x80;
+        assert!(
+            !is_contract_compatible_be32(&signature[33..65]),
+            "test setup: z should now have the top bit set"
+        );
+
+        assert!(
+            matches!(
+                validate_signature_format(&signature),
+                Err(CryptoError::InvalidSignatureFormat)
+            ),
+            "a z with the top bit set must be rejected as a format error"
+        );
+        assert!(
+            SchnorrVerifier
+                .verify_signature(&signature, &message, &pubkey)
+                .is_err(),
+            "verification must reject a z the contract cannot evaluate"
+        );
+    }
+
+    /// Same class of check for the Fiat-Shamir challenge: `e` is recomputed by the verifier, so it
+    /// cannot be tampered with directly. This asserts the shared predicate and that the signer
+    /// never emits a non-compatible challenge in the first place.
+    #[test]
+    fn challenge_compatibility_predicate_matches_signer() {
+        assert!(is_contract_compatible_be32(&[0x7f; 32]));
+        assert!(is_contract_compatible_be32(&[0x00; 32]));
+        assert!(!is_contract_compatible_be32(&[0x80; 32]));
+        assert!(!is_contract_compatible_be32(&[0xff; 32]));
+        assert!(!is_contract_compatible_be32(&[]));
+
+        // Sign repeatedly; every emitted signature must satisfy both rules the contract needs.
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
+        let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let pubkey = public_key.serialize();
+        for i in 0..25u64 {
+            let message =
+                crate::types::signing_message(&pubkey, &pubkey, 1_000_000_000u64 + i, 1743379200000u64);
+            let signature =
+                schnorr_sign(&message, &secret_key.secret_bytes(), &pubkey).expect("signing should succeed");
+
+            assert!(
+                is_contract_compatible_be32(&signature[33..65]),
+                "signer emitted a z the contract would read as negative"
+            );
+            let e = compute_challenge(&signature[0..33], &message, &pubkey).expect("challenge should parse");
+            assert!(
+                is_contract_compatible_be32(&e.to_be_bytes()),
+                "signer emitted a challenge the contract would read as negative"
+            );
+            SchnorrVerifier
+                .verify_signature(&signature, &message, &pubkey)
+                .expect("own signature must verify");
+        }
     }
 
     #[test]

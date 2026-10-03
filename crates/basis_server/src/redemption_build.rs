@@ -869,9 +869,21 @@ async fn build_redemption_inner(
         serialize_ergo_long(payload.timestamp as i64),
     );
     context_extension.insert("5".to_string(), serialize_coll_bytes(&insert_proof));
-    if !payload.emergency {
-        context_extension.insert("6".to_string(), serialize_coll_bytes(&tracker_signature));
-    }
+    // Context var #6 must ALWAYS be present. The contract reads it with
+    // `getVar[Coll[Byte]](6).get`, and `.get` on an absent var throws -- so omitting the key
+    // outright made every emergency redemption fail on-chain, leaving the contract's own
+    // `enoughTimeSpent` fallback (which allows omitting the tracker signature after the 3-day
+    // window) unreachable. An EMPTY Coll[Byte] is the correct encoding for "no signature": the
+    // contract branches on `trackerSigBytes.size > 0`. The Scala reference implementation and the
+    // CLI both send var 6 unconditionally for the same reason.
+    context_extension.insert(
+        "6".to_string(),
+        if payload.emergency {
+            serialize_coll_bytes(&[])
+        } else {
+            serialize_coll_bytes(&tracker_signature)
+        },
+    );
     if let Some(ref lp) = reserve_lookup_proof {
         context_extension.insert("7".to_string(), serialize_coll_bytes(lp));
     }

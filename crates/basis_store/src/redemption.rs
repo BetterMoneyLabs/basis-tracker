@@ -33,6 +33,13 @@ impl From<NoteError> for RedemptionError {
                 RedemptionError::StorageError("Future timestamp".to_string())
             }
             NoteError::PastTimestamp => RedemptionError::StorageError("Past timestamp".to_string()),
+            NoteError::DebtDecreaseNotPermitted { previous, requested } => {
+                RedemptionError::StorageError(format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ))
+            }
             NoteError::RedemptionTooEarly => RedemptionError::RedemptionTooEarly(0, 0),
             NoteError::StorageError(msg) => RedemptionError::StorageError(msg),
             _ => RedemptionError::StorageError(format!("{:?}", err)),

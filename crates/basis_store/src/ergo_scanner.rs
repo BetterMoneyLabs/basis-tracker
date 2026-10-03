@@ -156,12 +156,12 @@ impl ServerState {
 
         // Add API key header if configured
         if let Some(api_key) = &self.config.api_key {
-            debug!("Using API key '{}' for request to: {}", api_key, url);
-            info!("Adding HTTP header: api_key: {}", api_key);
+            // Never log the key itself: this runs on every request and the node api_key grants
+            // full wallet access to the tracker node.
+            debug!("Using API key header for request to: {}", url);
             request = request.header("api_key", api_key);
         } else {
             debug!("No API key configured for request to: {}", url);
-            info!("No API key header added to HTTP request");
         }
 
         request
@@ -175,8 +175,8 @@ impl ServerState {
 
         // Log which Ergo node is being used (INFO level)
         info!("Initializing Ergo scanner with node: {}", config.node_url);
-        if let Some(api_key) = &config.api_key {
-            info!("Using API key: {}", api_key);
+        if config.api_key.is_some() {
+            info!("An Ergo node API key is configured (value not logged)");
         } else {
             warn!("No API key configured for Ergo node");
         }

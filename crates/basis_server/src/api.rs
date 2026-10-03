@@ -304,6 +304,11 @@ pub async fn create_note(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -430,6 +435,11 @@ pub async fn get_notes_by_issuer(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -542,6 +552,11 @@ pub async fn get_notes_by_recipient(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -692,6 +707,11 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -786,6 +806,11 @@ pub async fn get_all_notes(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted { previous, requested } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),

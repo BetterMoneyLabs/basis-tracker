@@ -287,6 +287,9 @@ pub enum NoteError {
     AmountOverflow,
     FutureTimestamp,
     PastTimestamp,
+    /// A note tried to lower the committed cumulative debt for an existing (issuer, recipient)
+    /// pair. Only the creditor can consent to that; the debtor's signature is not enough.
+    DebtDecreaseNotPermitted { previous: u64, requested: u64 },
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
@@ -551,11 +554,43 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
+        // Carry the already-redeemed amount forward from the previous note for this pair.
+        //
+        // A new note for an existing (issuer, recipient) pair is an increase of the SAME cumulative
+        // debt, not a fresh claim. Persisting the incoming note verbatim would reset
+        // `amount_redeemed` to 0 and destroy the outstanding-debt / FIFO accounting, so the
+        // tracker's view of "how much of this edge is still outstanding" would grow without bound.
+        //
+        // Only the LOCAL record is adjusted: the AVL value committed on-chain is `amount_collected`,
+        // which the contract pins, so the signed message and the on-chain commitment are unchanged.
+        // The per-issuer reserve AVL tree (which is what the contract actually reads) is untouched.
+        let mut note_to_store = note.clone();
+
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing)
         if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
+            }
+            note_to_store.amount_redeemed = existing_note.amount_redeemed;
+            // SECURITY: cumulative debt may never decrease without the creditor's consent.
+            //
+            // The contract pins every redemption to the tracker tree, so lowering the committed
+            // totalDebt for an (issuer, recipient) pair makes every existing note for that pair
+            // permanently unredeemable: `trackerDebtCorrect` fails in the normal path AND in the
+            // emergency path, because both compare the note's totalDebt against the committed value.
+            // A debtor could therefore post totalDebt = 0, wait out the reserve's refund waiting
+            // period, and withdraw the collateral while the creditor's claim is silently dead.
+            //
+            // The debtor's signature proves that the debtor consents, never that the creditor does.
+            // Transferring debt to a *different* creditor is unaffected, because that is a different
+            // key in the tree; reducing an existing creditor's claim is not something the debtor can
+            // do unilaterally.
+            if note.amount_collected < existing_note.amount_collected {
+                return Err(NoteError::DebtDecreaseNotPermitted {
+                    previous: existing_note.amount_collected,
+                    requested: note.amount_collected,
+                });
             }
         }
 
@@ -580,7 +615,7 @@ impl TrackerStateManager {
         match avl_result {
             Ok(()) => {
                 // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
+                self.storage.store_note(issuer_pubkey, &note_to_store)?;
                 self.update_state();
 
                 // Recompute the confirmation status for this note based on the
@@ -863,11 +898,43 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
+        // Carry the already-redeemed amount forward from the previous note for this pair.
+        //
+        // A new note for an existing (issuer, recipient) pair is an increase of the SAME cumulative
+        // debt, not a fresh claim. Persisting the incoming note verbatim would reset
+        // `amount_redeemed` to 0 and destroy the outstanding-debt / FIFO accounting, so the
+        // tracker's view of "how much of this edge is still outstanding" would grow without bound.
+        //
+        // Only the LOCAL record is adjusted: the AVL value committed on-chain is `amount_collected`,
+        // which the contract pins, so the signed message and the on-chain commitment are unchanged.
+        // The per-issuer reserve AVL tree (which is what the contract actually reads) is untouched.
+        let mut note_to_store = note.clone();
+
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing)
         if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
+            }
+            note_to_store.amount_redeemed = existing_note.amount_redeemed;
+            // SECURITY: cumulative debt may never decrease without the creditor's consent.
+            //
+            // The contract pins every redemption to the tracker tree, so lowering the committed
+            // totalDebt for an (issuer, recipient) pair makes every existing note for that pair
+            // permanently unredeemable: `trackerDebtCorrect` fails in the normal path AND in the
+            // emergency path, because both compare the note's totalDebt against the committed value.
+            // A debtor could therefore post totalDebt = 0, wait out the reserve's refund waiting
+            // period, and withdraw the collateral while the creditor's claim is silently dead.
+            //
+            // The debtor's signature proves that the debtor consents, never that the creditor does.
+            // Transferring debt to a *different* creditor is unaffected, because that is a different
+            // key in the tree; reducing an existing creditor's claim is not something the debtor can
+            // do unilaterally.
+            if note.amount_collected < existing_note.amount_collected {
+                return Err(NoteError::DebtDecreaseNotPermitted {
+                    previous: existing_note.amount_collected,
+                    requested: note.amount_collected,
+                });
             }
         }
 
@@ -886,7 +953,7 @@ impl TrackerStateManager {
         match avl_result {
             Ok(()) => {
                 // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
+                self.storage.store_note(issuer_pubkey, &note_to_store)?;
                 self.update_state();
                 Ok(())
             }
