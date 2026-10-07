@@ -232,7 +232,6 @@
     // ONE output -- letting a third party (top-up needs no signature) or the owner (skipping the
     // refund waiting period) extract the difference between the two reserves.
     val uniqueReserveInput = INPUTS.filter({ (in: Box) =>
-      in.propositionBytes == SELF.propositionBytes &&
       in.R4[GroupElement].isDefined && in.R4[GroupElement].get == ownerKey
     }).size == 1
 
