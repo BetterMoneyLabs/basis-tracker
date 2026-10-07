@@ -46,6 +46,16 @@ alice_keys_output.txt
 # Local secret files (test fixtures may be committed)
 secrets/participants.local.csv
 
+# SECURITY (PR #14 S7): participant secrets must never be committed. This file previously held
+# live mainnet-format keys while its own header said it "should NOT be committed"; the keys are
+# public now and must be rotated. Copy secrets/participants.csv.template and fill it in locally.
+secrets/participants.csv
+
+# Per-demo tracker configs carry a real tracker_secret_key; the checked-in copy under
+# demo/agent_celaut_use/config/basis.toml was removed for the same reason. The other demos inject
+# the key from $TRACKER_SECRET at run time.
+demo/*/config/basis.toml
+
 # Demo output files
 demo/output/
 
@@ -57,3 +67,7 @@ test_tracker/
 
 # Test policies directories (created during acceptance tests)
 test_policies_*/
+
+# Python bytecode
+__pycache__/
+*.pyc

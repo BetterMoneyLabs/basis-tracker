@@ -50,7 +50,15 @@ Both updates are off-chain; no Ergo transaction is required.
 
 The issuer `A` must sign the new notes:
 
-- A note to `B` for the remaining amount (or a zero-amount cancellation record with a fresh timestamp).
+- A note to `B` for the remaining amount.
+
+  **Not implemented, and the cancellation variant is now rejected outright.** The tracker refuses any note
+  that lowers the committed cumulative debt for an existing (issuer, recipient) pair
+  (`NoteError::DebtDecreaseNotPermitted`, PR #14 S3), because the contract pins every redemption to the
+  tracker tree: lowering it makes the creditor's existing notes permanently unredeemable, and the debtor
+  can then serve the reserve's refund waiting period and withdraw the collateral. A "zero-amount
+  cancellation record" is exactly that, so it now returns an error. A creditor co-signature flow is
+  required and does not exist yet; until then settle via redemption plus re-issuance (Option 2 below).
 - A note to `C` for the transferred amount.
 
 Each note uses the standard 48-byte signing message with the tracker-specific recipient key. The source tracker signs the updated `A -> B` record; the target tracker signs the new `A -> C` record.

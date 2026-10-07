@@ -287,6 +287,12 @@ pub enum NoteError {
     AmountOverflow,
     FutureTimestamp,
     PastTimestamp,
+    /// A note tried to lower the committed cumulative debt for an existing (issuer, recipient)
+    /// pair. Only the creditor can consent to that; the debtor's signature is not enough.
+    DebtDecreaseNotPermitted {
+        previous: u64,
+        requested: u64,
+    },
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
@@ -309,8 +315,15 @@ pub struct TrackerStateManager {
     /// a fresh reserve for a new issuer starts from the empty tree digest and first
     /// redemptions succeed even if other issuers have redemption history.
     ///
-    /// NOTE: Each on-chain reserve box has its own R5 digest. This design assumes one
-    /// reserve per issuer; multi-reserve issuers would need per-reserve tracking.
+    /// NOTE: Each on-chain reserve box has its own R5 digest, so this design assumes ONE reserve per
+    /// issuer. That assumption is load-bearing, not cosmetic: a note's signed message is only
+    /// `hash(owner || receiver) || totalDebt || timestamp` and is not bound to a reserve box, so with two
+    /// reserves under the same owner and tracker the SAME note redeems in full against EACH of them --
+    /// overpaying the creditor and draining the owner's other reserves to do it.
+    ///
+    /// This cannot be fixed here (the redemption state lives in the contract's per-box R5), so the
+    /// tracker fails closed instead: see `ReserveTracker::resolve_issuer_reserve` and the collateral
+    /// endpoint, both of which return an error for a multi-reserve issuer. See specs/pr14_triage.md (C3).
     reserve_avl_states: std::collections::HashMap<PubKey, basis_trees::BasisAvlTree>,
     /// Per-note confirmation records, keyed by note key (32 bytes).
     confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,
@@ -551,11 +564,43 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
+        // Carry the already-redeemed amount forward from the previous note for this pair.
+        //
+        // A new note for an existing (issuer, recipient) pair is an increase of the SAME cumulative
+        // debt, not a fresh claim. Persisting the incoming note verbatim would reset
+        // `amount_redeemed` to 0 and destroy the outstanding-debt / FIFO accounting, so the
+        // tracker's view of "how much of this edge is still outstanding" would grow without bound.
+        //
+        // Only the LOCAL record is adjusted: the AVL value committed on-chain is `amount_collected`,
+        // which the contract pins, so the signed message and the on-chain commitment are unchanged.
+        // The per-issuer reserve AVL tree (which is what the contract actually reads) is untouched.
+        let mut note_to_store = note.clone();
+
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing)
         if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
+            }
+            note_to_store.amount_redeemed = existing_note.amount_redeemed;
+            // SECURITY: cumulative debt may never decrease without the creditor's consent.
+            //
+            // The contract pins every redemption to the tracker tree, so lowering the committed
+            // totalDebt for an (issuer, recipient) pair makes every existing note for that pair
+            // permanently unredeemable: `trackerDebtCorrect` fails in the normal path AND in the
+            // emergency path, because both compare the note's totalDebt against the committed value.
+            // A debtor could therefore post totalDebt = 0, wait out the reserve's refund waiting
+            // period, and withdraw the collateral while the creditor's claim is silently dead.
+            //
+            // The debtor's signature proves that the debtor consents, never that the creditor does.
+            // Transferring debt to a *different* creditor is unaffected, because that is a different
+            // key in the tree; reducing an existing creditor's claim is not something the debtor can
+            // do unilaterally.
+            if note.amount_collected < existing_note.amount_collected {
+                return Err(NoteError::DebtDecreaseNotPermitted {
+                    previous: existing_note.amount_collected,
+                    requested: note.amount_collected,
+                });
             }
         }
 
@@ -580,7 +625,7 @@ impl TrackerStateManager {
         match avl_result {
             Ok(()) => {
                 // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
+                self.storage.store_note(issuer_pubkey, &note_to_store)?;
                 self.update_state();
 
                 // Recompute the confirmation status for this note based on the
@@ -863,11 +908,43 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
+        // Carry the already-redeemed amount forward from the previous note for this pair.
+        //
+        // A new note for an existing (issuer, recipient) pair is an increase of the SAME cumulative
+        // debt, not a fresh claim. Persisting the incoming note verbatim would reset
+        // `amount_redeemed` to 0 and destroy the outstanding-debt / FIFO accounting, so the
+        // tracker's view of "how much of this edge is still outstanding" would grow without bound.
+        //
+        // Only the LOCAL record is adjusted: the AVL value committed on-chain is `amount_collected`,
+        // which the contract pins, so the signed message and the on-chain commitment are unchanged.
+        // The per-issuer reserve AVL tree (which is what the contract actually reads) is untouched.
+        let mut note_to_store = note.clone();
+
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing)
         if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
+            }
+            note_to_store.amount_redeemed = existing_note.amount_redeemed;
+            // SECURITY: cumulative debt may never decrease without the creditor's consent.
+            //
+            // The contract pins every redemption to the tracker tree, so lowering the committed
+            // totalDebt for an (issuer, recipient) pair makes every existing note for that pair
+            // permanently unredeemable: `trackerDebtCorrect` fails in the normal path AND in the
+            // emergency path, because both compare the note's totalDebt against the committed value.
+            // A debtor could therefore post totalDebt = 0, wait out the reserve's refund waiting
+            // period, and withdraw the collateral while the creditor's claim is silently dead.
+            //
+            // The debtor's signature proves that the debtor consents, never that the creditor does.
+            // Transferring debt to a *different* creditor is unaffected, because that is a different
+            // key in the tree; reducing an existing creditor's claim is not something the debtor can
+            // do unilaterally.
+            if note.amount_collected < existing_note.amount_collected {
+                return Err(NoteError::DebtDecreaseNotPermitted {
+                    previous: existing_note.amount_collected,
+                    requested: note.amount_collected,
+                });
             }
         }
 
@@ -886,12 +963,56 @@ impl TrackerStateManager {
         match avl_result {
             Ok(()) => {
                 // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
+                self.storage.store_note(issuer_pubkey, &note_to_store)?;
                 self.update_state();
                 Ok(())
             }
             Err(e) => Err(NoteError::StorageError(e.to_string())),
         }
+    }
+
+    /// Record that `amount_redeemed` was redeemed against an existing note.
+    ///
+    /// This is redemption accounting, NOT a debt update, so it deliberately bypasses
+    /// `update_note`'s requirements:
+    ///
+    /// * `update_note` demands a strictly newer timestamp and a valid issuer signature, because it
+    ///   represents a new signed note that changes the committed cumulative debt. A redemption
+    ///   changes neither the debt nor the signature.
+    /// * The timestamp is part of the signed message, so refreshing it here invalidated the stored
+    ///   issuer signature and left the creditor's note unredeemable. It is now preserved exactly.
+    /// * `amount_collected` -- the value committed in the AVL tree and checked by the contract --
+    ///   is untouched, so no AVL write is needed.
+    ///
+    /// The cumulative redeemed amount may only grow; going backwards would let a caller reset a
+    /// note's headroom and redeem the same debt again.
+    pub fn record_redemption(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        new_amount_redeemed: u64,
+    ) -> Result<(), NoteError> {
+        let mut note = self
+            .lookup_note(issuer_pubkey, recipient_pubkey)
+            .map_err(|_| NoteError::StorageError("note not found".to_string()))?;
+
+        if new_amount_redeemed < note.amount_redeemed {
+            return Err(NoteError::StorageError(format!(
+                "cumulative redeemed amount cannot decrease (stored {}, requested {})",
+                note.amount_redeemed, new_amount_redeemed
+            )));
+        }
+        // Redeeming more than was ever recorded as owed would leave the note permanently unusable.
+        if new_amount_redeemed > note.amount_collected {
+            return Err(NoteError::AmountOverflow);
+        }
+
+        if new_amount_redeemed == note.amount_redeemed {
+            return Ok(());
+        }
+
+        note.amount_redeemed = new_amount_redeemed;
+        self.storage.store_note(issuer_pubkey, &note)
     }
 
     /// Get the total debt for a specific (issuer, receiver) pair from the AVL tree

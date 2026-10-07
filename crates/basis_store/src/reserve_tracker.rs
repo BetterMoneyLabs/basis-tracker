@@ -16,6 +16,25 @@ pub enum ReserveTrackerError {
     ReserveNotFound(String),
     #[error("Insufficient collateral: {0} < {1}")]
     InsufficientCollateral(u64, u64),
+    /// More than one reserve is tracked for the same owner.
+    ///
+    /// SECURITY (PR #14 C3): the reserve contract tracks cumulative redeemed debt **per box** (each
+    /// reserve has its own R5), while a note's signed message is only
+    /// `hash(owner || receiver) || totalDebt || timestamp`. Nothing binds the two, so with two
+    /// reserves under the same owner and tracker the SAME note redeems in full from EACH of them.
+    /// That overpays the creditor and dilutes the owner's other creditors. It cannot be fixed in the
+    /// contract without changing the signed message format, so the tracker refuses to operate in
+    /// that configuration instead: see `ReserveTracker::resolve_issuer_reserve`.
+    #[error(
+        "multiple reserves for owner {owner}: {count} tracked ({boxes}). A debt note is not bound \
+         to a specific reserve, so it would redeem in full from each one. Close or point the tracker \
+         at a single reserve per owner."
+    )]
+    MultipleReservesForOwner {
+        owner: String,
+        count: usize,
+        boxes: String,
+    },
 }
 
 /// Extended reserve information with debt tracking
@@ -112,6 +131,54 @@ impl ReserveTracker {
             .find(|reserve| reserve.owner_pubkey == owner_pubkey)
             .cloned()
             .ok_or_else(|| ReserveTrackerError::ReserveNotFound(owner_pubkey.to_string()))
+    }
+
+    /// Every tracked reserve belonging to `owner_pubkey`, ordered by box ID for determinism.
+    pub fn get_reserves_by_owner(&self, owner_pubkey: &str) -> Vec<ExtendedReserveInfo> {
+        let reserves = self.reserves.read().unwrap();
+        let mut found: Vec<ExtendedReserveInfo> = reserves
+            .values()
+            .filter(|reserve| reserve.owner_pubkey == owner_pubkey)
+            .cloned()
+            .collect();
+        // HashMap iteration order is random, so sort to keep behaviour and errors reproducible.
+        found.sort_by(|a, b| a.box_id.cmp(&b.box_id));
+        found
+    }
+
+    /// Resolve the single reserve backing `owner_pubkey`, or fail closed.
+    ///
+    /// SECURITY (PR #14 C3): the contract keeps cumulative redeemed debt per reserve box, while a
+    /// note's signature covers only `hash(owner || receiver) || totalDebt || timestamp`. A note is
+    /// therefore not bound to a reserve, and with two or more reserves under the same owner and
+    /// tracker it redeems in full against each one -- the creditor is paid twice and the owner's
+    /// other reserves are drained to make it happen.
+    ///
+    /// Off-chain, the mitigation is to refuse the ambiguous configuration rather than guess which
+    /// reserve was meant. Callers that need one reserve per owner per tracker use this instead of
+    /// `get_reserve_by_owner`, which silently returned whichever entry the HashMap yielded first.
+    ///
+    /// Note this is tracker policy, not a contract invariant: it holds only while this tracker is
+    /// the one redeeming. The underlying per-box redemption state remains a protocol limitation.
+    pub fn resolve_issuer_reserve(
+        &self,
+        owner_pubkey: &str,
+    ) -> Result<ExtendedReserveInfo, ReserveTrackerError> {
+        match self.get_reserves_by_owner(owner_pubkey).as_slice() {
+            [] => Err(ReserveTrackerError::ReserveNotFound(
+                owner_pubkey.to_string(),
+            )),
+            [only] => Ok(only.clone()),
+            many => Err(ReserveTrackerError::MultipleReservesForOwner {
+                owner: owner_pubkey.to_string(),
+                count: many.len(),
+                boxes: many
+                    .iter()
+                    .map(|r| r.box_id.clone())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            }),
+        }
     }
 
     /// Get all reserves

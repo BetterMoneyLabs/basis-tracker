@@ -70,6 +70,17 @@ When authentication is enabled, routes require the following roles:
 | `Write` | `Read` access plus note creation, redemption, and `/tracker/signature` |
 | `Admin` | `Write` access plus `/reserves/create`, `/reserves/submit`, and `/acceptance/policy` |
 
+### Authentication
+
+`server.auth.mode` accepts `"none"`, `"api_key"` or `"signature"`. **The server refuses to start with
+`mode = "none"` on a non-loopback bind address**, because in that mode every request is granted
+`Admin`. Set an authenticated mode, bind to `127.0.0.1`, or set
+`server.auth.allow_anonymous_non_loopback = true` to accept the exposure deliberately.
+
+When auth is enabled and `allowed_origins` is empty, **no CORS layer is installed** — browsers cannot
+call the tracker cross-origin. There is no wildcard origin. Add `allowed_origins` only for web clients
+you trust.
+
 All three official clients support authentication:
 `basis_cli` and `basis_app` (TUI) read `server_auth_mode` and credentials from
 `~/.basis/cli.toml`; `basis_mcp` reads the same settings from environment
@@ -324,11 +335,26 @@ curl -X POST http://localhost:3048/reserves/create \
 
 ### Submit Reserve Transaction
 
+`/reserves/submit` forwards the payload to the tracker's Ergo node (`/wallet/payment/send`) together
+with the node `api_key`, so **the node signs it with the tracker's wallet key**. To stop a caller from
+having the node pay an arbitrary address from that wallet, the endpoint only accepts a payload whose
+fingerprint matches a live, unused `submission_permit` issued by `/reserves/create`.
+
+Submit the payload **exactly** as returned — do not modify `address`, `value`, `assets` or
+`registers`. Permits are valid for 30 minutes and may be used once.
+
 ```bash
 curl -X POST http://localhost:3048/reserves/submit \
   -H "Content-Type: application/json" \
   -d '@reserve_creation_response.json'
 ```
+
+| Status | Meaning |
+|---|---|
+| `400` | Missing/malformed `submission_permit`, or the payload does not match it |
+| `403` | Unknown, expired or already-used permit (call `/reserves/create` again) |
+| `503` | No Ergo node configured on the tracker |
+| `502` | The node rejected or could not be reached |
 
 ### Get Tracker State
 

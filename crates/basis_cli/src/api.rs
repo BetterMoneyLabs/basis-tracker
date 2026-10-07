@@ -187,6 +187,15 @@ pub struct ReserveCreationResponse {
     pub requests: Vec<ReservePaymentRequest>,
     pub fee: u64,
     pub change_address: String,
+    /// Single-use permit proving this payload came from `POST /reserves/create`.
+    ///
+    /// `POST /reserves/submit` forwards the payload to the tracker's Ergo node
+    /// (`/wallet/payment/send`) with the node `api_key`, so the node signs it with the tracker's
+    /// wallet key. The server therefore only accepts a payload whose fingerprint matches a live,
+    /// unused permit, which is what stops a caller from redirecting the payment. It must be echoed
+    /// back verbatim on submit -- hence `skip_serializing_if` so the field can be absent locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_permit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

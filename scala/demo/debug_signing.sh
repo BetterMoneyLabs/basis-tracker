@@ -1,5 +1,21 @@
 #!/bin/bash
 
+# SECURITY (PR #14 S7): the participant secret is no longer hardcoded here. It was previously pasted
+# inline and is therefore public. Resolve it from the environment, or from the local participants file
+# (which is gitignored), and skip the demo if neither is available.
+if [[ -z "${ALICE_SECRET:-}" ]]; then
+    for f in secrets/participants.csv scala/secrets/participants.local.csv; do
+        if [[ -f "$f" ]]; then
+            ALICE_SECRET="$(awk -F, '$1=="alice"{print $3}' "$f")"
+            [[ -n "$ALICE_SECRET" ]] && break
+        fi
+    done
+fi
+if [[ -z "${ALICE_SECRET:-}" ]]; then
+    echo "Set ALICE_SECRET or provide secrets/participants.csv (see secrets/participants.csv.template)." >&2
+    exit 1
+fi
+
 # Debug script to check why signing might fail
 
 API_KEY="${ERGO_API_KEY:-hello}"
@@ -69,7 +85,7 @@ ALICE_BALANCE=$(curl -s "$NODE_URL/wallet/balance/$ALICE_ADDRESS" -H "api_key: $
 if echo "$ALICE_BALANCE" | grep -q "error"; then
     echo "✗ Address not in wallet: $ALICE_ADDRESS"
     echo "   Import Alice's secret key first:"
-    echo "   curl -X POST '$NODE_URL/wallet/update' -H 'api_key: $API_KEY' -H 'Content-Type: application/json' -d '{\"secret\": \"c693d626538e9dd926519c13f3855412d60aaaa9c8818e7725415a45e92f3108\"}'"
+    echo "   curl -X POST '$NODE_URL/wallet/update' -H 'api_key: $API_KEY' -H 'Content-Type: application/json' -d '{\"secret\": \"${ALICE_SECRET}\"}'"
 else
     echo "✓ Alice's address is in wallet"
     echo "   Balance: $(echo "$ALICE_BALANCE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('balance', 'unknown'))" 2>/dev/null || echo "unknown") nanoERG"

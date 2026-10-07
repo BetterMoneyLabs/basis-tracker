@@ -386,6 +386,15 @@ pub struct ReserveCreationResponse {
     pub requests: Vec<ReservePaymentRequest>,
     pub fee: u64,
     pub change_address: String,
+    /// Opaque permit proving this exact payload came from `POST /reserves/create`.
+    ///
+    /// `POST /reserves/submit` forwards the payload to the node's `/wallet/payment/send` with the
+    /// node `api_key`, which signs it with the tracker's wallet key. It therefore only accepts a
+    /// payload whose fingerprint matches a live, unused permit, so a caller cannot substitute their
+    /// own destination address, value, assets or registers. Echoed back unchanged; clients that do
+    /// not care about it can ignore it, but it is not optional in practice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_permit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

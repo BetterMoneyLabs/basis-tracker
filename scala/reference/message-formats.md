@@ -47,7 +47,7 @@ type SecretKey = Scalar;  // From k256 crate
 
 **Example (hex):**
 ```
-c693d626538e9dd926519c13f3855412d60aaaa9c8818e7725415a45e92f3108
+<32-byte secret key hex, e.g. from demo_keygen.py>
 ```
 
 ---
@@ -474,7 +474,7 @@ fn validate_tracker_signature(
 Alice (Payer/Reserve Owner):
   Address:  9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ
   Public:   0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83
-  Secret:   c693d626538e9dd926519c13f3855412d60aaaa9c8818e7725415a45e92f3108
+  Secret:   <32-byte secret key hex, e.g. from demo_keygen.py>
 
 Bob (Payee/Receiver):
   Address:  9fJj8vHmB8P7yN5xQ3kR2tM4wL6sG9cV1bX3hD5fA7eK2jN4mP

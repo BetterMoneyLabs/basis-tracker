@@ -304,6 +304,14 @@ pub async fn create_note(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -430,6 +438,14 @@ pub async fn get_notes_by_issuer(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -542,6 +558,14 @@ pub async fn get_notes_by_recipient(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -692,6 +716,14 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -786,6 +818,14 @@ pub async fn get_all_notes(
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
                 NoteError::FutureTimestamp => "Future timestamp".to_string(),
                 NoteError::PastTimestamp => "Past timestamp".to_string(),
+                NoteError::DebtDecreaseNotPermitted {
+                    previous,
+                    requested,
+                } => format!(
+                    "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                    previous, requested
+                ),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -1566,6 +1606,38 @@ pub async fn get_key_status(
     let has_pending_refund = matching_reserves
         .iter()
         .any(|reserve| reserve.is_refund_pending());
+
+    // SECURITY (PR #14 C3): fail closed when the issuer has more than one reserve.
+    //
+    // `matching_reserves.first()` used to pick whichever entry the HashMap happened to yield, which
+    // reported a confident-looking ratio for an ambiguous situation. A debt note is bound to
+    // `hash(owner || receiver)`, not to a reserve box, so with two reserves under the same owner the
+    // same note redeems in full from EACH of them. Summing the collateral would report a healthy
+    // ratio for collateral that cannot actually back the debt twice over, so refuse instead and say
+    // why. See `ReserveTracker::resolve_issuer_reserve`.
+    if matching_reserves.len() > 1 {
+        let boxes: Vec<&str> = matching_reserves
+            .iter()
+            .map(|r| r.box_id.as_str())
+            .collect();
+        tracing::warn!(
+            "issuer {} has {} reserves ({}); refusing to report a single collateralization ratio",
+            pubkey_hex,
+            matching_reserves.len(),
+            boxes.join(", ")
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(crate::models::error_response(format!(
+                "issuer {} has {} tracked reserves ({}). A debt note is not bound to a specific \
+                 reserve, so it would redeem in full against each of them. Close the extra \
+                 reserves or point the tracker at a single reserve per owner before issuing debt.",
+                pubkey_hex,
+                matching_reserves.len(),
+                boxes.join(", ")
+            ))),
+        );
+    }
 
     let (collateral, collateralization_ratio, last_updated) =
         if let Some(reserve) = matching_reserves.first() {
@@ -2610,6 +2682,79 @@ pub async fn get_reserve_proof(
     }
 }
 
+/// Look up the tracker's stored note for an (issuer, recipient) pair.
+///
+/// SECURITY (PR #14 S4): the signing endpoints must sign STORED state, never values supplied by the
+/// caller. The tracker signature is the only thing gating `enforce_acceptance_policy` and the FIFO
+/// ordering rule, so a caller who could obtain a signature over an arbitrary
+/// `(totalDebt, timestamp)` could bypass both simply by assembling the transaction themselves from
+/// `/reserve/proof` and `/tracker/proof`.
+///
+/// Returns `Err(response)` with a caller-facing status when the pair is unknown or the lookup fails.
+async fn lookup_stored_note(
+    state: &AppState,
+    issuer_pubkey_bytes: &[u8],
+    recipient_pubkey_bytes: &[u8],
+) -> Result<
+    basis_store::IouNote,
+    (
+        StatusCode,
+        Json<ApiResponse<crate::models::TrackerSignatureResponse>>,
+    ),
+> {
+    let mut issuer: basis_store::PubKey = [0u8; 33];
+    issuer.copy_from_slice(issuer_pubkey_bytes);
+    let mut recipient: basis_store::PubKey = [0u8; 33];
+    recipient.copy_from_slice(recipient_pubkey_bytes);
+
+    let (note_tx, note_rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+            issuer_pubkey: issuer,
+            recipient_pubkey: recipient,
+            response_tx: note_tx,
+        })
+        .await
+        .is_err()
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread is unavailable".to_string(),
+            )),
+        ));
+    }
+
+    match note_rx.await {
+        Ok(Ok(Some(note))) => Ok(note),
+        Ok(Ok(None)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(crate::models::error_response(
+                "No note is recorded for this (issuer, recipient) pair. The tracker signs stored \
+                 debt only; submit the note with POST /notes first."
+                    .to_string(),
+            )),
+        )),
+        Ok(Err(e)) => {
+            tracing::warn!("Note lookup failed: {:?}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(format!(
+                    "Note lookup failed: {:?}",
+                    e
+                ))),
+            ))
+        }
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread did not respond".to_string(),
+            )),
+        )),
+    }
+}
+
 // Request tracker signature for redemption
 // Following specs/server/redemption_state_spec.md - POST /tracker/signature
 #[axum::debug_handler]
@@ -2666,6 +2811,38 @@ pub async fn request_tracker_signature(
         }
     };
 
+    // SECURITY: sign the tracker's STORED (totalDebt, timestamp), never the caller's values.
+    //
+    // This endpoint used to sign whatever `total_debt` / `timestamp` the request contained, with no
+    // state lookup and no policy check. Since the tracker signature is the only gate for
+    // `enforce_acceptance_policy` and the FIFO rule, a caller could obtain a signature over any
+    // debt figure and assemble the transaction themselves from `/reserve/proof` + `/tracker/proof`,
+    // bypassing both.
+    //
+    // A request whose figures disagree with stored state is REJECTED rather than silently
+    // overwritten, so a client working from stale state gets a clear error instead of a signature
+    // for something it did not ask for.
+    let stored_note =
+        match lookup_stored_note(&state, &issuer_pubkey_bytes, &recipient_pubkey_bytes).await {
+            Ok(note) => note,
+            Err(response) => return response,
+        };
+    if payload.total_debt != stored_note.amount_collected
+        || payload.timestamp != stored_note.timestamp
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(crate::models::error_response(format!(
+                "Request does not match stored note: caller asked for totalDebt={} timestamp={}, \
+                 tracker has totalDebt={} timestamp={}. The tracker signs stored state only.",
+                payload.total_debt,
+                payload.timestamp,
+                stored_note.amount_collected,
+                stored_note.timestamp
+            ))),
+        );
+    }
+
     // Create message to be signed matching the deployed Basis reserve contract.
     // message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) (48 bytes)
     // where key = blake2b256(ownerKeyBytes || receiverBytes)
@@ -2677,8 +2854,8 @@ pub async fn request_tracker_signature(
         &recipient_pubkey_bytes
             .try_into()
             .expect("recipient pubkey is 33 bytes"),
-        payload.total_debt,
-        payload.timestamp,
+        stored_note.amount_collected,
+        stored_note.timestamp,
     );
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
@@ -3085,9 +3262,27 @@ pub async fn prepare_redemption(
         );
     }
 
-    let total_debt = match note_response_rx.await {
-        Ok(Ok(Some(note))) => note.amount_collected,
-        Ok(Ok(None)) => payload.amount,
+    // SECURITY: an unknown (issuer, recipient) pair must NOT fall back to the caller's `amount`.
+    // The old `Ok(Ok(None)) => payload.amount` branch let the tracker sign an arbitrary
+    // (totalDebt, timestamp) for a pair it has never seen -- i.e. a signature over debt that does
+    // not exist in the committed tree. Fail closed instead.
+    let stored_note = match note_response_rx.await {
+        Ok(Ok(Some(note))) => note,
+        Ok(Ok(None)) => {
+            tracing::warn!(
+                "refusing to prepare redemption: no stored note for issuer={} recipient={}",
+                payload.issuer_pubkey,
+                payload.recipient_pubkey
+            );
+            return (
+                StatusCode::NOT_FOUND,
+                Json(crate::models::error_response(
+                    "No note is recorded for this (issuer, recipient) pair. Submit the note with \
+                     POST /notes first; the tracker signs stored debt only."
+                        .to_string(),
+                )),
+            );
+        }
         Ok(Err(e)) => {
             tracing::error!("Failed to look up note for total_debt: {:?}", e);
             return (
@@ -3108,6 +3303,20 @@ pub async fn prepare_redemption(
             );
         }
     };
+
+    // Both the signed message and the context variable come from stored state.
+    let total_debt = stored_note.amount_collected;
+    // A caller-supplied timestamp that disagrees with the stored note would produce a signature over
+    // a message the contract could never match, so refuse it explicitly.
+    if payload.timestamp != stored_note.timestamp {
+        return (
+            StatusCode::CONFLICT,
+            Json(crate::models::error_response(format!(
+                "Request timestamp {} does not match the stored note timestamp {}.",
+                payload.timestamp, stored_note.timestamp
+            ))),
+        );
+    }
 
     let message_to_sign_bytes = basis_store::schnorr::signing_message(
         &issuer_pubkey_array,
@@ -3801,7 +4010,37 @@ pub async fn create_reserve_payload(
         requests: vec![payment_request],
         fee: config.transaction.fee, // Get fee from configuration
         change_address,
+        submission_permit: None,
     };
+
+    // SECURITY: bind this exact payload to a single-use permit.
+    //
+    // `/reserves/submit` hands the payload to the node's `/wallet/payment/send` together with the
+    // node `api_key`, so the node signs it with the tracker's wallet key. Fingerprinting the payload
+    // the server just built means the submit endpoint can only ever forward something the server
+    // itself produced -- the caller cannot swap in their own address, value, assets or registers.
+    let fingerprint = match crate::reserve_submission::fingerprint_of(&response) {
+        Ok(fp) => fp,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(format!(
+                    "Failed to fingerprint reserve creation payload: {}",
+                    e
+                ))),
+            );
+        }
+    };
+    if !state.reserve_submission_permits.issue(fingerprint) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::models::error_response(
+                "Too many outstanding reserve creation requests; try again shortly.".to_string(),
+            )),
+        );
+    }
+    let mut response = response;
+    response.submission_permit = Some(hex::encode(fingerprint));
 
     if token_reserve_mode {
         tracing::info!(
@@ -3853,6 +4092,84 @@ pub async fn submit_reserve_transaction(
     StatusCode,
     Json<ApiResponse<crate::models::ReserveSubmissionResponse>>,
 ) {
+    // SECURITY: only forward a payload the server itself issued.
+    //
+    // This endpoint previously passed the caller's `{address, value, assets, registers}` straight to
+    // the node's `/wallet/payment/send` along with the node `api_key`, so anybody who could reach
+    // the tracker could have the node pay an arbitrary address from the tracker's wallet -- the same
+    // wallet that holds the tracker NFT. The fingerprint of the received payload must now match a
+    // live, unused permit from `/reserves/create`, and it is consumed on use.
+    let submitted_permit = match payload.submission_permit.as_deref() {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Missing submission_permit. Call POST /reserves/create first and submit the \
+                     payload it returned unchanged."
+                        .to_string(),
+                )),
+            );
+        }
+    };
+    let fingerprint = match hex::decode(submitted_permit) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut fp = [0u8; 32];
+            fp.copy_from_slice(&bytes);
+            fp
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "Invalid submission_permit: expected 64 hex characters".to_string(),
+                )),
+            );
+        }
+    };
+    // Compute the fingerprint over the payload WITHOUT the permit field, since /reserves/create
+    // hashed it before attaching one.
+    let payload_without_permit = ReserveCreationResponse {
+        requests: payload.requests.clone(),
+        fee: payload.fee,
+        change_address: payload.change_address.clone(),
+        submission_permit: None,
+    };
+    let actual = match crate::reserve_submission::fingerprint_of(&payload_without_permit) {
+        Ok(fp) => fp,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "Failed to fingerprint submitted payload: {}",
+                    e
+                ))),
+            );
+        }
+    };
+    if actual != fingerprint {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "Payload does not match its submission_permit. The address, value, assets or \
+                 registers were modified after POST /reserves/create."
+                    .to_string(),
+            )),
+        );
+    }
+    if !state.reserve_submission_permits.consume(fingerprint) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(crate::models::error_response(
+                "Unknown, expired or already-used submission_permit. Call POST /reserves/create \
+                 again to obtain a fresh one."
+                    .to_string(),
+            )),
+        );
+    }
+
+    // The permit is only consumed once the payload is known to be legitimate; from here on the
+    // node will sign it with the tracker's wallet key.
     let node_config = &state.config.ergo.node;
     if node_config.node_url.is_empty() {
         return (

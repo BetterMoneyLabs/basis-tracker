@@ -184,7 +184,34 @@ The TUI wallet uses the same `~/.basis/cli.toml` auth settings as `basis_cli`. I
 
 ## CORS Considerations
 
-When auth is enabled, the server restricts CORS origins if `allowed_origins` is non-empty. If `allowed_origins` is empty while auth is enabled, the server allows any origin but logs a warning, because browser-based clients should use an explicit allow-list.
+When auth is enabled, the server restricts CORS origins to `allowed_origins`. If `allowed_origins`
+is empty while auth is enabled, **no CORS layer is installed at all**, so browsers refuse
+cross-origin requests while non-browser clients (curl, the CLI, the MCP server) are unaffected.
+There is no wildcard-origin branch any more.
+
+This changed after PR #14 (S1). The previous behaviour fell through to `allow_origin(Any)` whenever
+auth was enabled but `allowed_origins` was empty, which is the default — so any web page the operator
+had open in their browser could call the tracker API. In `none` mode every such request is `Admin`.
+A wildcard origin is now used only when auth is disabled, where there is no credential to steal.
+
+### Mandatory authentication off loopback
+
+`auth.mode = "none"` grants `ClientRole::Admin` to every request. The server therefore **refuses to
+start** when `mode = "none"` is combined with a non-loopback bind address, unless
+`server.auth.allow_anonymous_non_loopback = true` is set explicitly (default `false`). Loopback is
+recognised as `127.0.0.0/8`, `::1`, and the name `localhost`.
+
+Two related changes from the same review:
+
+- A failed `AppConfig::load()` now **exits**. It used to log a warning, retry, and fall back to a
+  hardcoded default whose auth mode was `none` — so an operator who wrote the documented
+  `mode = "api_key"` (which did not match the serde name `apikey`) silently got an anonymous Admin
+  server on `0.0.0.0`. `api_key` is now the canonical spelling; `apikey` is accepted as an alias.
+- In signature mode the replay cache is written **after** the signature verifies (it used to be
+  written first, so a forged request could burn a client's nonce) and is keyed on the **parsed**
+  timestamp rather than the raw header, which otherwise allowed unlimited replay by sending
+  `X-Signature-Timestamp: 0<ts>` (leading zeros parse to the same integer but produced a fresh cache
+  key). The request body is also capped.
 
 ## Security Checklist
 

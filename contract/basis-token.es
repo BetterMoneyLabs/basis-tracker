@@ -32,7 +32,7 @@
     //    preventing replay attacks with old notes.
     //  * to redeem: B contacts tracker to obtain signature on the debt note, then presents reserve owner's signature
     //    (from original IOU note) and tracker's signature to the on-chain contract along with AVL tree proofs:
-    //    - proof for reserve tree lookup (context var #7, optional for first redemption)
+    //    - proof for reserve tree lookup (context var #7, optional; required from the second redemption on)
     //    - proof for tracker tree lookup (context var #8, required)
     //  * always possible to top up the reserve. To redeem partially, reserve holder can make an offchain payment to self (A -> A)
     //    updating the cumulative debt, then redeem the desired amount.
@@ -165,7 +165,9 @@
     // #5 - proof for insertOrUpdate into reserve's AVL tree (Coll[Byte])
     // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp)
     // #7 - [OPTIONAL] proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)
-    //      Not needed for first redemption (when redeemedDebt = 0)
+    //      Omitted only for a first redemption. If omitted, the contract uses AvlTree.insert,
+    //      which fails if the key is already present -- so omitting #7 for an already-redeemed
+    //      note is rejected rather than treated as "nothing redeemed yet".
     // #8 - proof for AVL tree lookup in tracker's tree for hash(ownerKey||receiverKey) -> totalDebt (required)
 
     // action and reserve output index. By passing them instead of hard-coding, we allow for multiple notes to be
@@ -190,18 +192,32 @@
 
     // common checks for all the paths (not incl. token #1 value and R5 check)
     // Note: selfOut.tokens == SELF.tokens is NOT used here because token #1 amount changes
+    val uniqueReserveInput = INPUTS.filter({ (in: Box) =>
+      in.propositionBytes == SELF.propositionBytes &&
+      in.R4[GroupElement].isDefined && in.R4[GroupElement].get == ownerKey
+    }).size == 1
+
     val selfPreserved =
+            uniqueReserveInput &&
             selfOut.propositionBytes == SELF.propositionBytes &&
             selfOut.R4[GroupElement].get == SELF.R4[GroupElement].get &&
             selfOut.R6[Coll[Byte]].get == SELF.R6[Coll[Byte]].get
 
-    // Verify token IDs at positions #0 and #1 are preserved in output
-    // Token #0 value is always 1 (0-value tokens not possible in Ergo)
+    // Verify token IDs at positions #0 and #1 are preserved in output, and that token #0 (the
+    // reserve NFT) keeps its amount. SECURITY: without the amount check, an output could carry more
+    // units of the reserve NFT than the input, i.e. mint additional reserve NFTs.
     // Token #1 value changes according to redemption/top-up logic
     val tokenIdsPreserved = 
         selfOut.tokens.size == 2 &&
         selfOut.tokens(0)._1 == tokenId0 &&
+        selfOut.tokens(0)._2 == SELF.tokens(0)._2 &&
         selfOut.tokens(1)._1 == tokenId1
+
+    // SECURITY: the reserve box's ERG must never decrease on the redemption or top-up paths.
+    // Action #1 (top up) requires no signature, so without this check anybody could add one token
+    // unit and take the whole ERG balance. Action #0 computed the redeemed amount from the token
+    // delta only, which likewise left selfOut.value unconstrained during a redemption.
+    val ergPreserved = selfOut.value >= SELF.value
 
     if (action == 0) {
       // redemption path
@@ -213,7 +229,7 @@
       // #5 - proof for insertOrUpdate into reserve's AVL tree (Coll[Byte])
       // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp)
       // #7 - [OPTIONAL] proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)
-      //      Not needed for first redemption (when redeemedDebt = 0)
+      //      Omitted only for a first redemption (see the insert/insertOrUpdate branch below)
       // #8 - proof for AVL tree lookup in tracker's tree for hash(ownerKey||receiverKey) -> totalDebt (required)
 
       // Base point for elliptic curve operations
@@ -271,9 +287,12 @@
         0L
       }
 
-      // Verify that the new timestamp is greater than the stored timestamp
-      // This prevents replay attacks with old notes
-      val timestampCorrect = timestamp > storedTimestamp
+      // Verify that the new timestamp is not older than the stored one.
+      // SECURITY: >= (not >) so the remainder of a partially redeemed note can still be claimed
+      // after the reserve is topped up. This cannot weaken replay protection: redeemedDebt below
+      // accumulates across redemptions and properlyRedeemed requires redeemed <= totalDebt -
+      // redeemedDebt. It also cannot lower the stored timestamp.
+      val timestampCorrect = timestamp >= storedTimestamp
 
       // Check if enough time has passed for emergency redemption (without tracker signature)
       // NOTE: After 3 days (2160 blocks), the tracker signature becomes optional.
@@ -350,8 +369,19 @@
       val newRedeemed = redeemedDebt + redeemed
       val treeValue = longToByteArray(timestamp) ++ longToByteArray(newRedeemed)
       val redeemedKeyVal = (key, treeValue)  // key -> (timestamp, redeemed debt value)
-      val insertOrUpdateProof = getVar[Coll[Byte]](5).get // Merkle proof for insertOrUpdate
-      val nextTree: AvlTree = SELF.R5[AvlTree].get.insertOrUpdate(Coll(redeemedKeyVal), insertOrUpdateProof).get
+      val insertOrUpdateProof = getVar[Coll[Byte]](5).get // Merkle proof for the AVL update
+      // SECURITY (replay protection): context var #7 stays optional, but omitting it no longer
+      // means "never redeemed". Without #7 we use insert instead of insertOrUpdate, and sigma's
+      // AvlTree.insert THROWS when the key is already present. So a redemption that omits #7 for a
+      // note which has already been redeemed against this reserve is rejected, while a genuine
+      // first redemption (key absent) still succeeds. Because this branch can only complete when
+      // the key was absent, the storedTimestamp/redeemedDebt = 0 read above is self-proving here.
+      val nextTree: AvlTree = if (lookupProofOpt.isDefined) {
+        SELF.R5[AvlTree].get.insertOrUpdate(Coll(redeemedKeyVal), insertOrUpdateProof).get
+      } else {
+        // insert yields None (and so this .get throws) when the key is already present
+        SELF.R5[AvlTree].get.insert(Coll(redeemedKeyVal), insertOrUpdateProof).get
+      }
       // Verify tree was properly updated in output
       val properRedemptionTree = nextTree == selfOut.R5[AvlTree].get
 
@@ -365,6 +395,7 @@
       // Combine all validation conditions
       sigmaProp(selfPreserved &&
                 tokenIdsPreserved &&
+                ergPreserved &&
                 trackerIdCorrect &&
                 trackerDebtCorrect &&
                 timestampCorrect &&
@@ -384,6 +415,7 @@
       sigmaProp(
         selfPreserved &&
         tokenIdsPreserved &&
+        ergPreserved &&
         selfOut.R5[AvlTree].get == SELF.R5[AvlTree].get && // as R5 register preservation is not checked in selfPreserved
         selfOut.R7[Long].getOrElse(0L) == refundHeight && // pending refund flag (if any) must be preserved
         (tokenAmountOut - tokenAmountIn >= 1) // at least 1 token unit added

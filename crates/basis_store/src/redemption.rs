@@ -33,6 +33,14 @@ impl From<NoteError> for RedemptionError {
                 RedemptionError::StorageError("Future timestamp".to_string())
             }
             NoteError::PastTimestamp => RedemptionError::StorageError("Past timestamp".to_string()),
+            NoteError::DebtDecreaseNotPermitted {
+                previous,
+                requested,
+            } => RedemptionError::StorageError(format!(
+                "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                previous, requested
+            )),
             NoteError::RedemptionTooEarly => RedemptionError::RedemptionTooEarly(0, 0),
             NoteError::StorageError(msg) => RedemptionError::StorageError(msg),
             _ => RedemptionError::StorageError(format!("{:?}", err)),
@@ -355,22 +363,45 @@ impl RedemptionManager {
             .lookup_note(issuer_pubkey, recipient_pubkey)
             .map_err(|_| RedemptionError::NoteNotFound)?;
 
-        // Capture the note's payment timestamp before it is refreshed; the reserve AVL tree value
-        // is `payment_timestamp || already_redeemed` and must match the on-chain reserve entry.
+        // SECURITY (PR #14 S4): the note's timestamp is PART OF THE SIGNED MESSAGE
+        // (`key || totalDebt || timestamp`). Refreshing it here made the stored issuer signature stop
+        // verifying, so the creditor's note silently became unredeemable. Redemptions do not change
+        // the debt figure, so the timestamp must stay exactly as the issuer signed it.
         let payment_timestamp = note.timestamp;
 
-        // Update the redeemed amount
-        note.amount_redeemed += redeemed_amount;
+        // SECURITY: do not let the caller drive the cumulative redeemed amount past the debt.
+        // `redeemed_amount` arrives from the request body (`/redeem/complete`,
+        // `/redemption/submit`), and a plain `+=` would accept more than was ever owed, permanently
+        // consuming the note's headroom.
+        let outstanding = note.amount_collected.saturating_sub(note.amount_redeemed);
+        if redeemed_amount > outstanding {
+            return Err(RedemptionError::StorageError(format!(
+                "redemption of {} exceeds the outstanding debt of {} for this note \
+                 (totalDebt {}, already redeemed {})",
+                redeemed_amount, outstanding, note.amount_collected, note.amount_redeemed
+            )));
+        }
 
-        // Update the timestamp to ensure it's newer than the existing one
-        note.timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| RedemptionError::StorageError("Failed to get current time".to_string()))?
-            .as_millis() as u64;
+        // SECURITY: checked arithmetic. A plain `+=` panics in debug builds and wraps in release
+        // builds, so a large caller-supplied amount could roll the counter over and make the note
+        // look freshly redeemable.
+        note.amount_redeemed = note
+            .amount_redeemed
+            .checked_add(redeemed_amount)
+            .ok_or_else(|| {
+                RedemptionError::StorageError(format!(
+                    "redemption amount overflow: {} + {}",
+                    note.amount_redeemed, redeemed_amount
+                ))
+            })?;
 
-        // Update the note in tracker
+        // Update the note in tracker.
+        //
+        // `record_redemption` rather than `update_note`: a redemption is not a new signed note, so it
+        // must not require a strictly newer timestamp, must not re-verify an issuer signature that
+        // did not change, and must not rewrite the committed `amount_collected`.
         self.tracker
-            .update_note(issuer_pubkey, &note)
+            .record_redemption(issuer_pubkey, recipient_pubkey, note.amount_redeemed)
             .map_err(RedemptionError::from)?;
 
         // Keep the reserve AVL tree in sync with the cumulative redeemed amount so subsequent
@@ -968,12 +999,16 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Regression test: `complete_redemption` must keep the reserve AVL tree in sync using the
-    /// note's PRE-refresh payment timestamp (the reserve tree value is
-    /// `payment_timestamp || cumulative_redeemed`, and the on-chain contract inserts exactly
-    /// that). Otherwise subsequent redemptions produce proofs that fail on-chain.
+    /// Regression test: `complete_redemption` must keep the reserve AVL tree in sync using the note's
+    /// payment timestamp (the reserve tree value is `payment_timestamp || cumulative_redeemed`, and
+    /// the on-chain contract inserts exactly that). Otherwise subsequent redemptions produce proofs
+    /// that fail on-chain.
+    ///
+    /// It must ALSO leave the note's own timestamp alone: that timestamp is part of the signed
+    /// message, so refreshing it invalidated the stored issuer signature and left the creditor's note
+    /// permanently unredeemable. Both halves are asserted below.
     #[test]
-    fn test_complete_redemption_syncs_reserve_tree_with_pre_refresh_timestamp() {
+    fn test_complete_redemption_preserves_timestamp_and_syncs_reserve_tree() {
         let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
@@ -1022,10 +1057,17 @@ mod tests {
             .lookup_note(&issuer_pubkey, &recipient_pubkey)
             .expect("lookup note");
         assert_eq!(updated.amount_redeemed, redeemed);
-        assert!(
-            updated.timestamp > payment_timestamp,
-            "note timestamp must be refreshed"
+        // SECURITY (PR #14 S4): the timestamp is part of the signed message
+        // (`key || totalDebt || timestamp`), so a redemption must NOT refresh it. It used to, which
+        // made the stored issuer signature stop verifying and left the creditor's note permanently
+        // unredeemable. The issuer's signature must still validate after a redemption.
+        assert_eq!(
+            updated.timestamp, payment_timestamp,
+            "a redemption must not change the note timestamp"
         );
+        updated
+            .verify_signature(&issuer_pubkey)
+            .expect("issuer signature must still verify after a redemption");
 
         // Reserve tree must contain (key, payment_timestamp || cumulative_redeemed) with the
         // PRE-refresh timestamp — compare against an independently built reference tree.

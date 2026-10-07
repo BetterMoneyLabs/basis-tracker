@@ -8,6 +8,7 @@ pub mod config;
 pub mod models;
 pub mod redemption_build;
 pub mod reserve_api;
+pub mod reserve_submission;
 pub mod store;
 pub mod tracker_box_updater;
 
@@ -42,6 +43,12 @@ pub struct AppState {
     pub tracker_storage: basis_store::persistence::TrackerStorage,
     pub acceptance_predicate: Option<std::sync::Arc<dyn acceptance::NotePredicate>>,
     pub policy_storage: basis_store::persistence::AcceptancePolicyStorage,
+    /// Single-use permits for `POST /reserves/submit`, issued by `POST /reserves/create`.
+    ///
+    /// Without this the submit endpoint would forward caller-chosen payment instructions to the
+    /// node's `/wallet/payment/send` together with the node `api_key`, letting any reachable caller
+    /// spend from the tracker's wallet. See `reserve_submission` for the full rationale.
+    pub reserve_submission_permits: std::sync::Arc<reserve_submission::PermitRegistry>,
     // Note: tracker_scanner is not stored here due to Send trait bounds
     // Tracker box ID is fetched from tracker_storage directly
 }

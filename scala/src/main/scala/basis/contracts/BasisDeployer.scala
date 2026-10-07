@@ -42,8 +42,19 @@ object BasisDeployer extends App {
   val basisAddress = BasisConstants.getAddressFromErgoTree(basisErgoTree)
 
   // Use BasisConstants.basisPlasmaParameters for consistency with BasisNoteRedeemer and TrackerBoxSetup
-  val InsertOnly = AvlTreeFlags(insertAllowed = true, updateAllowed = false, removeAllowed = false)
-  def emptyPlasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](InsertOnly, BasisConstants.basisPlasmaParameters)
+  // SECURITY: the reserve's R5 must allow insert AND update.
+  //
+  // This was InsertOnly (flags 0x01), which matches the TRACKER tree's needs but not the reserve's:
+  // both basis.es and basis-token.es redemption paths call
+  // `SELF.R5[AvlTree].get.insertOrUpdate(...)`, and sigma's insertOrUpdate yields None (so the `.get`
+  // throws) when an Update is applied to a tree whose updateAllowed == false. A reserve box created
+  // with InsertOnly was therefore redeemable exactly ONCE per (owner, receiver) pair -- the second
+  // partial redemption of the same note always failed on-chain. Every test used
+  // `basisReserveFlags` with updateAllowed = true, so no test exercised the deployed shape.
+  //
+  // The tracker box's R5 is a different tree and correctly stays InsertOnly.
+  val ReserveTreeFlags = AvlTreeFlags(insertAllowed = true, updateAllowed = true, removeAllowed = false)
+  def emptyPlasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](ReserveTreeFlags, BasisConstants.basisPlasmaParameters)
   val emptyTreeErgoValue: ErgoValue[AvlTree] = emptyPlasmaMap.ergoValue
   val emptyTree: AvlTree = emptyTreeErgoValue.getValue
 

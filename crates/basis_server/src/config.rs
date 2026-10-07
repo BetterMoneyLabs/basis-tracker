@@ -71,6 +71,14 @@ pub struct AuthConfig {
     /// Request signature timestamp tolerance in milliseconds.
     #[serde(default = "default_signature_timestamp_tolerance_ms")]
     pub signature_timestamp_tolerance_ms: u64,
+    /// Allow `mode = "none"` on a non-loopback bind address.
+    ///
+    /// SECURITY: in `none` mode every request is granted `ClientRole::Admin`, so a tracker bound
+    /// to anything other than loopback with `none` is an open, unauthenticated admin API on the
+    /// operator's network. The server refuses to start in that combination unless this flag is set
+    /// explicitly. Defaults to false, so the safe case is the default case.
+    #[serde(default)]
+    pub allow_anonymous_non_loopback: bool,
 }
 
 impl Default for AuthConfig {
@@ -81,18 +89,28 @@ impl Default for AuthConfig {
             authorized_clients: Vec::new(),
             allowed_origins: Vec::new(),
             signature_timestamp_tolerance_ms: default_signature_timestamp_tolerance_ms(),
+            allow_anonymous_non_loopback: false,
         }
     }
 }
 
 /// Authentication scheme.
+///
+/// The wire names are `none`, `api_key` and `signature`. `api_key` is what every consumer in this
+/// repository already uses (`config/basis.toml.example`, `docs/CONFIGURATION.md`, the CLI's
+/// `TrackerAuth` and the MCP server's env parsing), so `snake_case` is the canonical spelling.
+/// A previous `rename_all = "lowercase"` produced `apikey`, which no documented value matched --
+/// and because the server used to fall back to defaults on a config parse error, writing the
+/// documented `mode = "api_key"` silently yielded an anonymous-Admin server. The `apikey` alias is
+/// kept so an existing config keeps working instead of silently changing behaviour.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     /// No authentication.
     #[default]
     None,
     /// Shared API key checked from request headers.
+    #[serde(alias = "apikey", alias = "API_KEY")]
     ApiKey,
     /// Per-client secp256k1 request signatures.
     Signature,
@@ -266,7 +284,13 @@ impl AppConfig {
             // Node configuration defaults
             .set_default("ergo.node.start_height", "")?
             .set_default("ergo.node.reserve_contract_p2s", "")?
-            .set_default("ergo.node.node_url", "http://159.89.116.15:11088")?
+            // SECURITY: default to a LOCAL node, not a third-party host.
+            //
+            // This used to default to `http://159.89.116.15:11088`, a public mainnet node over
+            // plaintext HTTP. An operator who did not set `node_url` therefore sent every request
+            // -- including the node `api_key`, which grants full wallet access -- to somebody
+            // else's machine, unencrypted. Matches config/basis.toml.example.
+            .set_default("ergo.node.node_url", "http://127.0.0.1:9053")?
             .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
             .set_default("ergo.node.api_key", "")? // Set via config file or BASIS_ERGO_NODE_API_KEY env var
             // Transaction configuration defaults
@@ -300,6 +324,59 @@ impl AppConfig {
         format!("{}:{}", self.server.host, self.server.port)
             .parse()
             .expect("Invalid socket address")
+    }
+
+    /// Whether the configured bind address is loopback-only.
+    ///
+    /// A hostname that is not an IP literal (for example `localhost`) is resolved, so the common
+    /// local-development spellings are recognised. Anything that cannot be resolved is treated as
+    /// NON-loopback, which is the safe direction: the caller then requires authentication.
+    pub fn binds_loopback_only(&self) -> bool {
+        use std::net::{IpAddr, ToSocketAddrs};
+
+        let host = self.server.host.trim();
+        if host.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        // A bare IPv6 host in config is usually written without brackets.
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return ip.is_loopback();
+        }
+        match (host, self.server.port).to_socket_addrs() {
+            Ok(addrs) => {
+                let mut any = false;
+                for addr in addrs {
+                    any = true;
+                    if !addr.ip().is_loopback() {
+                        return false;
+                    }
+                }
+                any
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Refuse an unauthenticated server that is reachable from outside this machine.
+    ///
+    /// In `AuthMode::None` every request is treated as `ClientRole::Admin`, which makes the API a
+    /// complete control surface over the tracker's wallet, notes and acceptance policy. Returning
+    /// `Err` here is what keeps the old `auth.mode = "none"` + `host = "0.0.0.0"` default from
+    /// shipping an open admin port.
+    pub fn validate_startup(&self) -> Result<(), String> {
+        if self.server.auth.mode != AuthMode::None {
+            return Ok(());
+        }
+        if self.binds_loopback_only() || self.server.auth.allow_anonymous_non_loopback {
+            return Ok(());
+        }
+        Err(format!(
+            "refusing to start: auth.mode = \"none\" grants every caller Admin, but the server is \
+             bound to {} (not loopback). Set server.auth.mode to \"api_key\" or \"signature\", bind \
+             to 127.0.0.1, or -- if you really understand the exposure -- set \
+             server.auth.allow_anonymous_non_loopback = true.",
+            self.socket_addr()
+        ))
     }
 
     /// Get the Ergo node configuration

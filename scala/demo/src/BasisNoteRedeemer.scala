@@ -282,9 +282,10 @@ object BasisNoteRedeemer extends App {
    * Tree value format: timestamp (8 bytes) ++ redeemedAmount (8 bytes) = 16 bytes
    */
   def generateReserveInsertProof(payerKey: String, payeeKey: String, timestamp: Long, redeemedAmount: Long): (Array[Byte], AvlTree) = {
-    // Create PlasmaMap with InsertOnly flags and correct parameters (must match reserve box)
-    val InsertOnly = AvlTreeFlags(insertAllowed = true, updateAllowed = false, removeAllowed = false)
-    val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](InsertOnly, Constants.chainCashPlasmaParameters)
+    // SECURITY: insert + update flags, matching the reserve box's R5 (see BasisDeployer).
+    // With InsertOnly the second redemption of the same note could never be proven.
+    val ReserveTreeFlags = AvlTreeFlags(insertAllowed = true, updateAllowed = true, removeAllowed = false)
+    val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](ReserveTreeFlags, Constants.chainCashPlasmaParameters)
 
     // Create the key: hash(payerKey || payeeKey)
     val key = Blake2b256(

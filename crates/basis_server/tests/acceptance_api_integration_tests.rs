@@ -754,6 +754,9 @@ async fn create_test_app(
         tracker_storage,
         acceptance_predicate,
         policy_storage,
+        reserve_submission_permits: std::sync::Arc::new(
+            basis_server::reserve_submission::PermitRegistry::new(),
+        ),
     };
 
     axum::Router::new()
@@ -851,6 +854,9 @@ async fn create_test_app_with_policy_routes(
         tracker_storage,
         acceptance_predicate,
         policy_storage,
+        reserve_submission_permits: std::sync::Arc::new(
+            basis_server::reserve_submission::PermitRegistry::new(),
+        ),
     };
 
     axum::Router::new()
@@ -951,6 +957,9 @@ async fn create_test_app_with_all_routes(
         tracker_storage,
         acceptance_predicate,
         policy_storage,
+        reserve_submission_permits: std::sync::Arc::new(
+            basis_server::reserve_submission::PermitRegistry::new(),
+        ),
     };
 
     axum::Router::new()

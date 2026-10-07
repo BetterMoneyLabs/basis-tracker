@@ -842,8 +842,28 @@ async fn build_redemption_inner(
         };
 
     // Change address: the owner of the first selected fee box (which we sign), else config/recipient.
+    // SECURITY: change always goes back to the tracker's own address.
+    //
+    // The fee inputs come from the TRACKER's wallet (`select_fee_inputs` over `/wallet/boxes/unspent`)
+    // and are signed with the tracker key, so a caller-chosen `change_address` meant a caller could
+    // name any destination for the tracker's own ERG. Repeating a 1-nanoERG redemption against a
+    // tiny self-owned reserve handed out one wallet box minus the fee each time.
+    //
+    // `change_address` is still accepted on the wire for compatibility, but it is IGNORED. The
+    // configured change address wins; the fee box's own tree is the fallback when nothing is set.
     let change_address = match &payload.change_address {
-        Some(a) => a.clone(),
+        Some(a) => {
+            tracing::warn!(
+                "Ignoring caller-supplied change_address ({}): redemption change always returns to \
+                 the tracker's configured address.",
+                a
+            );
+            state
+                .config
+                .get_change_address()
+                .or_else(|_| ergo_tree_to_p2pk_address(&fee_boxes[0].ergo_tree))
+                .unwrap_or_else(|_| recipient_address.clone())
+        }
         None => ergo_tree_to_p2pk_address(&fee_boxes[0].ergo_tree)
             .or_else(|_| state.config.get_change_address().map_err(|e| e.to_string()))
             .unwrap_or_else(|_| recipient_address.clone()),
@@ -869,9 +889,21 @@ async fn build_redemption_inner(
         serialize_ergo_long(payload.timestamp as i64),
     );
     context_extension.insert("5".to_string(), serialize_coll_bytes(&insert_proof));
-    if !payload.emergency {
-        context_extension.insert("6".to_string(), serialize_coll_bytes(&tracker_signature));
-    }
+    // Context var #6 must ALWAYS be present. The contract reads it with
+    // `getVar[Coll[Byte]](6).get`, and `.get` on an absent var throws -- so omitting the key
+    // outright made every emergency redemption fail on-chain, leaving the contract's own
+    // `enoughTimeSpent` fallback (which allows omitting the tracker signature after the 3-day
+    // window) unreachable. An EMPTY Coll[Byte] is the correct encoding for "no signature": the
+    // contract branches on `trackerSigBytes.size > 0`. The Scala reference implementation and the
+    // CLI both send var 6 unconditionally for the same reason.
+    context_extension.insert(
+        "6".to_string(),
+        if payload.emergency {
+            serialize_coll_bytes(&[])
+        } else {
+            serialize_coll_bytes(&tracker_signature)
+        },
+    );
     if let Some(ref lp) = reserve_lookup_proof {
         context_extension.insert("7".to_string(), serialize_coll_bytes(lp));
     }

@@ -359,14 +359,33 @@ between Scala and Rust implementations.
 - **Signature**: `0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000`
 - **Expected verify**: `false`
 
-### TV003 - Valid tracker signature
+### TV003 - Signature with a contract-incompatible challenge
 - **Issuer pubkey**: `037c3f0429768437a942f1818ef1616c609b7a6d8a8dd245e179c8c0838e7d169d`
 - **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
 - **Amount**: `500000000`
 - **Timestamp**: `1743379201000`
 - **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000001dcd650000000195e97f7be8`
 - **Signature**: `024900b6f2a6c83c9158420e7e15bc211e761f5157fe84f2a25499340e731c420624c6b3f14a59b811d50ab0492e53784b541a53688452898924142a313cb64a37`
-- **Expected verify**: `true`
+- **Expected verify**: `false`
+
+> **This vector was previously labelled "Valid tracker signature" with `Expected verify: true`. That
+> was wrong, and the mistake was itself a bug report.**
+>
+> Its response `z` is fine (`bitLength` 6), but the Fiat-Shamir challenge is
+> `f7c4bea73d300504021d76b23f7e9d9b67598a18061971b95b47eed56c6fb74c` — the first byte is `0xf7`.
+> The contract reads both values with ErgoScript's `byteArrayToBigInt`, which is a **signed**
+> big-endian conversion, so `0xf7..` becomes a negative number and `pubKey.exp(negative)` throws.
+>
+> Two implementations disagreed with that:
+>
+> * `SigUtils.sign` only retried on `z.bitLength > 255` and never checked the challenge, so this
+>   reference signer emitted such signatures routinely.
+> * The Rust verifier checked only `z` too, so the tracker accepted and pinned a note whose
+>   redemption could never execute — the creditor's funds were stuck with no way to recover.
+>
+> Both now enforce the challenge rule (`SigUtils.sign` retries; `SchnorrVerifier` rejects). The
+> vector is kept with `should_verify: false` so the gap cannot silently reopen. See
+> `specs/pr14_triage.md` (S5).
 
 ### TV004 - Wrong signer signature should fail
 - **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`

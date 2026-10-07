@@ -13,8 +13,15 @@ database_url = "sqlite:data/basis.db"
 # tls_key_path = "server.key"
 
 [server.auth]
-# Authentication mode: "none" (default), "api_key", or "signature".
+# Authentication mode: "none", "api_key", or "signature".
+#
+# SECURITY: "none" grants EVERY caller Admin. The server therefore refuses to start with
+# mode = "none" unless it is bound to a loopback address (127.0.0.1 / ::1 / "localhost").
+# Set one of the authenticated modes, or bind to loopback.
 mode = "none"
+# Escape hatch for the rule above. Leave false unless you have a specific reason: it re-exposes a
+# full admin API (including the tracker's wallet) to the network.
+# allow_anonymous_non_loopback = false
 # Shared API key for server-to-server / MCP clients when mode = "api_key".
 # api_key = "change-me"
 # Authorized clients when mode = "signature". Each entry has a 66-character

@@ -54,8 +54,15 @@ object BasisConstants {
   // keyLength = 32 (Blake2b256 hash of ownerKey || receiverKey)
   val basisPlasmaParameters: PlasmaParameters = PlasmaParameters(32, None)
 
+  // SECURITY: insert + update, matching what the reserve contract's insertOrUpdate requires.
+  // InsertOnly (0x01) made every reserve box unredeemable after the first partial redemption of a
+  // given (owner, receiver) pair. The TRACKER tree is a separate tree and correctly stays
+  // InsertOnly, since it only ever inserts fresh (owner, receiver) -> totalDebt pairs.
+  val basisReserveTreeFlags: AvlTreeFlags =
+    AvlTreeFlags(insertAllowed = true, updateAllowed = true, removeAllowed = false)
+
   def emptyBasisPlasmaMap: PlasmaMap[Array[Byte], Array[Byte]] =
-    new PlasmaMap[Array[Byte], Array[Byte]](AvlTreeFlags.InsertOnly, basisPlasmaParameters)
+    new PlasmaMap[Array[Byte], Array[Byte]](basisReserveTreeFlags, basisPlasmaParameters)
 
   val emptyTreeErgoValue: ErgoValue[AvlTree] = emptyBasisPlasmaMap.ergoValue
   val emptyTree: AvlTree = emptyTreeErgoValue.getValue
