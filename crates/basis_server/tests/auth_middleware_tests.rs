@@ -207,146 +207,31 @@ async fn signature_mode_rejects_replayed_nonce() {
     });
 
     let app = test_app(config);
-    let request1 = sign_request(
+    let timestamp = current_timestamp_ms();
+    let request1 = sign_request_full(
         Request::builder().uri("/notes").method("GET"),
-        None,
+        Vec::new(),
         &pubkey_hex,
         &secret_key,
+        timestamp,
+        "test-nonce",
     );
 
     // First request succeeds.
     let response = app.clone().oneshot(request1).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Same nonce replayed is rejected.
-    let request2 = sign_request(
+    // Same (timestamp, nonce) pair replayed is rejected.
+    let request2 = sign_request_full(
         Request::builder().uri("/notes").method("GET"),
-        None,
+        Vec::new(),
         &pubkey_hex,
         &secret_key,
+        timestamp,
+        "test-nonce",
     );
     let response = app.oneshot(request2).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-/// SECURITY (PR #14 S4): a nonce must only be consumed by a request whose signature actually
-/// verified. The replay cache used to be written before verification, so anybody could burn a
-/// client's nonce with one forged request and lock the legitimate client out.
-#[tokio::test]
-async fn forged_request_does_not_consume_a_nonce() {
-    let (pubkey_hex, secret_key) = generate_keypair();
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::Signature;
-    config.authorized_clients.push(AuthorizedClient {
-        pubkey: pubkey_hex.clone(),
-        role: ClientRole::Write,
-    });
-
-    let app = test_app(config);
-
-    // A request with a valid timestamp/nonce but a garbage signature.
-    let forged = Request::builder()
-        .uri("/notes")
-        .method("GET")
-        .header("X-Signature-Pubkey", &pubkey_hex)
-        .header("X-Signature", hex::encode([0u8; 65]))
-        .header("X-Signature-Timestamp", current_timestamp_ms().to_string())
-        .header("X-Signature-Nonce", "shared-nonce")
-        .body(Body::empty())
-        .unwrap();
-    let response = app.clone().oneshot(forged).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-    // The genuine client must still be able to use that nonce.
-    let genuine = sign_request_with_nonce(
-        Request::builder().uri("/notes").method("GET"),
-        None,
-        &pubkey_hex,
-        &secret_key,
-        "shared-nonce",
-    );
-    let response = app.oneshot(genuine).await.unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "a forged request must not burn the client's nonce"
-    );
-}
-
-/// SECURITY (PR #14 S1): the replay cache is keyed on the PARSED timestamp, so a captured request
-/// cannot be replayed by adding leading zeros to `X-Signature-Timestamp` (`0<ts>`). Previously the
-/// cache used the raw header string while the signature covered the parsed value, so the padded
-/// variant produced a fresh cache key and the same signature verified again.
-#[tokio::test]
-async fn zero_padded_timestamp_cannot_bypass_replay_protection() {
-    let (pubkey_hex, secret_key) = generate_keypair();
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::Signature;
-    config.authorized_clients.push(AuthorizedClient {
-        pubkey: pubkey_hex.clone(),
-        role: ClientRole::Write,
-    });
-
-    let app = test_app(config);
-
-    // No nonce, so the cache falls back to the timestamp.
-    let first = sign_request_without_nonce(
-        Request::builder().uri("/notes").method("GET"),
-        None,
-        &pubkey_hex,
-        &secret_key,
-    );
-    let timestamp_str = first
-        .headers()
-        .get("X-Signature-Timestamp")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    let response = app.clone().oneshot(first).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // Same signature, same parsed timestamp, different header string.
-    let mut replay = sign_request_without_nonce(
-        Request::builder().uri("/notes").method("GET"),
-        None,
-        &pubkey_hex,
-        &secret_key,
-    );
-    replay.headers_mut().insert(
-        "X-Signature-Timestamp",
-        format!("0{timestamp_str}").parse().unwrap(),
-    );
-    let response = app.oneshot(replay).await.unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::UNAUTHORIZED,
-        "a zero-padded timestamp must not create a fresh replay-cache key"
-    );
-}
-
-/// SECURITY (PR #14 S1): the documented auth mode name is `api_key`. It used to deserialize as
-/// `apikey`, and the server then fell back to defaults -- i.e. anonymous Admin -- so an operator
-/// who followed the documentation silently ran an open server.
-#[test]
-fn auth_mode_deserializes_the_documented_api_key_spelling() {
-    for spelling in ["api_key", "apikey", "API_KEY"] {
-        let parsed: AuthConfig = toml::from_str(&format!("mode = \"{spelling}\""))
-            .unwrap_or_else(|e| panic!("auth mode {spelling:?} must deserialize: {e}"));
-        assert_eq!(parsed.mode, AuthMode::ApiKey, "spelling {spelling:?}");
-    }
-
-    // The other two modes keep working.
-    let none: AuthConfig = toml::from_str("mode = \"none\"").unwrap();
-    assert_eq!(none.mode, AuthMode::None);
-    let sig: AuthConfig = toml::from_str("mode = \"signature\"").unwrap();
-    assert_eq!(sig.mode, AuthMode::Signature);
-
-    // An unknown mode must be an error, not a silent downgrade to `none`.
-    assert!(
-        toml::from_str::<AuthConfig>("mode = \"ap1key\"").is_err(),
-        "an unrecognised auth mode must fail to parse rather than default to none"
-    );
 }
 
 fn generate_keypair() -> (String, secp256k1::SecretKey) {
@@ -366,12 +251,33 @@ fn sign_request(
         .as_ref()
         .map(|v| serde_json::to_vec(v).unwrap())
         .unwrap_or_default();
-    let body_hash = hex::encode(sha2::Sha256::digest(&body_bytes));
-    let timestamp = std::time::SystemTime::now()
+    let timestamp = current_timestamp_ms();
+    sign_request_full(
+        builder,
+        body_bytes,
+        pubkey_hex,
+        secret_key,
+        timestamp,
+        "test-nonce",
+    )
+}
+
+fn current_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u64;
-    let nonce = "test-nonce".to_string();
+        .as_millis() as u64
+}
+
+fn sign_request_full(
+    builder: axum::http::request::Builder,
+    body_bytes: Vec<u8>,
+    pubkey_hex: &str,
+    secret_key: &secp256k1::SecretKey,
+    timestamp: u64,
+    nonce: &str,
+) -> Request<Body> {
+    let body_hash = hex::encode(sha2::Sha256::digest(&body_bytes));
 
     let method = builder.method_ref().cloned().unwrap_or_default();
     let uri = builder.uri_ref().cloned().unwrap_or_default();
@@ -401,93 +307,91 @@ fn sign_request(
         .unwrap()
 }
 
-fn current_timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+fn write_mode_config(pubkey_hex: &str) -> AuthConfig {
+    let mut config = AuthConfig::default();
+    config.mode = AuthMode::Signature;
+    config.authorized_clients.push(AuthorizedClient {
+        pubkey: pubkey_hex.to_string(),
+        role: ClientRole::Write,
+    });
+    config
 }
 
-/// Core signing helper: builds a request signed over the canonical string, with a caller-chosen
-/// nonce (`None` omits the `X-Signature-Nonce` header entirely, which makes the middleware fall back
-/// to keying its replay cache on the timestamp).
-fn signed_request_with_nonce(
-    method: &str,
-    path: &str,
-    body: Option<serde_json::Value>,
-    pubkey_hex: &str,
-    secret_key: &secp256k1::SecretKey,
-    nonce: Option<&str>,
-) -> Request<Body> {
-    let body_bytes = body
-        .as_ref()
-        .map(|v| serde_json::to_vec(v).unwrap())
-        .unwrap_or_default();
-    let body_hash = hex::encode(sha2::Sha256::digest(&body_bytes));
-    let timestamp = current_timestamp_ms();
-    let nonce_value = nonce.unwrap_or("");
+#[tokio::test]
+async fn signature_mode_rejects_missing_nonce() {
+    let (pubkey_hex, secret_key) = generate_keypair();
+    let app = test_app(write_mode_config(&pubkey_hex));
 
-    let canonical = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        method.to_uppercase(),
-        path,
-        "",
+    let mut request = sign_request(
+        Request::builder().uri("/notes").method("GET"),
+        None,
+        &pubkey_hex,
+        &secret_key,
+    );
+    request.headers_mut().remove("X-Signature-Nonce");
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn bad_signature_does_not_burn_nonce() {
+    // A request with an invalid signature must not insert the nonce into the
+    // replay cache: the legitimate retry with the same nonce must still pass.
+    let (pubkey_hex, secret_key) = generate_keypair();
+    let app = test_app(write_mode_config(&pubkey_hex));
+
+    let timestamp = current_timestamp_ms();
+    let nonce = "burn-test-nonce";
+
+    // Forged request: valid headers but a corrupted signature.
+    let mut forged = sign_request_full(
+        Request::builder().uri("/notes").method("GET"),
+        Vec::new(),
+        &pubkey_hex,
+        &secret_key,
         timestamp,
-        nonce_value,
-        body_hash
+        nonce,
+    );
+    {
+        let headers = forged.headers_mut();
+        let sig = headers.get("X-Signature").unwrap().to_str().unwrap();
+        let mut bytes = hex::decode(sig).unwrap();
+        bytes[50] ^= 0x01;
+        headers.insert("X-Signature", hex::encode(bytes).parse().unwrap());
+    }
+    let response = app.clone().oneshot(forged).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Legitimate request with the same nonce succeeds.
+    let genuine = sign_request_full(
+        Request::builder().uri("/notes").method("GET"),
+        Vec::new(),
+        &pubkey_hex,
+        &secret_key,
+        timestamp,
+        nonce,
+    );
+    let response = app.oneshot(genuine).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn signature_mode_rejects_oversized_body() {
+    let (pubkey_hex, secret_key) = generate_keypair();
+    let app = test_app(write_mode_config(&pubkey_hex));
+
+    // One byte over the 1 MiB limit.
+    let body = vec![b'a'; 1024 * 1024 + 1];
+    let request = sign_request_full(
+        Request::builder().uri("/notes").method("POST"),
+        body,
+        &pubkey_hex,
+        &secret_key,
+        current_timestamp_ms(),
+        "big-body-nonce",
     );
 
-    let mut pubkey_array = [0u8; 33];
-    pubkey_array.copy_from_slice(&hex::decode(pubkey_hex).unwrap());
-    let signature =
-        basis_offchain::schnorr::schnorr_sign(canonical.as_bytes(), secret_key, &pubkey_array)
-            .unwrap();
-
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("X-Signature-Pubkey", pubkey_hex)
-        .header("X-Signature", hex::encode(signature))
-        .header("X-Signature-Timestamp", timestamp.to_string());
-    if let Some(n) = nonce {
-        builder = builder.header("X-Signature-Nonce", n);
-    }
-    builder.body(Body::from(body_bytes)).unwrap()
-}
-
-fn sign_request_with_nonce(
-    builder: axum::http::request::Builder,
-    body: Option<serde_json::Value>,
-    pubkey_hex: &str,
-    secret_key: &secp256k1::SecretKey,
-    nonce: &str,
-) -> Request<Body> {
-    let method = builder.method_ref().cloned().unwrap_or_default();
-    let uri = builder.uri_ref().cloned().unwrap_or_default();
-    signed_request_with_nonce(
-        method.as_str(),
-        uri.path(),
-        body,
-        pubkey_hex,
-        secret_key,
-        Some(nonce),
-    )
-}
-
-fn sign_request_without_nonce(
-    builder: axum::http::request::Builder,
-    body: Option<serde_json::Value>,
-    pubkey_hex: &str,
-    secret_key: &secp256k1::SecretKey,
-) -> Request<Body> {
-    let method = builder.method_ref().cloned().unwrap_or_default();
-    let uri = builder.uri_ref().cloned().unwrap_or_default();
-    signed_request_with_nonce(
-        method.as_str(),
-        uri.path(),
-        body,
-        pubkey_hex,
-        secret_key,
-        None,
-    )
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }

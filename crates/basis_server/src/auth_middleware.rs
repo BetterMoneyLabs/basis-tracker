@@ -9,7 +9,8 @@
 //! - `X-Signature-Pubkey`: hex-encoded 33-byte compressed public key (66 chars).
 //! - `X-Signature`: hex-encoded 65-byte Schnorr signature (130 chars).
 //! - `X-Signature-Timestamp`: Unix timestamp in milliseconds.
-//! - `X-Signature-Nonce`: unique nonce (recommended; required for strong replay protection).
+//! - `X-Signature-Nonce`: unique nonce (required; replay protection rejects
+//!   reused (pubkey, timestamp, nonce) combinations).
 //!
 //! The signed message is:
 //! ```text
@@ -34,12 +35,23 @@ use tokio::sync::Mutex;
 
 use crate::config::{AuthConfig, AuthMode, ClientRole};
 
-/// Upper bound on the body buffered while computing the signature's body hash.
-///
-/// The signature covers a hash of the raw body, so the middleware must read it in full. This is a
-/// backstop for direct callers; in the running server `main.rs` also installs a
-/// `DefaultBodyLimit` on the router.
-const MAX_SIGNATURE_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum request body size accepted in signature mode. Requests with larger
+/// bodies are rejected with 413 Payload Too Large.
+const MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+
+/// Error produced while authenticating a request.
+enum AuthError {
+    /// Authentication failed: the request is rejected with 401 Unauthorized.
+    Unauthorized(String),
+    /// The request body exceeds `MAX_BODY_BYTES`: rejected with 413.
+    PayloadTooLarge(String),
+}
+
+impl From<String> for AuthError {
+    fn from(message: String) -> Self {
+        AuthError::Unauthorized(message)
+    }
+}
 
 /// State shared by the auth middleware.
 #[derive(Clone)]
@@ -116,7 +128,8 @@ pub async fn auth_middleware(
                 request.extensions_mut().insert(ctx);
                 next.run(request).await
             }
-            Err(e) => unauthorized(e),
+            Err(AuthError::Unauthorized(e)) => unauthorized(e),
+            Err(AuthError::PayloadTooLarge(e)) => payload_too_large(e),
         },
     }
 }
@@ -128,6 +141,18 @@ fn is_health_check(request: &Request) -> bool {
 fn unauthorized(message: impl AsRef<str>) -> Response {
     (
         StatusCode::UNAUTHORIZED,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        format!(
+            r#"{{"success":false,"data":null,"error":"{}"}}"#,
+            message.as_ref().replace('"', "\\\"")
+        ),
+    )
+        .into_response()
+}
+
+fn payload_too_large(message: impl AsRef<str>) -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
         [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
         format!(
             r#"{{"success":false,"data":null,"error":"{}"}}"#,
@@ -182,21 +207,29 @@ fn extract_header(request: &Request, name: &str) -> Option<String> {
 async fn verify_signature(
     state: &AuthState,
     request: Request,
-) -> Result<(AuthContext, Request), String> {
+) -> Result<(AuthContext, Request), AuthError> {
     let pubkey_hex = extract_header(&request, "X-Signature-Pubkey")
-        .ok_or("Missing X-Signature-Pubkey header")?;
-    let signature_hex =
-        extract_header(&request, "X-Signature").ok_or("Missing X-Signature header")?;
-    let timestamp_str = extract_header(&request, "X-Signature-Timestamp")
-        .ok_or("Missing X-Signature-Timestamp header")?;
-    let nonce = extract_header(&request, "X-Signature-Nonce").unwrap_or_default();
+        .ok_or_else(|| AuthError::Unauthorized("Missing X-Signature-Pubkey header".to_string()))?;
+    let signature_hex = extract_header(&request, "X-Signature")
+        .ok_or_else(|| AuthError::Unauthorized("Missing X-Signature header".to_string()))?;
+    let timestamp_str = extract_header(&request, "X-Signature-Timestamp").ok_or_else(|| {
+        AuthError::Unauthorized("Missing X-Signature-Timestamp header".to_string())
+    })?;
+    // The nonce is mandatory: without it the replay cache cannot reliably
+    // distinguish requests (timestamp-string variants like "0123" would
+    // otherwise bypass replay protection).
+    let nonce = extract_header(&request, "X-Signature-Nonce")
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| AuthError::Unauthorized("Missing X-Signature-Nonce header".to_string()))?;
 
     // Validate pubkey format.
     if hex::decode(&pubkey_hex)
         .map(|b| b.len() != 33)
         .unwrap_or(true)
     {
-        return Err("Invalid X-Signature-Pubkey: expected 66 hex characters".to_string());
+        return Err("Invalid X-Signature-Pubkey: expected 66 hex characters"
+            .to_string()
+            .into());
     }
 
     // Locate the authorized client entry.
@@ -205,42 +238,49 @@ async fn verify_signature(
         .authorized_clients
         .iter()
         .find(|c| c.pubkey.eq_ignore_ascii_case(&pubkey_hex))
-        .ok_or("Public key is not authorized")?;
+        .ok_or_else(|| AuthError::Unauthorized("Public key is not authorized".to_string()))?;
 
     // Timestamp tolerance check.
-    let timestamp_ms: u64 = timestamp_str
-        .parse()
-        .map_err(|_| "Invalid X-Signature-Timestamp: expected integer milliseconds")?;
+    let timestamp_ms: u64 = timestamp_str.parse().map_err(|_| {
+        AuthError::Unauthorized(
+            "Invalid X-Signature-Timestamp: expected integer milliseconds".to_string(),
+        )
+    })?;
     let now_ms = current_timestamp_ms();
     let tolerance = state.config.signature_timestamp_tolerance_ms;
     if now_ms.saturating_sub(timestamp_ms) > tolerance {
-        return Err("Request signature timestamp is too old".to_string());
+        return Err("Request signature timestamp is too old".to_string().into());
     }
     if timestamp_ms > now_ms.saturating_add(tolerance) {
-        return Err("Request signature timestamp is in the future".to_string());
+        return Err("Request signature timestamp is in the future"
+            .to_string()
+            .into());
     }
 
-    // Replay cache key.
-    //
-    // SECURITY: keyed on the PARSED timestamp, not the raw header string. `u64` parsing accepts
-    // leading zeros, so a captured request could be replayed with `X-Signature-Timestamp: 0<ts>`:
-    // the signature still verified (the canonical message uses the parsed value) but the cache key
-    // differed, so the request was accepted again and again until the TTL expired. When a nonce is
-    // supplied we key on it, which is the stronger form.
-    let cache_key = if nonce.is_empty() {
-        (pubkey_hex.to_lowercase(), format!("ts:{timestamp_ms}"))
-    } else {
-        (pubkey_hex.to_lowercase(), format!("nonce:{nonce}"))
-    };
+    // Replay protection: key the cache on the parsed timestamp and the nonce
+    // so that timestamp-string variants of a captured request cannot replay.
+    // Only successfully authenticated requests are inserted (after signature
+    // verification below), so a forged request cannot burn a victim's nonce.
+    let cache_key = (
+        pubkey_hex.to_lowercase(),
+        format!("{}:{}", timestamp_ms, nonce),
+    );
+    {
+        let mut cache = state.replay_cache.lock().await;
+        prune_cache(&mut cache, state.replay_ttl());
+        if cache.contains_key(&cache_key) {
+            return Err("Replayed signature nonce/timestamp".to_string().into());
+        }
+    }
 
     // Build canonical message and verify signature.
     let (parts, body) = request.into_parts();
-    // The router installs a DefaultBodyLimit, so this read is bounded; the explicit bound here is
-    // the second line of defence for a body that arrives without one (for example in unit tests
-    // that call the middleware directly).
-    let body_bytes = to_bytes(body, MAX_SIGNATURE_BODY_BYTES)
-        .await
-        .map_err(|e| format!("Failed to read request body: {}", e))?;
+    let body_bytes = to_bytes(body, MAX_BODY_BYTES).await.map_err(|_| {
+        AuthError::PayloadTooLarge(format!(
+            "Request body too large: limit is {} bytes",
+            MAX_BODY_BYTES
+        ))
+    })?;
     let body_hash = hex::encode(Sha256::digest(&body_bytes));
 
     let path = parts.uri.path().to_string();
@@ -252,34 +292,34 @@ async fn verify_signature(
         method, path, query, timestamp_ms, nonce, body_hash
     );
 
-    let signature_bytes =
-        hex::decode(&signature_hex).map_err(|_| "Invalid X-Signature: expected hex string")?;
+    let signature_bytes = hex::decode(&signature_hex).map_err(|_| {
+        AuthError::Unauthorized("Invalid X-Signature: expected hex string".to_string())
+    })?;
     if signature_bytes.len() != 65 {
         return Err(format!(
             "Invalid signature length: expected 130 hex characters, got {}",
             signature_hex.len()
-        ));
+        )
+        .into());
     }
     let mut signature_array = [0u8; 65];
     signature_array.copy_from_slice(&signature_bytes);
 
-    let pubkey_bytes = hex::decode(&pubkey_hex).map_err(|_| "Invalid public key hex")?;
+    let pubkey_bytes = hex::decode(&pubkey_hex)
+        .map_err(|_| AuthError::Unauthorized("Invalid public key hex".to_string()))?;
     let mut pubkey_array = [0u8; 33];
     pubkey_array.copy_from_slice(&pubkey_bytes);
 
     basis_offchain::schnorr::schnorr_verify(&signature_array, canonical.as_bytes(), &pubkey_array)
-        .map_err(|_| "Invalid request signature")?;
+        .map_err(|_| AuthError::Unauthorized("Invalid request signature".to_string()))?;
 
-    // SECURITY: record the nonce only AFTER the signature verified.
-    //
-    // This insert used to happen before the body was read and before the signature was checked, so
-    // anybody could burn a client's nonce with a single forged request -- and a body that failed to
-    // read or a malformed signature consumed the slot too, denying the legitimate client its turn.
+    // The signature is valid: record the (pubkey, timestamp, nonce) pair in
+    // the replay cache.
     {
         let mut cache = state.replay_cache.lock().await;
         prune_cache(&mut cache, state.replay_ttl());
         if cache.contains_key(&cache_key) {
-            return Err("Replayed signature nonce/timestamp".to_string());
+            return Err("Replayed signature nonce/timestamp".to_string().into());
         }
         cache.insert(cache_key, Instant::now());
     }

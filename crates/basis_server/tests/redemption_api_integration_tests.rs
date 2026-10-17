@@ -126,8 +126,7 @@ mod redemption_api_tests {
                     } => {
                         let result = redemption_manager
                             .tracker
-                            .lookup_note(&issuer_pubkey, &recipient_pubkey)
-                            .map(Some);
+                            .get_note_optional(&issuer_pubkey, &recipient_pubkey);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::InitiateRedemption {
@@ -180,6 +179,21 @@ mod redemption_api_tests {
                             proof: vec![1, 2, 3, 4],
                         };
                         let _ = response_tx.send(Ok(mock_proof));
+                    }
+                    TrackerCommand::GetCommittedTrackerLookupProof {
+                        issuer_pubkey,
+                        recipient_pubkey,
+                        response_tx,
+                    } => {
+                        // Use the real committed-state proof path so tests exercise
+                        // the confirmation gating (issue #15 S6).
+                        let result = redemption_manager
+                            .tracker
+                            .generate_committed_tracker_lookup_proof(
+                                &issuer_pubkey,
+                                &recipient_pubkey,
+                            );
+                        let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetReserveLookupProof {
                         issuer_pubkey: _,
@@ -235,13 +249,14 @@ mod redemption_api_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::ConfirmPendingNotes {
+                        digest,
                         box_id,
                         height,
                         response_tx,
                     } => {
                         let result = redemption_manager
                             .tracker
-                            .confirm_pending_notes(&box_id, height);
+                            .confirm_pending_notes(digest, &box_id, height);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::RevertPendingNotes { response_tx } => {
@@ -1194,11 +1209,24 @@ mod redemption_api_tests {
         // Test that valid request structure is accepted (will fail at signing stage due to no secret key)
         let state = create_mock_app_state().await;
 
+        // A stored note is required: the tracker signs server-authoritative values (S4).
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_recipient_secret, recipient_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let recipient_hex = hex::encode(recipient_pubkey);
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &recipient_hex,
+            1000,
+            1000,
+        )
+        .await;
+
         let request = TrackerSignatureRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
+            issuer_pubkey: issuer_hex,
+            recipient_pubkey: recipient_hex,
             total_debt: 1000,
             timestamp: 1234567890,
             emergency: false,
@@ -1230,11 +1258,23 @@ mod redemption_api_tests {
         // Test that emergency flag is accepted in request
         let state = create_mock_app_state().await;
 
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_recipient_secret, recipient_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let recipient_hex = hex::encode(recipient_pubkey);
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &recipient_hex,
+            1000,
+            1000,
+        )
+        .await;
+
         let request = TrackerSignatureRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
+            issuer_pubkey: issuer_hex,
+            recipient_pubkey: recipient_hex,
             total_debt: 1000,
             timestamp: 1234567890,
             emergency: true, // Emergency flag
@@ -1260,6 +1300,34 @@ mod redemption_api_tests {
         }
     }
 
+    /// Issue #15 S4: the tracker must not sign caller-chosen (issuer, recipient,
+    /// totalDebt, timestamp) tuples. Requests for a note that does not exist are
+    /// rejected with 404 instead of producing a signature over arbitrary values.
+    #[tokio::test]
+    async fn test_request_tracker_signature_no_note_returns_404() {
+        let state = create_mock_app_state().await;
+
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_recipient_secret, recipient_pubkey) = generate_keypair();
+
+        let request = TrackerSignatureRequest {
+            issuer_pubkey: hex::encode(issuer_pubkey),
+            recipient_pubkey: hex::encode(recipient_pubkey),
+            total_debt: 999_999_999, // caller-chosen value, must never be signed
+            timestamp: 1234567890,
+            emergency: false,
+        };
+
+        let response =
+            request_tracker_signature(axum::extract::State(state), axum::extract::Json(request))
+                .await;
+
+        assert_eq!(response.0, StatusCode::NOT_FOUND);
+        let body = &response.1;
+        assert!(!body.success);
+        assert!(body.error.is_some());
+    }
+
     // ============================================================================
     // POST /redemption/prepare tests
     // ============================================================================
@@ -1275,6 +1343,7 @@ mod redemption_api_tests {
                 .to_string(),
             amount: 1000,
             timestamp: 1234567890,
+            emergency: false,
         };
 
         let response =
@@ -1300,6 +1369,7 @@ mod redemption_api_tests {
                 .to_string(),
             amount: 1000,
             timestamp: 1234567890,
+            emergency: false,
         };
 
         let response =
@@ -1325,13 +1395,27 @@ mod redemption_api_tests {
         // Test that valid request structure is accepted (will fail at Ergo node API call)
         let state = create_mock_app_state().await;
 
+        // A stored note is required: the tracker signs server-authoritative values (S4).
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_recipient_secret, recipient_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let recipient_hex = hex::encode(recipient_pubkey);
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &recipient_hex,
+            1000,
+            1000,
+        )
+        .await;
+
         let request = RedemptionPreparationRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
+            issuer_pubkey: issuer_hex,
+            recipient_pubkey: recipient_hex,
             amount: 1000,
             timestamp: 1234567890,
+            emergency: false,
         };
 
         let response =
@@ -1354,6 +1438,42 @@ mod redemption_api_tests {
         }
     }
 
+    /// Issue #15 S4: /redemption/prepare must not fall back to caller-supplied
+    /// amount/timestamp when no note exists — the request is rejected instead.
+    #[tokio::test]
+    async fn test_prepare_redemption_no_note_returns_404() {
+        let state = create_mock_app_state().await;
+
+        let (_issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_recipient_secret, recipient_pubkey) = generate_keypair();
+
+        let request = RedemptionPreparationRequest {
+            issuer_pubkey: hex::encode(issuer_pubkey),
+            recipient_pubkey: hex::encode(recipient_pubkey),
+            amount: 999_999_999, // caller-chosen value, must never be signed
+            timestamp: 1234567890,
+            emergency: false,
+        };
+
+        let response =
+            prepare_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+
+        assert_eq!(
+            response.0,
+            StatusCode::NOT_FOUND,
+            "unexpected error body: {:?}",
+            response.1.error
+        );
+        let body = &response.1;
+        assert!(!body.success);
+        let msg = body.error.clone().unwrap_or_default();
+        assert!(
+            msg.contains("No note is recorded"),
+            "expected note-not-found error, got: {}",
+            msg
+        );
+    }
+
     // ============================================================================
     // Regression tests: short-but-valid hex must not panic
     // ============================================================================
@@ -1373,6 +1493,7 @@ mod redemption_api_tests {
             recipient_pubkey: "aa".to_string(),
             amount: 1000,
             timestamp: 0,
+            emergency: false,
         };
 
         // Must return a 400 rather than panicking.
@@ -1402,6 +1523,7 @@ mod redemption_api_tests {
             recipient_pubkey: "aa".to_string(),
             amount: 1000,
             timestamp: 0,
+            emergency: false,
         };
 
         // The issuer key is valid, so only the recipient length is at fault: expect the
@@ -1430,6 +1552,7 @@ mod redemption_api_tests {
             recipient_pubkey: String::new(),
             amount: 1000,
             timestamp: 0,
+            emergency: false,
         };
 
         let response =

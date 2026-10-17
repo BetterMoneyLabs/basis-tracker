@@ -99,6 +99,7 @@ async fn main() {
     scanner_config.token_reserve_contract_p2s =
         Some(config.ergo.basis_token_reserve_contract_p2s.clone());
     scanner_config.reserve_token_id = config.ergo.reserve_token_id.clone();
+    scanner_config.tracker_nft_id = config.ergo.tracker_nft_id.clone();
 
     // Create real scanner state with configured node URL and contract template
     let ergo_scanner = match ServerState::new(scanner_config, &data_dir) {
@@ -339,8 +340,7 @@ async fn main() {
                 } => {
                     let result = redemption_manager
                         .tracker
-                        .lookup_note(&issuer_pubkey, &recipient_pubkey)
-                        .map(Some);
+                        .get_note_optional(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::InitiateRedemption {
@@ -395,6 +395,16 @@ async fn main() {
                     let result = redemption_manager
                         .tracker
                         .generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::GetCommittedTrackerLookupProof {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .generate_committed_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveLookupProof {
@@ -458,13 +468,14 @@ async fn main() {
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::ConfirmPendingNotes {
+                    digest,
                     box_id,
                     height,
                     response_tx,
                 } => {
                     let result = redemption_manager
                         .tracker
-                        .confirm_pending_notes(&box_id, height);
+                        .confirm_pending_notes(digest, &box_id, height);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::RevertPendingNotes { response_tx } => {

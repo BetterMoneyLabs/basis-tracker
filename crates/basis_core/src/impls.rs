@@ -177,6 +177,111 @@ mod tests {
     use super::*;
     use secp256k1::{Secp256k1, SecretKey};
 
+    /// Sign without the ErgoScript signed-BigInt retry constraints to produce a
+    /// signature that is mathematically valid but rejected on-chain (z >= 2^255
+    /// or challenge >= 2^255). The verifier must reject these (issue #15, S5).
+    fn sign_unconstrained(
+        message: &[u8],
+        secret_key_bytes: &[u8; 32],
+        issuer_pubkey: &PubKey,
+        want_bad_z: bool,
+    ) -> (Signature, bool) {
+        use num_bigint::BigUint;
+        use secp256k1::Secp256k1;
+
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(secret_key_bytes).unwrap();
+        let n = BigUint::from_bytes_be(&[
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C,
+            0xD0, 0x36, 0x41, 0x41,
+        ]);
+
+        loop {
+            let nonce_secret = SecretKey::new(&mut secp256k1::rand::thread_rng());
+            let a_point = secp256k1::PublicKey::from_secret_key(&secp, &nonce_secret);
+            let a_bytes = a_point.serialize();
+            let e_scalar = compute_challenge(&a_bytes, message, issuer_pubkey).unwrap();
+
+            let k_big = BigUint::from_bytes_be(&nonce_secret.secret_bytes());
+            let s_big = BigUint::from_bytes_be(&secret_key.secret_bytes());
+            let e_big = BigUint::from_bytes_be(&e_scalar.to_be_bytes());
+            let z_big = (&k_big + (&e_big * &s_big) % &n) % &n;
+            if z_big == BigUint::from(0u32) || z_big >= n {
+                continue;
+            }
+
+            let bad_e = e_scalar.to_be_bytes()[0] >= 0x80;
+            let bad_z = z_big.bits() > 255;
+            if (want_bad_z && !bad_z) || (!want_bad_z && !bad_e) {
+                continue;
+            }
+
+            let z_vec = z_big.to_bytes_be();
+            let mut z_bytes = [0u8; 32];
+            z_bytes[32 - z_vec.len()..].copy_from_slice(&z_vec);
+
+            let mut signature = [0u8; 65];
+            signature[0..33].copy_from_slice(&a_bytes);
+            signature[33..65].copy_from_slice(&z_bytes);
+            return (signature, bad_e);
+        }
+    }
+
+    #[test]
+    fn verify_rejects_z_with_top_bit_set_like_the_contract() {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
+        let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize();
+        let message = crate::types::signing_message(
+            &issuer_pubkey,
+            &issuer_pubkey,
+            1_000_000_000,
+            1743379200000,
+        );
+
+        let (signature, _) =
+            sign_unconstrained(&message, &secret_key.secret_bytes(), &issuer_pubkey, true);
+        assert_eq!(
+            signature[33] & 0x80,
+            0x80,
+            "test requires z with top bit set"
+        );
+
+        let verifier = SchnorrVerifier;
+        assert!(
+            verifier
+                .verify_signature(&signature, &message, &issuer_pubkey)
+                .is_err(),
+            "verifier must reject z >= 2^255 (negative as signed BigInt on-chain)"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_challenge_with_top_bit_set_like_the_contract() {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
+        let issuer_pubkey = secp256k1::PublicKey::from_secret_key(&secp, &secret_key).serialize();
+        let message = crate::types::signing_message(
+            &issuer_pubkey,
+            &issuer_pubkey,
+            1_000_000_000,
+            1743379200000,
+        );
+
+        let (signature, bad_e) =
+            sign_unconstrained(&message, &secret_key.secret_bytes(), &issuer_pubkey, false);
+        assert!(bad_e, "test requires challenge with top bit set");
+
+        let verifier = SchnorrVerifier;
+        assert!(
+            verifier
+                .verify_signature(&signature, &message, &issuer_pubkey)
+                .is_err(),
+            "verifier must reject challenge >= 2^255 (negative as signed BigInt on-chain)"
+        );
+    }
+
     #[test]
     fn test_schnorr_roundtrip() {
         let secp = Secp256k1::new();

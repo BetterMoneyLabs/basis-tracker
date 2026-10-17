@@ -230,9 +230,10 @@ pub struct TrackerLookupProof {
 pub struct ReserveLookupProof {
     /// The AVL tree key: blake2b256(ownerKey || receiverKey) (32 bytes)
     pub key: Vec<u8>,
-    /// The value: already_redeemed (8 bytes BE)
+    /// The value: timestamp || already_redeemed (16 bytes BE, zero-filled for first redemption)
     pub value: Vec<u8>,
-    /// AVL proof bytes for the lookup (None for first redemption)
+    /// AVL proof bytes for the lookup; a proof of absence for a first redemption.
+    /// Always present: context var #7 is mandatory on-chain.
     pub proof: Option<Vec<u8>>,
 }
 
@@ -293,6 +294,9 @@ pub enum NoteError {
         previous: u64,
         requested: u64,
     },
+    /// The note is not committed in the latest confirmed on-chain tracker box,
+    /// so no committed-state proof can be generated for it yet.
+    NoteNotConfirmed,
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
@@ -327,6 +331,13 @@ pub struct TrackerStateManager {
     reserve_avl_states: std::collections::HashMap<PubKey, basis_trees::BasisAvlTree>,
     /// Per-note confirmation records, keyed by note key (32 bytes).
     confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,
+    /// AVL root digest of the latest confirmed on-chain tracker box (R5).
+    /// Redemption proofs must be generated against this committed state, not the
+    /// live tree: any note posted after the last on-chain commitment changes the
+    /// live digest, which would make live-tree proofs fail against the on-chain
+    /// tracker box (issue #15 S6). `None` until an update confirms or the updater
+    /// observes a matching on-chain digest after restart.
+    confirmed_digest: Option<[u8; 33]>,
 }
 
 impl TrackerStateManager {
@@ -382,6 +393,7 @@ impl TrackerStateManager {
             storage,
             reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
+            confirmed_digest: None,
         };
 
         if let Err(e) = manager.rebuild_avl_tree() {
@@ -540,6 +552,7 @@ impl TrackerStateManager {
             storage,
             reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
+            confirmed_digest: None,
         };
 
         // Rebuild AVL tree and confirmations so test instances mirror production.
@@ -773,9 +786,17 @@ impl TrackerStateManager {
     }
 
     /// Promote every `Pending` note to `Confirmed`, copying the pending value to
-    /// the confirmed value and recording the confirming box metadata. Returns the
+    /// the confirmed value and recording the confirming box metadata. `digest` is
+    /// the AVL root committed by the confirming tracker box; it becomes the
+    /// committed state that redemption proofs are generated against. Returns the
     /// number of notes transitioned to `Confirmed`.
-    pub fn confirm_pending_notes(&mut self, box_id: &str, height: u64) -> Result<usize, NoteError> {
+    pub fn confirm_pending_notes(
+        &mut self,
+        digest: [u8; 33],
+        box_id: &str,
+        height: u64,
+    ) -> Result<usize, NoteError> {
+        self.confirmed_digest = Some(digest);
         let keys: Vec<NoteKeyBytes> = self.confirmations.keys().copied().collect();
         let mut count = 0usize;
 
@@ -845,16 +866,20 @@ impl TrackerStateManager {
         Ok(count)
     }
 
-    /// Reconcile confirmation records with an observed on-chain digest. When the
-    /// confirmed digest equals the current local digest, every note's local value
-    /// is the confirmed value, so mark them all as `Confirmed` with the given box
-    /// metadata. Returns the number of notes promoted to `Confirmed`.
+    /// Reconcile confirmation records with an observed on-chain digest. The
+    /// observed digest is always recorded as the committed state that redemption
+    /// proofs are generated against. When the confirmed digest equals the current
+    /// local digest, every note's local value is the confirmed value, so mark them
+    /// all as `Confirmed` with the given box metadata. Returns the number of notes
+    /// promoted to `Confirmed`.
     pub fn reconcile_with_confirmed_digest(
         &mut self,
         confirmed_digest: &[u8; 33],
         box_id: &str,
         height: u64,
     ) -> Result<usize, NoteError> {
+        self.confirmed_digest = Some(*confirmed_digest);
+
         if confirmed_digest != &self.current_state.avl_root_digest {
             return Ok(0);
         }
@@ -1043,7 +1068,13 @@ impl TrackerStateManager {
     }
 
     /// Generate a tracker lookup proof for context var #8
-    /// This proof verifies that totalDebt exists in the tracker's AVL tree
+    /// This proof verifies that totalDebt exists in the tracker's AVL tree.
+    ///
+    /// NOTE: this proof is generated against the LIVE local tree, which may
+    /// contain notes not yet committed on-chain. It is suitable for informational
+    /// endpoints (`GET /tracker/proof`) but NOT for redemption transactions:
+    /// redemptions must use `generate_committed_tracker_lookup_proof`, which
+    /// proves against the latest confirmed on-chain digest.
     pub fn generate_tracker_lookup_proof(
         &mut self,
         issuer_pubkey: &PubKey,
@@ -1061,6 +1092,112 @@ impl TrackerStateManager {
         Ok(TrackerLookupProof {
             key: key_bytes,
             value: total_debt.to_be_bytes().to_vec(),
+            proof: avl_proof,
+        })
+    }
+
+    /// The AVL root digest of the latest confirmed on-chain tracker box, if known.
+    pub fn confirmed_digest(&self) -> Option<[u8; 33]> {
+        self.confirmed_digest
+    }
+
+    /// Generate a tracker lookup proof for context var #8 against the COMMITTED
+    /// on-chain state (the latest confirmed tracker box's R5), not the live tree.
+    ///
+    /// Redemption transactions must use this: the proof is verified on-chain
+    /// against the tracker box's committed digest, so any note posted after the
+    /// last commitment must not alter the proof's starting digest (issue #15 S6).
+    ///
+    /// The committed tree is rebuilt from the per-note `confirmed_total_debt`
+    /// values in chronological order (same ordering as `rebuild_avl_tree`), and
+    /// the rebuilt digest is asserted to equal the recorded confirmed digest.
+    ///
+    /// Returns `NoteError::NoteNotConfirmed` when the note has no confirmed value
+    /// (i.e. it is not committed on-chain yet) and `NoteError::StorageError` when
+    /// no confirmed on-chain digest is known or the rebuilt tree does not
+    /// reproduce it.
+    pub fn generate_committed_tracker_lookup_proof(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<TrackerLookupProof, NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+
+        // The note being redeemed must be committed on-chain with a known value.
+        let confirmed_total_debt = self
+            .get_confirmation(issuer_pubkey, recipient_pubkey)
+            .and_then(|c| {
+                if c.status == NoteConfirmationStatus::Confirmed {
+                    c.confirmed_total_debt
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "Committed proof requested for unconfirmed note {} -> {}",
+                    hex::encode(issuer_pubkey),
+                    hex::encode(recipient_pubkey)
+                );
+                NoteError::NoteNotConfirmed
+            })?;
+
+        let confirmed_digest = self.confirmed_digest.ok_or_else(|| {
+            NoteError::StorageError(
+                "No confirmed on-chain tracker digest known yet; wait for the tracker box updater"
+                    .to_string(),
+            )
+        })?;
+
+        // Rebuild the committed tree from every note's confirmed value, in
+        // chronological order by note timestamp (same ordering as
+        // `rebuild_avl_tree`). Notes without a confirmed value are not part of
+        // the committed state.
+        let mut notes_with_issuer = self
+            .storage
+            .get_all_notes_with_issuer()
+            .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
+        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
+
+        let mut committed_tree = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to create committed AVL tree: {:?}", e))
+        })?;
+        for (issuer, note) in &notes_with_issuer {
+            let note_key = Self::confirmation_key(issuer, &note.recipient_pubkey);
+            let confirmed_value = self
+                .confirmations
+                .get(&note_key)
+                .and_then(|c| c.confirmed_total_debt);
+            if let Some(value) = confirmed_value {
+                committed_tree
+                    .update(note_key.to_vec(), value.to_be_bytes().to_vec())
+                    .map_err(|e| {
+                        NoteError::StorageError(format!(
+                            "Committed AVL tree rebuild failed: {:?}",
+                            e
+                        ))
+                    })?;
+            }
+        }
+
+        // The rebuilt committed tree must reproduce the confirmed on-chain digest;
+        // otherwise local confirmation metadata is inconsistent with the chain and
+        // generating a proof would produce something that fails on-chain anyway.
+        let rebuilt_digest = committed_tree.root_digest();
+        if rebuilt_digest != confirmed_digest {
+            return Err(NoteError::StorageError(format!(
+                "Committed tree digest mismatch: rebuilt {} != confirmed on-chain {}",
+                hex::encode(rebuilt_digest),
+                hex::encode(confirmed_digest)
+            )));
+        }
+
+        let (avl_proof, _returned_value) = committed_tree.generate_lookup_proof(key_bytes.to_vec());
+
+        Ok(TrackerLookupProof {
+            key: key_bytes,
+            value: confirmed_total_debt.to_be_bytes().to_vec(),
             proof: avl_proof,
         })
     }
@@ -1316,7 +1453,7 @@ impl TrackerStateManager {
                 None => {
                     tracing::warn!(
                         "Reserve AVL journal references unknown note key {}; skipping",
-                        hex::encode(&note_key.to_bytes())
+                        hex::encode(note_key.to_bytes())
                     );
                     continue;
                 }
@@ -1330,7 +1467,7 @@ impl TrackerStateManager {
             ) {
                 tracing::warn!(
                     "Failed to replay reserve AVL update for issuer {}: {:?}",
-                    hex::encode(&issuer_pubkey),
+                    hex::encode(issuer_pubkey),
                     e
                 );
             }
@@ -1398,6 +1535,16 @@ impl TrackerStateManager {
         self.storage
             .get_note(issuer_pubkey, recipient_pubkey)?
             .ok_or_else(|| NoteError::StorageError("Note not found".to_string()))
+    }
+
+    /// Look up a note by issuer and recipient, returning `Ok(None)` when it does
+    /// not exist (unlike `lookup_note`, which errors on missing notes).
+    pub fn get_note_optional(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<Option<IouNote>, NoteError> {
+        self.storage.get_note(issuer_pubkey, recipient_pubkey)
     }
 
     /// Get all notes for a specific issuer

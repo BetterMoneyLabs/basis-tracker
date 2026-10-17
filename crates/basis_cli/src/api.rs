@@ -212,7 +212,7 @@ pub struct Asset {
     pub amount: u64,
 }
 
-/// Response from submitting a reserve creation payload to the tracker's Ergo node.
+/// Response from reserve submission.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReserveSubmissionResponse {
     pub tx_id: String,
@@ -231,8 +231,9 @@ pub struct ReserveTokenConfig {
 pub struct TrackerSignatureRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Legacy field, ignored by the server: the stored note's total debt is signed.
     pub total_debt: u64,
-    /// Payment timestamp in milliseconds since Unix epoch
+    /// Legacy field, ignored by the server: the stored note's payment timestamp is signed.
     pub timestamp: u64,
     #[serde(default)]
     pub emergency: bool,
@@ -559,6 +560,10 @@ impl TrackerClient {
 
     /// Request tracker signature for redemption
     /// Following the Basis protocol specification - POST /tracker/signature
+    ///
+    /// The server signs the stored note's total debt and timestamp; the
+    /// `total_debt` and `timestamp` arguments are sent for backward
+    /// compatibility but ignored by the server.
     pub async fn request_tracker_signature(
         &self,
         issuer_pubkey: &str,
@@ -601,7 +606,12 @@ impl TrackerClient {
 pub struct RedemptionPreparationRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Intended redemption amount. Used by the server only for the
+    /// acceptance-policy check; the signed message always covers the stored
+    /// note's cumulative debt.
     pub amount: u64,
+    /// Legacy field, ignored by the server: the stored note's payment
+    /// timestamp is signed.
     pub timestamp: u64,
 }
 
@@ -622,6 +632,9 @@ pub struct RedemptionBuildRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub amount: u64,
+    /// Legacy field, ignored by the server: the stored note's payment
+    /// timestamp is used for the signature, context extension, and reserve
+    /// tree value.
     pub timestamp: u64,
     /// Issuer's 65-byte Schnorr signature (hex) over the redemption signing message.
     pub issuer_signature: String,
@@ -629,6 +642,7 @@ pub struct RedemptionBuildRequest {
     pub emergency: bool,
     #[serde(default)]
     pub tracker_box_id: Option<String>,
+    /// Deprecated: ignored by the tracker, which always pays change to its own wallet.
     #[serde(default)]
     pub change_address: Option<String>,
 }
@@ -763,6 +777,11 @@ impl TrackerClient {
         }
     }
 
+    /// Prepare a redemption via POST /redemption/prepare.
+    ///
+    /// The note must exist in the tracker state. The server signs the stored
+    /// note's cumulative debt and payment timestamp; `amount` is used only for
+    /// the acceptance-policy check and the `timestamp` sent here is ignored.
     pub async fn prepare_redemption(
         &self,
         issuer_pubkey: &str,
@@ -953,6 +972,10 @@ impl TrackerClient {
     }
 
     /// Submit a reserve creation payload to the tracker's configured Ergo node for broadcast.
+    ///
+    /// The server only forwards payloads carrying a live single-use permit issued by
+    /// `POST /reserves/create` (it would otherwise sign arbitrary payment requests with
+    /// the tracker's wallet), so `payload.submission_permit` must be populated.
     pub async fn submit_reserve(
         &self,
         payload: ReserveCreationResponse,

@@ -118,6 +118,18 @@ pub enum TrackerCommand {
             Result<basis_store::TrackerLookupProof, basis_store::NoteError>,
         >,
     },
+    /// Tracker lookup proof against the COMMITTED on-chain state (latest confirmed
+    /// tracker box digest). Redemption transactions must use this variant: the live
+    /// tree may contain uncommitted notes that would invalidate the proof on-chain
+    /// (issue #15 S6). Fails with `NoteError::NoteNotConfirmed` when the note is not
+    /// committed on-chain yet.
+    GetCommittedTrackerLookupProof {
+        issuer_pubkey: basis_store::PubKey,
+        recipient_pubkey: basis_store::PubKey,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<basis_store::TrackerLookupProof, basis_store::NoteError>,
+        >,
+    },
     GetReserveLookupProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
@@ -160,7 +172,9 @@ pub enum TrackerCommand {
         response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
     },
     /// Promote all pending notes to confirmed after an update tx confirms.
+    /// `digest` is the AVL root committed by the confirming tracker box.
     ConfirmPendingNotes {
+        digest: [u8; 33],
         box_id: String,
         height: u64,
         response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,

@@ -275,11 +275,26 @@ impl ReserveTracker {
             .collect()
     }
 
-    /// Get total system collateral and debt
+    /// Get reserves by owner public key that are not pending refund.
+    /// Reserves in the two-phase refund window must not be counted as
+    /// collateral (C4): the owner may be about to withdraw.
+    pub fn get_active_reserves_by_owner(&self, owner_pubkey: &str) -> Vec<ExtendedReserveInfo> {
+        let reserves = self.reserves.read().unwrap();
+        reserves
+            .values()
+            .filter(|reserve| reserve.owner_pubkey == owner_pubkey && !reserve.is_refund_pending())
+            .cloned()
+            .collect()
+    }
+
+    /// Get total system collateral and debt.
+    /// Collateral excludes reserves with a pending refund (C4); their debt is
+    /// still counted until the refund completes and creditors are paid out.
     pub fn get_system_totals(&self) -> (u64, u64) {
         let reserves = self.reserves.read().unwrap();
         let total_collateral = reserves
             .values()
+            .filter(|r| !r.is_refund_pending())
             .map(|r| r.base_info.collateral_amount)
             .sum();
         let total_debt = reserves.values().map(|r| r.total_debt).sum();

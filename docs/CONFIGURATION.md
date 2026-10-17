@@ -60,6 +60,16 @@ the same `server_auth_*` fields in `~/.basis/cli.toml`; the MCP server can also
 read them from environment variables. See `specs/server/authentication_authorization.md`
 for the full signature scheme and RBAC rules.
 
+With `mode = "none"` every request is granted admin access, so the server
+refuses to start when `server.host` is not a loopback address (`127.0.0.1`,
+`::1`, or `localhost`). In `signature` mode the `X-Signature-Nonce` header is
+required on every request.
+
+`allowed_origins` is a CORS allow-list. When it is empty (the default) the
+server attaches no CORS layer at all: no CORS headers are emitted and only
+same-origin or non-browser clients can connect. Wildcard origins are never
+used; list explicit origins to serve browser clients.
+
 ### Ergo Blockchain Configuration
 
 ```toml
@@ -253,6 +263,11 @@ enforce_acceptance_policy = true
 [confirmation]
 min_depth = 2
 ```
+
+> **Note:** with these defaults (`mode = "none"` and `host = "0.0.0.0"`) the
+> server refuses to start, because anonymous mode grants admin access to every
+> request. Either bind to a loopback address (`host = "127.0.0.1"`) or
+> configure an authentication mode under `[server.auth]`.
 
 ## Verification
 

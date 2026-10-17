@@ -28,7 +28,7 @@
     //    hash(ownerKey||receiverKey) || totalDebt || timestamp.
     //    The tracker signature guarantees that the offchain state is consistent and prevents double-spending.
     //    Additionally, the contract verifies that totalDebt is committed in the tracker's AVL tree (context var #8 provides lookup proof).
-    //    The contract also verifies that the note's timestamp is greater than any previously redeemed timestamp,
+    //    The contract also verifies that the note's timestamp is not older than any previously redeemed timestamp,
     //    preventing replay attacks with old notes.
     //  * to redeem: B contacts tracker to obtain signature on the debt note, then presents reserve owner's signature
     //    (from original IOU note) and tracker's signature to the on-chain contract along with AVL tree proofs:
@@ -57,14 +57,17 @@
     //
     // Debt Transfer (Novation):
     //  * The scheme supports transferring debt obligations between creditors with debtor consent.
-    //  * Example: A owes debt to B. B wants to buy from C. If A agrees, A can sign new notes:
-    //    - Note 1: A -> B for remaining amount (e.g., 5 tokens)
-    //    - Note 2: A -> C for transferred amount (e.g., 5 tokens)
+    //  * Example: A owes debt to B. B wants to buy from C. If A agrees, A signs a new note:
+    //    - Note: A -> C for transferred amount (e.g., 5 tokens)
     //  * Process:
     //    1. B initiates transfer: requests payment from C via A's debt
-    //    2. A signs two new notes: one to B (remaining), one to C (transferred)
-    //    3. Tracker signs both new notes
-    //    4. Tracker updates ledger: cancels old A->B note, adds new A->B and A->C notes
+    //    2. A signs the new note to C (transferred amount)
+    //    3. Tracker signs the new note
+    //    4. Tracker updates ledger: adds the A->C note; the A->B note keeps its cumulative total
+    //  * Note: per-creditor cumulative totals never decrease on the tracker (a lower total would
+    //    break the creditor's on-chain redemption). After a novation B simply refrains from
+    //    redeeming the transferred part of the A->B note; a creditor-signed decrease mechanism
+    //    is future work.
     //  * This allows debt to circulate in the network: A's credit with B can be used to pay C,
     //    effectively making debt notes transferrable with debtor consent.
     //  * Benefits:
@@ -96,7 +99,8 @@
     // * At any time, B can redeem the debt by presenting both signatures to the reserve contract along with
     //   an AVL tree proof showing the cumulative redeemed amount. The contract verifies both signatures and
     //   ensures the redeemed amount doesn't exceed (totalDebt - alreadyRedeemed).
-    //   The contract also verifies timestamp > storedTimestamp, preventing replay attacks.
+    //   The contract also verifies timestamp >= storedTimestamp; together with the cumulative
+    //   redeemed-amount counter this prevents replay attacks.
     // * At any time, A can make another payment to B by signing a message with increased cumulative debt amount
     //   and new timestamp.
     // * A can refund by redeeming like B (in pseudonymous environments, A may have multiple keys).
@@ -105,14 +109,14 @@
     // Debt Transfer Workflow (Triangular Trade):
     // * Scenario: A owes 10 tokens to B. B wants to buy 5 tokens worth of services from C.
     // * Step 1: B proposes to C that B will pay via debt transfer from A. C agrees.
-    // * Step 2: B requests payment from A: sign new notes for remaining debt and transferred debt.
-    // * Step 3: A signs two new notes:
-    //   - Note 1: A -> B for 5 tokens (remaining debt)
-    //   - Note 2: A -> C for 5 tokens (transferred debt)
-    // * Step 4: Tracker signs both new notes
-    // * Step 5: Tracker updates ledger: cancels old A->B (10 tokens), adds A->B (5 tokens) and A->C (5 tokens)
-    // * Result: B is paid (debt reduced), C is creditor (new note received), A owes C instead of part of B.
-    // * C can now redeem from A's reserve or further transfer the debt to D (with A's consent).
+    // * Step 2: B requests payment from A: sign a new note for the transferred debt.
+    // * Step 3: A signs the new note:
+    //   - Note: A -> C for 5 tokens (transferred debt)
+    // * Step 4: Tracker signs the new note
+    // * Step 5: Tracker updates ledger: adds A->C (5 tokens); A->B keeps its cumulative total (10 tokens)
+    // * Result: B is paid (B gives up the transferred claim off-chain), C is creditor (new note
+    //   received), A additionally owes C. C can now redeem from A's reserve or further transfer
+    //   the debt to D (with A's consent).
 
     // Tracker's role here is to guarantee fairness of payments. Tracker can't steal A's onchain funds as A's signature is
     // required. Tracker cannot enable double-redemption as the contract tracks cumulative redeemed amounts in AVL tree.

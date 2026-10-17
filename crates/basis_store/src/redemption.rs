@@ -23,6 +23,9 @@ pub enum RedemptionError {
     StorageError(String),
     #[error("Invalid public key: {0}")]
     InvalidPublicKey(String),
+    /// Caller-supplied redemption amounts that do not match the stored note state.
+    #[error("Invalid redemption amount: {0}")]
+    InvalidAmount(String),
 }
 
 impl From<NoteError> for RedemptionError {
@@ -243,7 +246,14 @@ impl RedemptionManager {
 
         // Generate reserve insert proof (for inserting redeemed amount into reserve tree)
         // This also updates the reserve AVL tree and returns the updated tree digest for R5
-        let new_already_redeemed = note.amount_redeemed + request.amount;
+        let new_already_redeemed = note
+            .amount_redeemed
+            .checked_add(request.amount)
+            .ok_or_else(|| {
+                RedemptionError::InvalidAmount(
+                    "cumulative redeemed amount overflows u64".to_string(),
+                )
+            })?;
         let (reserve_insert_proof, updated_reserve_tree) = self
             .tracker
             .generate_reserve_insert_proof(
@@ -369,13 +379,22 @@ impl RedemptionManager {
         // the debt figure, so the timestamp must stay exactly as the issuer signed it.
         let payment_timestamp = note.timestamp;
 
+        // The caller supplies `redeemed_amount` (and optionally the cumulative
+        // `new_already_redeemed`); validate both against the stored note state
+        // instead of applying them blindly (issue #15 S4).
+        if redeemed_amount == 0 {
+            return Err(RedemptionError::InvalidAmount(
+                "redeemed amount must be positive".to_string(),
+            ));
+        }
+
         // SECURITY: do not let the caller drive the cumulative redeemed amount past the debt.
         // `redeemed_amount` arrives from the request body (`/redeem/complete`,
         // `/redemption/submit`), and a plain `+=` would accept more than was ever owed, permanently
         // consuming the note's headroom.
         let outstanding = note.amount_collected.saturating_sub(note.amount_redeemed);
         if redeemed_amount > outstanding {
-            return Err(RedemptionError::StorageError(format!(
+            return Err(RedemptionError::InvalidAmount(format!(
                 "redemption of {} exceeds the outstanding debt of {} for this note \
                  (totalDebt {}, already redeemed {})",
                 redeemed_amount, outstanding, note.amount_collected, note.amount_redeemed
@@ -395,6 +414,21 @@ impl RedemptionManager {
                 ))
             })?;
 
+        // An explicit cumulative value from the on-chain build must match the
+        // note's resulting state; a mismatch means the caller's view of the
+        // reserve tree diverges from the tracker's (issue #15 S4).
+        if let Some(explicit) = new_already_redeemed {
+            if explicit != note.amount_redeemed {
+                return Err(RedemptionError::InvalidAmount(format!(
+                    "new_already_redeemed {} does not match note state ({} + {} = {})",
+                    explicit,
+                    note.amount_redeemed - redeemed_amount,
+                    redeemed_amount,
+                    note.amount_redeemed
+                )));
+            }
+        }
+
         // Update the note in tracker.
         //
         // `record_redemption` rather than `update_note`: a redemption is not a new signed note, so it
@@ -406,8 +440,8 @@ impl RedemptionManager {
 
         // Keep the reserve AVL tree in sync with the cumulative redeemed amount so subsequent
         // redemptions generate insert/lookup proofs that verify against the on-chain reserve R5.
-        // When the on-chain build used an explicit cumulative value (e.g. a fresh reserve whose
-        // tree did not yet contain earlier redemptions), that value takes precedence.
+        // An explicit value from the on-chain build was validated above to equal the note's
+        // resulting cumulative redeemed amount.
         let tree_value = new_already_redeemed.unwrap_or(note.amount_redeemed);
         self.tracker
             .update_already_redeemed(
@@ -1112,10 +1146,9 @@ mod tests {
         );
     }
 
-    /// When an explicit `new_already_redeemed` is provided (the cumulative value proven
-    /// on-chain by the build), the note still accumulates the redeemed amount but the
-    /// reserve tree is synced to the explicit value. This covers fresh reserves whose
-    /// tree did not contain earlier redemptions recorded against another reserve.
+    /// An explicit `new_already_redeemed` (the cumulative value proven on-chain by the
+    /// build) must match the note's resulting cumulative redeemed amount; mismatched
+    /// caller-supplied values are rejected (issue #15 S4).
     #[test]
     fn test_complete_redemption_with_explicit_reserve_tree_value() {
         let tracker = TrackerStateManager::new_with_temp_storage();
@@ -1142,7 +1175,7 @@ mod tests {
             crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
                 .expect("sign note");
 
-        // Note already has 100M redeemed (from an earlier redemption against another reserve).
+        // Note already has 100M redeemed.
         let note = IouNote {
             recipient_pubkey,
             amount_collected: total_debt,
@@ -1155,14 +1188,33 @@ mod tests {
             .add_note(&issuer_pubkey, &note)
             .expect("add note");
 
-        // On-chain build against a fresh (empty) reserve tree used cumulative 100M
-        // (0 + 100M redeemed now), while the note accumulates to 200M.
+        // A mismatched explicit cumulative value (100M instead of 100M + 100M) is rejected.
+        let result = redemption_manager.complete_redemption(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            100_000_000,
+            Some(100_000_000),
+        );
+        assert!(
+            matches!(result, Err(RedemptionError::InvalidAmount(_))),
+            "expected InvalidAmount, got {:?}",
+            result
+        );
+
+        // The note state is unchanged after the rejected completion.
+        let unchanged = redemption_manager
+            .tracker
+            .lookup_note(&issuer_pubkey, &recipient_pubkey)
+            .expect("lookup note");
+        assert_eq!(unchanged.amount_redeemed, 100_000_000);
+
+        // The matching explicit value is accepted and syncs the reserve tree.
         redemption_manager
             .complete_redemption(
                 &issuer_pubkey,
                 &recipient_pubkey,
                 100_000_000,
-                Some(100_000_000),
+                Some(200_000_000),
             )
             .expect("complete redemption");
 
@@ -1181,7 +1233,7 @@ mod tests {
                 &issuer_pubkey,
                 &recipient_pubkey,
                 payment_timestamp,
-                100_000_000,
+                200_000_000,
             )
             .expect("reference update");
         assert_eq!(
@@ -1189,7 +1241,84 @@ mod tests {
                 .tracker
                 .reserve_state_digest(&issuer_pubkey),
             reference.reserve_state_digest(&issuer_pubkey),
-            "reserve tree must use the explicit on-chain cumulative value"
+            "reserve tree must use the validated cumulative value"
+        );
+    }
+
+    /// `complete_redemption` rejects zero and over-debt redeemed amounts and would
+    /// overflow the cumulative counter without checked arithmetic (issue #15 S4).
+    #[test]
+    fn test_complete_redemption_validates_amounts() {
+        let tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[5u8; 32]).unwrap();
+        let issuer_pubkey =
+            secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret).serialize();
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[6u8; 32]).unwrap();
+        let recipient_pubkey =
+            secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret).serialize();
+
+        let total_debt: u64 = 100_000_000;
+        let payment_timestamp: u64 = 1_783_796_933_524;
+
+        let message = crate::schnorr::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            total_debt,
+            payment_timestamp,
+        );
+        let signature =
+            crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
+                .expect("sign note");
+
+        let note = IouNote {
+            recipient_pubkey,
+            amount_collected: total_debt,
+            amount_redeemed: 0,
+            timestamp: payment_timestamp,
+            signature,
+        };
+        redemption_manager
+            .tracker
+            .add_note(&issuer_pubkey, &note)
+            .expect("add note");
+
+        // Zero amount is rejected.
+        let result =
+            redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, 0, None);
+        assert!(
+            matches!(result, Err(RedemptionError::InvalidAmount(_))),
+            "expected InvalidAmount for zero amount, got {:?}",
+            result
+        );
+
+        // Amount exceeding outstanding debt is rejected.
+        let result = redemption_manager.complete_redemption(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            total_debt + 1,
+            None,
+        );
+        assert!(
+            matches!(result, Err(RedemptionError::InvalidAmount(_))),
+            "expected InvalidAmount for over-debt amount, got {:?}",
+            result
+        );
+
+        // An amount that would overflow the cumulative counter is rejected instead
+        // of wrapping. Craft a note with amount_redeemed near u64::MAX by redeeming
+        // the full debt first, then attempting another redemption.
+        redemption_manager
+            .complete_redemption(&issuer_pubkey, &recipient_pubkey, total_debt, None)
+            .expect("full redemption");
+        let result =
+            redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, 1, None);
+        assert!(
+            matches!(result, Err(RedemptionError::InvalidAmount(_))),
+            "expected InvalidAmount after full redemption, got {:?}",
+            result
         );
     }
 

@@ -64,8 +64,9 @@ pub struct AuthConfig {
     /// `Signature`.
     #[serde(default)]
     pub authorized_clients: Vec<AuthorizedClient>,
-    /// Allowed CORS origins when auth is enabled. An empty list means only
-    /// non-browser/non-CORS callers can connect.
+    /// Allowed CORS origins. An empty list disables CORS entirely: no CORS
+    /// headers are emitted, so only same-origin or non-browser callers can
+    /// connect. Cross-origin browser access requires an explicit allow-list.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     /// Request signature timestamp tolerance in milliseconds.
@@ -141,6 +142,14 @@ pub struct AuthorizedClient {
 
 fn default_signature_timestamp_tolerance_ms() -> u64 {
     30_000 // 30 seconds
+}
+
+/// Returns true when `host` refers to a loopback interface, i.e. the server is
+/// only reachable from the local machine. Used by the startup guard that
+/// refuses to run without authentication on a publicly reachable interface.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim().trim_matches(['[', ']']).to_lowercase();
+    host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
 impl ServerConfig {
@@ -276,8 +285,8 @@ impl AppConfig {
             // TLS configuration (empty = plain HTTP)
             .set_default("server.tls_cert_path", "")?
             .set_default("server.tls_key_path", "")?
-            // Authentication configuration
-            .set_default("server.auth.mode", "none")?
+            // Authentication configuration (`server.auth.mode` defaults to
+            // `AuthMode::None` via serde when not configured)
             .set_default("server.auth.api_key", "")?
             .set_default("server.auth.allowed_origins", Vec::<String>::new())?
             .set_default("server.auth.signature_timestamp_tolerance_ms", 30_000)?
@@ -386,6 +395,7 @@ impl AppConfig {
         config.token_reserve_contract_p2s =
             Some(self.ergo.basis_token_reserve_contract_p2s.clone());
         config.reserve_token_id = self.ergo.reserve_token_id.clone();
+        config.tracker_nft_id = self.ergo.tracker_nft_id.clone();
         config
     }
 
@@ -630,6 +640,7 @@ mod tests {
                     reserve_contract_p2s: None,
                     token_reserve_contract_p2s: None,
                     reserve_token_id: None,
+                    tracker_nft_id: None,
                     node_url: "http://localhost:9053".to_string(),
                     scan_name: None,
                     api_key: Some("test".to_string()),
@@ -700,5 +711,41 @@ mod tests {
         // Explicit override is honored.
         let config: ConfirmationConfig = toml::from_str("min_depth = 6").unwrap();
         assert_eq!(config.min_depth, 6);
+    }
+
+    #[test]
+    fn test_auth_mode_parsing() {
+        // Documented snake_case spellings parse.
+        let config: AuthConfig = toml::from_str(r#"mode = "api_key""#).unwrap();
+        assert_eq!(config.mode, AuthMode::ApiKey);
+        let config: AuthConfig = toml::from_str(r#"mode = "signature""#).unwrap();
+        assert_eq!(config.mode, AuthMode::Signature);
+        let config: AuthConfig = toml::from_str(r#"mode = "none""#).unwrap();
+        assert_eq!(config.mode, AuthMode::None);
+
+        // Legacy "apikey" spelling still parses for backward compatibility.
+        let config: AuthConfig = toml::from_str(r#"mode = "apikey""#).unwrap();
+        assert_eq!(config.mode, AuthMode::ApiKey);
+
+        // An absent mode defaults to None.
+        let config: AuthConfig = toml::from_str("").unwrap();
+        assert_eq!(config.mode, AuthMode::None);
+
+        // Unknown modes are rejected.
+        assert!(toml::from_str::<AuthConfig>(r#"mode = "bogus""#).is_err());
+    }
+
+    #[test]
+    fn test_is_loopback_host() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("[::1]"));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host(" LOCALHOST "));
+
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(!is_loopback_host("::"));
+        assert!(!is_loopback_host("192.168.1.10"));
+        assert!(!is_loopback_host("tracker.example.com"));
     }
 }

@@ -229,12 +229,20 @@ pub struct ProofResponse {
 
 // Request for tracker signature
 // Following specs/server/redemption_state_spec.md - POST /tracker/signature
+// Request for tracker signature
+// Following specs/server/redemption_state_spec.md - POST /tracker/signature
+//
+// The server signs only server-authoritative values (issue #15 S4): a stored note
+// for (issuer, recipient) must exist, and the message covers the stored
+// `amount_collected`/`timestamp`. `total_debt`/`timestamp` must match the stored
+// note; a mismatch is rejected with 409 Conflict.
 #[derive(Debug, Deserialize)]
 pub struct TrackerSignatureRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Must equal the stored note's total debt (rejected otherwise).
     pub total_debt: u64,
-    /// Payment timestamp in milliseconds since Unix epoch
+    /// Must equal the stored note's payment timestamp (rejected otherwise).
     pub timestamp: u64,
     #[serde(default)]
     pub emergency: bool,
@@ -257,8 +265,14 @@ pub struct TrackerSignatureResponse {
 pub struct RedemptionPreparationRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Intended redemption amount. Used only for the acceptance-policy check; the
+    /// signed message always covers the stored note's cumulative debt.
     pub amount: u64,
+    /// Must equal the stored note's payment timestamp (rejected with 409 otherwise).
     pub timestamp: u64,
+    /// Whether this is an emergency redemption (exempt from the acceptance-policy check)
+    #[serde(default)]
+    pub emergency: bool,
 }
 
 // Response for redemption preparation

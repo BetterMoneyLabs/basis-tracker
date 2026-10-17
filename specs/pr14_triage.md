@@ -30,15 +30,15 @@ as negative regression tests against the real `contract/` files.
 | C1 | Critical | Omitting context var #7 lets a creditor replay a fully redeemed note | **Yes** | **Fixed** — with a different, smaller fix than proposed |
 | C2 | Critical | Two reserve inputs can be satisfied by one output; unsigned top-up lets anyone take a reserve | **Yes** | **Fixed** |
 | C3 | High | A note is not bound to a reserve, tracker, chain or contract | **Yes** | **Partially fixed (off-chain)**; protocol change deferred |
-| C4 | High | Reserve and tracker setup is never validated (R7 preset, poisoned R5, Int R7, R6 length-only) | **Yes** | **Partially fixed** — the deploy-time InsertOnly bug; scanner validation deferred |
+| C4 | High | Reserve and tracker setup is never validated (R7 preset, poisoned R5, Int R7, R6 length-only) | **Yes** | **Fixed** — deploy-time InsertOnly bug and scanner first-seen validation |
 | C5 | Medium | After a partial redemption the remainder of the note is stuck | **Yes** | **Fixed** |
 | C6 | Medium | basis-token.es: anyone can take the reserve box's ERG | **Yes** | **Fixed** (not covered by the PR's patch) |
 | S1 | Critical | `auth.mode = "none"` by default, wildcard CORS, `api_key` fails to parse | **Yes** — worse than reported | **Fixed** |
 | S2 | Critical | `/reserves/submit` drains the tracker wallet; `/redemption/build` trusts `change_address` | **Yes** | **Fixed** |
 | S3 | Critical | A debtor can lower `totalDebt` to 0 without the creditor | **Yes** | **Fixed** |
-| S4 | High | Endpoints sign caller-chosen values; redemption state applied from the request body | **Yes** | **Partially fixed**; chain-derived state deferred |
+| S4 | High | Endpoints sign caller-chosen values; redemption state applied from the request body | **Yes** | **Fixed** — signing endpoints use stored state + acceptance policy; chain-derived state deferred |
 | S5 | High | The Rust verifier accepts signatures the contract rejects | **Yes** | **Fixed** |
-| S6 | High (liveness) | Tracker-built redemptions fail without an attacker (4 sub-causes) | **Yes** (all four) | **1 of 4 fixed**; AVL determinism + snapshots deferred |
+| S6 | High (liveness) | Tracker-built redemptions fail without an attacker (4 sub-causes) | **Yes** (all four) | **Fixed** — journal-ordered rebuild, committed-digest proofs, dropped-tx recovery |
 | S7 | Medium | Committed secret keys, logged node api_key, third-party default node URL | **Yes** | **Fixed** — keys must still be rotated |
 
 Deferred work is listed at the end.
@@ -164,9 +164,13 @@ The **tracker** tree is a different tree and correctly stays `InsertOnly` — it
 fresh `(owner, receiver) -> totalDebt` pairs. `TestVectorGenerator` and `TrackerBoxSetup` were left
 alone for that reason.
 
-**Deferred**: first-seen validation of R4 (curve point), R5 (empty-tree constant `0x03`/32/0), R6
-(actual NFT equality), R7 (Long type, sane range), excluding pending-refund reserves from
-collateralization totals, and minting the tracker NFT with supply 1.
+**Also fixed (scanner side)**: `ergo_scanner.rs` validates a reserve when it is first seen — R4
+must be a valid secp256k1 point, R5 must equal the empty-tree constant (flags `0x03`, 32-byte keys),
+R6 must equal the tracker's own NFT, and R7 must be a `Long` and zero (no pre-initiated refund).
+Reserves with a pending refund are excluded from collateralization totals
+(`ReserveTracker::get_system_totals`, `get_active_reserves_by_owner`), and the tracker scanner only
+accepts a tracker box holding exactly one NFT (`amount == 1`). Minting the tracker NFT with supply 1
+remains an operational requirement.
 
 ### C3 — note not bound to a reserve, tracker, chain or contract (High) — Partially fixed
 
@@ -260,7 +264,7 @@ note instead of being reset to `0` (it was hardcoded in both `IouNote::create_an
 **The documented novation flow must not be used until a creditor co-signature endpoint exists.** Debt
 transfer to a *different* creditor is unaffected, since that is a different key in the tree.
 
-### S4 — endpoints sign or store caller-chosen values (High) — Partially fixed
+### S4 — endpoints sign or store caller-chosen values (High) — Fixed
 
 `/tracker/signature` signed any `(key, totalDebt, timestamp)` with no state lookup and no policy
 check. Since the tracker signature is the only gate for `enforce_acceptance_policy` and the FIFO
@@ -314,15 +318,15 @@ Lesson worth recording: a hardcoded vector asserted `should_verify: true` and th
 so a vector can encode a bug as "expected". The vectors were only re-examined because the verifier fix
 made them fail.
 
-### S6 — tracker-built redemptions fail without an attacker (High, liveness) — 1 of 4 fixed
+### S6 — tracker-built redemptions fail without an attacker (High, liveness) — Fixed
 
 | Sub-cause | Status |
 |---|---|
 | Emergency redemptions omit context var #6, so `getVar[Coll[Byte]](6).get` throws | **Fixed** |
-| `avl_tree.rs` rebuilds a prover from a `HashMap` (random order); AVL+ shape depends on insertion order | Deferred |
-| Restart rebuild sorts only by timestamp, with no tiebreaker | Deferred |
-| Proofs served from the live in-memory tree instead of the committed on-chain digest | Deferred |
-| A dropped update transaction (node 404) is treated as pending forever | Deferred |
+| `avl_tree.rs` rebuilds a prover from a `HashMap` (random order); AVL+ shape depends on insertion order | **Fixed** (insertion-order journal; rebuilt digest asserted equal to the committed one) |
+| Restart rebuild sorts only by timestamp, with no tiebreaker | **Fixed** (journal order, not re-sorting) |
+| Proofs served from the live in-memory tree instead of the committed on-chain digest | **Fixed** (`generate_committed_tracker_lookup_proof`; unconfirmed notes get `NoteNotConfirmed`) |
+| A dropped update transaction (node 404) is treated as pending forever | **Fixed** (dropped-tx detection reverts pending notes and resubmits; orphaned confirmed box detected) |
 | No reorg handling past depth 2 | Deferred (already documented in `docs/CONFIGURATION.md`) |
 
 The emergency path omitted var #6 entirely, but the contract reads it unconditionally with `.get`, so
@@ -383,10 +387,8 @@ per owner, which is the property that actually matters.
 | Item | Why |
 |---|---|
 | C3 protocol change (domain tag + tracker NFT id in the signed message) | Breaking change across the contract, both Rust signers, the CLI and the Scala reference. The off-chain single-reserve rule holds meanwhile. |
-| C4 first-seen validation (R4/R5/R6/R7), pending-refund collateral exclusion, tracker NFT supply 1 | Needs a policy decision on how a reserve failing validation is surfaced (reject vs mark) and interacts with reserve generations. |
 | S4 chain-derived redemption state | Same redesign deferred in `pr12_triage.md` finding 3. |
-| S6 AVL insertion-order durability, proofs from a committed snapshot | Prerequisite for each other; same family as `pr12_triage.md` finding 3. |
-| S6 updater stall recovery and reorg handling | 404-on-update currently wedges the updater indefinitely; `RevertPendingNotes` exists but is never called from production code. |
+| S6 reorg handling past confirmation depth 2 | Deep reorgs remain unhandled (documented in `docs/CONFIGURATION.md`); shallow reorgs are detected via confirmed-box orphan checks. |
 
 ## Deployment impact
 

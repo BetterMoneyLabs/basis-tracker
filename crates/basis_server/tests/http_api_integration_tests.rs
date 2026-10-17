@@ -84,8 +84,7 @@ mod http_api_tests {
                     } => {
                         let result = redemption_manager
                             .tracker
-                            .lookup_note(&issuer_pubkey, &recipient_pubkey)
-                            .map(Some);
+                            .get_note_optional(&issuer_pubkey, &recipient_pubkey);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::InitiateRedemption {
@@ -135,6 +134,19 @@ mod http_api_tests {
                         response_tx,
                     } => {
                         // Mock tracker lookup proof
+                        let mock_proof = basis_store::TrackerLookupProof {
+                            key: vec![0u8; 64],
+                            value: vec![0u8; 8],
+                            proof: vec![1, 2, 3, 4],
+                        };
+                        let _ = response_tx.send(Ok(mock_proof));
+                    }
+                    TrackerCommand::GetCommittedTrackerLookupProof {
+                        issuer_pubkey: _,
+                        recipient_pubkey: _,
+                        response_tx,
+                    } => {
+                        // Mock committed tracker lookup proof
                         let mock_proof = basis_store::TrackerLookupProof {
                             key: vec![0u8; 64],
                             value: vec![0u8; 8],
@@ -199,13 +211,14 @@ mod http_api_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::ConfirmPendingNotes {
+                        digest,
                         box_id,
                         height,
                         response_tx,
                     } => {
                         let result = redemption_manager
                             .tracker
-                            .confirm_pending_notes(&box_id, height);
+                            .confirm_pending_notes(digest, &box_id, height);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::RevertPendingNotes { response_tx } => {

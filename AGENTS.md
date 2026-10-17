@@ -180,9 +180,9 @@ start_scanner(state).await.unwrap();
 ```rust
 use basis_store::ergo_scanner::{NodeConfig, ServerState};
 
-// Create real scanner for mainnet
+// Create real scanner against a local node (the default node_url)
 let config = NodeConfig::default();
-let scanner = ServerState::new(config, "http://159.89.116.15:11088".to_string());
+let scanner = ServerState::new(config, "http://127.0.0.1:9053".to_string());
 
 // Test connectivity
 let height = scanner.get_current_height().await?;
@@ -195,10 +195,11 @@ println!("Current blockchain height: {}", height);
 - **ReserveRedeemed**: Debt redemption from reserve
 - **ReserveSpent**: Reserve box spent/closed
 
-### Available Ergo Nodes
-- **Mainnet**: `http://159.89.116.15:11088` (public)
-- **Testnet**: `http://213.239.193.208:9052` (public)
+### Node Configuration
+- `ergo.node.node_url` defaults to `http://127.0.0.1:9053` (a local node); set it explicitly
+  for mainnet/testnet. Never rely on a third-party plaintext node — it sees every request
 - **Local**: `http://localhost:9053` (development)
+- Public mainnet/testnet nodes exist, but operator-controlled or local nodes are recommended
 
 ### Configuration
 - Node configuration stored in `config/basis.toml` under `[ergo.node]`

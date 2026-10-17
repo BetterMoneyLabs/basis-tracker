@@ -46,15 +46,34 @@ Anyone (presumably, owner in most cases) can top the reserve up.
 * If A has on-chain reserve, B may redeem offchain from A->B note, by providing proof of (amount, timestamp).
  Reserve contract UTXO is storing tree of hash(ownerKey||receiverKey) -> (timestamp, cumulativeRedeemedAmount) pairs.
  The value format is: timestamp (8 bytes big-endian) ++ cumulativeRedeemedAmount (8 bytes big-endian) = 16 bytes total.
- During redemption, the contract verifies that the note's timestamp is **greater than** the stored timestamp,
- which prevents replay attacks with old notes. After on-chain redemption, A and B should contact offchain tracker
+ During redemption, the contract verifies that the note's timestamp is **greater than or equal to** the stored
+ timestamp, which prevents replay attacks with old notes while still allowing the remainder of a partially
+ redeemed note to be redeemed later. After on-chain redemption, A and B should contact offchain tracker
  to update their records before next payment from A to B is done.
+
+ Redemption additionally enforces, in both contract variants:
+ - **Replay protection without a lookup proof:** context variable #7 (AVL+ lookup proof for the note
+   key in the reserve's redemption tree) is provided from the second redemption on. For a first
+   redemption it may be omitted, in which case the contract uses `AvlTree.insert`, which fails if the
+   key is already present — so replaying a redeemed note without #7 is rejected.
+ - **Single reserve input:** exactly one input with the reserve contract and the owner's public key in R4
+   may appear in a redemption transaction, so two reserves of the same owner cannot be mixed to redeem
+   the same note twice.
+ - **Token reserves preserve ERG:** in `basis-token.es` the reserve output must keep at least the input's
+   ERG value in both redemption and top-up actions, so the reserve cannot be drained of its ERG (storage
+   rent) while tokens are redeemed.
+
+ A reserve only counts as collateral once the tracker has validated its setup when first seen on-chain
+ (box creation is not a spend, so the contract cannot check it): R5 must hold the empty AVL+ tree
+ (flags `0x03`, 32-byte keys), R7 must be absent or `Long 0` (no pre-initiated refund), R6 must reference
+ the tracker's own NFT (a singleton token), and R4 must be a valid secp256k1 point. A reserve with a
+ pending refund is never counted as collateral.
 
 * Debt Transfer (Triangular Trade): The protocol supports transferring debt between creditors with debtor consent.
  Example: A owes 10 ERG to B. B wants to buy from C for 5 ERG. Instead of on-chain redemption:
-  1. B requests A to sign new notes: A->B (5 ERG remaining), A->C (5 ERG transferred)
-  2. A signs both notes, tracker signs both notes
-  3. Old note A->B (10 ERG) is cancelled, new notes A->B (5 ERG) and A->C (5 ERG) are created
+  1. B requests A to sign a new note A->C (5 ERG transferred)
+  2. A signs the note, tracker signs the note
+  3. New note A->C (5 ERG) is created; the A->B note keeps its cumulative total of 10 ERG on the tracker
   4. C can now redeem A->C note from A's reserve
  This enables efficient multi-party settlements without on-chain transactions.
 
@@ -188,6 +207,12 @@ see specs/pr14_triage.md for the full trust-model notes.
 Tracker may collude with a reserve holder to inject a note with fake timestamp in the past to redeem immediately. 
 Tracker would be caught in this case. For making this case impossible with contract, technique similar to anti-censorship 
 protection can be used.
+
+Known limitation: the note signing message (`key || totalDebt || timestamp`) is not bound to a specific reserve
+contract or collateral type. If the same owner operates multiple reserves (e.g. an ERG reserve and a token
+reserve), a note signed once could in principle be redeemed against either of them. Binding the reserve into
+the signed message is a deferred protocol change (it alters the message format on both chains of the
+implementation).
 
 ## Wallet
 

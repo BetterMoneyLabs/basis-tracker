@@ -293,9 +293,9 @@ Key configuration includes:
   - `mode`: `none`, `api_key`, or `signature`.
   - `api_key`: shared secret used when `mode = "api_key"`.
   - `authorized_clients`: list of `{ pubkey, role }` entries used when `mode = "signature"`.
-  - `allowed_origins`: CORS allow-list used when auth is enabled.
+  - `allowed_origins`: CORS origin allow-list. Empty (default) disables CORS entirely; wildcard origins are never used.
   - `signature_timestamp_tolerance_ms`: maximum age of a request signature in milliseconds (default 30 s).
-- **Ergo node connection details** (required): The server will abort with exit code 1 if `ergo.node.node_url` is not provided in the configuration - no default localhost value is used
+- **Ergo node connection details**: `ergo.node.node_url` defaults to `http://127.0.0.1:9053`; point it at your Ergo node for real deployments
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)
 - Tracker public key (for identifying the tracker server)
@@ -303,7 +303,7 @@ Key configuration includes:
 - Transaction fees
 
 **Critical Requirements**:
-1. The server requires a valid Ergo node URL to be provided in the configuration (`ergo.node.node_url` field). If this is missing or empty, the server will immediately exit with status code 1 during startup.
+1. `ergo.node.node_url` defaults to `http://127.0.0.1:9053` (local node); point it at your Ergo node for real deployments.
 2. The server requires access to an Ergo node with the Schnorr signing API (`/utils/schnorrSign`) enabled for endpoints that require tracker signatures. The tracker private key must be available in the Ergo node's wallet for signature generation.
 3. The tracker public key must be provided in the configuration for signature verification purposes.
 4. The tracker API key must be provided to authenticate requests to the Ergo node's signing API.
@@ -370,7 +370,7 @@ For full details see `specs/server/authentication_authorization.md`.
 
 ## Security Considerations
 
-- CORS headers configured for cross-origin requests, with origin restriction when auth is enabled and `allowed_origins` is non-empty
+- CORS headers only for the explicit `allowed_origins` allow-list; when it is empty (default), no CORS layer is installed at all
 - Input validation for all public keys and amounts
 - Signature verification for note creation and debt transfer
 - Channel-based communication to ensure thread safety

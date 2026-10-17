@@ -577,7 +577,9 @@ mod confirmation_state_tests {
         manager.add_note(&issuer, &note).unwrap();
         let digest = manager.get_state().avl_root_digest;
         manager.mark_notes_pending(digest, "tx123", 100).unwrap();
-        manager.confirm_pending_notes("box123", 200).unwrap();
+        manager
+            .confirm_pending_notes(digest, "box123", 200)
+            .unwrap();
 
         let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::Confirmed);
@@ -688,5 +690,245 @@ mod confirmation_state_tests {
         assert_eq!(confirmation.redeemable_amount(1000), 0);
         assert!(!confirmation.is_redeemable(1500));
         assert_eq!(confirmation.redeemable_amount(1500), 0);
+    }
+
+    #[test]
+    fn committed_proof_rejects_unconfirmed_note() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+        let note = create_note(&issuer_secret, &recipient, 1000, 1);
+
+        manager.add_note(&issuer, &note).unwrap();
+
+        let result = manager.generate_committed_tracker_lookup_proof(&issuer, &recipient);
+        assert!(
+            matches!(result, Err(crate::NoteError::NoteNotConfirmed)),
+            "expected NoteNotConfirmed, got {:?}",
+            result
+        );
+    }
+
+    /// Issue #15 S6: redemption proofs must be generated against the committed
+    /// on-chain state. A note posted after the last commitment changes the live
+    /// tree digest but must not affect committed proofs for already-confirmed
+    /// notes, and must itself be rejected until confirmed.
+    #[test]
+    fn committed_proof_unaffected_by_later_unconfirmed_notes() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient1 = [2u8; 33];
+        let recipient2 = [3u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient1, 1000, 1))
+            .unwrap();
+        let digest1 = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest1, "tx1", 100).unwrap();
+        manager.confirm_pending_notes(digest1, "box1", 200).unwrap();
+        assert_eq!(manager.confirmed_digest(), Some(digest1));
+
+        // Committed proof for the confirmed note works and carries the confirmed value.
+        let proof1 = manager
+            .generate_committed_tracker_lookup_proof(&issuer, &recipient1)
+            .expect("committed proof for confirmed note");
+        assert_eq!(proof1.value, 1000u64.to_be_bytes().to_vec());
+
+        // A second note (possibly a self-note from an attacker) changes the live tree.
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient2, 5000, 2))
+            .unwrap();
+        assert_ne!(manager.get_state().avl_root_digest, digest1);
+
+        // The committed proof for the first note still verifies against the
+        // confirmed digest — redemption liveness is preserved.
+        let proof1_after = manager
+            .generate_committed_tracker_lookup_proof(&issuer, &recipient1)
+            .expect("committed proof must survive later unconfirmed notes");
+        assert_eq!(proof1_after.value, 1000u64.to_be_bytes().to_vec());
+        assert!(
+            basis_trees::BasisAvlTree::verify_proof(
+                &digest1,
+                &proof1_after.proof,
+                &proof1_after.key,
+                &proof1_after.value,
+            ),
+            "committed proof must verify against the confirmed on-chain digest"
+        );
+
+        // The unconfirmed note itself cannot be redeemed yet.
+        let result = manager.generate_committed_tracker_lookup_proof(&issuer, &recipient2);
+        assert!(
+            matches!(result, Err(crate::NoteError::NoteNotConfirmed)),
+            "expected NoteNotConfirmed, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn committed_proof_errors_when_rebuilt_digest_mismatches() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx1", 100).unwrap();
+        manager.confirm_pending_notes(digest, "box1", 200).unwrap();
+
+        // Reconcile against a digest that does not match the committed tree. The
+        // note keeps its confirmed value but the recorded confirmed digest moves,
+        // so the rebuilt committed tree no longer reproduces it.
+        let other_digest = [9u8; 33];
+        manager
+            .reconcile_with_confirmed_digest(&other_digest, "box2", 300)
+            .unwrap();
+
+        let result = manager.generate_committed_tracker_lookup_proof(&issuer, &recipient);
+        match result {
+            Err(crate::NoteError::StorageError(msg)) => {
+                assert!(
+                    msg.contains("digest mismatch"),
+                    "expected digest mismatch error, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected digest mismatch StorageError, got {:?}", other),
+        }
+    }
+}
+
+#[cfg(test)]
+mod debt_monotonicity_tests {
+    use crate::{IouNote, NoteError, TrackerStateManager};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    fn make_manager() -> TrackerStateManager {
+        TrackerStateManager::new_with_temp_storage()
+    }
+
+    fn issuer_pubkey(secret_key: &[u8; 32]) -> [u8; 33] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(secret_key).expect("valid secret key");
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+    }
+
+    fn create_note(
+        issuer_secret: &[u8; 32],
+        recipient: &[u8; 33],
+        amount: u64,
+        timestamp: u64,
+    ) -> IouNote {
+        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret).unwrap()
+    }
+
+    #[test]
+    fn debt_decrease_rejected_on_add_note() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .unwrap();
+
+        // A debtor restating a lower cumulative total must be rejected.
+        let lower = create_note(&issuer_secret, &recipient, 500, 2);
+        let result = manager.add_note(&issuer, &lower);
+        assert!(
+            matches!(result, Err(NoteError::DebtDecreaseNotPermitted { .. })),
+            "expected DebtDecreaseNotPermitted, got {:?}",
+            result
+        );
+
+        // The stored note keeps the original (higher) total.
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_collected, 1000);
+    }
+
+    #[test]
+    fn debt_decrease_rejected_on_update_note() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .unwrap();
+
+        let lower = create_note(&issuer_secret, &recipient, 0, 2);
+        let result = manager.update_note(&issuer, &lower);
+        assert!(
+            matches!(result, Err(NoteError::DebtDecreaseNotPermitted { .. })),
+            "expected DebtDecreaseNotPermitted, got {:?}",
+            result
+        );
+
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_collected, 1000);
+    }
+
+    #[test]
+    fn equal_or_higher_debt_accepted() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .unwrap();
+
+        // Equal total (e.g. a re-signed note) is accepted.
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 2))
+            .unwrap();
+        // Higher total is accepted.
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1500, 3))
+            .unwrap();
+        manager
+            .update_note(&issuer, &create_note(&issuer_secret, &recipient, 2000, 4))
+            .unwrap();
+
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_collected, 2000);
+    }
+
+    #[test]
+    fn amount_redeemed_preserved_across_replacement() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        let mut note = create_note(&issuer_secret, &recipient, 1000, 1);
+        note.amount_redeemed = 400;
+        manager.add_note(&issuer, &note).unwrap();
+
+        // A replacement note from create_and_sign carries amount_redeemed = 0;
+        // the tracked redemption progress must survive the update.
+        let replacement = create_note(&issuer_secret, &recipient, 1500, 2);
+        assert_eq!(replacement.amount_redeemed, 0);
+        manager.add_note(&issuer, &replacement).unwrap();
+
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_collected, 1500);
+        assert_eq!(stored.amount_redeemed, 400);
+
+        // A later redemption (higher amount_redeemed) is recorded via record_redemption;
+        // update_note always carries the existing amount_redeemed forward.
+        manager.record_redemption(&issuer, &recipient, 600).unwrap();
+
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_collected, 1500);
+        assert_eq!(stored.amount_redeemed, 600);
     }
 }

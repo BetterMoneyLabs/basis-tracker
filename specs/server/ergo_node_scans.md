@@ -140,23 +140,27 @@ The tracker scanner registers using the `containsAsset` predicate rather than re
 
 ### Processing Tracker Boxes
 
-Tracker boxes contain different data than reserve boxes:
+Tracker boxes contain different data than reserve boxes. Boxes that fail validation are
+logged and skipped (they are never stored):
 1. **Asset Validation**: Verify the box contains the tracker NFT
-2. **Register Information Extraction**: Parse key registers:
-   - R4: Contains the tracker's public key (33-byte compressed secp256k1 point)
-   - R5: Contains the AVL+ tree root digest (33-byte commitment to all notes in the system)
-   - R6: Contains the last verified height
+2. **Register Validation**: Parse and sanity-check key registers:
+   - R4: Contains the tracker's public key (33-byte compressed secp256k1 point, 66 hex chars after stripping the type prefix)
+   - R5: Contains the AVL+ tree root digest; must start with the SAvlTree type identifier (0x64) and meet a minimum length
+   - R6: Contains the tracker NFT ID (32 bytes hex after stripping the `0e20` prefix); when it disagrees with the configured NFT ID, the on-chain value is used and a warning is logged
 3. **Tracker State Updates**: Update the tracker state manager with cross-verification information
 
 ### Processing Reserve Boxes
 
-Reserve boxes contain the following key information:
+Reserve boxes contain the following key information. Invalid boxes are rejected with an
+error and never counted as collateral:
 1. **Asset Validation**: Verify the box contains the tracker NFT token
-2. **Register Information Extraction**: Parse key registers:
-   - R4: Contains the issuer's public key (33-byte compressed secp256k1 point)
-   - R5: Contains the AVL tree root digest (33-byte commitment to all notes owed by this issuer)
-   - R6: Contains the NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to
-3. **Reserve State Updates**: Update the reserve tracker with collateralization ratios and reserve status
+2. **Register Validation**: Parse key registers:
+   - R4: Contains the issuer's public key (33-byte compressed secp256k1 point) — must be a valid curve point, otherwise the reserve can never be redeemed on-chain
+   - R5: Contains the AVL tree root digest (commitment to all notes owed by this issuer)
+   - R6: Contains the NFT ID of the tracker server (bytes, exactly 32) — when `tracker_nft_id` is configured, a reserve referencing a different tracker is rejected
+   - R7: Contains the refund initiation height (Long); any non-Long type (missing `0x05` prefix) is rejected because `SELF.R7[Long]` would throw on-chain
+3. **First-Seen Setup Validation**: when a reserve is first seen it must be clean — R7 must be `0` (a reserve created with a pending refund could be withdrawn immediately) and R5 must be the empty AVL tree (a poisoned tree could block creditors from ever redeeming). Reserves failing these checks are not tracked as collateral.
+4. **Reserve State Updates**: Update the reserve tracker with collateralization ratios and reserve status
 
 ## Data Models
 

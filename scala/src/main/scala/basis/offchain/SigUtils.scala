@@ -61,9 +61,11 @@ object SigUtils {
 
     // Scala's BigInt applies two's-complement for negative values, so a non-negative BigInt whose
     // bitLength is 256 came from bytes with the top bit set -- exactly the case byteArrayToBigInt
-    // would read as negative.
+    // would read as negative. The challenge bytes must be checked directly: a top-bit-set hash is
+    // read as NEGATIVE by BigInt(e), and a negative BigInt's bitLength never exceeds 255, so a
+    // bitLength check on BigInt(e) would be a no-op.
     val zContractSafe = z.bitLength <= 255
-    val eContractSafe = BigInt(e).bitLength <= 255
+    val eContractSafe = isContractCompatible(e)
 
     if (zContractSafe && eContractSafe) {
       (a, z)

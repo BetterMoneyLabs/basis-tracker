@@ -44,6 +44,7 @@ secret.txt
 alice_keys_output.txt
 
 # Local secret files (test fixtures may be committed)
+/secrets/
 secrets/participants.local.csv
 
 # SECURITY (PR #14 S7): participant secrets must never be committed. This file previously held

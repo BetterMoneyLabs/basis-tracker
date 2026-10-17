@@ -1,4 +1,4 @@
-//! Coverage for the eight HTTP handlers that no existing test exercised.
+//! Coverage for the seven HTTP handlers that no existing test exercised.
 //!
 //! Verified by grep that neither the handler names nor the route paths appeared in any test
 //! file before this one:
@@ -88,8 +88,7 @@ mod untested_handlers {
                     } => {
                         let r = redemption_manager
                             .tracker
-                            .lookup_note(&issuer_pubkey, &recipient_pubkey)
-                            .map(Some);
+                            .get_note_optional(&issuer_pubkey, &recipient_pubkey);
                         let _ = response_tx.send(r);
                     }
                     TrackerCommand::CompleteRedemption {
@@ -675,11 +674,29 @@ mod untested_handlers {
     async fn test_submit_redemption_failed_broadcast_returns_500() {
         let state = mock_state_with_config("http://127.0.0.1:1").await;
 
-        let (status, body) = submit_redemption(
-            axum::extract::State(state),
-            axum::extract::Json(submit_request()),
-        )
-        .await;
+        // The handler validates the caller-supplied amounts against the stored
+        // note BEFORE broadcasting (issue #15 S4), so a note must exist for the
+        // request to reach the broadcast stage.
+        let (secret, issuer) = generate_keypair();
+        let (_, recipient) = generate_keypair();
+        let note = IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret).unwrap();
+        state
+            .tx
+            .send(TrackerCommand::AddNote {
+                issuer_pubkey: issuer,
+                note,
+                response_tx: tokio::sync::oneshot::channel().0,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut req = submit_request();
+        req.issuer_pubkey = hex::encode(issuer);
+        req.recipient_pubkey = hex::encode(recipient);
+
+        let (status, body) =
+            submit_redemption(axum::extract::State(state), axum::extract::Json(req)).await;
 
         assert_eq!(
             status,
@@ -694,6 +711,60 @@ mod untested_handlers {
             "a failed broadcast must be reported as such, got: {}",
             msg
         );
+    }
+
+    /// Issue #15 S4: /redemption/submit must reject caller-supplied amounts that
+    /// do not match the stored note state, before any broadcast happens.
+    #[tokio::test]
+    async fn test_submit_redemption_rejects_mismatched_amounts() {
+        let node_url = spawn_accepting_node().await;
+        let state = mock_state_with_config(&node_url).await;
+
+        let (secret, issuer) = generate_keypair();
+        let (_, recipient) = generate_keypair();
+        let note = IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret).unwrap();
+        state
+            .tx
+            .send(TrackerCommand::AddNote {
+                issuer_pubkey: issuer,
+                note,
+                response_tx: tokio::sync::oneshot::channel().0,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut req = submit_request();
+        req.issuer_pubkey = hex::encode(issuer);
+        req.recipient_pubkey = hex::encode(recipient);
+
+        // redeemed_amount exceeds the outstanding debt.
+        let mut too_much = req.clone();
+        too_much.redeemed_amount = 20_000;
+        too_much.new_already_redeemed = 20_000;
+        let (status, _) = submit_redemption(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(too_much),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // new_already_redeemed inconsistent with note state.
+        req.new_already_redeemed = 999_999;
+        let (status, _) = submit_redemption(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(req),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // No note at all.
+        let mut no_note = submit_request();
+        let (_, other_issuer) = generate_keypair();
+        no_note.issuer_pubkey = hex::encode(other_issuer);
+        let (status, _) =
+            submit_redemption(axum::extract::State(state), axum::extract::Json(no_note)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
