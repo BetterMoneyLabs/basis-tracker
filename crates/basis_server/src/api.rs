@@ -230,6 +230,49 @@ pub async fn create_note(
         }
     };
 
+    // SECURITY (issue #15 C3): the note's signed message ends with the tracker NFT ID, binding the
+    // note to one tracker (and its contract deployment and chain). A note minted for a different
+    // tracker verifies mathematically but could never redeem against this tracker's reserves, so
+    // it must not be pinned in this tree.
+    let tracker_nft_bytes: [u8; 32] = match hex::decode(&payload.tracker_nft_id) {
+        Ok(bytes) => match bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(
+                        "tracker_nft_id must be 32 bytes".to_string(),
+                    )),
+                )
+            }
+        },
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "tracker_nft_id must be hex-encoded".to_string(),
+                )),
+            )
+        }
+    };
+    if let Some(configured_nft) = state
+        .config
+        .ergo
+        .tracker_nft_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+    {
+        if !configured_nft.eq_ignore_ascii_case(&payload.tracker_nft_id) {
+            return (
+                StatusCode::CONFLICT,
+                Json(crate::models::error_response(format!(
+                    "Note is bound to tracker NFT {}, this tracker is {}",
+                    payload.tracker_nft_id, configured_nft
+                ))),
+            );
+        }
+    }
+
     // Create the IOU note
     let note = IouNote::new(
         recipient_pubkey,
@@ -237,6 +280,7 @@ pub async fn create_note(
         0, // amount_redeemed
         payload.timestamp,
         signature,
+        tracker_nft_bytes,
     );
 
     // Send command to tracker thread
@@ -313,6 +357,7 @@ pub async fn create_note(
                     previous, requested
                 ),
                 NoteError::NoteNotConfirmed => "Note is not committed on-chain yet".to_string(),
+                NoteError::TrackerIdMismatch => "Note is bound to a different tracker".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -448,6 +493,7 @@ pub async fn get_notes_by_issuer(
                     previous, requested
                 ),
                 NoteError::NoteNotConfirmed => "Note is not committed on-chain yet".to_string(),
+                NoteError::TrackerIdMismatch => "Note is bound to a different tracker".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -569,6 +615,7 @@ pub async fn get_notes_by_recipient(
                     previous, requested
                 ),
                 NoteError::NoteNotConfirmed => "Note is not committed on-chain yet".to_string(),
+                NoteError::TrackerIdMismatch => "Note is bound to a different tracker".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -728,6 +775,7 @@ pub async fn get_note_by_issuer_and_recipient(
                     previous, requested
                 ),
                 NoteError::NoteNotConfirmed => "Note is not committed on-chain yet".to_string(),
+                NoteError::TrackerIdMismatch => "Note is bound to a different tracker".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -805,6 +853,7 @@ pub async fn get_all_notes(
                     amount_redeemed: note.amount_redeemed,
                     timestamp: note.timestamp,
                     signature: hex::encode(note.signature),
+                    tracker_nft_id: hex::encode(note.tracker_nft_id),
                     age_seconds,
                     confirmation,
                 });
@@ -831,6 +880,7 @@ pub async fn get_all_notes(
                     previous, requested
                 ),
                 NoteError::NoteNotConfirmed => "Note is not committed on-chain yet".to_string(),
+                NoteError::TrackerIdMismatch => "Note is bound to a different tracker".to_string(),
                 NoteError::RedemptionTooEarly => "Redemption too early".to_string(),
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
@@ -3010,16 +3060,18 @@ pub async fn request_tracker_signature(
     };
 
     // Create message to be signed matching the deployed Basis reserve contract.
-    // message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) (48 bytes)
+    // message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId (80 bytes)
     // where key = blake2b256(ownerKeyBytes || receiverBytes)
     // Both normal redemption and the reserve contract verify this exact message format.
     // The signed values are the stored note's (amount_collected, timestamp), not
-    // caller-supplied values (issue #15 S4).
+    // caller-supplied values (issue #15 S4); the tracker NFT ID binds the signature
+    // to this tracker (issue #15 C3).
     let message_to_sign_bytes = basis_store::schnorr::signing_message(
         &issuer_pubkey_array,
         &recipient_pubkey_array,
         stored_note.amount_collected,
         stored_note.timestamp,
+        &stored_note.tracker_nft_id,
     );
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
@@ -3206,11 +3258,23 @@ async fn get_tracker_signature_for_redemption(
             )
         })?;
 
+    let tracker_nft_id: [u8; 32] = state
+        .config
+        .tracker_nft_bytes()
+        .ok()
+        .and_then(|b| b.as_slice().try_into().ok())
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker NFT ID not configured".to_string(),
+            )),
+        ))?;
     let message_to_sign_bytes = basis_store::schnorr::signing_message(
         &issuer_pubkey_array,
         &recipient_pubkey_array,
         total_debt,
         timestamp,
+        &tracker_nft_id,
     );
 
     // Check if we have a tracker secret key for local signing
@@ -3582,6 +3646,7 @@ pub async fn prepare_redemption(
         &recipient_pubkey_array,
         total_debt,
         stored_note.timestamp,
+        &stored_note.tracker_nft_id,
     );
 
     let message_to_sign = hex::encode(&message_to_sign_bytes);
@@ -4036,6 +4101,7 @@ pub async fn get_latest_tracker_box_id(
                 tracker_box_id,
                 timestamp: current_height,
                 height: current_height,
+                tracker_nft_id: state.config.ergo.tracker_nft_id.clone().unwrap_or_default(),
             };
 
             tracing::info!(

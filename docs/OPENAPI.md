@@ -109,7 +109,7 @@ All endpoints return a standardized response envelope:
 
 ### Notes
 
-- `POST /notes` - Create a new IOU note
+- `POST /notes` - Create a new IOU note (requires `tracker_nft_id`, which must match this tracker's configured NFT id — see "Signing Message Format" below)
 - `GET /notes` - Get all IOU notes with age and confirmation state
 - `GET /notes/issuer/{pubkey}` - Get all notes issued by a public key
 - `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get a specific note
@@ -202,6 +202,7 @@ All public keys and signatures are hex-encoded strings:
   "amount_redeemed": 0,
   "timestamp": 1234567890,
   "signature": "030303...",
+  "tracker_nft_id": "a1b2c3d4...",
   "confirmation": {
     "status": "local_only",
     "confirmed_total_debt": null,
@@ -235,9 +236,15 @@ curl -X POST http://localhost:3048/notes \
     "amount": 1000,
     "timestamp": 1234567890,
     "signature": "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303",
-    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101"
+    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
+    "tracker_nft_id": "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
   }'
 ```
+
+The `tracker_nft_id` field (32 bytes, hex) is required. It is part of the signed message (appended
+after `key || totalDebt || timestamp`), binding the note to one tracker. The tracker validates it
+against its configured `ergo.tracker_nft_id`: a malformed hex string or wrong length returns
+`400`, and an id that does not match this tracker's NFT returns `409`.
 
 ### Get Notes by Issuer
 
@@ -399,10 +406,10 @@ curl http://localhost:3048/tracker/state
 
 ## Signing Message Format
 
-The Schnorr signatures used in notes and redemptions sign the following 48-byte message:
+The Schnorr signatures used in notes and redemptions sign the following 80-byte message:
 
 ```
-key || totalDebt || timestamp
+key || totalDebt || timestamp || trackerNftId
 ```
 
 where:
@@ -410,6 +417,7 @@ where:
 - `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
 - `totalDebt` is the cumulative debt amount (8 bytes, big-endian)
 - `timestamp` is the note payment timestamp (8 bytes, big-endian)
+- `trackerNftId` is the tracker's NFT id (32 bytes), binding the signature to one specific tracker/contract — on-chain the contract reads it from the tracker box's `R6` register and appends it, so a signature made for one tracker cannot be replayed on another
 
 The same message format is used for both normal and emergency redemption. In an emergency redemption, the tracker signature is optional.
 

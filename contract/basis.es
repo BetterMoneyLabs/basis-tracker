@@ -22,7 +22,7 @@
     //    A key->value dictionary is used to store the data as hash(A_pubkey || B_pubkey) -> totalDebt,
     //    where totalDebt is the cumulative amount of debt A owes to B.
     //  * to make a (new payment) to B, A is taking current AB record, increasing cumulative debt,
-    //    signing the updated record (message: hash(A||B) || totalDebt || timestamp) and sending it to the tracker.
+    //    signing the updated record (message: hash(A||B) || totalDebt || timestamp || trackerNftId) and sending it to the tracker.
     //    The timestamp is in milliseconds since Unix epoch (Java time format).
     //  * tracker is periodically committing to its state (dictionary) by posting its digest on chain
     //    via an AVL tree in register R5. The tree stores hash(A||B) -> totalDebt mappings.
@@ -31,7 +31,7 @@
     //    The AVL tree stores: hash(ownerKey||receiverKey) -> (timestamp, cumulativeRedeemedAmount)
     //    where timestamp is the latest payment timestamp and cumulativeRedeemedAmount is total redeemed.
     //    Redemption requires BOTH reserve owner's signature AND tracker's signature on message: 
-    //    hash(ownerKey||receiverKey) || totalDebt || timestamp.
+    //    hash(ownerKey||receiverKey) || totalDebt || timestamp || trackerNftId.
     //    The tracker signature guarantees that the offchain state is consistent and prevents double-spending.
     //    Additionally, the contract verifies that totalDebt is committed in the tracker's AVL tree (context var #8 provides lookup proof).
     //    The contract also verifies that the note's timestamp is not older than any previously redeemed timestamp,
@@ -201,11 +201,11 @@
 
     // Context extension variables for redemption:
     // #1 - receiver pubkey (as a GroupElement)
-    // #2 - reserve owner's signature bytes (Schnorr signature on key || totalDebt || timestamp)
+    // #2 - reserve owner's signature bytes (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
     // #3 - current total debt amount (Long)
     // #4 - timestamp of the payment (Long, milliseconds since Unix epoch)
     // #5 - proof for insertOrUpdate into reserve's AVL tree (Coll[Byte])
-    // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp)
+    // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
     // #7 - [OPTIONAL] proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)
     //      Omitted only for a first redemption. If omitted, the contract uses AvlTree.insert, which
     //      fails if the key is already present -- so omitting #7 for an already-redeemed note is
@@ -253,11 +253,11 @@
       // redemption path
       // context extension variables used:
       // #1 - receiver pubkey (as a GroupElement)
-      // #2 - reserve owner's signature bytes for the debt record (Schnorr signature on key || totalDebt || timestamp)
+      // #2 - reserve owner's signature bytes for the debt record (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
       // #3 - current total debt amount (Long)
       // #4 - timestamp of the payment (Long, milliseconds since Unix epoch)
       // #5 - proof for insertOrUpdate into reserve's AVL tree (Coll[Byte])
-      // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp)
+      // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
       // #7 - [OPTIONAL] proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)
       //      Omitted only for a first redemption (see the insert/insertOrUpdate branch below)
       // #8 - proof for AVL tree lookup in tracker's tree for hash(ownerKey||receiverKey) -> totalDebt (required)
@@ -333,8 +333,10 @@
       val trackerUpdateTime = tracker.creationInfo._1
       val enoughTimeSpent = (HEIGHT - trackerUpdateTime) > 3 * 720 // 3 days passed
 
-      // Message to verify signatures: key || totalDebt || timestamp
-      val message = key ++ longToByteArray(totalDebt) ++ longToByteArray(timestamp)
+      // Message to verify signatures: key || totalDebt || timestamp || trackerNftId
+      // The tracker NFT ID (SELF.R6, 32 bytes) binds every signature to this tracker,
+      // its reserve contract deployment and its chain (issue #15 C3).
+      val message = key ++ longToByteArray(totalDebt) ++ longToByteArray(timestamp) ++ SELF.R6[Coll[Byte]].get
 
       // Tracker's signature (optional after emergency period)
       val trackerSigBytes = getVar[Coll[Byte]](6).get

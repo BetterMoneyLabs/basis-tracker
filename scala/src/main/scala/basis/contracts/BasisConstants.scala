@@ -88,6 +88,12 @@ object BasisConstants {
   // Minimum top-up amount (0.1 ERG)
   val MIN_TOP_UP_AMOUNT: Long = 100000000L
 
+  // Fixed 32-byte tracker NFT id used for test/demo message construction. The signing message is
+  // key || totalDebt || timestamp || trackerNftId (see contract/basis.es), so every off-chain signer
+  // appends these bytes. Test specs use their own fixture NFT ids (the same bytes they put in the
+  // reserve box R6); this constant is for demos and generated test vectors.
+  val testTrackerNftId: Array[Byte] = Array.fill(32)(0x42.toByte)
+
   // Emergency redemption time (3 days in blocks, assuming ~2.5 min per block)
   val EMERGENCY_REDEMPTION_TIME_IN_BLOCKS: Int = 3 * 720
 

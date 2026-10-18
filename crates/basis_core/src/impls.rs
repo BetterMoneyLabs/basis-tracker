@@ -174,6 +174,7 @@ fn compute_challenge(
 
 #[cfg(test)]
 mod tests {
+    const TEST_TRACKER_NFT_ID: [u8; 32] = [7u8; 32];
     use super::*;
     use secp256k1::{Secp256k1, SecretKey};
 
@@ -238,6 +239,7 @@ mod tests {
             &issuer_pubkey,
             1_000_000_000,
             1743379200000,
+            &TEST_TRACKER_NFT_ID,
         );
 
         let (signature, _) =
@@ -267,6 +269,7 @@ mod tests {
             &issuer_pubkey,
             1_000_000_000,
             1743379200000,
+            &TEST_TRACKER_NFT_ID,
         );
 
         let (signature, bad_e) =
@@ -297,8 +300,13 @@ mod tests {
         let timestamp = 1743379200000u64; // Mar 29, 2025 in ms
 
         // Create the message to be signed: key || totalDebt || timestamp
-        let message =
-            crate::types::signing_message(&issuer_pubkey, &recipient_pubkey, total_debt, timestamp);
+        let message = crate::types::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            total_debt,
+            timestamp,
+            &TEST_TRACKER_NFT_ID,
+        );
 
         // Sign the message
         let verifier = SchnorrVerifier;
@@ -329,8 +337,13 @@ mod tests {
         let timestamp = 1743379200000u64; // Mar 29, 2025 in ms
 
         // Create the message to be signed: key || totalDebt || timestamp
-        let message =
-            crate::types::signing_message(&issuer_pubkey, &recipient_pubkey, total_debt, timestamp);
+        let message = crate::types::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            total_debt,
+            timestamp,
+            &TEST_TRACKER_NFT_ID,
+        );
 
         // Sign the message
         let verifier = SchnorrVerifier;
@@ -363,8 +376,13 @@ mod tests {
         let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let pubkey = public_key.serialize();
 
-        let message =
-            crate::types::signing_message(&pubkey, &pubkey, 1_000_000_000u64, 1743379200000u64);
+        let message = crate::types::signing_message(
+            &pubkey,
+            &pubkey,
+            1_000_000_000u64,
+            1743379200000u64,
+            &TEST_TRACKER_NFT_ID,
+        );
         let mut signature = schnorr_sign(&message, &secret_key.secret_bytes(), &pubkey)
             .expect("Signing should succeed");
 
@@ -412,6 +430,7 @@ mod tests {
                 &pubkey,
                 1_000_000_000u64 + i,
                 1743379200000u64,
+                &TEST_TRACKER_NFT_ID,
             );
             let signature = schnorr_sign(&message, &secret_key.secret_bytes(), &pubkey)
                 .expect("signing should succeed");
@@ -446,10 +465,16 @@ mod tests {
                 .unwrap();
         let total_debt: u64 = 200_000_000;
         let timestamp: u64 = 1785019966273;
-        let message = crate::types::signing_message(&issuer, &recipient, total_debt, timestamp);
+        let message = crate::types::signing_message(
+            &issuer,
+            &recipient,
+            total_debt,
+            timestamp,
+            &TEST_TRACKER_NFT_ID,
+        );
 
-        let issuer_sig_hex = "03891ffb055e3acc60dbb3307708eac61024a759b6e0f2b13ada817d587d14db651414b4d138a227fdff961b27ae19e729075a27d8793e01b7c56d266d0d164eec";
-        let tracker_sig_hex = "022d33ce9fb101646a4acf50d3ae4b493cc4fde22dd304ad1584094ae7fd7c4ca67873708c0403315a3e488cfe2ec55b0bc2d9e4b03f6431919dfc839967ab8417";
+        let issuer_sig_hex = "03fc7cfadcebc74723abadb74a84259911be52a1692a99dee43991913540cc3e360940916c9cc92b89bcdacd7a393b3bef0708799554f700fa1313a7cea2e5314f";
+        let tracker_sig_hex = "02cb34354b024e2a58b5c558ad74eb25fdd5774ee70804d1fa75b075c30acc81db1fe4d1a822e89aacdce5c0766ae5fe89cbd6ff55b82533494f748d7be87bc099";
 
         let issuer_sig: [u8; 65] = hex::decode(issuer_sig_hex).unwrap().try_into().unwrap();
         let tracker_sig: [u8; 65] = hex::decode(tracker_sig_hex).unwrap().try_into().unwrap();

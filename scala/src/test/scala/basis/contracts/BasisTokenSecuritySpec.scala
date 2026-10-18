@@ -142,7 +142,7 @@ class BasisTokenSecuritySpec extends PropSpec with Matchers with basis.HttpClien
       val timestamp = System.currentTimeMillis()
 
       val key = Blake2b256(t.ownerPk.getEncoded.toArray ++ t.receiverPk.getEncoded.toArray)
-      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ t.trackerNFTBytes
       val reserveSig = signAll(message, t.ownerSecret)
       val trackerSig = signAll(message, t.trackerSecret)
 

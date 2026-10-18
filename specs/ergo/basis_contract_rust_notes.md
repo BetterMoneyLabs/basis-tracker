@@ -33,10 +33,15 @@ The contract uses TWO separate AVL trees:
 All signatures (both payer and tracker) use the SAME message format:
 
 ```
-message = blake2b256(payer_key || payee_key) || total_debt_u64_le || timestamp_i64_le
+message = blake2b256(payer_key || payee_key) || total_debt_u64_le || timestamp_i64_le || tracker_nft_id
 ```
 
-**Total length**: 32 + 8 + 8 = **48 bytes**
+**Total length**: 32 + 8 + 8 + 32 = **80 bytes**
+
+The trailing `tracker_nft_id` (32 bytes) is the tracker's NFT id, read on-chain from
+`SELF.R6[Coll[Byte]]` and appended by the contract to the 48-byte payload the signers produce.
+It binds every signature to one specific tracker/contract, so a signature for one tracker
+cannot be replayed on another (issue #15, finding C3).
 
 **IMPORTANT**: 
 - Timestamp is in **milliseconds** since Unix epoch (Java/JavaScript format)

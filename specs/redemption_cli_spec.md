@@ -155,13 +155,14 @@ Query the server:
 - Fetch the recipient's private key from the node wallet via `/wallet/getPrivateKey`.
 
 ### Step 6: Build Signing Message
-Build the 48-byte message signed by both reserve owner and tracker:
+Build the 80-byte message signed by both reserve owner and tracker:
 ```
 key = blake2b256(issuer_pubkey || recipient_pubkey)          // 32 bytes
-message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)  // 48 bytes total
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId  // 80 bytes total
 ```
 - `totalDebt`: 8-byte big-endian cumulative debt
 - `timestamp`: 8-byte big-endian payment timestamp in milliseconds
+- `trackerNftId`: 32-byte tracker NFT id (learned from the note / tracker box), binding the signature to this tracker
 
 ### Step 7: Sign with Issuer Key
 Sign the message using the current CLI account's private key. The implementation retries nonces until both the challenge `e` and response `z` have their most-significant byte < 0x80 (ErgoScript signed-integer compatibility). See `specs/SCHNORR_SIGNATURE_SPEC.md`.

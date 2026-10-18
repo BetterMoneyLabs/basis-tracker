@@ -125,7 +125,9 @@ mod cors_tests {
                     } => {
                         // For testing purposes, return a mock proof
                         let mock_proof = basis_store::NoteProof {
-                            note: basis_store::IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]),
+                            note: basis_store::IouNote::new(
+                                [0u8; 33], 0, 0, 0, [0u8; 65], [0x42; 32],
+                            ),
                             avl_proof: vec![1, 2, 3, 4], // Mock proof data
                             operations: vec![],
                         };

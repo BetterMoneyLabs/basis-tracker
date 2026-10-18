@@ -80,6 +80,7 @@ pub struct CreateNoteRequest {
     pub amount: u64,
     pub timestamp: u64,
     pub signature: String,
+    pub tracker_nft_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +91,8 @@ pub struct SerializableIouNote {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    #[serde(default)]
+    pub tracker_nft_id: String,
 }
 
 impl SerializableIouNote {
@@ -1103,6 +1106,8 @@ pub struct TrackerBoxIdResponse {
     pub tracker_box_id: String,
     pub timestamp: u64,
     pub height: u64,
+    #[serde(default)]
+    pub tracker_nft_id: String,
 }
 
 /// Response from `GET /tracker/state`.

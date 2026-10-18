@@ -679,7 +679,9 @@ mod untested_handlers {
         // request to reach the broadcast stage.
         let (secret, issuer) = generate_keypair();
         let (_, recipient) = generate_keypair();
-        let note = IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret).unwrap();
+        let note =
+            IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret, &[0x42; 32])
+                .unwrap();
         state
             .tx
             .send(TrackerCommand::AddNote {
@@ -722,7 +724,9 @@ mod untested_handlers {
 
         let (secret, issuer) = generate_keypair();
         let (_, recipient) = generate_keypair();
-        let note = IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret).unwrap();
+        let note =
+            IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret, &[0x42; 32])
+                .unwrap();
         state
             .tx
             .send(TrackerCommand::AddNote {
@@ -785,7 +789,9 @@ mod untested_handlers {
 
         let (secret, issuer) = generate_keypair();
         let (_, recipient) = generate_keypair();
-        let note = IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret).unwrap();
+        let note =
+            IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret, &[0x42; 32])
+                .unwrap();
         state
             .tx
             .send(TrackerCommand::AddNote {

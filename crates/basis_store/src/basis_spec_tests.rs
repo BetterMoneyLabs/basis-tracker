@@ -4,7 +4,7 @@
 //! adapted for the Rust off-chain implementation. Since we cannot test
 //! on-chain ErgoScript execution in Rust, these tests focus on:
 //!
-//! 1. Message format correctness (48 bytes: key || totalDebt || timestamp)
+//! 1. Message format correctness (80 bytes: key || totalDebt || timestamp || trackerNftId)
 //! 2. Schnorr signature creation and verification by both parties
 //! 3. Debt transfer / triangular trade scenarios
 //! 4. Replay attack prevention via timestamp verification
@@ -29,6 +29,13 @@ mod tests {
 
     const BASIS_TOKEN_ID: &str = "4b2d8b7beb3eaac8234d9e61792d270898a43934d6a27275e4f3a044609c9f2a";
     const TRACKER_NFT: &str = "3c45f29a5165b030fdb5eaf5d81f8108f9d8f507b31487dd51f4ae08fe07cf4a";
+
+    /// Tracker NFT ID bytes as used in the reserve box's R6 register (matches Scala BasisSpec).
+    fn tracker_nft_bytes() -> [u8; 32] {
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&hex::decode(TRACKER_NFT).unwrap());
+        id
+    }
 
     const MIN_VALUE: u64 = 1_000_000_000; // 1 ERG
     const FEE_VALUE: u64 = 1_000_000; // 0.001 ERG
@@ -63,7 +70,7 @@ mod tests {
 
     /// BasisSpec: "basis redemption should work with valid setup"
     /// Tests that valid signatures from both owner and tracker verify correctly
-    /// against the same 48-byte message (key || totalDebt || timestamp).
+    /// against the same 80-byte message (key || totalDebt || timestamp || trackerNftId).
     #[test]
     fn basis_redemption_with_valid_setup() {
         // Setup keys
@@ -76,10 +83,16 @@ mod tests {
         let timestamp: u64 = TEST_TIMESTAMP;
 
         // Create message for signatures: key || totalDebt || timestamp
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
-        // Verify message format: 32 (key) + 8 (totalDebt) + 8 (timestamp) = 48 bytes
-        assert_eq!(message.len(), 48, "Message must be exactly 48 bytes");
+        // Verify message format: 32 (key) + 8 (totalDebt) + 8 (timestamp) + 32 (trackerNftId) = 80 bytes
+        assert_eq!(message.len(), 80, "Message must be exactly 80 bytes");
 
         // Both owner and tracker sign the EXACT same message
         let owner_sig =
@@ -110,12 +123,18 @@ mod tests {
         );
 
         // Create IOU note using the crate's API
-        let note = IouNote::create_and_sign(receiver_pk, total_debt, timestamp, &owner_secret)
-            .expect("Note creation should succeed");
+        let note = IouNote::create_and_sign(
+            receiver_pk,
+            total_debt,
+            timestamp,
+            &owner_secret,
+            &tracker_nft_bytes(),
+        )
+        .expect("Note creation should succeed");
 
         // Verify the note's signing message matches the expected format
         let note_message = note.signing_message(&owner_pk);
-        assert_eq!(note_message.len(), 48);
+        assert_eq!(note_message.len(), 80);
         assert_eq!(note_message, message, "Note's signing message must match");
 
         // Verify the note's signature
@@ -136,7 +155,13 @@ mod tests {
         let total_debt: u64 = 500_000_000; // 0.5 ERG
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         let reserve_sig = schnorr_sign(&message, &owner_secret, &owner_pk).unwrap();
         let tracker_sig = schnorr_sign(&message, &tracker_secret, &tracker_pk).unwrap();
@@ -159,8 +184,14 @@ mod tests {
 
         // Same message for both normal and emergency (the only difference is
         // tracker signature is optional after 2160 blocks on-chain)
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
-        assert_eq!(message.len(), 48);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
+        assert_eq!(message.len(), 80);
 
         // Owner can still sign
         let owner_sig = schnorr_sign(&message, &owner_secret, &owner_pk).unwrap();
@@ -197,13 +228,25 @@ mod tests {
         let timestamp: u64 = TEST_TIMESTAMP;
 
         // Alice signs note to Bob (remaining debt)
-        let msg_to_bob = core_signing_message(&alice_pk, &bob_pk, remaining_debt_to_bob, timestamp);
-        assert_eq!(msg_to_bob.len(), 48);
+        let msg_to_bob = core_signing_message(
+            &alice_pk,
+            &bob_pk,
+            remaining_debt_to_bob,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
+        assert_eq!(msg_to_bob.len(), 80);
 
         // Alice signs note to Carol (transferred debt)
         let timestamp2 = timestamp + 1000; // Slightly later timestamp for new note
-        let msg_to_carol = core_signing_message(&alice_pk, &carol_pk, transfer_amount, timestamp2);
-        assert_eq!(msg_to_carol.len(), 48);
+        let msg_to_carol = core_signing_message(
+            &alice_pk,
+            &carol_pk,
+            transfer_amount,
+            timestamp2,
+            &tracker_nft_bytes(),
+        );
+        assert_eq!(msg_to_carol.len(), 80);
 
         // Alice signs both notes
         let alice_sig_bob =
@@ -240,6 +283,7 @@ mod tests {
             remaining_debt_to_bob,
             timestamp,
             &alice_secret.secret_bytes(),
+            &tracker_nft_bytes(),
         )
         .unwrap();
         let note_to_carol = IouNote::create_and_sign(
@@ -247,6 +291,7 @@ mod tests {
             transfer_amount,
             timestamp2,
             &alice_secret.secret_bytes(),
+            &tracker_nft_bytes(),
         )
         .unwrap();
 
@@ -289,14 +334,20 @@ mod tests {
         let base_timestamp: u64 = TEST_TIMESTAMP;
 
         // Create notes with different timestamps
-        let note_bob =
-            IouNote::create_and_sign(bob_pk, amount, base_timestamp, &alice_secret.secret_bytes())
-                .unwrap();
+        let note_bob = IouNote::create_and_sign(
+            bob_pk,
+            amount,
+            base_timestamp,
+            &alice_secret.secret_bytes(),
+            &tracker_nft_bytes(),
+        )
+        .unwrap();
         let note_carol = IouNote::create_and_sign(
             carol_pk,
             amount,
             base_timestamp + 1000,
             &alice_secret.secret_bytes(),
+            &tracker_nft_bytes(),
         )
         .unwrap();
         let note_dave = IouNote::create_and_sign(
@@ -304,6 +355,7 @@ mod tests {
             amount,
             base_timestamp + 2000,
             &alice_secret.secret_bytes(),
+            &tracker_nft_bytes(),
         )
         .unwrap();
 
@@ -335,7 +387,13 @@ mod tests {
         let total_debt: u64 = 500_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         let reserve_sig = schnorr_sign(&message, &owner_secret, &owner_pk).unwrap();
         // Invalid tracker sig: signed with wrong key
@@ -362,7 +420,13 @@ mod tests {
         let total_debt: u64 = 1_000_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         let reserve_sig = schnorr_sign(&message, &owner_secret, &owner_pk).unwrap();
         // Invalid tracker sig: signed with receiver's secret
@@ -384,7 +448,13 @@ mod tests {
         let total_debt: u64 = 500_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         // Invalid reserve sig: signed with tracker's secret
         let invalid_reserve_sig = schnorr_sign(&message, &tracker_secret, &tracker_pk).unwrap();
@@ -410,7 +480,13 @@ mod tests {
         let total_debt: u64 = 500_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
         let mut tracker_sig = schnorr_sign(&message, &tracker_secret, &tracker_pk).unwrap();
 
         // Corrupt signature by flipping bit at position 0
@@ -434,10 +510,22 @@ mod tests {
         let timestamp: u64 = TEST_TIMESTAMP;
 
         // Correct key: blake2b256(owner || receiver)
-        let correct_message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let correct_message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         // Wrong key: blake2b256(receiver || owner) -- reversed!
-        let wrong_message = core_signing_message(&receiver_pk, &owner_pk, total_debt, timestamp);
+        let wrong_message = core_signing_message(
+            &receiver_pk,
+            &owner_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         let sig = schnorr_sign(&correct_message, &owner_secret, &owner_pk).unwrap();
         let tracker_sig = schnorr_sign(&correct_message, &tracker_secret, &tracker_pk).unwrap();
@@ -479,8 +567,13 @@ mod tests {
         let timestamp: u64 = TEST_TIMESTAMP;
 
         // Message for note to Carol
-        let message_to_carol =
-            core_signing_message(&alice_pk, &carol_pk, transfer_amount, timestamp);
+        let message_to_carol = core_signing_message(
+            &alice_pk,
+            &carol_pk,
+            transfer_amount,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         // Bob tries to forge Alice's signature
         let forged_alice_sig =
@@ -505,23 +598,41 @@ mod tests {
         let timestamp2: u64 = timestamp1 + 1000;
 
         // Create note with timestamp1
-        let note1 =
-            IouNote::create_and_sign(receiver_pk, total_debt, timestamp1, &owner_secret).unwrap();
+        let note1 = IouNote::create_and_sign(
+            receiver_pk,
+            total_debt,
+            timestamp1,
+            &owner_secret,
+            &tracker_nft_bytes(),
+        )
+        .unwrap();
 
         // Attempt to "replay" with same timestamp
         // In a real system, the contract checks timestamp > storedTimestamp
         // Here we verify that a second note with the same timestamp has the
         // same message (and thus same signature, enabling replay detection)
-        let note1_replay =
-            IouNote::create_and_sign(receiver_pk, total_debt, timestamp1, &owner_secret).unwrap();
+        let note1_replay = IouNote::create_and_sign(
+            receiver_pk,
+            total_debt,
+            timestamp1,
+            &owner_secret,
+            &tracker_nft_bytes(),
+        )
+        .unwrap();
 
         // Same timestamp + same amount = same message = same signature
         assert_eq!(note1.timestamp, note1_replay.timestamp);
         assert_eq!(note1.amount_collected, note1_replay.amount_collected);
 
         // A new note with a different timestamp would have a different message
-        let note2 =
-            IouNote::create_and_sign(receiver_pk, total_debt, timestamp2, &owner_secret).unwrap();
+        let note2 = IouNote::create_and_sign(
+            receiver_pk,
+            total_debt,
+            timestamp2,
+            &owner_secret,
+            &tracker_nft_bytes(),
+        )
+        .unwrap();
 
         assert_ne!(note1.timestamp, note2.timestamp);
         // Different timestamps mean different messages
@@ -544,8 +655,14 @@ mod tests {
         let timestamp: u64 = TEST_TIMESTAMP;
         let reserve_value: u64 = 3_000_000_000; // Only 3 ERG collateral
 
-        let note =
-            IouNote::create_and_sign(receiver_pk, total_debt, timestamp, &owner_secret).unwrap();
+        let note = IouNote::create_and_sign(
+            receiver_pk,
+            total_debt,
+            timestamp,
+            &owner_secret,
+            &tracker_nft_bytes(),
+        )
+        .unwrap();
 
         // Outstanding debt is 5 ERG, reserve only has 3 ERG
         assert!(
@@ -556,8 +673,8 @@ mod tests {
 
     // ========== MESSAGE FORMAT COMPATIBILITY TESTS ==========
 
-    /// Verify the 48-byte message format matches the spec exactly:
-    /// key (32) || totalDebt (8 BE) || timestamp (8 BE)
+    /// Verify the 80-byte message format matches the spec exactly:
+    /// key (32) || totalDebt (8 BE) || timestamp (8 BE) || trackerNftId (32)
     #[test]
     fn message_format_exact_structure() {
         let owner_pk: [u8; 33] = [0x02u8; 33];
@@ -565,9 +682,15 @@ mod tests {
         let total_debt: u64 = 1_000_000_000;
         let timestamp: u64 = 1_743_379_200_000;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
-        assert_eq!(message.len(), 48);
+        assert_eq!(message.len(), 80);
 
         // Verify key portion (first 32 bytes)
         let expected_key = {
@@ -595,6 +718,13 @@ mod tests {
             &timestamp.to_be_bytes(),
             "Bytes 40-48 must be timestamp (BE)"
         );
+
+        // Verify trackerNftId portion (bytes 48-80)
+        assert_eq!(
+            &message[48..80],
+            &tracker_nft_bytes(),
+            "Bytes 48-80 must be trackerNftId"
+        );
     }
 
     /// BasisSpec: "basis redemption should fail with invalid action code"
@@ -608,7 +738,13 @@ mod tests {
         let total_debt: u64 = 500_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
         let sig = schnorr_sign(&message, &owner_secret, &owner_pk).unwrap();
 
         // The same signature works regardless of what action code is used in context
@@ -627,7 +763,13 @@ mod tests {
         let timestamp: u64 = TEST_TIMESTAMP;
 
         // Both sign the same message
-        let msg = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let msg = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         // Owner signs
         let owner_sig = schnorr_sign(&msg, &owner_secret, &owner_pk).unwrap();
@@ -654,7 +796,13 @@ mod tests {
     #[test]
     fn signature_hex_roundtrip() {
         let (secret, pubkey) = random_keypair();
-        let message = core_signing_message(&pubkey, &[0x03u8; 33], 1000, TEST_TIMESTAMP);
+        let message = core_signing_message(
+            &pubkey,
+            &[0x03u8; 33],
+            1000,
+            TEST_TIMESTAMP,
+            &tracker_nft_bytes(),
+        );
         let sig = schnorr_sign(&message, &secret, &pubkey).unwrap();
 
         let hex = signature_to_hex(&sig);
@@ -674,8 +822,14 @@ mod tests {
         let max_debt = u64::MAX;
         let timestamp: u64 = 0;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, max_debt, timestamp);
-        assert_eq!(message.len(), 48);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            max_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
+        assert_eq!(message.len(), 80);
         // Message should still be well-formed even with max values
         assert_eq!(&message[32..40], &max_debt.to_be_bytes());
         assert_eq!(&message[40..48], &timestamp.to_be_bytes());
@@ -689,8 +843,14 @@ mod tests {
         let zero_debt: u64 = 0;
         let zero_timestamp: u64 = 0;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, zero_debt, zero_timestamp);
-        assert_eq!(message.len(), 48);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            zero_debt,
+            zero_timestamp,
+            &tracker_nft_bytes(),
+        );
+        assert_eq!(message.len(), 80);
         assert_eq!(&message[32..40], &0u64.to_be_bytes());
         assert_eq!(&message[40..48], &0u64.to_be_bytes());
     }
@@ -702,8 +862,20 @@ mod tests {
         let receiver_pk: [u8; 33] = [0x03u8; 33];
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let msg1 = core_signing_message(&owner_pk, &receiver_pk, 1_000_000_000, timestamp);
-        let msg2 = core_signing_message(&owner_pk, &receiver_pk, 2_000_000_000, timestamp);
+        let msg1 = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            1_000_000_000,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
+        let msg2 = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            2_000_000_000,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         assert_ne!(
             msg1, msg2,
@@ -718,8 +890,20 @@ mod tests {
         let receiver_pk: [u8; 33] = [0x03u8; 33];
         let total_debt: u64 = 1_000_000_000;
 
-        let msg1 = core_signing_message(&owner_pk, &receiver_pk, total_debt, TEST_TIMESTAMP);
-        let msg2 = core_signing_message(&owner_pk, &receiver_pk, total_debt, TEST_TIMESTAMP + 1);
+        let msg1 = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            TEST_TIMESTAMP,
+            &tracker_nft_bytes(),
+        );
+        let msg2 = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            TEST_TIMESTAMP + 1,
+            &tracker_nft_bytes(),
+        );
 
         assert_ne!(
             msg1, msg2,
@@ -797,8 +981,14 @@ mod tests {
         let total_debt: u64 = 1_000_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let note =
-            IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
+        let note = IouNote::create_and_sign(
+            recipient_pk,
+            total_debt,
+            timestamp,
+            &issuer_secret,
+            &tracker_nft_bytes(),
+        )
+        .unwrap();
 
         // Insert note into tracker
         tracker.add_note(&issuer_pk, &note).unwrap();
@@ -834,8 +1024,14 @@ mod tests {
         let total_debt: u64 = 1_000_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let note =
-            IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
+        let note = IouNote::create_and_sign(
+            recipient_pk,
+            total_debt,
+            timestamp,
+            &issuer_secret,
+            &tracker_nft_bytes(),
+        )
+        .unwrap();
         tracker.add_note(&issuer_pk, &note).unwrap();
 
         let already_redeemed = tracker
@@ -858,8 +1054,14 @@ mod tests {
         let total_debt: u64 = 1_000_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let note =
-            IouNote::create_and_sign(recipient_pk, total_debt, timestamp, &issuer_secret).unwrap();
+        let note = IouNote::create_and_sign(
+            recipient_pk,
+            total_debt,
+            timestamp,
+            &issuer_secret,
+            &tracker_nft_bytes(),
+        )
+        .unwrap();
         tracker.add_note(&issuer_pk, &note).unwrap();
 
         let lookup_proof = tracker
@@ -901,7 +1103,8 @@ mod tests {
 
         for amount in amounts {
             for ts in &timestamps {
-                let msg = core_signing_message(&pubkey, &receiver_pk, amount, *ts);
+                let msg =
+                    core_signing_message(&pubkey, &receiver_pk, amount, *ts, &tracker_nft_bytes());
                 let sig = schnorr_sign(&msg, &secret, &pubkey).unwrap();
                 assert_eq!(
                     sig.len(),
@@ -929,15 +1132,38 @@ mod tests {
         let amount: u64 = 1_000_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let correct_msg = core_signing_message(&pubkey, &receiver_pk, amount, timestamp);
+        let correct_msg = core_signing_message(
+            &pubkey,
+            &receiver_pk,
+            amount,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
         let sig = schnorr_sign(&correct_msg, &secret, &pubkey).unwrap();
 
         // Try various wrong messages
-        let wrong_amount_msg = core_signing_message(&pubkey, &receiver_pk, amount + 1, timestamp);
-        let wrong_ts_msg = core_signing_message(&pubkey, &receiver_pk, amount, timestamp + 1);
+        let wrong_amount_msg = core_signing_message(
+            &pubkey,
+            &receiver_pk,
+            amount + 1,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
+        let wrong_ts_msg = core_signing_message(
+            &pubkey,
+            &receiver_pk,
+            amount,
+            timestamp + 1,
+            &tracker_nft_bytes(),
+        );
         let (_, diff_receiver_pk) = random_keypair();
-        let wrong_receiver_msg =
-            core_signing_message(&pubkey, &diff_receiver_pk, amount, timestamp);
+        let wrong_receiver_msg = core_signing_message(
+            &pubkey,
+            &diff_receiver_pk,
+            amount,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         assert!(schnorr_verify(&sig, &wrong_amount_msg, &pubkey).is_err());
         assert!(schnorr_verify(&sig, &wrong_ts_msg, &pubkey).is_err());
@@ -953,7 +1179,13 @@ mod tests {
         let amount: u64 = 1_000_000_000;
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let msg = core_signing_message(&pubkey, &receiver_pk, amount, timestamp);
+        let msg = core_signing_message(
+            &pubkey,
+            &receiver_pk,
+            amount,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
         let sig = schnorr_sign(&msg, &secret, &pubkey).unwrap();
 
         // Corrupt each byte position
@@ -975,8 +1207,14 @@ mod tests {
         let (_, receiver_pk) = random_keypair();
 
         // Note with collected > redeemed
-        let note =
-            IouNote::create_and_sign(receiver_pk, 5_000_000_000, TEST_TIMESTAMP, &secret).unwrap();
+        let note = IouNote::create_and_sign(
+            receiver_pk,
+            5_000_000_000,
+            TEST_TIMESTAMP,
+            &secret,
+            &tracker_nft_bytes(),
+        )
+        .unwrap();
         assert_eq!(note.outstanding_debt(), 5_000_000_000);
 
         // Note with equal collected and redeemed
@@ -986,6 +1224,7 @@ mod tests {
             5_000_000_000,
             TEST_TIMESTAMP,
             [0u8; 65],
+            [0x42; 32],
         );
         note2.amount_collected = 5_000_000_000;
         note2.amount_redeemed = 5_000_000_000;
@@ -998,6 +1237,7 @@ mod tests {
             3_000_000_000,
             TEST_TIMESTAMP,
             [0u8; 65],
+            [0x42; 32],
         );
         note3.amount_collected = 10_000_000_000;
         note3.amount_redeemed = 3_000_000_000;

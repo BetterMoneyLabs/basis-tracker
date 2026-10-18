@@ -164,7 +164,7 @@ The redemption process begins when a recipient initiates a redemption request:
    - Return `RedemptionError::AvlProofError` if proof generation fails
 
 9. **Request Signatures**
-    - Build signing message: `message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
+    - Build signing message: `message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
     - Emergency redemption uses the same message format; tracker signature verification is bypassed after 3 days
     - Request reserve owner's signature on message (generated locally by the redeemer's CLI using the issuer's secret key)
     - Request tracker's signature on message from the tracker server via its `/tracker/signature` API

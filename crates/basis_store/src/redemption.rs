@@ -75,7 +75,7 @@ pub struct RedemptionRequest {
     /// Change address for transaction outputs (derived from tracker pubkey if not specified)
     pub change_address: String,
     /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    /// Signs: key || totalDebt || timestamp (48 bytes)
+    /// Signs: key || totalDebt || timestamp || trackerNftId (80 bytes)
     /// where key = blake2b256(ownerKey || receiverKey)
     pub issuer_signature: String,
     /// Whether this is an emergency redemption (after 3 days tracker unavailability)
@@ -560,7 +560,8 @@ mod tests {
             amount_collected: 10000,
             amount_redeemed: 0,
             timestamp: 1672531200,
-            signature: [0u8; 65], // dummy signature
+            signature: [0u8; 65], // dummy signature,
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -632,6 +633,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -703,6 +705,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -773,6 +776,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -843,6 +847,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -913,6 +918,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -983,6 +989,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -1063,6 +1070,7 @@ mod tests {
             &recipient_pubkey,
             total_debt,
             payment_timestamp,
+            &[0x42; 32],
         );
         let signature =
             crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
@@ -1074,6 +1082,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: payment_timestamp,
             signature,
+            tracker_nft_id: [0x42; 32],
         };
         redemption_manager
             .tracker
@@ -1170,6 +1179,7 @@ mod tests {
             &recipient_pubkey,
             total_debt,
             payment_timestamp,
+            &[0x42; 32],
         );
         let signature =
             crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
@@ -1182,6 +1192,7 @@ mod tests {
             amount_redeemed: 100_000_000,
             timestamp: payment_timestamp,
             signature,
+            tracker_nft_id: [0x42; 32],
         };
         redemption_manager
             .tracker
@@ -1268,6 +1279,7 @@ mod tests {
             &recipient_pubkey,
             total_debt,
             payment_timestamp,
+            &[0x42; 32],
         );
         let signature =
             crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
@@ -1279,6 +1291,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: payment_timestamp,
             signature,
+            tracker_nft_id: [0x42; 32],
         };
         redemption_manager
             .tracker
@@ -1344,6 +1357,7 @@ mod tests {
             &recipient_pubkey,
             total_debt,
             payment_timestamp,
+            &[0x42; 32],
         );
         let signature =
             crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
@@ -1355,6 +1369,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: payment_timestamp,
             signature,
+            tracker_nft_id: [0x42; 32],
         };
 
         // Create a manager with on-disk storage so we can reopen it.

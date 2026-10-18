@@ -285,7 +285,8 @@ from the ChainCash repository:
 * **Basis reserve contract tests** — Scala contract tests (`BasisSpec`, `BasisTokenSpec`) are in
   `scala/src/test/scala/basis/contracts/` and run with `sbt test`.
 * **Token-based reserve contract** — `contract/basis-token.es` provides a custom-token-backed variant.
-* **Schnorr signing / verification** — Canonical 48-byte signing message and 65-byte Schnorr signatures
+* **Schnorr signing / verification** — Canonical 80-byte signing message (binding each signature to the
+  tracker's NFT id) and 65-byte Schnorr signatures
   are implemented in both Rust (`crates/basis_offchain/src/schnorr.rs`, `crates/basis_core/src/impls.rs`)
   and Scala (`scala/src/main/scala/basis/offchain/SigUtils.scala`), with shared test vectors in
   `specs/SCHNORR_SIGNATURE_SPEC.md`.

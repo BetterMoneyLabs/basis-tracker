@@ -29,7 +29,7 @@ as negative regression tests against the real `contract/` files.
 |---|-----------|-------|-----------|-------------|
 | C1 | Critical | Omitting context var #7 lets a creditor replay a fully redeemed note | **Yes** | **Fixed** — with a different, smaller fix than proposed |
 | C2 | Critical | Two reserve inputs can be satisfied by one output; unsigned top-up lets anyone take a reserve | **Yes** | **Fixed** |
-| C3 | High | A note is not bound to a reserve, tracker, chain or contract | **Yes** | **Partially fixed (off-chain)**; protocol change deferred |
+| C3 | High | A note is not bound to a reserve, tracker, chain or contract | **Yes** | **Fixed** — tracker NFT id now in the signed message (cross-contract/cross-chain); per-reserve replay stays an off-chain mitigation |
 | C4 | High | Reserve and tracker setup is never validated (R7 preset, poisoned R5, Int R7, R6 length-only) | **Yes** | **Fixed** — deploy-time InsertOnly bug and scanner first-seen validation |
 | C5 | Medium | After a partial redemption the remainder of the note is stuck | **Yes** | **Fixed** |
 | C6 | Medium | basis-token.es: anyone can take the reserve box's ERG | **Yes** | **Fixed** (not covered by the PR's patch) |
@@ -172,24 +172,40 @@ Reserves with a pending refund are excluded from collateralization totals
 accepts a tracker box holding exactly one NFT (`amount == 1`). Minting the tracker NFT with supply 1
 remains an operational requirement.
 
-### C3 — note not bound to a reserve, tracker, chain or contract (High) — Partially fixed
+### C3 — note not bound to a reserve, tracker, chain or contract (High) — Fixed (protocol change)
 
-The signed message is `blake2b256(owner || receiver) || totalDebt || timestamp`, while cumulative
-redeemed debt is tracked **per reserve box** (each reserve has its own R5). Nothing connects the two,
-so the same note redeems in full from *every* reserve the owner has under the same tracker. The same
-signature is also valid for both contracts and on both testnet and mainnet.
+The signed message was `blake2b256(owner || receiver) || totalDebt || timestamp`, while cumulative
+redeemed debt is tracked **per reserve box** (each reserve has its own R5). Nothing connected the two,
+so the same note redeemed in full from *every* reserve the owner has under the same tracker. The same
+signature was also valid for both contracts and on both testnet and mainnet.
 
-**The proposed fix does not address the main damage.** Adding a domain tag and the tracker NFT id to
-the message would stop cross-contract and cross-chain replay, but per-box redemption state is the
-actual problem, and a message-format change cannot fix it — it would require changing the signed
-message across the contract, both Rust signers, the CLI and the Scala reference, before any note
-exists.
+**Protocol change implemented** (issue #15 follow-up): the signed message is now
 
-What was implemented is the off-chain mitigation: `ReserveTracker::resolve_issuer_reserve` fails
-closed when an owner has more than one tracked reserve, and the collateralization endpoint returns
-`409` instead of a confident-looking ratio computed from `matching_reserves.first()`. Summing the
-collateral would have been worse still — it would report a healthy ratio for collateral that cannot
-back the same debt twice.
+```
+key(32) || totalDebt(8 BE) || timestamp(8 BE) || trackerNftId(32)   = 80 bytes
+```
+
+where `trackerNftId` is the tracker's NFT id, read on-chain from `SELF.R6[Coll[Byte]]` and appended by
+every signer (contract, Rust off-chain signer, CLI, Scala reference). This binds every note and
+signature to one tracker: a signature minted under tracker A is invalid for tracker B, and invalid on
+the other contract variant and the other network, closing the cross-contract and cross-chain replay
+vectors. No domain tag was added — the tracker NFT id alone provides the binding, since it is unique
+per tracker, per deployment, and per network.
+
+The change is breaking end to end and was applied everywhere: `contract/basis.es` and
+`contract/basis-token.es`, `signing_message` in `basis_core`/`basis_store`/`basis_offchain`, `IouNote`
+(storage grew a `tracker_nft_id` field; records are now 187 bytes), the server (`CreateNoteRequest`
+requires `tracker_nft_id`, validated against the configured `ergo.tracker_nft_id` — `400` on malformed
+input, `409` on mismatch; new `NoteError::TrackerIdMismatch`), the CLI/TUI redemption and note
+creation flows, and the Scala reference (specs, `TestVectorGenerator`, note creator/redeemer demos).
+All cross-validation vectors TV001–TV011 were regenerated over the 80-byte message.
+
+**Still open by design: per-reserve replay within one tracker.** Cumulative redeemed debt stays per
+reserve box, and the message format cannot bind a note to one reserve of several under the same
+tracker without deeper changes. The off-chain mitigation remains in force:
+`ReserveTracker::resolve_issuer_reserve` fails closed when an owner has more than one tracked
+reserve, and the collateralization endpoint returns `409` instead of a confident-looking ratio
+computed from `matching_reserves.first()`.
 
 **This is tracker policy, not a contract invariant.** It holds only while this tracker is the one
 redeeming. The underlying per-box redemption state remains a protocol limitation and must be recorded
@@ -386,7 +402,6 @@ per owner, which is the property that actually matters.
 
 | Item | Why |
 |---|---|
-| C3 protocol change (domain tag + tracker NFT id in the signed message) | Breaking change across the contract, both Rust signers, the CLI and the Scala reference. The off-chain single-reserve rule holds meanwhile. |
 | S4 chain-derived redemption state | Same redesign deferred in `pr12_triage.md` finding 3. |
 | S6 reorg handling past confirmation depth 2 | Deep reorgs remain unhandled (documented in `docs/CONFIGURATION.md`); shallow reorgs are detected via confirmed-box orphan checks. |
 
@@ -405,3 +420,8 @@ from the script — so:
    non-loopback address will now refuse to start until authentication is configured or the flag is set.
 4. `ReserveCreationResponse` gained `submission_permit`. Clients must echo it back on submit; the CLI
    does so automatically.
+5. **C3 message change**: the contracts changed a second time (the signed message now includes the
+   tracker NFT id), so the P2S addresses must be recomputed again. All signatures over the old
+   48-byte message are invalid; wipe any existing note databases (`scripts/clean_database.sh`) and
+   let counterparties re-sign. Stored note records grew a `tracker_nft_id` field (187 bytes), so
+   old databases are unreadable by the new code in any case.

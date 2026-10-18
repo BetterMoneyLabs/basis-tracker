@@ -68,6 +68,9 @@ pub struct IouNote {
     pub timestamp: u64,
     /// Signature from issuer (A)
     pub signature: Signature,
+    /// Tracker NFT ID this note is bound to (32 bytes). Part of the signed message,
+    /// so the note is only redeemable under this tracker (issue #15 C3).
+    pub tracker_nft_id: [u8; 32],
 }
 
 /// Tracker state commitment
@@ -297,6 +300,10 @@ pub enum NoteError {
     /// The note is not committed in the latest confirmed on-chain tracker box,
     /// so no committed-state proof can be generated for it yet.
     NoteNotConfirmed,
+    /// The note is bound to a different tracker NFT ID than this tracker's.
+    /// Accepting it would pin debt that can never redeem against this tracker's
+    /// reserves (issue #15 C3).
+    TrackerIdMismatch,
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
@@ -1632,6 +1639,7 @@ impl IouNote {
         amount_redeemed: u64,
         timestamp: u64,
         signature: Signature,
+        tracker_nft_id: [u8; 32],
     ) -> Self {
         Self {
             recipient_pubkey,
@@ -1639,6 +1647,7 @@ impl IouNote {
             amount_redeemed,
             timestamp,
             signature,
+            tracker_nft_id,
         }
     }
 
@@ -1654,13 +1663,14 @@ impl IouNote {
 
     /// Create and sign a new IOU note
     ///
-    /// Message format: key || totalDebt || timestamp (48 bytes)
+    /// Message format: key || totalDebt || timestamp || trackerNftId (80 bytes)
     /// where key = blake2b256(ownerKeyBytes || receiverKeyBytes)
     pub fn create_and_sign(
         recipient_pubkey: PubKey,
         amount_collected: u64,
         _timestamp: u64, // Kept for API compatibility but not used in signing message
         issuer_secret_key: &[u8; 32],
+        tracker_nft_id: &[u8; 32],
     ) -> Result<Self, NoteError> {
         use secp256k1::{Secp256k1, SecretKey};
 
@@ -1674,12 +1684,13 @@ impl IouNote {
         let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let issuer_pubkey = public_key.serialize();
 
-        // Generate the signing message: key || totalDebt || timestamp
+        // Generate the signing message: key || totalDebt || timestamp || trackerNftId
         let message = schnorr::signing_message(
             &issuer_pubkey,
             &recipient_pubkey,
             amount_collected,
             _timestamp,
+            tracker_nft_id,
         );
 
         // Use the chaincash-rs approach for Schnorr signing
@@ -1692,14 +1703,15 @@ impl IouNote {
             amount_redeemed: 0, // Start with no redemptions
             timestamp: _timestamp,
             signature,
+            tracker_nft_id: *tracker_nft_id,
         })
     }
 
     /// Generate the message that should be signed following the Basis protocol specification.
     ///
-    /// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp)
+    /// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
     ///
-    /// Total: 48 bytes
+    /// Total: 80 bytes
     ///
     /// # Arguments
     /// * `owner_pubkey` - Reserve owner's public key (the issuer of the IOU note)
@@ -1709,6 +1721,7 @@ impl IouNote {
             &self.recipient_pubkey,
             self.amount_collected,
             self.timestamp,
+            &self.tracker_nft_id,
         )
     }
 

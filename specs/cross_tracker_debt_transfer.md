@@ -22,11 +22,15 @@ The short-term recommendation is to specify and use **(1) with (2) as a fallback
   ```
   hash(owner_pubkey || receiver_pubkey) -> (timestamp, cumulativeRedeemedAmount)
   ```
-- Normal redemption needs the issuer's signature **and** the tracker's signature on the 48-byte message:
+- Normal redemption needs the issuer's signature **and** the tracker's signature on the 80-byte message:
   ```
   key = blake2b256(ownerKey || receiverKey)
-  message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+  message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
   ```
+  The `trackerNftId` (32 bytes) is the tracker NFT id from the reserve's `R6` / tracker box, appended at
+  the end. Every signature is therefore bound to the tracker it was issued for: a signature produced for
+  `T1` cannot even be verified against a `T2` redemption, which is exactly what makes cross-tracker
+  replay concerns tractable (issue #15, finding C3).
 - Emergency redemption bypasses the tracker signature after the tracker box is older than `3 * 720` blocks (~3 days).
 - The reserve contract enforces `timestamp > storedTimestamp`, so notes used for redemption must be newer than any previously redeemed note for the same `(owner, receiver)` pair.
 - Acceptance policies and redemption ordering are evaluated from the tracker's local note state; collateralization uses the issuer's gross debt on that tracker.
@@ -61,7 +65,7 @@ The issuer `A` must sign the new notes:
   required and does not exist yet; until then settle via redemption plus re-issuance (Option 2 below).
 - A note to `C` for the transferred amount.
 
-Each note uses the standard 48-byte signing message with the tracker-specific recipient key. The source tracker signs the updated `A -> B` record; the target tracker signs the new `A -> C` record.
+Each note uses the standard 80-byte signing message with the tracker-specific recipient key. Because the message embeds the signing tracker's own NFT id, the source tracker's signature on the updated `A -> B` record is valid only on `T1`, and the target tracker's signature on the new `A -> C` record is valid only on `T2`.
 
 ### Atomicity problem
 

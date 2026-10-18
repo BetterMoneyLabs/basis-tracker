@@ -795,6 +795,7 @@ async fn build_redemption_inner(
             &recipient_pk,
             total_debt,
             note.timestamp,
+            &note.tracker_nft_id,
         );
         match basis_store::schnorr::schnorr_sign(&message, &tracker_secret, &tracker_pubkey_bytes) {
             Ok(sig) => sig.to_vec(),

@@ -26,6 +26,7 @@ pub struct DemoNote {
     pub message: String,
     pub messageFormat: String,
     pub noteKey: String,
+    pub trackerNftId: String,
 }
 
 /// Signature component (a point and z scalar)
@@ -253,6 +254,12 @@ pub async fn handle_note_command(
     Ok(())
 }
 
+/// Tracker NFT ID used by the CLI demo notes. Matches the demo deployments under `demo/`
+/// (see `demo/agent_coop/config/basis.toml` and `demo/lets_tutorial/config/basis.toml`).
+fn demo_tracker_nft_id() -> &'static str {
+    "125daf0d7a3fb64da5c3a680de2d281f7b56be425e38f34ed816ccf4fd18df3e"
+}
+
 /// Create a demo note (Alice → Bob with tracker signature)
 pub async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<DemoNote> {
     let alice = demo_keys::alice();
@@ -276,11 +283,16 @@ pub async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<De
     key_hash_input.extend_from_slice(&bob_pk_bytes);
     let key_hash = blake2b256_hash(&key_hash_input);
 
-    // Build message: key || totalDebt || timestamp (48 bytes)
+    // The demo note is bound to the demo tracker's NFT ID (issue #15 C3); it must match
+    // the R6 register of the demo reserves it redeems against.
+    let tracker_nft_id = demo_tracker_nft_id();
+
+    // Build message: key || totalDebt || timestamp || trackerNftId (80 bytes)
     let mut message = Vec::new();
     message.extend_from_slice(&key_hash);
     message.extend_from_slice(&amount.to_be_bytes());
     message.extend_from_slice(&timestamp.to_be_bytes());
+    message.extend_from_slice(&hex::decode(tracker_nft_id).expect("valid demo tracker NFT ID"));
 
     eprintln!("Message: {}", hex::encode(&message));
     eprintln!("  Key hash: {}", hex::encode(key_hash));
@@ -323,7 +335,8 @@ pub async fn create_demo_note(amount: u64, output: Option<PathBuf>) -> Result<De
             z: tracker_sig_z,
         },
         message: hex::encode(&message),
-        messageFormat: "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes)".to_string(),
+        messageFormat: "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes) || trackerNftId (32 bytes)".to_string(),
+        trackerNftId: tracker_nft_id.to_string(),
         noteKey: {
             let mut key_input = Vec::with_capacity(66);
             key_input.extend_from_slice(&alice_pk_bytes);
@@ -379,7 +392,20 @@ pub async fn create_normal_note(
     let status_before = client.get_reserve_status(&issuer_pubkey).await?;
     print_reserve_status(&status_before);
 
-    // Create signing message: key || totalDebt || timestamp (48 bytes)
+    // The note's signed message is bound to this tracker's NFT ID (issue #15 C3).
+    let tracker_nft_id = client.get_latest_tracker_box_id().await?.tracker_nft_id;
+    if tracker_nft_id.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Tracker has no NFT ID configured; cannot bind the note"
+        ));
+    }
+    let tracker_nft_bytes = hex::decode(&tracker_nft_id)
+        .map_err(|e| anyhow::anyhow!("Invalid tracker NFT ID: {}", e))?;
+    if tracker_nft_bytes.len() != 32 {
+        return Err(anyhow::anyhow!("Tracker NFT ID must be 32 bytes"));
+    }
+
+    // Create signing message: key || totalDebt || timestamp || trackerNftId (80 bytes)
     // where key = blake2b256(ownerKey || receiverKey)
     let recipient_bytes = hex::decode(recipient)?;
     let issuer_bytes = hex::decode(&issuer_pubkey)?;
@@ -390,11 +416,12 @@ pub async fn create_normal_note(
     key_hash_input.extend_from_slice(&recipient_bytes);
     let key_hash = blake2b256_hash(&key_hash_input);
 
-    // Build message: key || totalDebt || timestamp (48 bytes)
+    // Build message: key || totalDebt || timestamp || trackerNftId (80 bytes)
     let mut message = Vec::new();
     message.extend_from_slice(&key_hash);
     message.extend_from_slice(&amount.to_be_bytes());
     message.extend_from_slice(&timestamp.to_be_bytes());
+    message.extend_from_slice(&tracker_nft_bytes);
 
     let signature = current_account.sign_message(&message)?;
     let signature_hex = hex::encode(signature);
@@ -405,6 +432,7 @@ pub async fn create_normal_note(
         amount,
         timestamp,
         signature: signature_hex.clone(),
+        tracker_nft_id,
     };
 
     client.create_note(request).await?;

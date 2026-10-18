@@ -32,11 +32,11 @@ For signature `"02f40cf9d43542868b3e97a790872812574a8be92fd02ce229908d578724c28b
 ## Signing Process
 
 ### Message Format
-The message to be signed follows the Basis protocol specification (always 48 bytes):
+The message to be signed follows the Basis protocol specification (always 80 bytes):
 
-**Standard Format** (48 bytes):
+**Standard Format** (80 bytes):
 ```
-message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
 ```
 
 Where:
@@ -45,8 +45,9 @@ Where:
   - `receiverKeyBytes`: 33-byte compressed public key of the recipient (creditor/payee)
 - `totalDebt`: 8-byte big-endian representation of the total cumulative debt amount
 - `timestamp`: 8-byte big-endian representation of the payment timestamp (milliseconds since Unix epoch, Java time format)
+- `trackerNftId`: 32-byte identifier of the tracker's NFT (the tracker NFT id read from the reserve/tracker box, on-chain from `SELF.R6[Coll[Byte]]`). Appending it binds every signature to one specific tracker/contract, so a signature produced for one tracker cannot be replayed on another (issue #15, finding C3)
 
-**Total message length**: 32 + 8 + 8 = **48 bytes**
+**Total message length**: 32 + 8 + 8 + 32 = **80 bytes**
 
 **IMPORTANT**:
 - Both the reserve owner (payer) and the tracker sign the **exact same message**
@@ -62,8 +63,8 @@ Where:
 
 2. **Message Construction**:
    - Compute key hash: `key = blake2b256(ownerKey || receiverKey)` (32 bytes)
-   - Concatenate: `key || longToByteArray(totalDebt) || longToByteArray(timestamp)`
-   - Total message length: 48 bytes (always)
+   - Concatenate: `key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId`
+   - Total message length: 80 bytes (always)
 
 3. **Nonce Generation**:
    - Generate a cryptographically secure random nonce `k` (scalar value)
@@ -280,6 +281,7 @@ Given:
 - Receiver (payee) pubkey: `03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea` (33 bytes)
 - Total debt: 50000000 nanoERG (0.05 ERG)
 - Timestamp: 1743379200000 ms (Sat Mar 29 2025)
+- Tracker NFT id: `4242424242424242424242424242424242424242424242424242424242424242` (32 bytes, example value — `0x42` repeated 32 times)
 
 Step 1 - Compute key:
 ```
@@ -288,16 +290,17 @@ key = blake2b256(ownerKeyBytes || receiverKeyBytes)
     = 6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4
 ```
 
-Step 2 - Assemble message (48 bytes):
+Step 2 - Assemble message (80 bytes):
 ```
-message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
-        = 6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4 || 0000000002faf080 || 00000194f8c88000
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
+        = 6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4 || 0000000002faf080 || 00000194f8c88000 || 4242424242424242424242424242424242424242424242424242424242424242
 ```
 
 Message breakdown:
 - Key (32 bytes): `6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4`
 - Total debt (8 bytes BE): `0000000002faf080` = 50,000,000 nanoERG
 - Timestamp (8 bytes BE): `00000194f8c88000` = 1,743,379,200,000 ms
+- Tracker NFT id (32 bytes): `4242424242424242424242424242424242424242424242424242424242424242` — binds the signature to this tracker; the contract reads the same id from `SELF.R6[Coll[Byte]]`
 
 ### Expected Signature Format
 - Length: 65 bytes (130 hex characters)
@@ -338,43 +341,50 @@ Message breakdown:
 
 The following test vectors were generated using the Scala reference implementation
 (`scala/src/main/scala/basis/offchain/SigUtils.scala`) with the `z.bitLength <= 255`
-constraint. They are hardcoded in the Rust test suite and verify cross-compatibility
-between Scala and Rust implementations.
+constraint. They are hardcoded in the Rust test suite (`crates/basis_store/src/schnorr_test_vectors.rs`)
+and verify cross-compatibility between Scala and Rust implementations.
+
+They were regenerated for the C3 fix (issue #15): every message is now 80 bytes,
+`key(32) || totalDebt(8 BE) || timestamp(8 BE) || trackerNftId(32)`, with the tracker
+NFT id fixed to `0x42` repeated 32 times for test purposes. Keypairs are derived from
+the committed `scala/secrets/participants.csv` fixture (alice = issuer,
+bob = recipient, tracker = issuer of TV003).
 
 ### TV001 - Standard valid signature
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `1000000000`
 - **Timestamp**: `1743379200000`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800`
-- **Signature**: `0389ec7df5ff00fcdf83f41ad41ef1813cfd64a87b6c7f219bcd1ecfae9b82a1041af95c9171d4ad63e29513701cdeb5cc9f45798276947c8a8b361dae0f94ab93`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f000000003b9aca0000000195e97f78004242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `027742dac59ea73f7f8710648f17b9fb8ccf570460a727c02b28a6e2f310ebf4711397afdac9e6cc799beedc3309ef2b4989598768f65ea78b95151c844e86408f`
 - **Expected verify**: `true`
 
 ### TV002 - All-zero signature should fail
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `1000000000`
 - **Timestamp**: `1743379200000`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f000000003b9aca0000000195e97f78004242424242424242424242424242424242424242424242424242424242424242`
 - **Signature**: `0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000`
 - **Expected verify**: `false`
 
 ### TV003 - Signature with a contract-incompatible challenge
-- **Issuer pubkey**: `037c3f0429768437a942f1818ef1616c609b7a6d8a8dd245e179c8c0838e7d169d`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02b651a75c3cec621fa493dfa45fbb42ff77943acdceeb9543163d76e3d81cb645`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `500000000`
 - **Timestamp**: `1743379201000`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000001dcd650000000195e97f7be8`
-- **Signature**: `024900b6f2a6c83c9158420e7e15bc211e761f5157fe84f2a25499340e731c420624c6b3f14a59b811d50ab0492e53784b541a53688452898924142a313cb64a37`
+- **Message**: `52eb0beb0bd0e86206e0a817785aadabbef08730fd5654ea65ebcbe1ef1b3b9e000000001dcd650000000195e97f7be84242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `02d052ebc2a622f61681dc9ad52a8cd062acc4c6acf9ba6cfdd507ae886b8054701319d7378338904e89be9604c16825a06fd831afa598248e3f3902be9d270c39`
 - **Expected verify**: `false`
 
 > **This vector was previously labelled "Valid tracker signature" with `Expected verify: true`. That
 > was wrong, and the mistake was itself a bug report.**
 >
-> Its response `z` is fine (`bitLength` 6), but the Fiat-Shamir challenge is
-> `f7c4bea73d300504021d76b23f7e9d9b67598a18061971b95b47eed56c6fb74c` — the first byte is `0xf7`.
+> Its response `z` is fine (top byte `0x13`, `bitLength` well under 255), but the Fiat-Shamir
+> challenge is
+> `dabdc82a6add16a23e6124ccea24b8e77013909cdc06821245f7a4e5c8a0d8da` — the first byte is `0xda`.
 > The contract reads both values with ErgoScript's `byteArrayToBigInt`, which is a **signed**
-> big-endian conversion, so `0xf7..` becomes a negative number and `pubKey.exp(negative)` throws.
+> big-endian conversion, so `0xda..` becomes a negative number and `pubKey.exp(negative)` throws.
 >
 > Two implementations disagreed with that:
 >
@@ -388,73 +398,82 @@ between Scala and Rust implementations.
 > `specs/pr14_triage.md` (S5).
 
 ### TV004 - Wrong signer signature should fail
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `1000000000`
 - **Timestamp**: `1743379200000`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800`
-- **Signature**: `03896bab104009190272b8f99808d3d04654f3a882c04aa4119fdffe352e7d496e31f2cc1a52fb60cd3ea7eb5919929584b83f4e9fd7122ea28c9a5ff20090e782`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f000000003b9aca0000000195e97f78004242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `0240d01f20717b244800f147d2c9b559cd836c19aea344071c1639be2a22870e772bdbbaf89bb715fcc8c4ec7d8df464fb196c83a9616ef0ccd392f5ae8022d072`
 - **Expected verify**: `false`
 
 ### TV005 - Corrupted signature should fail
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `1000000000`
 - **Timestamp**: `1743379200000`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800`
-- **Signature**: `0224f5a465dc99fe66177dbb503363bcd12a679b260783adc2305dfa996feb5e9564afadb695cf16d8ff1500f557bc0fff7cfb28e418bac449748a09a5ffb7dce3`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f000000003b9aca0000000195e97f78004242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `036eb16f1611ae82edfd2ca30251e6fbbb3eae03173eb16e270e53ce7f755342a16d86d89db441bb8905f86110f3e615ffaf3ceb9d7b1992c0d14d0e3cbf7f3931`
 - **Expected verify**: `false`
 
 ### TV006 - Wrong amount should fail
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `1000000000`
 - **Timestamp**: `1743379200000`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0100000195e97f7800`
-- **Signature**: `028fd39a0481ab31003d979a8276655c020530038ee18046a441296c4f4b8bbebf38fdbd14ac7fedbfef993d02ef3941dd9fb1f3f287e7bf56a93bf0dd6af67456`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f000000003b9aca0000000195e97f78004242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `028c3d344aefd0caa6a16ffdab0bd154b457585cd998e5ac80b86286a796f33f1e53488afbc8e3160caab535bac018b81bd62acea9b64c2a426d08727d42193720`
 - **Expected verify**: `false`
 
 ### TV007 - Wrong timestamp should fail
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `1000000000`
 - **Timestamp**: `1743379200000`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7801`
-- **Signature**: `03a3d6e4435fb29955452a59d568395b4d46423adbdd46de707c21468dcad159aa6a6a09dff6065b03a54069037c3e37a71186bcc8df20728424d214373c708c12`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f000000003b9aca0000000195e97f78004242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `03baecb66840002c131c54134b0abde112a0405f3d6d1d384b5815857ee68b9e624ba6d7c176c8631633c7e609af34f9e389f99c6e3fd64e16aa743956d66e1e11`
 - **Expected verify**: `false`
 
 ### TV008 - Wrong recipient should fail
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `1000000000`
 - **Timestamp**: `1743379200000`
-- **Message**: `55df4d11e0afb42e8137dab457fd76f46a00b6abb753c85cdef64493263c9900000000003b9aca0000000195e97f7800`
-- **Signature**: `023c0b5e1235b762dc62f27938ada133422ecd4e94ebdfc875cf8af05c30f67a7b751806f0a0d4d92a65be6e5c84de819a45a31720453f8fdb348e2c9ed857226c`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f000000003b9aca0000000195e97f78004242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `0282fcc89cb99e3491bb43d1797ff2567fde0620ea38d78f937ae122ae0acf2f897169bcb397037aeb94eda8ee6e5642781f8fe1d85f33bc6a8ed5a440760fd029`
 - **Expected verify**: `false`
 
-### TV009 - Maximum u64 values
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+> TV006–TV008 intentionally reuse TV001's message: each signature was produced over a different
+> amount, timestamp, or recipient key, so it must fail when verified against TV001's message.
+
+### TV009 - Maximum u64 values (contract-incompatible challenge)
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `18446744073709551615`
 - **Timestamp**: `18446744073709551615`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220bffffffffffffffffffffffffffffffff`
-- **Signature**: `03ac2d20f2aceedc94fd621ce5fa0f42926da94d6b673296e24c4a63c7f5178c6f7645dd84cd50f6c5bed74a8aeaacceba442a5008ca0eeb17c8008ae7d3c58dec`
-- **Expected verify**: `true`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851fffffffffffffffffffffffffffffffff4242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `03917db7e61b54d50409c0447ebd27caa124d2702aa0ae5651381cd662162307c8055e54abdd0ba40be01c695edf95b9026c94f286a3353f63d1e2348e5d455c2f`
+- **Expected verify**: `false`
+
+> Like TV003, this vector carries a Fiat-Shamir challenge whose first byte (`0xc0`) has the
+> top bit set: `z` satisfies `bitLength <= 255`, but the contract reads the challenge with
+> signed `byteArrayToBigInt`, so `pubKey.exp(e)` would throw on-chain. It is kept with
+> `should_verify: false` as regression coverage for that gap (see TV003's SECURITY note and
+> `specs/pr14_triage.md` S5).
 
 ### TV010 - Zero amount and timestamp
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `0`
 - **Timestamp**: `0`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b00000000000000000000000000000000`
-- **Signature**: `022d591f919b441f3a3fa671560ef3e7dffa9cf2fb51ed02a7e64e9da203be38905096f698e4c8e49bf4bf03d1f38e4c4554e22df4d334167c0cc59d6747a2501e`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f000000000000000000000000000000004242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `0235f9989903d1e2ee8c274ba5494119b6deef7cd0d0e15dc07190011b524c891d5deec9c943adce1891dc5977cda361da0a81e81bbf489b3a7f6b8d2c15116ad4`
 - **Expected verify**: `true`
 
 ### TV011 - Emergency redemption valid reserve signature
-- **Issuer pubkey**: `0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0`
-- **Recipient pubkey**: `02207bba70bc66309baa582a6ac120fd52d68026c51f6326f8ccedcbd2c1b7eb82`
+- **Issuer pubkey**: `02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063`
+- **Recipient pubkey**: `023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd`
 - **Amount**: `500000000`
 - **Timestamp**: `1743379202000`
-- **Message**: `07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000001dcd650000000195e97f7fd0`
-- **Signature**: `03517ac544f2d87d1ae0731b9c992d7359bfb09b41d18337b9c24dd59b6919b3f26d73531d00d7ba3ae8cf36168a9b9f652eed6cb6a5c7f68c8e9d8fd36641e5a5`
+- **Message**: `76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f000000001dcd650000000195e97f7fd04242424242424242424242424242424242424242424242424242424242424242`
+- **Signature**: `02001d67f568ace3b32c68bd9cfdd3795d5df0f5057b4d837935578697675c8e334668c7b923ae13df8dd9725ac66c63a4ca6f05cc2e7d1c3d23abdcb750dea923`
 - **Expected verify**: `true`

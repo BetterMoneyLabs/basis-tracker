@@ -52,6 +52,9 @@ pub struct CreateNoteRequest {
     pub timestamp: u64,
     pub signature: String,
     pub issuer_pubkey: String,
+    /// Tracker NFT ID the note is bound to (part of the signed message, issue #15 C3).
+    /// Must match this tracker's configured `ergo.tracker_nft_id`.
+    pub tracker_nft_id: String,
 }
 
 // Response structure for API responses
@@ -99,6 +102,8 @@ pub struct SerializableIouNote {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    /// Tracker NFT ID this note is bound to (part of the signed message, issue #15 C3).
+    pub tracker_nft_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<NoteConfirmationSummary>,
 }
@@ -112,6 +117,8 @@ pub struct SerializableIouNoteWithAge {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    /// Tracker NFT ID this note is bound to (part of the signed message, issue #15 C3).
+    pub tracker_nft_id: String,
     pub age_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<NoteConfirmationSummary>,
@@ -126,6 +133,7 @@ impl From<IouNote> for SerializableIouNote {
             amount_redeemed: note.amount_redeemed,
             timestamp: note.timestamp,
             signature: hex::encode(note.signature),
+            tracker_nft_id: hex::encode(note.tracker_nft_id),
             confirmation: None,
         }
     }
@@ -435,6 +443,10 @@ pub struct TrackerBoxIdResponse {
     pub tracker_box_id: String,
     pub timestamp: u64,
     pub height: u64,
+    /// Tracker NFT ID (hex) that notes must bind to in their signed message (issue #15 C3).
+    /// Empty when not configured.
+    #[serde(default)]
+    pub tracker_nft_id: String,
 }
 
 // Reserve-token configuration exposed to clients so they can display and create

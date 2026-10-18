@@ -161,14 +161,17 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
   def mkKey(ownerKey: GroupElement, receiverKey: GroupElement): Array[Byte] =
     Blake2b256(ownerKey.getEncoded.toArray ++ receiverKey.getEncoded.toArray)
 
+  // Message for redemption: key || totalDebt || timestamp || tracker NFT id (the same bytes as the
+  // reserve box's R6, which is what the contract appends via SELF.R6[Coll[Byte]]).
   def mkMessage(key: Array[Byte], totalDebt: Long, timestamp: Long): Array[Byte] =
-    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
-  // NOTE: Emergency redemption uses the SAME message format as normal redemption.
-  // The only difference is that tracker signature becomes OPTIONAL after 3 days (2160 blocks).
+  // NOTE: Emergency redemption uses the SAME message format as normal redemption:
+  // key || totalDebt || timestamp || tracker NFT id. The only difference is that the tracker
+  // signature becomes OPTIONAL after 3 days (2160 blocks).
   // This function is kept for documentation purposes but is NOT used by the actual contract.
   def mkEmergencyMessage(key: Array[Byte], totalDebt: Long, timestamp: Long): Array[Byte] =
-    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ Longs.toByteArray(0L)
+    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
   def mkSigBytes(sig: (GroupElement, BigInt)): Array[Byte] =
     GroupElementSerializer.toBytes(sig._1) ++ sig._2.toByteArray

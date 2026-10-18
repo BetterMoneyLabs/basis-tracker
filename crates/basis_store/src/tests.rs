@@ -27,7 +27,7 @@ fn test_iou_note_creation() -> Result<(), String> {
     let recipient_pubkey = [1u8; 33];
     let signature = [2u8; 65];
 
-    let note = IouNote::new(recipient_pubkey, 1000, 0, 1234567890, signature);
+    let note = IouNote::new(recipient_pubkey, 1000, 0, 1234567890, signature, [0x42; 32]);
 
     if note.recipient_pubkey != recipient_pubkey {
         return Err("recipient_pubkey mismatch".to_string());
@@ -53,17 +53,17 @@ fn test_signing_message() -> Result<(), String> {
     let owner_pubkey = [1u8; 33];
     let receiver_pubkey = [2u8; 33];
     let timestamp = 1743379200000u64;
-    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [3u8; 65]);
+    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [3u8; 65], [0x42; 32]);
 
-    // Format: key (32) || totalDebt (8) || timestamp (8) = 48 bytes
+    // Format: key (32) || totalDebt (8) || timestamp (8) || trackerNftId (32) = 80 bytes
     let message = note.signing_message(&owner_pubkey);
     if message.is_empty() {
         return Err("signing message is empty".to_string());
     }
 
-    if message.len() != 48 {
+    if message.len() != 80 {
         return Err(format!(
-            "signing message should be 48 bytes, got {}",
+            "signing message should be 80 bytes, got {}",
             message.len()
         ));
     }
@@ -108,8 +108,9 @@ fn test_signature_verification() -> Result<(), String> {
     let timestamp = 1234567890u64;
 
     // Create a valid signature using our implementation
-    let note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &[1u8; 32])
-        .expect("Failed to create valid signature");
+    let note =
+        IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &[1u8; 32], &[0x42; 32])
+            .expect("Failed to create valid signature");
 
     // Test valid signature (basic format validation)
     if note.verify_signature(&issuer_pubkey).is_err() {
@@ -117,7 +118,14 @@ fn test_signature_verification() -> Result<(), String> {
     }
 
     // Test invalid signature (all zeros)
-    let invalid_note = IouNote::new(recipient_pubkey, amount, 0, timestamp, [0u8; 65]);
+    let invalid_note = IouNote::new(
+        recipient_pubkey,
+        amount,
+        0,
+        timestamp,
+        [0u8; 65],
+        [0x42; 32],
+    );
 
     if invalid_note.verify_signature(&issuer_pubkey).is_ok() {
         return Err("should fail with zero signature".to_string());
@@ -167,6 +175,7 @@ fn test_roundtrip_signature() -> Result<(), String> {
         amount,
         timestamp,
         &secret_key.secret_bytes(),
+        &[0x42; 32],
     )
     .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
 
@@ -204,9 +213,14 @@ fn test_signature_tampering() -> Result<(), String> {
     let issuer_pubkey = public_key.serialize();
 
     // Create and sign a valid note
-    let mut note =
-        IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key.secret_bytes())
-            .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+    let mut note = IouNote::create_and_sign(
+        [2u8; 33],
+        1000,
+        1234567890,
+        &secret_key.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
 
     // Test 1: Tamper with signature
     note.signature[0] ^= 0x01; // Flip a bit in the signature
@@ -215,18 +229,28 @@ fn test_signature_tampering() -> Result<(), String> {
     }
 
     // Test 2: Tamper with recipient
-    let mut note2 =
-        IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key.secret_bytes())
-            .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+    let mut note2 = IouNote::create_and_sign(
+        [2u8; 33],
+        1000,
+        1234567890,
+        &secret_key.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
     note2.recipient_pubkey[0] ^= 0x01;
     if note2.verify_signature(&issuer_pubkey).is_ok() {
         return Err("Tampered recipient should fail verification".to_string());
     }
 
     // Test 3: Tamper with amount
-    let mut note3 =
-        IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key.secret_bytes())
-            .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+    let mut note3 = IouNote::create_and_sign(
+        [2u8; 33],
+        1000,
+        1234567890,
+        &secret_key.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
     note3.amount_collected = 2000;
     if note3.verify_signature(&issuer_pubkey).is_ok() {
         return Err("Tampered amount should fail verification".to_string());
@@ -234,8 +258,14 @@ fn test_signature_tampering() -> Result<(), String> {
 
     // Test 4: Wrong issuer public key
     let wrong_pubkey = [0u8; 33];
-    let note4 = IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key.secret_bytes())
-        .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+    let note4 = IouNote::create_and_sign(
+        [2u8; 33],
+        1000,
+        1234567890,
+        &secret_key.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
     if note4.verify_signature(&wrong_pubkey).is_ok() {
         return Err("Wrong issuer pubkey should fail verification".to_string());
     }
@@ -259,11 +289,23 @@ fn test_multiple_signatures() -> Result<(), String> {
     let issuer_pubkey2 = public_key2.serialize();
 
     // Create notes with different issuers
-    let note1 = IouNote::create_and_sign([2u8; 33], 1000, 1234567890, &secret_key1.secret_bytes())
-        .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+    let note1 = IouNote::create_and_sign(
+        [2u8; 33],
+        1000,
+        1234567890,
+        &secret_key1.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
 
-    let note2 = IouNote::create_and_sign([2u8; 33], 2000, 1234567891, &secret_key2.secret_bytes())
-        .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
+    let note2 = IouNote::create_and_sign(
+        [2u8; 33],
+        2000,
+        1234567891,
+        &secret_key2.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
 
     // Verify each note with its correct issuer
     note1
@@ -301,6 +343,7 @@ fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
         0,
         9999999999999, // Far future timestamp in milliseconds
         [0u8; 65],
+        [0x42; 32],
     );
 
     // Should fail with FutureTimestamp error
@@ -323,9 +366,14 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
     let recipient_pubkey: PubKey = [2u8; 33];
 
     // Create first signed note
-    let note1 =
-        IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key.secret_bytes())
-            .map_err(|e| format!("Failed to create first note: {:?}", e))?;
+    let note1 = IouNote::create_and_sign(
+        recipient_pubkey,
+        1000,
+        1000000,
+        &secret_key.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
     let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1);
     if result1.is_err() {
@@ -333,9 +381,14 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
     }
 
     // Create second signed note with higher timestamp
-    let note2 =
-        IouNote::create_and_sign(recipient_pubkey, 2000, 1000001, &secret_key.secret_bytes())
-            .map_err(|e| format!("Failed to create second note: {:?}", e))?;
+    let note2 = IouNote::create_and_sign(
+        recipient_pubkey,
+        2000,
+        1000001,
+        &secret_key.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
     let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2);
     if result2.is_err() {
@@ -360,9 +413,14 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
     let recipient_pubkey: PubKey = [2u8; 33];
 
     // Add first signed note
-    let note1 =
-        IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key.secret_bytes())
-            .map_err(|e| format!("Failed to create first note: {:?}", e))?;
+    let note1 = IouNote::create_and_sign(
+        recipient_pubkey,
+        1000,
+        1000000,
+        &secret_key.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
     let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1);
     if result1.is_err() {
@@ -370,9 +428,14 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
     }
 
     // Try to add note with same timestamp - should fail
-    let note2 =
-        IouNote::create_and_sign(recipient_pubkey, 2000, 1000000, &secret_key.secret_bytes())
-            .map_err(|e| format!("Failed to create second note: {:?}", e))?;
+    let note2 = IouNote::create_and_sign(
+        recipient_pubkey,
+        2000,
+        1000000,
+        &secret_key.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
     let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2);
     match result2 {
@@ -386,9 +449,14 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
     }
 
     // Try to add note with lower timestamp - should fail
-    let note3 =
-        IouNote::create_and_sign(recipient_pubkey, 2000, 999999, &secret_key.secret_bytes())
-            .map_err(|e| format!("Failed to create third note: {:?}", e))?;
+    let note3 = IouNote::create_and_sign(
+        recipient_pubkey,
+        2000,
+        999999,
+        &secret_key.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create third note: {:?}", e))?;
 
     let result3 = tracker.add_note(&issuer_pubkey_bytes, &note3);
     match result3 {
@@ -414,9 +482,14 @@ fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), S
     let recipient_pubkey: PubKey = [3u8; 33];
 
     // Add note for first issuer
-    let note1 =
-        IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key1.secret_bytes())
-            .map_err(|e| format!("Failed to create first note: {:?}", e))?;
+    let note1 = IouNote::create_and_sign(
+        recipient_pubkey,
+        1000,
+        1000000,
+        &secret_key1.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
     let result1 = tracker.add_note(&issuer1_pubkey, &note1);
     if result1.is_err() {
@@ -424,9 +497,14 @@ fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), S
     }
 
     // Add note for different issuer with same timestamp - should succeed
-    let note2 =
-        IouNote::create_and_sign(recipient_pubkey, 1000, 1000000, &secret_key2.secret_bytes())
-            .map_err(|e| format!("Failed to create second note: {:?}", e))?;
+    let note2 = IouNote::create_and_sign(
+        recipient_pubkey,
+        1000,
+        1000000,
+        &secret_key2.secret_bytes(),
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
     let result2 = tracker.add_note(&issuer2_pubkey, &note2);
     if result2.is_err() {
@@ -527,7 +605,7 @@ mod confirmation_state_tests {
         amount: u64,
         timestamp: u64,
     ) -> IouNote {
-        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret).unwrap()
+        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret, &[0x42; 32]).unwrap()
     }
 
     #[test]
@@ -824,7 +902,7 @@ mod debt_monotonicity_tests {
         amount: u64,
         timestamp: u64,
     ) -> IouNote {
-        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret).unwrap()
+        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret, &[0x42; 32]).unwrap()
     }
 
     #[test]

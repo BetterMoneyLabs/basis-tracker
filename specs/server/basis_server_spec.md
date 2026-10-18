@@ -157,7 +157,7 @@ The `/tracker/signature` endpoint returns responses with the following structure
 - `tracker_signature`: 65-byte Schnorr signature (hex-encoded, 130 characters) proving tracker authorization
 - `tracker_pubkey`: Tracker's public key (hex-encoded, 66 characters)
 - `message_signed`: The hex-encoded message that was signed
-  - Normal and emergency: `hash(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
+  - Normal and emergency: `hash(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
 
 ### Redemption Preparation Request Structure
 
@@ -207,8 +207,8 @@ The server now implements real cryptographic functionality using the Ergo node's
 - **Authentication**: Remote requests to the signing API are authenticated using the tracker API key
 - **Implementation**: Tracker signature endpoints (`/tracker/signature` and `/redemption/prepare`) try local signing first, then fall back to Ergo node API
 - **Message Format**: 
-  - Normal and emergency: `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
-  - Emergency redemption (after 3 days): same 48-byte message format, tracker signature becomes optional
+  - Normal and emergency: `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
+  - Emergency redemption (after 3 days): same 80-byte message format, tracker signature becomes optional
 
 #### AVL Tree Proof Generation
 - **Real Proofs**: All proof endpoints now generate actual AVL tree lookup and insert/update proofs from the tracker's and reserve's AVL tree state

@@ -82,7 +82,7 @@ basis-tracker-rust/
 
 ### Message Format
 ```
-48 bytes total: key (32) || totalDebt (8) || timestamp (8)
+80 bytes total: key (32) || totalDebt (8) || timestamp (8) || trackerNftId (32)
 ```
 
 ### Signature Format
@@ -119,7 +119,7 @@ flags: InsertOnly (0x01)
 ## ⚠️ Common Pitfalls
 
 1. **Wrong z encoding** - Must be unsigned 32 bytes (use BouncyCastle, not BigInt.toByteArray)
-2. **Wrong message length** - 48 bytes (with timestamp), NOT 40 bytes
+2. **Wrong message length** - 80 bytes (with timestamp and tracker NFT id); was 48 bytes (with timestamp), NOT 40 bytes
 3. **Uncompressed keys** - Must use 33-byte compressed format
 4. **Wrong endianness** - Numbers are little-endian, not big-endian
 5. **Timestamp units** - Milliseconds, not seconds

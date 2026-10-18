@@ -161,7 +161,9 @@ mod redemption_api_tests {
                         response_tx,
                     } => {
                         let mock_proof = basis_store::NoteProof {
-                            note: basis_store::IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]),
+                            note: basis_store::IouNote::new(
+                                [0u8; 33], 0, 0, 0, [0u8; 65], [0x42; 32],
+                            ),
                             avl_proof: vec![1, 2, 3, 4],
                             operations: vec![],
                         };
@@ -376,9 +378,14 @@ mod redemption_api_tests {
         let recipient_bytes = hex::decode(recipient_pubkey).unwrap();
         let recipient_arr: [u8; 33] = recipient_bytes.try_into().unwrap();
 
-        let note =
-            basis_store::IouNote::create_and_sign(recipient_arr, amount, timestamp, issuer_secret)
-                .unwrap();
+        let note = basis_store::IouNote::create_and_sign(
+            recipient_arr,
+            amount,
+            timestamp,
+            issuer_secret,
+            &[0x42; 32],
+        )
+        .unwrap();
 
         let issuer_bytes = hex::decode(issuer_pubkey).unwrap();
         let issuer_arr: [u8; 33] = issuer_bytes.try_into().unwrap();

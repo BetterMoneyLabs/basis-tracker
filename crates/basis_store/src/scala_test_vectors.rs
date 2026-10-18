@@ -5,7 +5,7 @@
 //!
 //! This module provides additional structure and tests around those vectors to
 //! verify cross-compatibility with the Scala redemption logic:
-//! - Message format: key || totalDebt || timestamp (48 bytes)
+//! - Message format: key || totalDebt || timestamp || trackerNftId (80 bytes)
 //! - Schnorr signatures: 65-byte format (33-byte a + 32-byte z)
 //! - AVL tree proofs: tracker lookup, reserve insert, reserve lookup
 //! - Ergo constant serialization prefixes
@@ -151,6 +151,9 @@ mod tests {
     use super::*;
     use crate::schnorr;
 
+    /// Tracker NFT ID shared with the Scala TestVectorGenerator (32 bytes of 0x42).
+    const TEST_TRACKER_NFT_ID: [u8; 32] = [0x42; 32];
+
     // -------------------------------------------------------------------------
     // Helper: decode hex to fixed-size arrays
     // -------------------------------------------------------------------------
@@ -215,6 +218,7 @@ mod tests {
                 &recipient_pubkey,
                 vector.amount,
                 vector.timestamp,
+                &TEST_TRACKER_NFT_ID,
             );
 
             // Hardcoded Scala message
@@ -226,11 +230,11 @@ mod tests {
                 vector.id
             );
 
-            // Also verify the constructed message is exactly 48 bytes
+            // Also verify the constructed message is exactly 80 bytes
             assert_eq!(
                 rust_message.len(),
-                48,
-                "Vector {}: Constructed message must be exactly 48 bytes",
+                80,
+                "Vector {}: Constructed message must be exactly 80 bytes",
                 vector.id
             );
         }
@@ -333,6 +337,7 @@ mod tests {
                 &recipient_pubkey,
                 vector.amount,
                 vector.timestamp,
+                &TEST_TRACKER_NFT_ID,
             );
 
             let expected = hex::decode(vector.message_hex).expect("Invalid message hex");

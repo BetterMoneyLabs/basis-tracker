@@ -103,7 +103,7 @@ Global flags on every subcommand: `--json`, `--config <path>`, `--server-url <ur
 - **Curve**: secp256k1
 - **Public Keys**: 33 bytes compressed format
 - **Signatures**: 65 bytes Schnorr (a || z format)
-- **Signing Message**: `blake2b256(ownerKey || receiverKey) || totalDebt || timestamp` (48 bytes)
+- **Signing Message**: `blake2b256(ownerKey || receiverKey) || totalDebt || timestamp` (48 bytes historically; now 80 bytes incl. tracker NFT id)
 - **Verification**: `g^z = a * x^e` where `e = H(a || message || pubkey)`
 
 ---

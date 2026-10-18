@@ -64,12 +64,15 @@
 ### Signature Format
 - **Public keys**: 33 bytes compressed secp256k1 (66 hex chars)
 - **Signatures**: 65 bytes (130 hex chars) - 33-byte a + 32-byte z (Schnorr format)
-- **Signing message**: `key || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
+- **Signing message**: `key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
   - Same format for both normal and emergency redemption
   - Where `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
   - `ownerKey`: Reserve owner's public key (issuer of the IOU note)
   - `receiverKey`: Recipient's public key (creditor)
   - `totalDebt`: Total cumulative debt amount (8 bytes big-endian)
+  - `trackerNftId`: Tracker's NFT id (32 bytes), appended at the end; the on-chain contract reads it
+    from `SELF.R6[Coll[Byte]]`. It binds every signature to one tracker/contract so a signature for
+    one tracker cannot be replayed on another (issue #15, finding C3)
 - **Verification**: Schnorr signature verification following chaincash-rs approach
 - **Algorithm**: `g^z = a * x^e` where:
   - `g` is generator point
@@ -140,9 +143,10 @@ Tests require `scala/secrets/participants.csv` with valid `name,address,secret_h
   retry limit). The Rust **verifier** rejects such signatures too — otherwise the tracker accepts and
   pins a note the node will refuse, permanently stranding the creditor's funds (see `specs/pr14_triage.md` S5).
 - **Cross-validation**: All signatures verified against hardcoded Scala test vectors (see
-  specs/SCHNORR_SIGNATURE_SPEC.md). Four historical vectors (TV003, TV005, TV008, TV009) have
-  contract-incompatible challenges and are kept with `should_verify: false` as regression coverage —
-  the Scala signer previously emitted them.
+  specs/SCHNORR_SIGNATURE_SPEC.md). The vectors were regenerated for the C3 fix (80-byte messages,
+  tracker NFT id = `0x42` × 32). Two of them (TV003, TV009) carry contract-incompatible challenges
+  (top bit set) and are kept with `should_verify: false` as regression coverage —
+  the Scala signer previously emitted such signatures.
 - **Ergo node compatibility**: Basis server signatures are compatible with ErgoScript contract verification
 
 ## Ergo Blockchain Scanner

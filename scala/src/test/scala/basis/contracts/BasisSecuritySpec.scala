@@ -85,7 +85,7 @@ class BasisSecuritySpec extends PropSpec with Matchers with basis.HttpClientTest
       val totalDebt = 10000000000L
       val timestamp = System.currentTimeMillis()
       val key = Blake2b256(b.ownerPk.getEncoded.toArray ++ b.receiverPk.getEncoded.toArray)
-      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ b.trackerNFTBytes
       val reserveSig = signAll(message, b.ownerSecret)
       val trackerSig = signAll(message, b.trackerSecret)
       val tracker = b.mkTrackerTreeAndProof(key, totalDebt)
@@ -160,7 +160,7 @@ class BasisSecuritySpec extends PropSpec with Matchers with basis.HttpClientTest
       val totalDebt = 10000000000L
       val timestamp = System.currentTimeMillis()
       val key = Blake2b256(b.ownerPk.getEncoded.toArray ++ b.receiverPk.getEncoded.toArray)
-      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ b.trackerNFTBytes
       val reserveSig = signAll(message, b.ownerSecret)
       val trackerSig = signAll(message, b.trackerSecret)
       val tracker = b.mkTrackerTreeAndProof(key, totalDebt)
@@ -231,7 +231,7 @@ class BasisSecuritySpec extends PropSpec with Matchers with basis.HttpClientTest
       val totalDebt = 10000000000L
       val timestamp = System.currentTimeMillis()
       val key = Blake2b256(b.ownerPk.getEncoded.toArray ++ b.receiverPk.getEncoded.toArray)
-      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ b.trackerNFTBytes
       val reserveSig = signAll(message, b.ownerSecret)
       val trackerSig = signAll(message, b.trackerSecret)
 
@@ -282,7 +282,7 @@ class BasisSecuritySpec extends PropSpec with Matchers with basis.HttpClientTest
 
       def redeemOnce(txId: String)(implicit ctx: BlockchainContext): Unit = {
         val key = Blake2b256(b.ownerPk.getEncoded.toArray ++ b.receiverPk.getEncoded.toArray)
-        val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+        val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ b.trackerNFTBytes
         val reserveSig = signAll(message, b.ownerSecret)
         val trackerSig = signAll(message, b.trackerSecret)
         val tracker = b.mkTrackerTreeAndProof(key, totalDebt)
@@ -335,7 +335,7 @@ class BasisSecuritySpec extends PropSpec with Matchers with basis.HttpClientTest
       val remainder = totalDebt - alreadyRedeemed
 
       val key = Blake2b256(b.ownerPk.getEncoded.toArray ++ b.receiverPk.getEncoded.toArray)
-      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ b.trackerNFTBytes
       val reserveSig = signAll(message, b.ownerSecret)
       val trackerSig = signAll(message, b.trackerSecret)
 
@@ -372,7 +372,7 @@ class BasisSecuritySpec extends PropSpec with Matchers with basis.HttpClientTest
       val newTimestamp = System.currentTimeMillis()
 
       val key = Blake2b256(b.ownerPk.getEncoded.toArray ++ b.receiverPk.getEncoded.toArray)
-      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(oldTimestamp)
+      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(oldTimestamp) ++ b.trackerNFTBytes
       val reserveSig = signAll(message, b.ownerSecret)
       val trackerSig = signAll(message, b.trackerSecret)
 

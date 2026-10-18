@@ -121,7 +121,9 @@ mod http_api_tests {
                     } => {
                         // For testing purposes, return a mock proof
                         let mock_proof = basis_store::NoteProof {
-                            note: basis_store::IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]),
+                            note: basis_store::IouNote::new(
+                                [0u8; 33], 0, 0, 0, [0u8; 65], [0x42; 32],
+                            ),
                             avl_proof: vec![1, 2, 3, 4], // Mock proof data
                             operations: vec![],
                         };
@@ -497,9 +499,14 @@ mod http_api_tests {
         let secp = secp256k1::Secp256k1::new();
         let sk = secp256k1::SecretKey::from_slice(&issuer_secret).unwrap();
         let issuer = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize();
-        let note =
-            basis_store::IouNote::create_and_sign(recipient, amount, timestamp, &issuer_secret)
-                .unwrap();
+        let note = basis_store::IouNote::create_and_sign(
+            recipient,
+            amount,
+            timestamp,
+            &issuer_secret,
+            &[0x42; 32],
+        )
+        .unwrap();
         (issuer, note)
     }
 
