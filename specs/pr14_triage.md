@@ -142,7 +142,7 @@ Also pinned the reserve-NFT amount: `tokenIdsPreserved` now checks `selfOut.toke
 SELF.tokens(0)._2`. Previously only the token *IDs* were compared, so an output could carry more units
 of the reserve NFT than the input, i.e. mint additional reserve NFTs.
 
-### C4 — reserve setup never validated (High) — Partially fixed
+### C4 — reserve setup never validated (High) — Fixed
 
 The scanner (`ergo_scanner.rs`) reads only R4, R6 and R7. **R5 is never read at all.** R6 is
 length-checked (32 bytes) but never compared against the configured tracker NFT, which allows
