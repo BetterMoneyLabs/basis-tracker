@@ -8,6 +8,7 @@ pub mod config;
 pub mod models;
 pub mod redemption_build;
 pub mod reserve_api;
+pub mod reserve_submission;
 pub mod store;
 pub mod tracker_box_updater;
 
@@ -42,6 +43,12 @@ pub struct AppState {
     pub tracker_storage: basis_store::persistence::TrackerStorage,
     pub acceptance_predicate: Option<std::sync::Arc<dyn acceptance::NotePredicate>>,
     pub policy_storage: basis_store::persistence::AcceptancePolicyStorage,
+    /// Single-use permits for `POST /reserves/submit`, issued by `POST /reserves/create`.
+    ///
+    /// Without this the submit endpoint would forward caller-chosen payment instructions to the
+    /// node's `/wallet/payment/send` together with the node `api_key`, letting any reachable caller
+    /// spend from the tracker's wallet. See `reserve_submission` for the full rationale.
+    pub reserve_submission_permits: std::sync::Arc<reserve_submission::PermitRegistry>,
     // Note: tracker_scanner is not stored here due to Send trait bounds
     // Tracker box ID is fetched from tracker_storage directly
 }
@@ -111,6 +118,18 @@ pub enum TrackerCommand {
             Result<basis_store::TrackerLookupProof, basis_store::NoteError>,
         >,
     },
+    /// Tracker lookup proof against the COMMITTED on-chain state (latest confirmed
+    /// tracker box digest). Redemption transactions must use this variant: the live
+    /// tree may contain uncommitted notes that would invalidate the proof on-chain
+    /// (issue #15 S6). Fails with `NoteError::NoteNotConfirmed` when the note is not
+    /// committed on-chain yet.
+    GetCommittedTrackerLookupProof {
+        issuer_pubkey: basis_store::PubKey,
+        recipient_pubkey: basis_store::PubKey,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<basis_store::TrackerLookupProof, basis_store::NoteError>,
+        >,
+    },
     GetReserveLookupProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
@@ -153,7 +172,9 @@ pub enum TrackerCommand {
         response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
     },
     /// Promote all pending notes to confirmed after an update tx confirms.
+    /// `digest` is the AVL root committed by the confirming tracker box.
     ConfirmPendingNotes {
+        digest: [u8; 33],
         box_id: String,
         height: u64,
         response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,

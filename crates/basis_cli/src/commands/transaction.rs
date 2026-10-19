@@ -861,7 +861,17 @@ pub async fn execute_local_redemption(
             issuer_pubkey
         ));
     }
-    let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, note.timestamp);
+    let tracker_nft_id: [u8; 32] = hex::decode(&note.tracker_nft_id)
+        .map_err(|e| anyhow::anyhow!("Invalid tracker NFT ID on note: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Tracker NFT ID must be 32 bytes"))?;
+    let message = redemption_signing_message(
+        &issuer_pk,
+        &recipient_pk,
+        total_debt,
+        note.timestamp,
+        &tracker_nft_id,
+    );
     let issuer_signature = current.sign_message(&message)?;
     let issuer_signature_hex = hex::encode(issuer_signature);
 
@@ -1009,11 +1019,16 @@ pub async fn generate_redemption_transaction(
         .try_into()
         .map_err(|_| anyhow::anyhow!("Recipient public key must be 33 bytes"))?;
 
+    let tracker_nft_id: [u8; 32] = hex::decode(&note.tracker_nft_id)
+        .map_err(|e| anyhow::anyhow!("Invalid tracker NFT ID on note: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Tracker NFT ID must be 32 bytes"))?;
     let message = redemption_signing_message(
         &issuer_pk,
         &recipient_pk,
         note.amount_collected,
         note.timestamp,
+        &tracker_nft_id,
     );
     let issuer_signature = current_account.sign_message(&message)?;
     let issuer_signature_hex = hex::encode(issuer_signature);
@@ -1165,7 +1180,17 @@ pub async fn redeem_tracker_assisted(
             &issuer_pubkey[..16]
         );
     }
-    let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, timestamp);
+    let tracker_nft_id: [u8; 32] = hex::decode(&note.tracker_nft_id)
+        .map_err(|e| anyhow::anyhow!("Invalid tracker NFT ID on note: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Tracker NFT ID must be 32 bytes"))?;
+    let message = redemption_signing_message(
+        &issuer_pk,
+        &recipient_pk,
+        total_debt,
+        timestamp,
+        &tracker_nft_id,
+    );
     let issuer_sig = current.sign_message(&message)?;
     progress!("✅ issuer signature ({} bytes)", issuer_sig.len());
 

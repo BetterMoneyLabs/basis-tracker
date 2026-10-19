@@ -42,8 +42,9 @@ This document describes the integration tests for the acceptance policy feature.
 ### 5. Redemption-Time Policy Check Tests
 
 The acceptance policy is also enforced at redemption time (see
-`specs/redemption_acceptance_policy.md`). Coverage for that check lives outside
-`acceptance_api_integration_tests.rs`:
+`specs/redemption_acceptance_policy.md`) — in `POST /redeem`, `POST /redemption/build`,
+`POST /redemption/prepare`, and `POST /tracker/signature`. Coverage for that check lives
+outside `acceptance_api_integration_tests.rs`:
 
 - Unit tests for `check_redemption_policy_compliance` in
   `crates/basis_server/src/acceptance/redemption_check.rs` (well-collateralized

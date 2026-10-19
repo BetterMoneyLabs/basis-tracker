@@ -64,12 +64,15 @@
 ### Signature Format
 - **Public keys**: 33 bytes compressed secp256k1 (66 hex chars)
 - **Signatures**: 65 bytes (130 hex chars) - 33-byte a + 32-byte z (Schnorr format)
-- **Signing message**: `key || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
+- **Signing message**: `key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
   - Same format for both normal and emergency redemption
   - Where `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
   - `ownerKey`: Reserve owner's public key (issuer of the IOU note)
   - `receiverKey`: Recipient's public key (creditor)
   - `totalDebt`: Total cumulative debt amount (8 bytes big-endian)
+  - `trackerNftId`: Tracker's NFT id (32 bytes), appended at the end; the on-chain contract reads it
+    from `SELF.R6[Coll[Byte]]`. It binds every signature to one tracker/contract so a signature for
+    one tracker cannot be replayed on another (issue #15, finding C3)
 - **Verification**: Schnorr signature verification following chaincash-rs approach
 - **Algorithm**: `g^z = a * x^e` where:
   - `g` is generator point
@@ -130,9 +133,20 @@ Tests require `scala/secrets/participants.csv` with valid `name,address,secret_h
 - **Module structure**: Schnorr operations extracted to dedicated `schnorr.rs` module
 
 ### Scala Compatibility
-- **bitLength constraint**: Both Scala and Rust implementations enforce `z.bitLength <= 255`
-- **Retry logic**: Signatures with `z.bitLength > 255` are automatically regenerated with a new nonce (no retry limit)
-- **Cross-validation**: All signatures verified against hardcoded Scala test vectors (see specs/SCHNORR_SIGNATURE_SPEC.md)
+- **Two signed-BigInt constraints**: The contract reads both the response `z` and the Fiat-Shamir
+  challenge `e` with ErgoScript's `byteArrayToBigInt`, which is a **signed** big-endian conversion.
+  A 32-byte value with the top bit set becomes negative and `.exp(negative)` throws, so both must be
+  below 2^255 for the contract to be able to evaluate the signature at all.
+  - `z.bitLength <= 255`
+  - the challenge's first byte is `< 0x80` (`is_contract_compatible_be32` / `SigUtils.isContractCompatible`)
+- **Retry logic**: Both Scala and Rust signers regenerate the nonce when either constraint fails (no
+  retry limit). The Rust **verifier** rejects such signatures too — otherwise the tracker accepts and
+  pins a note the node will refuse, permanently stranding the creditor's funds (see `specs/pr14_triage.md` S5).
+- **Cross-validation**: All signatures verified against hardcoded Scala test vectors (see
+  specs/SCHNORR_SIGNATURE_SPEC.md). The vectors were regenerated for the C3 fix (80-byte messages,
+  tracker NFT id = `0x42` × 32). Two of them (TV003, TV009) carry contract-incompatible challenges
+  (top bit set) and are kept with `should_verify: false` as regression coverage —
+  the Scala signer previously emitted such signatures.
 - **Ergo node compatibility**: Basis server signatures are compatible with ErgoScript contract verification
 
 ## Ergo Blockchain Scanner
@@ -170,9 +184,9 @@ start_scanner(state).await.unwrap();
 ```rust
 use basis_store::ergo_scanner::{NodeConfig, ServerState};
 
-// Create real scanner for mainnet
+// Create real scanner against a local node (the default node_url)
 let config = NodeConfig::default();
-let scanner = ServerState::new(config, "http://159.89.116.15:11088".to_string());
+let scanner = ServerState::new(config, "http://127.0.0.1:9053".to_string());
 
 // Test connectivity
 let height = scanner.get_current_height().await?;
@@ -185,10 +199,11 @@ println!("Current blockchain height: {}", height);
 - **ReserveRedeemed**: Debt redemption from reserve
 - **ReserveSpent**: Reserve box spent/closed
 
-### Available Ergo Nodes
-- **Mainnet**: `http://159.89.116.15:11088` (public)
-- **Testnet**: `http://213.239.193.208:9052` (public)
+### Node Configuration
+- `ergo.node.node_url` defaults to `http://127.0.0.1:9053` (a local node); set it explicitly
+  for mainnet/testnet. Never rely on a third-party plaintext node — it sees every request
 - **Local**: `http://localhost:9053` (development)
+- Public mainnet/testnet nodes exist, but operator-controlled or local nodes are recommended
 
 ### Configuration
 - Node configuration stored in `config/basis.toml` under `[ergo.node]`

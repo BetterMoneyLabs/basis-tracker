@@ -14,7 +14,7 @@
 //! - Premature emergency redemption failure
 //!
 //! Key differences from old tests:
-//! - Uses proper 48-byte message format: blake2b256(ownerKey||receiverKey) || totalDebt || timestamp
+//! - Uses proper 80-byte message format: blake2b256(ownerKey||receiverKey) || totalDebt || timestamp || trackerNftId
 //! - Tracker signs with its own key (not issuer's key)
 //! - No time lock for normal redemption (contract handles it via tracker creation height)
 //! - First redemption: no reserve lookup proof (#7) needed
@@ -94,8 +94,14 @@ impl MockContractValidator {
         already_redeemed: u64,
         blockchain: &MockBlockchain,
     ) -> ContractValidationResult {
-        // Build message: key || totalDebt || timestamp (48 bytes)
-        let message = signing_message(owner_pubkey, receiver_pubkey, total_debt, timestamp);
+        // Build message: key || totalDebt || timestamp || trackerNftId (80 bytes)
+        let message = signing_message(
+            owner_pubkey,
+            receiver_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
         // 5. Verify reserve owner signature
         if schnorr::schnorr_verify(issuer_signature, &message, owner_pubkey).is_err() {
@@ -140,13 +146,14 @@ impl MockContractValidator {
 // Helper Functions
 // ============================================================================
 
-/// Generate the 48-byte signing message following Basis protocol spec
-/// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp)
+/// Generate the 80-byte signing message following Basis protocol spec
+/// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
 pub fn signing_message(
     owner_key: &PubKey,
     receiver_key: &PubKey,
     total_debt: u64,
     timestamp: u64,
+    tracker_nft_id: &[u8; 32],
 ) -> Vec<u8> {
     let mut key_hash_input = Vec::with_capacity(66);
     key_hash_input.extend_from_slice(owner_key);
@@ -156,10 +163,11 @@ pub fn signing_message(
     hasher.update(&key_hash_input);
     let key_hash = hasher.finalize();
 
-    let mut message = Vec::with_capacity(48);
+    let mut message = Vec::with_capacity(80);
     message.extend_from_slice(&key_hash);
     message.extend_from_slice(&total_debt.to_be_bytes());
     message.extend_from_slice(&timestamp.to_be_bytes());
+    message.extend_from_slice(tracker_nft_id);
 
     message
 }
@@ -223,8 +231,14 @@ mod tests {
         let total_debt = 50_000_000u64; // 0.05 ERG
         let timestamp = 1_000_000_000u64; // Fixed timestamp (in the past)
 
-        let note = IouNote::create_and_sign(bob_pubkey, total_debt, timestamp, &alice_secret)
-            .expect("Failed to create note");
+        let note = IouNote::create_and_sign(
+            bob_pubkey,
+            total_debt,
+            timestamp,
+            &alice_secret,
+            &[0x42; 32],
+        )
+        .expect("Failed to create note");
 
         // Add note to tracker
         redemption_manager
@@ -245,10 +259,16 @@ mod tests {
         assert_eq!(stored_note.amount_redeemed, 0);
         assert_eq!(stored_note.outstanding_debt(), total_debt);
 
-        // Generate proper 48-byte message
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
-        assert_eq!(message.len(), 48, "Message must be exactly 48 bytes");
-        println!("Message (48 bytes): {}", hex::encode(&message));
+        // Generate proper 80-byte message
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
+        assert_eq!(message.len(), 80, "Message must be exactly 80 bytes");
+        println!("Message (80 bytes): {}", hex::encode(&message));
 
         // Generate signatures (issuer and tracker sign the SAME message)
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
@@ -361,7 +381,13 @@ mod tests {
         let timestamp = 1_000_000_000u64;
 
         // Generate valid message
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
         // Generate valid tracker signature
         let tracker_sig = generate_redemption_signature(&tracker_secret, &tracker_pubkey, &message);
@@ -406,7 +432,13 @@ mod tests {
         let timestamp = 1_000_000_000u64;
 
         // Generate valid message
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
         // Generate valid issuer signature
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
@@ -451,7 +483,13 @@ mod tests {
         let timestamp = 1_000_000_000u64;
 
         // Generate valid message
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
         // Generate valid signatures
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
@@ -496,7 +534,13 @@ mod tests {
         let timestamp = 1_000_000_000u64;
 
         // Generate valid message
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
         // Generate valid issuer signature
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
@@ -546,7 +590,13 @@ mod tests {
         let timestamp = 1_000_000_000u64;
 
         // Generate valid message
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
         // Generate valid issuer signature
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
@@ -596,7 +646,13 @@ mod tests {
         let timestamp = 1_000_000_000u64;
 
         // Generate valid message
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
         // Generate valid signatures
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
@@ -647,8 +703,14 @@ mod tests {
         let mut redemption_manager = RedemptionManager::new(tracker);
 
         // Create and sign note
-        let note = IouNote::create_and_sign(bob_pubkey, total_debt, timestamp, &alice_secret)
-            .expect("Failed to create note");
+        let note = IouNote::create_and_sign(
+            bob_pubkey,
+            total_debt,
+            timestamp,
+            &alice_secret,
+            &[0x42; 32],
+        )
+        .expect("Failed to create note");
 
         redemption_manager
             .tracker
@@ -656,7 +718,13 @@ mod tests {
             .expect("Failed to add note");
 
         // Generate signatures
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
         let tracker_sig = generate_redemption_signature(&tracker_secret, &tracker_pubkey, &message);
 
@@ -812,7 +880,7 @@ mod tests {
         println!("✅ First redemption transaction structure validated\n");
     }
 
-    /// Test 9: Verify that the 48-byte message format matches Scala demo
+    /// Test 9: Verify that the 80-byte message format matches Scala demo
     #[test]
     fn test_message_format_matches_spec() {
         println!("=== Test 9: Message Format Matches Spec ===");
@@ -824,10 +892,16 @@ mod tests {
         let timestamp = 1_000_000_000u64;
 
         // Generate message using our function
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
-        // Verify length: 32 (key) + 8 (totalDebt) + 8 (timestamp) = 48 bytes
-        assert_eq!(message.len(), 48, "Message must be exactly 48 bytes");
+        // Verify length: 32 (key) + 8 (totalDebt) + 8 (timestamp) + 32 (trackerNftId) = 80 bytes
+        assert_eq!(message.len(), 80, "Message must be exactly 80 bytes");
 
         // Verify key hash (first 32 bytes)
         let mut key_hash_input = Vec::with_capacity(66);
@@ -853,8 +927,14 @@ mod tests {
         assert_eq!(timestamp_from_message, timestamp, "Timestamp should match");
 
         // Verify this matches the message used by IouNote::signing_message
-        let note = IouNote::create_and_sign(bob_pubkey, total_debt, timestamp, &alice_secret)
-            .expect("Failed to create note");
+        let note = IouNote::create_and_sign(
+            bob_pubkey,
+            total_debt,
+            timestamp,
+            &alice_secret,
+            &[0x42; 32],
+        )
+        .expect("Failed to create note");
         let note_message = note.signing_message(&alice_pubkey);
         assert_eq!(
             message, note_message,
@@ -881,7 +961,13 @@ mod tests {
         let timestamp = 1_000_000_000u64;
 
         // Both parties sign the SAME message
-        let message = signing_message(&alice_pubkey, &bob_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
         let tracker_sig = generate_redemption_signature(&tracker_secret, &tracker_pubkey, &message);
@@ -925,9 +1011,14 @@ mod tests {
         let total_debt = 200_000_000u64; // 0.2 ERG
         let payment_timestamp = 1_000_000_000u64;
 
-        let note =
-            IouNote::create_and_sign(bob_pubkey, total_debt, payment_timestamp, &alice_secret)
-                .expect("Failed to create note");
+        let note = IouNote::create_and_sign(
+            bob_pubkey,
+            total_debt,
+            payment_timestamp,
+            &alice_secret,
+            &[0x42; 32],
+        )
+        .expect("Failed to create note");
         redemption_manager
             .tracker
             .add_note(&alice_pubkey, &note)
@@ -942,8 +1033,13 @@ mod tests {
         // -------------------------------------------------------------------------
         // First redemption: 0.3 ERG reserve -> 0.2 ERG reserve + 0.1 ERG payout.
         // -------------------------------------------------------------------------
-        let first_message =
-            signing_message(&alice_pubkey, &bob_pubkey, total_debt, payment_timestamp);
+        let first_message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            payment_timestamp,
+            &[0x42; 32],
+        );
         let first_issuer_sig =
             generate_redemption_signature(&alice_secret, &alice_pubkey, &first_message);
         let first_tracker_sig =
@@ -1051,8 +1147,13 @@ mod tests {
             .expect("Note should exist after first redemption");
         let second_timestamp = updated_note.timestamp;
 
-        let second_message =
-            signing_message(&alice_pubkey, &bob_pubkey, total_debt, second_timestamp);
+        let second_message = signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            total_debt,
+            second_timestamp,
+            &[0x42; 32],
+        );
         let second_issuer_sig =
             generate_redemption_signature(&alice_secret, &alice_pubkey, &second_message);
         let second_tracker_sig =

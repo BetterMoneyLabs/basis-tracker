@@ -46,17 +46,49 @@ Anyone (presumably, owner in most cases) can top the reserve up.
 * If A has on-chain reserve, B may redeem offchain from A->B note, by providing proof of (amount, timestamp).
  Reserve contract UTXO is storing tree of hash(ownerKey||receiverKey) -> (timestamp, cumulativeRedeemedAmount) pairs.
  The value format is: timestamp (8 bytes big-endian) ++ cumulativeRedeemedAmount (8 bytes big-endian) = 16 bytes total.
- During redemption, the contract verifies that the note's timestamp is **greater than** the stored timestamp,
- which prevents replay attacks with old notes. After on-chain redemption, A and B should contact offchain tracker
+ During redemption, the contract verifies that the note's timestamp is **greater than or equal to** the stored
+ timestamp, which prevents replay attacks with old notes while still allowing the remainder of a partially
+ redeemed note to be redeemed later. After on-chain redemption, A and B should contact offchain tracker
  to update their records before next payment from A to B is done.
+
+ Redemption additionally enforces, in both contract variants:
+ - **Replay protection without a lookup proof:** context variable #7 (AVL+ lookup proof for the note
+   key in the reserve's redemption tree) is provided from the second redemption on. For a first
+   redemption it may be omitted, in which case the contract uses `AvlTree.insert`, which fails if the
+   key is already present — so replaying a redeemed note without #7 is rejected.
+ - **Single reserve input:** exactly one input with the reserve contract and the owner's public key in R4
+   may appear in a redemption transaction, so two reserves of the same owner cannot be mixed to redeem
+   the same note twice.
+ - **Token reserves preserve ERG:** in `basis-token.es` the reserve output must keep at least the input's
+   ERG value in both redemption and top-up actions, so the reserve cannot be drained of its ERG (storage
+   rent) while tokens are redeemed.
+
+ A reserve only counts as collateral once the tracker has validated its setup when first seen on-chain
+ (box creation is not a spend, so the contract cannot check it): R5 must hold the empty AVL+ tree
+ (flags `0x03`, 32-byte keys), R7 must be absent or `Long 0` (no pre-initiated refund), R6 must reference
+ the tracker's own NFT (a singleton token), and R4 must be a valid secp256k1 point. A reserve with a
+ pending refund is never counted as collateral.
 
 * Debt Transfer (Triangular Trade): The protocol supports transferring debt between creditors with debtor consent.
  Example: A owes 10 ERG to B. B wants to buy from C for 5 ERG. Instead of on-chain redemption:
-  1. B requests A to sign new notes: A->B (5 ERG remaining), A->C (5 ERG transferred)
-  2. A signs both notes, tracker signs both notes
-  3. Old note A->B (10 ERG) is cancelled, new notes A->B (5 ERG) and A->C (5 ERG) are created
+  1. B requests A to sign a new note A->C (5 ERG transferred)
+  2. A signs the note, tracker signs the note
+  3. New note A->C (5 ERG) is created; the A->B note keeps its cumulative total of 10 ERG on the tracker
   4. C can now redeem A->C note from A's reserve
  This enables efficient multi-party settlements without on-chain transactions.
+
+ **WARNING — step 3 is not safe as written, and is currently rejected by the tracker.** Lowering the
+ committed cumulative debt for an existing (A, B) pair requires B's consent, not just A's: the contract
+ pins every redemption to the tracker tree, so a lowered totalDebt makes all of B's existing notes fail
+ `trackerDebtCorrect` permanently (the emergency path requires the same tree match). Worse, B could
+ redeem 10 ERG before the change is committed and C could then redeem 5 ERG, so A pays 15; and if B had
+ already redeemed 8, "remaining 5" is meaningless against a cumulative redeemedDebt of 8.
+
+ As of PR #14 the tracker therefore **refuses any note that lowers the committed debt** for an existing
+ pair (`NoteError::DebtDecreaseNotPermitted`), and `amount_redeemed` carries forward instead of resetting.
+ Transferring debt to a *different* creditor is unaffected, because that is a different key in the tree.
+ Reviving the flow above requires a creditor co-signature endpoint that does not exist yet; until then a
+ debt transfer must be settled as redemption plus re-issuance. See specs/pr14_triage.md (S3).
 
 ## Basis Contract
 
@@ -165,9 +197,22 @@ Tracker can simply go offline, but then the latest state committed on-chain is s
 Tracker may remove debt notes of protocol participants. This problem can be tackled with the anti-censorship protection
 from "Future Extensions" section.
 
+**This is not implemented.** In the current contracts every redemption path, the emergency path included, requires
+`trackerTree[key] == totalDebt`, so a tracker that omits a note from its committed tree -- or lowers its value --
+blocks that note permanently. The 3-day emergency branch is not a remedy: it relaxes only the tracker's *signature*
+requirement, not the tree match, and it only becomes available once the tracker box is more than 3 days old.
+A tracker that recreates its box regularly therefore never triggers it. README.md was corrected to say so;
+see specs/pr14_triage.md for the full trust-model notes.
+
 Tracker may collude with a reserve holder to inject a note with fake timestamp in the past to redeem immediately. 
 Tracker would be caught in this case. For making this case impossible with contract, technique similar to anti-censorship 
 protection can be used.
+
+Known limitation: the note signing message (`key || totalDebt || timestamp`) is not bound to a specific reserve
+contract or collateral type. If the same owner operates multiple reserves (e.g. an ERG reserve and a token
+reserve), a note signed once could in principle be redeemed against either of them. Binding the reserve into
+the signed message is a deferred protocol change (it alters the message format on both chains of the
+implementation).
 
 ## Wallet
 
@@ -240,7 +285,8 @@ from the ChainCash repository:
 * **Basis reserve contract tests** — Scala contract tests (`BasisSpec`, `BasisTokenSpec`) are in
   `scala/src/test/scala/basis/contracts/` and run with `sbt test`.
 * **Token-based reserve contract** — `contract/basis-token.es` provides a custom-token-backed variant.
-* **Schnorr signing / verification** — Canonical 48-byte signing message and 65-byte Schnorr signatures
+* **Schnorr signing / verification** — Canonical 80-byte signing message (binding each signature to the
+  tracker's NFT id) and 65-byte Schnorr signatures
   are implemented in both Rust (`crates/basis_offchain/src/schnorr.rs`, `crates/basis_core/src/impls.rs`)
   and Scala (`scala/src/main/scala/basis/offchain/SigUtils.scala`), with shared test vectors in
   `specs/SCHNORR_SIGNATURE_SPEC.md`.

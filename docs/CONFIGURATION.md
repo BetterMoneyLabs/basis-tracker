@@ -47,6 +47,10 @@ mode = "signature"
 # pubkey = "020202020202020202020202020202020202020202020202020202020202020202"
 # role = "admin"
 allowed_origins = []
+# With auth enabled and this list empty, NO CORS layer is installed: browsers cannot
+# call the tracker cross-origin. There is no wildcard origin.
+# auth.mode = "none" is refused on a non-loopback bind address unless:
+# allow_anonymous_non_loopback = false
 signature_timestamp_tolerance_ms = 30000
 ```
 
@@ -55,6 +59,16 @@ credentials and signatures are not sent in plaintext. Clients authenticate with
 the same `server_auth_*` fields in `~/.basis/cli.toml`; the MCP server can also
 read them from environment variables. See `specs/server/authentication_authorization.md`
 for the full signature scheme and RBAC rules.
+
+With `mode = "none"` every request is granted admin access, so the server
+refuses to start when `server.host` is not a loopback address (`127.0.0.1`,
+`::1`, or `localhost`). In `signature` mode the `X-Signature-Nonce` header is
+required on every request.
+
+`allowed_origins` is a CORS allow-list. When it is empty (the default) the
+server attaches no CORS layer at all: no CORS headers are emitted and only
+same-origin or non-browser clients can connect. Wildcard origins are never
+used; list explicit origins to serve browser clients.
 
 ### Ergo Blockchain Configuration
 
@@ -77,7 +91,7 @@ tracker_nft_id = ""
 tracker_public_key = ""
 
 [ergo.node]
-url = "http://159.89.116.15:11088"   # Ergo node URL
+url = "http://127.0.0.1:9053"   # Ergo node URL (default is localhost)
 api_key = "hello"                    # API key for authenticated nodes
 timeout_secs = 30                    # Request timeout in seconds
 ```
@@ -225,6 +239,10 @@ database_url = "sqlite:data/basis.db"
 mode = "none"
 api_key = ""
 allowed_origins = []
+# With auth enabled and this list empty, NO CORS layer is installed: browsers cannot
+# call the tracker cross-origin. There is no wildcard origin.
+# auth.mode = "none" is refused on a non-loopback bind address unless:
+# allow_anonymous_non_loopback = false
 signature_timestamp_tolerance_ms = 30000
 
 [ergo]
@@ -233,7 +251,9 @@ start_height = 0
 tracker_nft_id = ""
 
 [ergo.node]
-url = "http://159.89.116.15:11088"
+# Any public node works, but note the default is LOCALHOST. A plaintext remote node means the
+# node api_key -- which grants full wallet access -- crosses the network unencrypted.
+url = "http://127.0.0.1:9053"
 api_key = "hello"
 timeout_secs = 30
 
@@ -243,6 +263,11 @@ enforce_acceptance_policy = true
 [confirmation]
 min_depth = 2
 ```
+
+> **Note:** with these defaults (`mode = "none"` and `host = "0.0.0.0"`) the
+> server refuses to start, because anonymous mode grants admin access to every
+> request. Either bind to a loopback address (`host = "127.0.0.1"`) or
+> configure an authentication mode under `[server.auth]`.
 
 ## Verification
 

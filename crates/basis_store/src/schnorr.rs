@@ -4,17 +4,24 @@ use crate::{NoteError, PubKey, Signature};
 
 /// Generate the signing message following the Basis protocol specification.
 ///
-/// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp)
+/// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
 ///
 /// Where key = blake2b256(ownerKeyBytes || receiverKeyBytes)
-/// Total: 48 bytes (32 + 8 + 8)
+/// Total: 80 bytes (32 + 8 + 8 + 32)
 pub fn signing_message(
     owner_key: &PubKey,
     receiver_key: &PubKey,
     total_debt: u64,
     timestamp: u64,
+    tracker_nft_id: &[u8; 32],
 ) -> Vec<u8> {
-    basis_core::types::signing_message(owner_key, receiver_key, total_debt, timestamp)
+    basis_core::types::signing_message(
+        owner_key,
+        receiver_key,
+        total_debt,
+        timestamp,
+        tracker_nft_id,
+    )
 }
 
 /// Validate that a public key is a valid compressed secp256k1 point
@@ -172,9 +179,15 @@ mod tests {
         let total_debt = 1000u64;
         let timestamp = 1743379200000u64;
 
-        // Test message format: key (32) || totalDebt (8) || timestamp (8) = 48 bytes
-        let message = signing_message(&owner_pubkey, &receiver_pubkey, total_debt, timestamp);
-        assert_eq!(message.len(), 48);
+        // Test message format: key (32) || totalDebt (8) || timestamp (8) || trackerNftId (32) = 80 bytes
+        let message = signing_message(
+            &owner_pubkey,
+            &receiver_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
+        assert_eq!(message.len(), 80);
     }
 
     #[test]
@@ -193,7 +206,13 @@ mod tests {
         let timestamp = 1743379200000u64;
 
         // Generate signing message: key || totalDebt || timestamp
-        let message = signing_message(&owner_pubkey, &receiver_pubkey, total_debt, timestamp);
+        let message = signing_message(
+            &owner_pubkey,
+            &receiver_pubkey,
+            total_debt,
+            timestamp,
+            &[0x42; 32],
+        );
 
         // Create signature
         let signature = schnorr_sign(&message, &secret_key.secret_bytes(), &issuer_pubkey)
@@ -203,8 +222,13 @@ mod tests {
         assert!(schnorr_verify(&signature, &message, &issuer_pubkey).is_ok());
 
         // Test with wrong total_debt
-        let wrong_message =
-            signing_message(&owner_pubkey, &receiver_pubkey, total_debt + 1, timestamp);
+        let wrong_message = signing_message(
+            &owner_pubkey,
+            &receiver_pubkey,
+            total_debt + 1,
+            timestamp,
+            &[0x42; 32],
+        );
         assert!(schnorr_verify(&signature, &wrong_message, &issuer_pubkey).is_err());
 
         // Test with wrong issuer

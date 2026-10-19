@@ -92,8 +92,8 @@ mod tests {
 
         // Create notes totaling 0.5 ERG debt (50% collateralization)
         let notes = vec![
-            IouNote::new([2u8; 33], 250000000, 0, 1234567890, [3u8; 65]), // 0.25 ERG
-            IouNote::new([2u8; 33], 250000000, 0, 1234567891, [3u8; 65]), // 0.25 ERG
+            IouNote::new([2u8; 33], 250000000, 0, 1234567890, [3u8; 65], [0x42; 32]), // 0.25 ERG
+            IouNote::new([2u8; 33], 250000000, 0, 1234567891, [3u8; 65], [0x42; 32]), // 0.25 ERG
         ];
 
         // Test collateralization ratio calculation
@@ -110,7 +110,7 @@ mod tests {
 
         // Test with higher debt (should trigger alert)
         let high_debt_notes = vec![
-            IouNote::new([2u8; 33], 800000000, 0, 1234567890, [3u8; 65]), // 0.8 ERG
+            IouNote::new([2u8; 33], 800000000, 0, 1234567890, [3u8; 65], [0x42; 32]), // 0.8 ERG
         ];
 
         let high_total_debt: u64 = high_debt_notes

@@ -315,7 +315,7 @@ sigmaProp(
 - `SELF.R5.insert((key, value), proof) == selfOut.R5`
 
 **properReserveSignature:**
-- Schnorr signature verification with message = `key || totalDebt || timestamp` (48 bytes)
+- Schnorr signature verification with message = `key || totalDebt || timestamp || trackerNftId` (80 bytes)
 
 **properlyRedeemed:**
 - `redeemed > 0`

@@ -54,8 +54,15 @@ object BasisConstants {
   // keyLength = 32 (Blake2b256 hash of ownerKey || receiverKey)
   val basisPlasmaParameters: PlasmaParameters = PlasmaParameters(32, None)
 
+  // SECURITY: insert + update, matching what the reserve contract's insertOrUpdate requires.
+  // InsertOnly (0x01) made every reserve box unredeemable after the first partial redemption of a
+  // given (owner, receiver) pair. The TRACKER tree is a separate tree and correctly stays
+  // InsertOnly, since it only ever inserts fresh (owner, receiver) -> totalDebt pairs.
+  val basisReserveTreeFlags: AvlTreeFlags =
+    AvlTreeFlags(insertAllowed = true, updateAllowed = true, removeAllowed = false)
+
   def emptyBasisPlasmaMap: PlasmaMap[Array[Byte], Array[Byte]] =
-    new PlasmaMap[Array[Byte], Array[Byte]](AvlTreeFlags.InsertOnly, basisPlasmaParameters)
+    new PlasmaMap[Array[Byte], Array[Byte]](basisReserveTreeFlags, basisPlasmaParameters)
 
   val emptyTreeErgoValue: ErgoValue[AvlTree] = emptyBasisPlasmaMap.ergoValue
   val emptyTree: AvlTree = emptyTreeErgoValue.getValue
@@ -80,6 +87,12 @@ object BasisConstants {
 
   // Minimum top-up amount (0.1 ERG)
   val MIN_TOP_UP_AMOUNT: Long = 100000000L
+
+  // Fixed 32-byte tracker NFT id used for test/demo message construction. The signing message is
+  // key || totalDebt || timestamp || trackerNftId (see contract/basis.es), so every off-chain signer
+  // appends these bytes. Test specs use their own fixture NFT ids (the same bytes they put in the
+  // reserve box R6); this constant is for demos and generated test vectors.
+  val testTrackerNftId: Array[Byte] = Array.fill(32)(0x42.toByte)
 
   // Emergency redemption time (3 days in blocks, assuming ~2.5 min per block)
   val EMERGENCY_REDEMPTION_TIME_IN_BLOCKS: Int = 3 * 720

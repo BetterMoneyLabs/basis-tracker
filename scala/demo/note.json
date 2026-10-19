@@ -1,18 +1,19 @@
 {
-  "payerKey": "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83",
-  "payeeKey": "03af13e39dd0ccc7429f9dfa5a056b71a8f5160eaf179763a03e0b55d8feec2cea",
+  "payerKey": "02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063",
+  "payeeKey": "023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd",
   "totalDebt": 50000000,
   "totalDebtERG": 0.05,
   "timestamp": 1743379200000,
   "payerSignature": {
-    "a": "035354d462a94ba9193ebedf9ca9802bf9781492244c02a8126b21d3111449e497",
-    "z": "5bf46efbd651f171d490ad85c70db8aad9dd30cf267d4fdb6313113a891ebbef"
+    "a": "033bca6e24df976e685b350d5986b730d45691875118bbd1482ad196c77d35a9dd",
+    "z": "213e9045f831180a1c98587ece9092d7c66bea59dd61e64d84b32078eeeaa284"
   },
   "trackerSignature": {
-    "a": "036acf767d2efc64d5eafb21c04125794d154a075f4826e33bed532bb180090b79",
-    "z": "4258e6ff09fc6c5497afc1962148125b8c643a38172d01240fca05d346c56a11"
+    "a": "03dd0f142de36fe6b92fa56e64d7f5056aa925171610fdb656ddc9639dacfc6d7d",
+    "z": "3b192c6deb7cc55e4b88ed1b3cc635a9e4149ffc85bcd98f5cbfd81182ed0a0e"
   },
-  "message": "6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a40000000002faf08000000194f8c88000",
-  "messageFormat": "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes)",
-  "noteKey": "6b53571940c97be28da71862428563e01d6952e56b14a4ad3b0f3b25d2c076c9"
+  "message": "76a4d85b3cac6917e0f0565ebcdc2fbf7656662ca97ef40b9ed1db70c211851f0000000002faf08000000195e97f78008b1ab583bb085ecbd8fa9bc2fd59784afcdfce5496eb146bb3dd04664b56822a",
+  "messageFormat": "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes) || trackerNftId (32 bytes)",
+  "trackerNftId": "8b1ab583bb085ecbd8fa9bc2fd59784afcdfce5496eb146bb3dd04664b56822a",
+  "noteKey": "f9848e5d089b8f49534cde068da12429243c6cda110b216fd3aa63dc2eb800f4"
 }

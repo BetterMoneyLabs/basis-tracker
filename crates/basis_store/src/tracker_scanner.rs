@@ -173,11 +173,13 @@ impl TrackerServerState {
             .as_ref()
             .ok_or(TrackerScannerError::MissingTrackerNftId)?;
 
-        // Validate that the box contains the tracker NFT
+        // Validate that the box contains the tracker NFT. The NFT must be a
+        // singleton (amount exactly 1): otherwise another holder of the same
+        // token could publish a rival tracker box (C4).
         let has_tracker_nft = scan_box
             .assets
             .iter()
-            .any(|asset| asset.token_id == *tracker_nft_id && asset.amount >= 1);
+            .any(|asset| asset.token_id == *tracker_nft_id && asset.amount == 1);
 
         if !has_tracker_nft {
             return Err(TrackerScannerError::MissingTrackerNft);

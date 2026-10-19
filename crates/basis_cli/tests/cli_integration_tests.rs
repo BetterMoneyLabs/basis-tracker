@@ -7,7 +7,7 @@ mod cli_tests {
     #[test]
     fn test_note_validation() {
         // Test that note validation works correctly
-        let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [2u8; 65]);
+        let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [2u8; 65], [0x42; 32]);
 
         assert_eq!(note.amount_collected, 1000);
         assert_eq!(note.amount_redeemed, 0);
@@ -140,6 +140,7 @@ mod cli_tests {
             0,         // zero redeemed
             0,         // zero timestamp
             [0u8; 65], // zero signature
+            [0x42; 32],
         );
 
         // Verify that invalid data is handled

@@ -50,7 +50,7 @@ import java.net.{URL, HttpURLConnection}
  * If tracker is offline, notes can be redeemed against last committed state
  * after emergency period expires (3 days / 2160 blocks):
  * - **No tracker signature needed** after emergency period
- * - Same message format: `key || totalDebt || timestamp`
+ * - Same message format: `key || totalDebt || timestamp || trackerNftId` (trackerNftId = reserve's R6)
  * - Replay attacks prevented by timestamp verification (must be > stored timestamp)
  * - Reserve owner's signature still required (proves debt validity)
  * - Use empty bytes for tracker signature field when tracker is unavailable
@@ -132,13 +132,15 @@ object BasisNoteRedeemer extends App {
     signature: Option[SignatureJson], // legacy field for backward compatibility
     message: String,
     messageFormat: Option[String],
+    trackerNftId: Option[String], // tracker NFT id appended to the signed message (defaults to the built-in constant)
     noteKey: String
   ) {
     // Get timestamp from note or message (for backward compatibility)
     def getTimestamp: Long = {
       timestamp.getOrElse {
-        // Extract timestamp from message if not provided directly
-        // Message format: key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes)
+        // Extract timestamp from message if not provided directly.
+        // Message format: key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes) || trackerNftId (32 bytes),
+        // so the timestamp stays at bytes 40..48 regardless of the appended tracker NFT id.
         val messageBytes = Base16.decode(message).get
         if (messageBytes.length >= 48) {
           Longs.fromByteArray(messageBytes.slice(40, 48))
@@ -146,6 +148,14 @@ object BasisNoteRedeemer extends App {
           System.currentTimeMillis() // Fallback to current time
         }
       }
+    }
+
+    // Tracker NFT id appended to the redemption message; must equal the reserve box's R6
+    // (Ergo serializes a 32-byte Coll[Byte] register as 0e20 || bytes, hence the strip).
+    def getTrackerNftIdBytes: Array[Byte] = {
+      val hex = trackerNftId.getOrElse(BasisNoteRedeemer.this.trackerNftId)
+      val bytes = Base16.decode(hex).get
+      if (bytes.length == 34 && bytes(0) == 0x0e.toByte && bytes(1) == 0x20.toByte) bytes.drop(2) else bytes
     }
 
     // Get tracker signature (prioritize new field, fallback to legacy)
@@ -282,9 +292,10 @@ object BasisNoteRedeemer extends App {
    * Tree value format: timestamp (8 bytes) ++ redeemedAmount (8 bytes) = 16 bytes
    */
   def generateReserveInsertProof(payerKey: String, payeeKey: String, timestamp: Long, redeemedAmount: Long): (Array[Byte], AvlTree) = {
-    // Create PlasmaMap with InsertOnly flags and correct parameters (must match reserve box)
-    val InsertOnly = AvlTreeFlags(insertAllowed = true, updateAllowed = false, removeAllowed = false)
-    val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](InsertOnly, Constants.chainCashPlasmaParameters)
+    // SECURITY: insert + update flags, matching the reserve box's R5 (see BasisDeployer).
+    // With InsertOnly the second redemption of the same note could never be proven.
+    val ReserveTreeFlags = AvlTreeFlags(insertAllowed = true, updateAllowed = true, removeAllowed = false)
+    val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](ReserveTreeFlags, Constants.chainCashPlasmaParameters)
 
     // Create the key: hash(payerKey || payeeKey)
     val key = Blake2b256(
@@ -361,14 +372,15 @@ object BasisNoteRedeemer extends App {
     trackerSecret: BigInt,
     trackerProof: String,
     redeemedAmount: Long,
+    trackerNftIdBytes: Array[Byte],
     feeAmount: Long = 1000000L,
     feeBoxIds: Option[Seq[String]] = None  // List of box IDs to cover fee
   ): String = {
-    // Create redemption message: key || totalDebt || timestamp
+    // Create redemption message: key || totalDebt || timestamp || trackerNftId (reserve's R6)
     val ownerKeyBytes = note.payerKey.getEncoded.toArray
     val receiverBytes = note.payeeKey.getEncoded.toArray
     val key = Blake2b256(ownerKeyBytes ++ receiverBytes)
-    val redemptionMessage = key ++ Longs.toByteArray(note.totalDebt) ++ Longs.toByteArray(note.timestamp)
+    val redemptionMessage = key ++ Longs.toByteArray(note.totalDebt) ++ Longs.toByteArray(note.timestamp) ++ trackerNftIdBytes
 
     // Generate reserve owner's signature on redemption message
     val (reserveSigA, reserveSigZ) = SigUtils.sign(redemptionMessage, reserveOwnerSecret)
@@ -529,7 +541,7 @@ object BasisNoteRedeemer extends App {
     println(s"Tracker AVL proof: ${avlProof.take(64)}...")
     println()
 
-    val txJson = buildTransaction(note, reserveBoxId, trackerBoxId, reserveOwnerSecret, trackerSecret, avlProof, noteJson.totalDebt, feeAmount = 1000000L, feeBoxIds = feeBoxIds)
+    val txJson = buildTransaction(note, reserveBoxId, trackerBoxId, reserveOwnerSecret, trackerSecret, avlProof, noteJson.totalDebt, noteJson.getTrackerNftIdBytes, feeAmount = 1000000L, feeBoxIds = feeBoxIds)
 
     outputFile match {
       case Some(file) =>

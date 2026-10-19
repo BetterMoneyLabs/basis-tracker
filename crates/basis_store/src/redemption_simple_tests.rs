@@ -26,6 +26,7 @@ fn test_basic_redemption_validation() {
         amount_collected,
         timestamp,
         &issuer_secret,
+        &[0x42; 32],
     )
     .unwrap();
 
@@ -61,6 +62,7 @@ fn test_time_lock_validation() {
         amount_collected,
         recent_timestamp,
         &issuer_secret,
+        &[0x42; 32],
     )
     .unwrap();
 
@@ -71,6 +73,7 @@ fn test_time_lock_validation() {
         amount_collected,
         old_timestamp,
         &issuer_secret,
+        &[0x42; 32],
     )
     .unwrap();
 
@@ -111,6 +114,7 @@ fn test_signature_verification() {
         amount_collected,
         timestamp,
         &issuer_secret,
+        &[0x42; 32],
     )
     .unwrap();
 
@@ -120,6 +124,7 @@ fn test_signature_verification() {
         amount_collected,
         timestamp,
         &wrong_issuer_secret,
+        &[0x42; 32],
     )
     .unwrap();
 

@@ -64,13 +64,22 @@ pub struct AuthConfig {
     /// `Signature`.
     #[serde(default)]
     pub authorized_clients: Vec<AuthorizedClient>,
-    /// Allowed CORS origins when auth is enabled. An empty list means only
-    /// non-browser/non-CORS callers can connect.
+    /// Allowed CORS origins. An empty list disables CORS entirely: no CORS
+    /// headers are emitted, so only same-origin or non-browser callers can
+    /// connect. Cross-origin browser access requires an explicit allow-list.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     /// Request signature timestamp tolerance in milliseconds.
     #[serde(default = "default_signature_timestamp_tolerance_ms")]
     pub signature_timestamp_tolerance_ms: u64,
+    /// Allow `mode = "none"` on a non-loopback bind address.
+    ///
+    /// SECURITY: in `none` mode every request is granted `ClientRole::Admin`, so a tracker bound
+    /// to anything other than loopback with `none` is an open, unauthenticated admin API on the
+    /// operator's network. The server refuses to start in that combination unless this flag is set
+    /// explicitly. Defaults to false, so the safe case is the default case.
+    #[serde(default)]
+    pub allow_anonymous_non_loopback: bool,
 }
 
 impl Default for AuthConfig {
@@ -81,18 +90,28 @@ impl Default for AuthConfig {
             authorized_clients: Vec::new(),
             allowed_origins: Vec::new(),
             signature_timestamp_tolerance_ms: default_signature_timestamp_tolerance_ms(),
+            allow_anonymous_non_loopback: false,
         }
     }
 }
 
 /// Authentication scheme.
+///
+/// The wire names are `none`, `api_key` and `signature`. `api_key` is what every consumer in this
+/// repository already uses (`config/basis.toml.example`, `docs/CONFIGURATION.md`, the CLI's
+/// `TrackerAuth` and the MCP server's env parsing), so `snake_case` is the canonical spelling.
+/// A previous `rename_all = "lowercase"` produced `apikey`, which no documented value matched --
+/// and because the server used to fall back to defaults on a config parse error, writing the
+/// documented `mode = "api_key"` silently yielded an anonymous-Admin server. The `apikey` alias is
+/// kept so an existing config keeps working instead of silently changing behaviour.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     /// No authentication.
     #[default]
     None,
     /// Shared API key checked from request headers.
+    #[serde(alias = "apikey", alias = "API_KEY")]
     ApiKey,
     /// Per-client secp256k1 request signatures.
     Signature,
@@ -123,6 +142,14 @@ pub struct AuthorizedClient {
 
 fn default_signature_timestamp_tolerance_ms() -> u64 {
     30_000 // 30 seconds
+}
+
+/// Returns true when `host` refers to a loopback interface, i.e. the server is
+/// only reachable from the local machine. Used by the startup guard that
+/// refuses to run without authentication on a publicly reachable interface.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim().trim_matches(['[', ']']).to_lowercase();
+    host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
 impl ServerConfig {
@@ -258,15 +285,21 @@ impl AppConfig {
             // TLS configuration (empty = plain HTTP)
             .set_default("server.tls_cert_path", "")?
             .set_default("server.tls_key_path", "")?
-            // Authentication configuration
-            .set_default("server.auth.mode", "none")?
+            // Authentication configuration (`server.auth.mode` defaults to
+            // `AuthMode::None` via serde when not configured)
             .set_default("server.auth.api_key", "")?
             .set_default("server.auth.allowed_origins", Vec::<String>::new())?
             .set_default("server.auth.signature_timestamp_tolerance_ms", 30_000)?
             // Node configuration defaults
             .set_default("ergo.node.start_height", "")?
             .set_default("ergo.node.reserve_contract_p2s", "")?
-            .set_default("ergo.node.node_url", "http://159.89.116.15:11088")?
+            // SECURITY: default to a LOCAL node, not a third-party host.
+            //
+            // This used to default to `http://159.89.116.15:11088`, a public mainnet node over
+            // plaintext HTTP. An operator who did not set `node_url` therefore sent every request
+            // -- including the node `api_key`, which grants full wallet access -- to somebody
+            // else's machine, unencrypted. Matches config/basis.toml.example.
+            .set_default("ergo.node.node_url", "http://127.0.0.1:9053")?
             .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
             .set_default("ergo.node.api_key", "")? // Set via config file or BASIS_ERGO_NODE_API_KEY env var
             // Transaction configuration defaults
@@ -302,6 +335,59 @@ impl AppConfig {
             .expect("Invalid socket address")
     }
 
+    /// Whether the configured bind address is loopback-only.
+    ///
+    /// A hostname that is not an IP literal (for example `localhost`) is resolved, so the common
+    /// local-development spellings are recognised. Anything that cannot be resolved is treated as
+    /// NON-loopback, which is the safe direction: the caller then requires authentication.
+    pub fn binds_loopback_only(&self) -> bool {
+        use std::net::{IpAddr, ToSocketAddrs};
+
+        let host = self.server.host.trim();
+        if host.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        // A bare IPv6 host in config is usually written without brackets.
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return ip.is_loopback();
+        }
+        match (host, self.server.port).to_socket_addrs() {
+            Ok(addrs) => {
+                let mut any = false;
+                for addr in addrs {
+                    any = true;
+                    if !addr.ip().is_loopback() {
+                        return false;
+                    }
+                }
+                any
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Refuse an unauthenticated server that is reachable from outside this machine.
+    ///
+    /// In `AuthMode::None` every request is treated as `ClientRole::Admin`, which makes the API a
+    /// complete control surface over the tracker's wallet, notes and acceptance policy. Returning
+    /// `Err` here is what keeps the old `auth.mode = "none"` + `host = "0.0.0.0"` default from
+    /// shipping an open admin port.
+    pub fn validate_startup(&self) -> Result<(), String> {
+        if self.server.auth.mode != AuthMode::None {
+            return Ok(());
+        }
+        if self.binds_loopback_only() || self.server.auth.allow_anonymous_non_loopback {
+            return Ok(());
+        }
+        Err(format!(
+            "refusing to start: auth.mode = \"none\" grants every caller Admin, but the server is \
+             bound to {} (not loopback). Set server.auth.mode to \"api_key\" or \"signature\", bind \
+             to 127.0.0.1, or -- if you really understand the exposure -- set \
+             server.auth.allow_anonymous_non_loopback = true.",
+            self.socket_addr()
+        ))
+    }
+
     /// Get the Ergo node configuration
     pub fn ergo_node_config(&self) -> NodeConfig {
         let mut config = self.ergo.node.clone();
@@ -309,6 +395,7 @@ impl AppConfig {
         config.token_reserve_contract_p2s =
             Some(self.ergo.basis_token_reserve_contract_p2s.clone());
         config.reserve_token_id = self.ergo.reserve_token_id.clone();
+        config.tracker_nft_id = self.ergo.tracker_nft_id.clone();
         config
     }
 
@@ -553,6 +640,7 @@ mod tests {
                     reserve_contract_p2s: None,
                     token_reserve_contract_p2s: None,
                     reserve_token_id: None,
+                    tracker_nft_id: None,
                     node_url: "http://localhost:9053".to_string(),
                     scan_name: None,
                     api_key: Some("test".to_string()),
@@ -623,5 +711,41 @@ mod tests {
         // Explicit override is honored.
         let config: ConfirmationConfig = toml::from_str("min_depth = 6").unwrap();
         assert_eq!(config.min_depth, 6);
+    }
+
+    #[test]
+    fn test_auth_mode_parsing() {
+        // Documented snake_case spellings parse.
+        let config: AuthConfig = toml::from_str(r#"mode = "api_key""#).unwrap();
+        assert_eq!(config.mode, AuthMode::ApiKey);
+        let config: AuthConfig = toml::from_str(r#"mode = "signature""#).unwrap();
+        assert_eq!(config.mode, AuthMode::Signature);
+        let config: AuthConfig = toml::from_str(r#"mode = "none""#).unwrap();
+        assert_eq!(config.mode, AuthMode::None);
+
+        // Legacy "apikey" spelling still parses for backward compatibility.
+        let config: AuthConfig = toml::from_str(r#"mode = "apikey""#).unwrap();
+        assert_eq!(config.mode, AuthMode::ApiKey);
+
+        // An absent mode defaults to None.
+        let config: AuthConfig = toml::from_str("").unwrap();
+        assert_eq!(config.mode, AuthMode::None);
+
+        // Unknown modes are rejected.
+        assert!(toml::from_str::<AuthConfig>(r#"mode = "bogus""#).is_err());
+    }
+
+    #[test]
+    fn test_is_loopback_host() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("[::1]"));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host(" LOCALHOST "));
+
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(!is_loopback_host("::"));
+        assert!(!is_loopback_host("192.168.1.10"));
+        assert!(!is_loopback_host("tracker.example.com"));
     }
 }

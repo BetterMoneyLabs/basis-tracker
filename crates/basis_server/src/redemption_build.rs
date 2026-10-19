@@ -55,7 +55,9 @@ pub struct RedemptionBuildRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub amount: u64,
-    /// Note payment timestamp (ms since Unix epoch), from the note.
+    /// Legacy field, ignored by the server: the stored note's payment timestamp
+    /// is used for the signature, context extension, and reserve tree value
+    /// (issue #15 S4 — never sign caller-supplied values).
     pub timestamp: u64,
     /// Issuer's 65-byte Schnorr signature (hex) over
     /// `signing_message(issuer || receiver || totalDebt || timestamp)`.
@@ -65,7 +67,9 @@ pub struct RedemptionBuildRequest {
     /// Optional tracker box id; fetched from storage if omitted.
     #[serde(default)]
     pub tracker_box_id: Option<String>,
-    /// Optional change address; derived from the selected fee box if omitted.
+    /// Deprecated and ignored. Change always goes to the owner of the tracker's
+    /// selected fee box (or the configured change address as fallback); a
+    /// caller-supplied address would let anyone drain tracker wallet boxes.
     #[serde(default)]
     pub change_address: Option<String>,
 }
@@ -101,7 +105,7 @@ pub struct RedemptionBuildResponse {
     pub new_already_redeemed: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RedemptionSubmitRequest {
     pub signed_tx: Value,
     /// Issuer (reserve owner) compressed public key, hex.
@@ -343,8 +347,12 @@ async fn build_redemption_inner(
 
     let node = NodeClient::from_state(state);
 
-    // Look up the note to confirm it exists (timestamp/total debt are authoritative from proofs).
-    {
+    // Look up the note to confirm it exists. The stored note's payment
+    // timestamp is authoritative for the tracker signature, context var #4, and
+    // the reserve tree value — the caller-supplied `payload.timestamp` is
+    // ignored (issue #15 S4). Total debt is authoritative from the committed
+    // tracker proof below.
+    let note = {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if state
             .tx
@@ -362,7 +370,7 @@ async fn build_redemption_inner(
             );
         }
         match rx.await {
-            Ok(Ok(Some(_note))) => {}
+            Ok(Ok(Some(note))) => note,
             Ok(Ok(None)) => {
                 return api_err(
                     StatusCode::BAD_REQUEST,
@@ -377,7 +385,7 @@ async fn build_redemption_inner(
             }
             Err(_) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, "tracker unavailable"),
         }
-    }
+    };
 
     // Select the smallest reserve that covers the redemption, leaves a valid remainder, is actually
     // unspent on-chain, AND whose on-chain R5 (reserve AVL tree) matches the tracker's current
@@ -608,11 +616,16 @@ async fn build_redemption_inner(
     };
 
     // Tracker lookup proof (context var #8) + authoritative total debt.
+    // The proof is generated against the COMMITTED on-chain tracker state (the
+    // latest confirmed tracker box digest), not the live local tree: any note
+    // posted after the last commitment would otherwise change the digest and
+    // break every redemption (issue #15 S6). The total debt is the value
+    // committed on-chain for this note.
     let (tracker_lookup_proof, total_debt) = {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if state
             .tx
-            .send(TrackerCommand::GetTrackerLookupProof {
+            .send(TrackerCommand::GetCommittedTrackerLookupProof {
                 issuer_pubkey,
                 recipient_pubkey,
                 response_tx: tx,
@@ -635,6 +648,12 @@ async fn build_redemption_inner(
                     0
                 };
                 (proof.proof, total_debt)
+            }
+            Ok(Err(basis_store::NoteError::NoteNotConfirmed)) => {
+                return api_err(
+                    StatusCode::BAD_REQUEST,
+                    "note is not committed on-chain yet; wait for the next tracker box update",
+                )
             }
             Ok(Err(e)) => {
                 return api_err(
@@ -692,8 +711,16 @@ async fn build_redemption_inner(
         } else {
             0
         };
-        let is_first = lookup.proof.is_none();
-        let new_already_redeemed = already_redeemed + payload.amount;
+        let is_first = already_redeemed == 0;
+        let new_already_redeemed = match already_redeemed.checked_add(payload.amount) {
+            Some(v) => v,
+            None => {
+                return api_err(
+                    StatusCode::BAD_REQUEST,
+                    "cumulative redeemed amount overflows u64",
+                )
+            }
+        };
 
         let (itx, irx) = tokio::sync::oneshot::channel();
         if state
@@ -701,7 +728,7 @@ async fn build_redemption_inner(
             .send(TrackerCommand::GetReserveInsertProof {
                 issuer_pubkey,
                 recipient_pubkey,
-                timestamp: payload.timestamp,
+                timestamp: note.timestamp,
                 new_already_redeemed,
                 response_tx: itx,
             })
@@ -767,7 +794,8 @@ async fn build_redemption_inner(
             &issuer_pk,
             &recipient_pk,
             total_debt,
-            payload.timestamp,
+            note.timestamp,
+            &note.tracker_nft_id,
         );
         match basis_store::schnorr::schnorr_sign(&message, &tracker_secret, &tracker_pubkey_bytes) {
             Ok(sig) => sig.to_vec(),
@@ -842,8 +870,28 @@ async fn build_redemption_inner(
         };
 
     // Change address: the owner of the first selected fee box (which we sign), else config/recipient.
+    // SECURITY: change always goes back to the tracker's own address.
+    //
+    // The fee inputs come from the TRACKER's wallet (`select_fee_inputs` over `/wallet/boxes/unspent`)
+    // and are signed with the tracker key, so a caller-chosen `change_address` meant a caller could
+    // name any destination for the tracker's own ERG. Repeating a 1-nanoERG redemption against a
+    // tiny self-owned reserve handed out one wallet box minus the fee each time.
+    //
+    // `change_address` is still accepted on the wire for compatibility, but it is IGNORED. The
+    // configured change address wins; the fee box's own tree is the fallback when nothing is set.
     let change_address = match &payload.change_address {
-        Some(a) => a.clone(),
+        Some(a) => {
+            tracing::warn!(
+                "Ignoring caller-supplied change_address ({}): redemption change always returns to \
+                 the tracker's configured address.",
+                a
+            );
+            state
+                .config
+                .get_change_address()
+                .or_else(|_| ergo_tree_to_p2pk_address(&fee_boxes[0].ergo_tree))
+                .unwrap_or_else(|_| recipient_address.clone())
+        }
         None => ergo_tree_to_p2pk_address(&fee_boxes[0].ergo_tree)
             .or_else(|_| state.config.get_change_address().map_err(|e| e.to_string()))
             .unwrap_or_else(|_| recipient_address.clone()),
@@ -864,14 +912,23 @@ async fn build_redemption_inner(
     context_extension.insert("1".to_string(), format!("07{}", payload.recipient_pubkey));
     context_extension.insert("2".to_string(), serialize_coll_bytes(&issuer_signature));
     context_extension.insert("3".to_string(), serialize_ergo_long(total_debt as i64));
-    context_extension.insert(
-        "4".to_string(),
-        serialize_ergo_long(payload.timestamp as i64),
-    );
+    context_extension.insert("4".to_string(), serialize_ergo_long(note.timestamp as i64));
     context_extension.insert("5".to_string(), serialize_coll_bytes(&insert_proof));
-    if !payload.emergency {
-        context_extension.insert("6".to_string(), serialize_coll_bytes(&tracker_signature));
-    }
+    // Context var #6 must ALWAYS be present. The contract reads it with
+    // `getVar[Coll[Byte]](6).get`, and `.get` on an absent var throws -- so omitting the key
+    // outright made every emergency redemption fail on-chain, leaving the contract's own
+    // `enoughTimeSpent` fallback (which allows omitting the tracker signature after the 3-day
+    // window) unreachable. An EMPTY Coll[Byte] is the correct encoding for "no signature": the
+    // contract branches on `trackerSigBytes.size > 0`. The Scala reference implementation and the
+    // CLI both send var 6 unconditionally for the same reason.
+    context_extension.insert(
+        "6".to_string(),
+        if payload.emergency {
+            serialize_coll_bytes(&[])
+        } else {
+            serialize_coll_bytes(&tracker_signature)
+        },
+    );
     if let Some(ref lp) = reserve_lookup_proof {
         context_extension.insert("7".to_string(), serialize_coll_bytes(lp));
     }
@@ -1218,6 +1275,91 @@ pub async fn submit_redemption(
     };
     let issuer_pubkey: basis_store::PubKey = issuer_pubkey_bytes.try_into().unwrap();
     let recipient_pubkey: basis_store::PubKey = recipient_pubkey_bytes.try_into().unwrap();
+
+    // Validate the caller-supplied amounts against the stored note state BEFORE
+    // broadcasting (issue #15 S4): redeemed_amount must be positive and within the
+    // note's outstanding debt, and new_already_redeemed must equal the note's
+    // resulting cumulative redeemed amount. The tracker re-validates after
+    // broadcast; this pre-check avoids broadcasting a transaction whose local
+    // state sync would then be rejected.
+    //
+    // TODO(issue #15 S4): redemption state should ultimately be derived from the
+    // confirmed on-chain transaction rather than caller-supplied amounts.
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if state
+            .tx
+            .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+                issuer_pubkey,
+                recipient_pubkey,
+                response_tx: tx,
+            })
+            .await
+            .is_err()
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error_response("tracker thread unavailable".to_string())),
+            );
+        }
+        let note = match rx.await {
+            Ok(Ok(Some(note))) => note,
+            Ok(Ok(None)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(error_response(
+                        "note not found for issuer/recipient".to_string(),
+                    )),
+                )
+            }
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(error_response(format!("note lookup failed: {e:?}"))),
+                )
+            }
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(error_response("tracker unavailable".to_string())),
+                )
+            }
+        };
+
+        let outstanding = note.outstanding_debt();
+        if payload.redeemed_amount == 0 || payload.redeemed_amount > outstanding {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error_response(format!(
+                    "redeemed_amount {} is invalid for outstanding debt {}",
+                    payload.redeemed_amount, outstanding
+                ))),
+            );
+        }
+        let expected_cumulative = match note.amount_redeemed.checked_add(payload.redeemed_amount) {
+            Some(v) => v,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(error_response(
+                        "cumulative redeemed amount overflows u64".to_string(),
+                    )),
+                )
+            }
+        };
+        if payload.new_already_redeemed != expected_cumulative {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error_response(format!(
+                    "new_already_redeemed {} does not match note state ({} + {} = {})",
+                    payload.new_already_redeemed,
+                    note.amount_redeemed,
+                    payload.redeemed_amount,
+                    expected_cumulative
+                ))),
+            );
+        }
+    }
 
     let node = NodeClient::from_state(&state);
     let tx_id = match node.broadcast(&payload.signed_tx).await {

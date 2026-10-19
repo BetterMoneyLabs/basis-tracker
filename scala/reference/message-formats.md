@@ -47,7 +47,7 @@ type SecretKey = Scalar;  // From k256 crate
 
 **Example (hex):**
 ```
-c693d626538e9dd926519c13f3855412d60aaaa9c8818e7725415a45e92f3108
+<32-byte secret key hex, e.g. from demo_keygen.py>
 ```
 
 ---
@@ -75,7 +75,7 @@ fn sign(message: &[u8; 48], secret: &SecretKey) -> SchnorrSignature {
     // 3. Compute challenge (strong Fiat-Shamir)
     let challenge_input = [
         a.compress().to_bytes(),    // 33 bytes
-        message,                     // 48 bytes
+        message,                     // 80 bytes
         public_key.compress(),       // 33 bytes
     ].concat();
     let e_bytes = blake2b_256(&challenge_input);
@@ -97,7 +97,7 @@ fn verify(sig: &SchnorrSignature, pubkey: &CompressedPoint, message: &[u8]) -> b
     // 1. Recompute challenge
     let challenge_input = [
         sig.a.as_bytes(),          // 33 bytes
-        message,                    // 48 bytes
+        message,                    // 80 bytes
         pubkey.as_bytes(),          // 33 bytes
     ].concat();
     let e_bytes = blake2b_256(&challenge_input);
@@ -121,16 +121,17 @@ fn verify(sig: &SchnorrSignature, pubkey: &CompressedPoint, message: &[u8]) -> b
 
 ## 4. Message Formats
 
-### 4.1 IOU Note Message (48 bytes)
+### 4.1 IOU Note Message (80 bytes)
 
 ```rust
-// message = blake2b256(payer_key || payee_key) || total_debt || timestamp
+// message = blake2b256(payer_key || payee_key) || total_debt || timestamp || tracker_nft_id
 struct IouMessage {
     key: [u8; 32],        // Blake2b256(payer_key_bytes || payee_key_bytes)
     total_debt: [u8; 8],  // u64 little-endian (nanoERG)
     timestamp: [u8; 8],   // i64 little-endian (ms since Unix epoch)
+    tracker_nft_id: [u8; 32], // tracker NFT id from SELF.R6 — binds the signature to one tracker
 }
-// Total: 48 bytes
+// Total: 80 bytes (was 48 bytes before the C3 fix, issue #15)
 ```
 
 **Construction:**
@@ -458,8 +459,8 @@ fn validate_tracker_signature(
     "a": "<33 bytes hex - compressed point>",
     "z": "<32 bytes hex - unsigned scalar>"
   },
-  "message": "<48 bytes hex - iou message>",
-  "messageFormat": "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes)",
+  "message": "<80 bytes hex - iou message>",
+  "messageFormat": "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes) || trackerNftId (32 bytes)",
   "noteKey": "<32 bytes hex - blake2b256 of payerKey||payeeKey>"
 }
 ```
@@ -474,7 +475,7 @@ fn validate_tracker_signature(
 Alice (Payer/Reserve Owner):
   Address:  9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ
   Public:   0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83
-  Secret:   c693d626538e9dd926519c13f3855412d60aaaa9c8818e7725415a45e92f3108
+  Secret:   <32-byte secret key hex, e.g. from demo_keygen.py>
 
 Bob (Payee/Receiver):
   Address:  9fJj8vHmB8P7yN5xQ3kR2tM4wL6sG9cV1bX3hD5fA7eK2jN4mP
@@ -640,7 +641,7 @@ struct TrackerBox {
    ✅ Use unsigned 32-byte encoding
 
 2. ❌ **Wrong message format**: Missing timestamp or wrong order
-   ✅ Always: `key || total_debt || timestamp` (48 bytes)
+   ✅ Always: `key || total_debt || timestamp || tracker_nft_id` (80 bytes)
 
 3. ❌ **Uncompressed public keys**: Contract expects compressed
    ✅ Always compress to 33 bytes

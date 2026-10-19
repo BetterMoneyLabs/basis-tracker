@@ -68,6 +68,9 @@ pub struct IouNote {
     pub timestamp: u64,
     /// Signature from issuer (A)
     pub signature: Signature,
+    /// Tracker NFT ID this note is bound to (32 bytes). Part of the signed message,
+    /// so the note is only redeemable under this tracker (issue #15 C3).
+    pub tracker_nft_id: [u8; 32],
 }
 
 /// Tracker state commitment
@@ -230,9 +233,10 @@ pub struct TrackerLookupProof {
 pub struct ReserveLookupProof {
     /// The AVL tree key: blake2b256(ownerKey || receiverKey) (32 bytes)
     pub key: Vec<u8>,
-    /// The value: already_redeemed (8 bytes BE)
+    /// The value: timestamp || already_redeemed (16 bytes BE, zero-filled for first redemption)
     pub value: Vec<u8>,
-    /// AVL proof bytes for the lookup (None for first redemption)
+    /// AVL proof bytes for the lookup; a proof of absence for a first redemption.
+    /// Always present: context var #7 is mandatory on-chain.
     pub proof: Option<Vec<u8>>,
 }
 
@@ -287,6 +291,19 @@ pub enum NoteError {
     AmountOverflow,
     FutureTimestamp,
     PastTimestamp,
+    /// A note tried to lower the committed cumulative debt for an existing (issuer, recipient)
+    /// pair. Only the creditor can consent to that; the debtor's signature is not enough.
+    DebtDecreaseNotPermitted {
+        previous: u64,
+        requested: u64,
+    },
+    /// The note is not committed in the latest confirmed on-chain tracker box,
+    /// so no committed-state proof can be generated for it yet.
+    NoteNotConfirmed,
+    /// The note is bound to a different tracker NFT ID than this tracker's.
+    /// Accepting it would pin debt that can never redeem against this tracker's
+    /// reserves (issue #15 C3).
+    TrackerIdMismatch,
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
@@ -309,11 +326,25 @@ pub struct TrackerStateManager {
     /// a fresh reserve for a new issuer starts from the empty tree digest and first
     /// redemptions succeed even if other issuers have redemption history.
     ///
-    /// NOTE: Each on-chain reserve box has its own R5 digest. This design assumes one
-    /// reserve per issuer; multi-reserve issuers would need per-reserve tracking.
+    /// NOTE: Each on-chain reserve box has its own R5 digest, so this design assumes ONE reserve per
+    /// issuer. That assumption is load-bearing, not cosmetic: a note's signed message is only
+    /// `hash(owner || receiver) || totalDebt || timestamp` and is not bound to a reserve box, so with two
+    /// reserves under the same owner and tracker the SAME note redeems in full against EACH of them --
+    /// overpaying the creditor and draining the owner's other reserves to do it.
+    ///
+    /// This cannot be fixed here (the redemption state lives in the contract's per-box R5), so the
+    /// tracker fails closed instead: see `ReserveTracker::resolve_issuer_reserve` and the collateral
+    /// endpoint, both of which return an error for a multi-reserve issuer. See specs/pr14_triage.md (C3).
     reserve_avl_states: std::collections::HashMap<PubKey, basis_trees::BasisAvlTree>,
     /// Per-note confirmation records, keyed by note key (32 bytes).
     confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,
+    /// AVL root digest of the latest confirmed on-chain tracker box (R5).
+    /// Redemption proofs must be generated against this committed state, not the
+    /// live tree: any note posted after the last on-chain commitment changes the
+    /// live digest, which would make live-tree proofs fail against the on-chain
+    /// tracker box (issue #15 S6). `None` until an update confirms or the updater
+    /// observes a matching on-chain digest after restart.
+    confirmed_digest: Option<[u8; 33]>,
 }
 
 impl TrackerStateManager {
@@ -369,6 +400,7 @@ impl TrackerStateManager {
             storage,
             reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
+            confirmed_digest: None,
         };
 
         if let Err(e) = manager.rebuild_avl_tree() {
@@ -527,6 +559,7 @@ impl TrackerStateManager {
             storage,
             reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
+            confirmed_digest: None,
         };
 
         // Rebuild AVL tree and confirmations so test instances mirror production.
@@ -551,11 +584,43 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
+        // Carry the already-redeemed amount forward from the previous note for this pair.
+        //
+        // A new note for an existing (issuer, recipient) pair is an increase of the SAME cumulative
+        // debt, not a fresh claim. Persisting the incoming note verbatim would reset
+        // `amount_redeemed` to 0 and destroy the outstanding-debt / FIFO accounting, so the
+        // tracker's view of "how much of this edge is still outstanding" would grow without bound.
+        //
+        // Only the LOCAL record is adjusted: the AVL value committed on-chain is `amount_collected`,
+        // which the contract pins, so the signed message and the on-chain commitment are unchanged.
+        // The per-issuer reserve AVL tree (which is what the contract actually reads) is untouched.
+        let mut note_to_store = note.clone();
+
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing)
         if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
+            }
+            note_to_store.amount_redeemed = existing_note.amount_redeemed;
+            // SECURITY: cumulative debt may never decrease without the creditor's consent.
+            //
+            // The contract pins every redemption to the tracker tree, so lowering the committed
+            // totalDebt for an (issuer, recipient) pair makes every existing note for that pair
+            // permanently unredeemable: `trackerDebtCorrect` fails in the normal path AND in the
+            // emergency path, because both compare the note's totalDebt against the committed value.
+            // A debtor could therefore post totalDebt = 0, wait out the reserve's refund waiting
+            // period, and withdraw the collateral while the creditor's claim is silently dead.
+            //
+            // The debtor's signature proves that the debtor consents, never that the creditor does.
+            // Transferring debt to a *different* creditor is unaffected, because that is a different
+            // key in the tree; reducing an existing creditor's claim is not something the debtor can
+            // do unilaterally.
+            if note.amount_collected < existing_note.amount_collected {
+                return Err(NoteError::DebtDecreaseNotPermitted {
+                    previous: existing_note.amount_collected,
+                    requested: note.amount_collected,
+                });
             }
         }
 
@@ -580,7 +645,7 @@ impl TrackerStateManager {
         match avl_result {
             Ok(()) => {
                 // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
+                self.storage.store_note(issuer_pubkey, &note_to_store)?;
                 self.update_state();
 
                 // Recompute the confirmation status for this note based on the
@@ -728,9 +793,17 @@ impl TrackerStateManager {
     }
 
     /// Promote every `Pending` note to `Confirmed`, copying the pending value to
-    /// the confirmed value and recording the confirming box metadata. Returns the
+    /// the confirmed value and recording the confirming box metadata. `digest` is
+    /// the AVL root committed by the confirming tracker box; it becomes the
+    /// committed state that redemption proofs are generated against. Returns the
     /// number of notes transitioned to `Confirmed`.
-    pub fn confirm_pending_notes(&mut self, box_id: &str, height: u64) -> Result<usize, NoteError> {
+    pub fn confirm_pending_notes(
+        &mut self,
+        digest: [u8; 33],
+        box_id: &str,
+        height: u64,
+    ) -> Result<usize, NoteError> {
+        self.confirmed_digest = Some(digest);
         let keys: Vec<NoteKeyBytes> = self.confirmations.keys().copied().collect();
         let mut count = 0usize;
 
@@ -800,16 +873,20 @@ impl TrackerStateManager {
         Ok(count)
     }
 
-    /// Reconcile confirmation records with an observed on-chain digest. When the
-    /// confirmed digest equals the current local digest, every note's local value
-    /// is the confirmed value, so mark them all as `Confirmed` with the given box
-    /// metadata. Returns the number of notes promoted to `Confirmed`.
+    /// Reconcile confirmation records with an observed on-chain digest. The
+    /// observed digest is always recorded as the committed state that redemption
+    /// proofs are generated against. When the confirmed digest equals the current
+    /// local digest, every note's local value is the confirmed value, so mark them
+    /// all as `Confirmed` with the given box metadata. Returns the number of notes
+    /// promoted to `Confirmed`.
     pub fn reconcile_with_confirmed_digest(
         &mut self,
         confirmed_digest: &[u8; 33],
         box_id: &str,
         height: u64,
     ) -> Result<usize, NoteError> {
+        self.confirmed_digest = Some(*confirmed_digest);
+
         if confirmed_digest != &self.current_state.avl_root_digest {
             return Ok(0);
         }
@@ -863,11 +940,43 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
+        // Carry the already-redeemed amount forward from the previous note for this pair.
+        //
+        // A new note for an existing (issuer, recipient) pair is an increase of the SAME cumulative
+        // debt, not a fresh claim. Persisting the incoming note verbatim would reset
+        // `amount_redeemed` to 0 and destroy the outstanding-debt / FIFO accounting, so the
+        // tracker's view of "how much of this edge is still outstanding" would grow without bound.
+        //
+        // Only the LOCAL record is adjusted: the AVL value committed on-chain is `amount_collected`,
+        // which the contract pins, so the signed message and the on-chain commitment are unchanged.
+        // The per-issuer reserve AVL tree (which is what the contract actually reads) is untouched.
+        let mut note_to_store = note.clone();
+
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing)
         if let Ok(existing_note) = self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
             if note.timestamp <= existing_note.timestamp {
                 return Err(NoteError::PastTimestamp);
+            }
+            note_to_store.amount_redeemed = existing_note.amount_redeemed;
+            // SECURITY: cumulative debt may never decrease without the creditor's consent.
+            //
+            // The contract pins every redemption to the tracker tree, so lowering the committed
+            // totalDebt for an (issuer, recipient) pair makes every existing note for that pair
+            // permanently unredeemable: `trackerDebtCorrect` fails in the normal path AND in the
+            // emergency path, because both compare the note's totalDebt against the committed value.
+            // A debtor could therefore post totalDebt = 0, wait out the reserve's refund waiting
+            // period, and withdraw the collateral while the creditor's claim is silently dead.
+            //
+            // The debtor's signature proves that the debtor consents, never that the creditor does.
+            // Transferring debt to a *different* creditor is unaffected, because that is a different
+            // key in the tree; reducing an existing creditor's claim is not something the debtor can
+            // do unilaterally.
+            if note.amount_collected < existing_note.amount_collected {
+                return Err(NoteError::DebtDecreaseNotPermitted {
+                    previous: existing_note.amount_collected,
+                    requested: note.amount_collected,
+                });
             }
         }
 
@@ -886,12 +995,56 @@ impl TrackerStateManager {
         match avl_result {
             Ok(()) => {
                 // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, note)?;
+                self.storage.store_note(issuer_pubkey, &note_to_store)?;
                 self.update_state();
                 Ok(())
             }
             Err(e) => Err(NoteError::StorageError(e.to_string())),
         }
+    }
+
+    /// Record that `amount_redeemed` was redeemed against an existing note.
+    ///
+    /// This is redemption accounting, NOT a debt update, so it deliberately bypasses
+    /// `update_note`'s requirements:
+    ///
+    /// * `update_note` demands a strictly newer timestamp and a valid issuer signature, because it
+    ///   represents a new signed note that changes the committed cumulative debt. A redemption
+    ///   changes neither the debt nor the signature.
+    /// * The timestamp is part of the signed message, so refreshing it here invalidated the stored
+    ///   issuer signature and left the creditor's note unredeemable. It is now preserved exactly.
+    /// * `amount_collected` -- the value committed in the AVL tree and checked by the contract --
+    ///   is untouched, so no AVL write is needed.
+    ///
+    /// The cumulative redeemed amount may only grow; going backwards would let a caller reset a
+    /// note's headroom and redeem the same debt again.
+    pub fn record_redemption(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        new_amount_redeemed: u64,
+    ) -> Result<(), NoteError> {
+        let mut note = self
+            .lookup_note(issuer_pubkey, recipient_pubkey)
+            .map_err(|_| NoteError::StorageError("note not found".to_string()))?;
+
+        if new_amount_redeemed < note.amount_redeemed {
+            return Err(NoteError::StorageError(format!(
+                "cumulative redeemed amount cannot decrease (stored {}, requested {})",
+                note.amount_redeemed, new_amount_redeemed
+            )));
+        }
+        // Redeeming more than was ever recorded as owed would leave the note permanently unusable.
+        if new_amount_redeemed > note.amount_collected {
+            return Err(NoteError::AmountOverflow);
+        }
+
+        if new_amount_redeemed == note.amount_redeemed {
+            return Ok(());
+        }
+
+        note.amount_redeemed = new_amount_redeemed;
+        self.storage.store_note(issuer_pubkey, &note)
     }
 
     /// Get the total debt for a specific (issuer, receiver) pair from the AVL tree
@@ -922,7 +1075,13 @@ impl TrackerStateManager {
     }
 
     /// Generate a tracker lookup proof for context var #8
-    /// This proof verifies that totalDebt exists in the tracker's AVL tree
+    /// This proof verifies that totalDebt exists in the tracker's AVL tree.
+    ///
+    /// NOTE: this proof is generated against the LIVE local tree, which may
+    /// contain notes not yet committed on-chain. It is suitable for informational
+    /// endpoints (`GET /tracker/proof`) but NOT for redemption transactions:
+    /// redemptions must use `generate_committed_tracker_lookup_proof`, which
+    /// proves against the latest confirmed on-chain digest.
     pub fn generate_tracker_lookup_proof(
         &mut self,
         issuer_pubkey: &PubKey,
@@ -940,6 +1099,112 @@ impl TrackerStateManager {
         Ok(TrackerLookupProof {
             key: key_bytes,
             value: total_debt.to_be_bytes().to_vec(),
+            proof: avl_proof,
+        })
+    }
+
+    /// The AVL root digest of the latest confirmed on-chain tracker box, if known.
+    pub fn confirmed_digest(&self) -> Option<[u8; 33]> {
+        self.confirmed_digest
+    }
+
+    /// Generate a tracker lookup proof for context var #8 against the COMMITTED
+    /// on-chain state (the latest confirmed tracker box's R5), not the live tree.
+    ///
+    /// Redemption transactions must use this: the proof is verified on-chain
+    /// against the tracker box's committed digest, so any note posted after the
+    /// last commitment must not alter the proof's starting digest (issue #15 S6).
+    ///
+    /// The committed tree is rebuilt from the per-note `confirmed_total_debt`
+    /// values in chronological order (same ordering as `rebuild_avl_tree`), and
+    /// the rebuilt digest is asserted to equal the recorded confirmed digest.
+    ///
+    /// Returns `NoteError::NoteNotConfirmed` when the note has no confirmed value
+    /// (i.e. it is not committed on-chain yet) and `NoteError::StorageError` when
+    /// no confirmed on-chain digest is known or the rebuilt tree does not
+    /// reproduce it.
+    pub fn generate_committed_tracker_lookup_proof(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<TrackerLookupProof, NoteError> {
+        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key_bytes = key.to_bytes();
+
+        // The note being redeemed must be committed on-chain with a known value.
+        let confirmed_total_debt = self
+            .get_confirmation(issuer_pubkey, recipient_pubkey)
+            .and_then(|c| {
+                if c.status == NoteConfirmationStatus::Confirmed {
+                    c.confirmed_total_debt
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "Committed proof requested for unconfirmed note {} -> {}",
+                    hex::encode(issuer_pubkey),
+                    hex::encode(recipient_pubkey)
+                );
+                NoteError::NoteNotConfirmed
+            })?;
+
+        let confirmed_digest = self.confirmed_digest.ok_or_else(|| {
+            NoteError::StorageError(
+                "No confirmed on-chain tracker digest known yet; wait for the tracker box updater"
+                    .to_string(),
+            )
+        })?;
+
+        // Rebuild the committed tree from every note's confirmed value, in
+        // chronological order by note timestamp (same ordering as
+        // `rebuild_avl_tree`). Notes without a confirmed value are not part of
+        // the committed state.
+        let mut notes_with_issuer = self
+            .storage
+            .get_all_notes_with_issuer()
+            .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
+        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
+
+        let mut committed_tree = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to create committed AVL tree: {:?}", e))
+        })?;
+        for (issuer, note) in &notes_with_issuer {
+            let note_key = Self::confirmation_key(issuer, &note.recipient_pubkey);
+            let confirmed_value = self
+                .confirmations
+                .get(&note_key)
+                .and_then(|c| c.confirmed_total_debt);
+            if let Some(value) = confirmed_value {
+                committed_tree
+                    .update(note_key.to_vec(), value.to_be_bytes().to_vec())
+                    .map_err(|e| {
+                        NoteError::StorageError(format!(
+                            "Committed AVL tree rebuild failed: {:?}",
+                            e
+                        ))
+                    })?;
+            }
+        }
+
+        // The rebuilt committed tree must reproduce the confirmed on-chain digest;
+        // otherwise local confirmation metadata is inconsistent with the chain and
+        // generating a proof would produce something that fails on-chain anyway.
+        let rebuilt_digest = committed_tree.root_digest();
+        if rebuilt_digest != confirmed_digest {
+            return Err(NoteError::StorageError(format!(
+                "Committed tree digest mismatch: rebuilt {} != confirmed on-chain {}",
+                hex::encode(rebuilt_digest),
+                hex::encode(confirmed_digest)
+            )));
+        }
+
+        let (avl_proof, _returned_value) = committed_tree.generate_lookup_proof(key_bytes.to_vec());
+
+        Ok(TrackerLookupProof {
+            key: key_bytes,
+            value: confirmed_total_debt.to_be_bytes().to_vec(),
             proof: avl_proof,
         })
     }
@@ -1195,7 +1460,7 @@ impl TrackerStateManager {
                 None => {
                     tracing::warn!(
                         "Reserve AVL journal references unknown note key {}; skipping",
-                        hex::encode(&note_key.to_bytes())
+                        hex::encode(note_key.to_bytes())
                     );
                     continue;
                 }
@@ -1209,7 +1474,7 @@ impl TrackerStateManager {
             ) {
                 tracing::warn!(
                     "Failed to replay reserve AVL update for issuer {}: {:?}",
-                    hex::encode(&issuer_pubkey),
+                    hex::encode(issuer_pubkey),
                     e
                 );
             }
@@ -1277,6 +1542,16 @@ impl TrackerStateManager {
         self.storage
             .get_note(issuer_pubkey, recipient_pubkey)?
             .ok_or_else(|| NoteError::StorageError("Note not found".to_string()))
+    }
+
+    /// Look up a note by issuer and recipient, returning `Ok(None)` when it does
+    /// not exist (unlike `lookup_note`, which errors on missing notes).
+    pub fn get_note_optional(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+    ) -> Result<Option<IouNote>, NoteError> {
+        self.storage.get_note(issuer_pubkey, recipient_pubkey)
     }
 
     /// Get all notes for a specific issuer
@@ -1364,6 +1639,7 @@ impl IouNote {
         amount_redeemed: u64,
         timestamp: u64,
         signature: Signature,
+        tracker_nft_id: [u8; 32],
     ) -> Self {
         Self {
             recipient_pubkey,
@@ -1371,6 +1647,7 @@ impl IouNote {
             amount_redeemed,
             timestamp,
             signature,
+            tracker_nft_id,
         }
     }
 
@@ -1386,13 +1663,14 @@ impl IouNote {
 
     /// Create and sign a new IOU note
     ///
-    /// Message format: key || totalDebt || timestamp (48 bytes)
+    /// Message format: key || totalDebt || timestamp || trackerNftId (80 bytes)
     /// where key = blake2b256(ownerKeyBytes || receiverKeyBytes)
     pub fn create_and_sign(
         recipient_pubkey: PubKey,
         amount_collected: u64,
         _timestamp: u64, // Kept for API compatibility but not used in signing message
         issuer_secret_key: &[u8; 32],
+        tracker_nft_id: &[u8; 32],
     ) -> Result<Self, NoteError> {
         use secp256k1::{Secp256k1, SecretKey};
 
@@ -1406,12 +1684,13 @@ impl IouNote {
         let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let issuer_pubkey = public_key.serialize();
 
-        // Generate the signing message: key || totalDebt || timestamp
+        // Generate the signing message: key || totalDebt || timestamp || trackerNftId
         let message = schnorr::signing_message(
             &issuer_pubkey,
             &recipient_pubkey,
             amount_collected,
             _timestamp,
+            tracker_nft_id,
         );
 
         // Use the chaincash-rs approach for Schnorr signing
@@ -1424,14 +1703,15 @@ impl IouNote {
             amount_redeemed: 0, // Start with no redemptions
             timestamp: _timestamp,
             signature,
+            tracker_nft_id: *tracker_nft_id,
         })
     }
 
     /// Generate the message that should be signed following the Basis protocol specification.
     ///
-    /// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp)
+    /// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
     ///
-    /// Total: 48 bytes
+    /// Total: 80 bytes
     ///
     /// # Arguments
     /// * `owner_pubkey` - Reserve owner's public key (the issuer of the IOU note)
@@ -1441,6 +1721,7 @@ impl IouNote {
             &self.recipient_pubkey,
             self.amount_collected,
             self.timestamp,
+            &self.tracker_nft_id,
         )
     }
 

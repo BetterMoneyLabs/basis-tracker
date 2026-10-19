@@ -25,6 +25,7 @@ mod api_avl_integration_tests {
             amount_collected,
             timestamp,
             secret_key_bytes,
+            &[0x42; 32],
         )
         .unwrap()
     }

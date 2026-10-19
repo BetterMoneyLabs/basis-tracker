@@ -18,7 +18,7 @@ The contract uses TWO separate AVL trees:
 - **Purpose**: Tracks cumulative redeemed amounts per (owner, receiver) pair
 - **Key**: `Blake2b256(owner_pubkey_bytes || receiver_pubkey_bytes)` (32 bytes)
 - **Value**: `timestamp (8 bytes LE) || cumulative_redeemed (8 bytes LE)` (16 bytes total)
-- **Flags**: InsertOnly (0x01) - can only insert, never update/remove
+- **Flags**: Insert + update (0x03), no remove — the contract calls `insertOrUpdate` so a note can be redeemed multiple times against the same reserve (the cumulative redeemed amount is rewritten per (owner, receiver) key). An `InsertOnly` reserve tree makes every reserve unredeemable after the first partial redemption of a key.
 - **Plasma Parameters**: `(key_length=32, value_length=None)`
 
 #### Tracker Tree (in tracker box R5)
@@ -33,10 +33,15 @@ The contract uses TWO separate AVL trees:
 All signatures (both payer and tracker) use the SAME message format:
 
 ```
-message = blake2b256(payer_key || payee_key) || total_debt_u64_le || timestamp_i64_le
+message = blake2b256(payer_key || payee_key) || total_debt_u64_le || timestamp_i64_le || tracker_nft_id
 ```
 
-**Total length**: 32 + 8 + 8 = **48 bytes**
+**Total length**: 32 + 8 + 8 + 32 = **80 bytes**
+
+The trailing `tracker_nft_id` (32 bytes) is the tracker's NFT id, read on-chain from
+`SELF.R6[Coll[Byte]]` and appended by the contract to the 48-byte payload the signers produce.
+It binds every signature to one specific tracker/contract, so a signature for one tracker
+cannot be replayed on another (issue #15, finding C3).
 
 **IMPORTANT**: 
 - Timestamp is in **milliseconds** since Unix epoch (Java/JavaScript format)
@@ -140,7 +145,7 @@ The contract verifies (in order):
 1. ✅ `selfPreserved`: Contract proposition, tokens, R4, R6 unchanged
 2. ✅ `trackerIdCorrect`: Tracker NFT ID matches R6
 3. ✅ `trackerDebtCorrect`: Debt exists in tracker's AVL tree (via proof #8)
-4. ✅ `timestampCorrect`: New timestamp > stored timestamp
+4. ✅ `timestampCorrect`: New timestamp >= stored timestamp
 5. ✅ `properRedemptionTree`: AVL tree correctly updated (via proof #5)
 6. ✅ `properReserveSignature`: Owner's Schnorr signature valid
 7. ✅ `properlyRedeemed`: Amount valid + tracker sig valid (or emergency)
@@ -154,9 +159,10 @@ The contract verifies (in order):
 // Key library: ergo-avltree or sigma-state Rust port
 
 // Reserve tree operations:
-// 1. Create empty tree with InsertOnly flags
-// 2. Insert (key, timestamp || redeemed_amount)
-// 3. Generate proof for insertion
+// 1. Create empty tree with insert+update flags (0x03)
+// 2. First redemption for a key: insert (key, timestamp || redeemed_amount);
+//    later redemptions: insertOrUpdate with the new cumulative amount
+// 3. Generate proof for insertion/update (context var #5)
 // 4. Return updated tree digest for output box
 
 // Tracker tree operations:
@@ -212,7 +218,7 @@ struct RedeemOutput {
 2. **AVL tests**: Test tree insert/lookup proofs match Scala implementation
 3. **Integration**: Use note.json from simple demo, build matching transaction
 4. **Edge cases**: 
-   - Empty bytes for tracker signature (emergency redemption)
+   - Empty Coll[Byte] for the tracker signature (emergency redemption)
    - Multiple sequential redemptions (timestamp ordering)
    - Partial redemptions (amount < total_debt)
 

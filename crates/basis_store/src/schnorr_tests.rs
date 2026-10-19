@@ -196,6 +196,7 @@ pub fn verify_all_test_vectors() -> Result<(), String> {
             0, // amount_redeemed
             vector.timestamp,
             vector.signature,
+            [0x42; 32],
         );
 
         let result = note.verify_signature(&vector.issuer_pubkey);
@@ -248,8 +249,9 @@ fn get_test_vectors() -> Vec<SchnorrTestVector> {
     let timestamp = 1234567890u64;
 
     // Create a valid signature using our implementation
-    let valid_note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &[1u8; 32])
-        .expect("Failed to create valid signature");
+    let valid_note =
+        IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &[1u8; 32], &[0x42; 32])
+            .expect("Failed to create valid signature");
     let valid_signature = valid_note.signature;
 
     vec![
@@ -315,18 +317,18 @@ fn test_signing_message_format() {
     let owner_pubkey = [1u8; 33];
     let receiver_pubkey = [2u8; 33];
     let timestamp = 1743379200000u64;
-    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65]);
+    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65], [0x42; 32]);
 
-    // Format: key (32) || totalDebt (8) || timestamp (8) = 48 bytes
+    // Format: key (32) || totalDebt (8) || timestamp (8) || trackerNftId (32) = 80 bytes
     let message = note.signing_message(&owner_pubkey);
 
-    assert_eq!(message.len(), 48);
+    assert_eq!(message.len(), 80);
 }
 
 /// Test that the challenge computation matches basis.es
 fn test_challenge_computation() {
     let a_bytes = [0x01u8; 33];
-    let message_bytes = [0x02u8; 48]; // 32 + 8 + 8
+    let message_bytes = [0x02u8; 80]; // 32 + 8 + 8 + 32
     let issuer_pubkey = [0x03u8; 33];
 
     // Compute challenge e = H(a || message || issuer_pubkey)
@@ -368,6 +370,7 @@ pub fn run_schnorr_test_vectors() -> Result<(), String> {
             0, // amount_redeemed
             vector.timestamp,
             vector.signature,
+            [0x42; 32],
         );
 
         let result = note.verify_signature(&vector.issuer_pubkey);
@@ -415,8 +418,13 @@ mod comprehensive_tests {
         // Test signing and verification with different issuers
         for (recipient_pubkey, amount, timestamp) in test_cases {
             // Alice signs a note to recipient
-            let message =
-                schnorr::signing_message(&alice_pubkey, &recipient_pubkey, amount, timestamp);
+            let message = schnorr::signing_message(
+                &alice_pubkey,
+                &recipient_pubkey,
+                amount,
+                timestamp,
+                &[0x42; 32],
+            );
             let signature = schnorr::schnorr_sign(&message, &alice_secret, &alice_pubkey)
                 .expect("Failed to create signature");
 
@@ -427,14 +435,25 @@ mod comprehensive_tests {
             assert!(schnorr::schnorr_verify(&signature, &message, &bob_pubkey).is_err());
 
             // Should fail with wrong message
-            let wrong_message =
-                schnorr::signing_message(&alice_pubkey, &recipient_pubkey, amount + 1, timestamp);
+            let wrong_message = schnorr::signing_message(
+                &alice_pubkey,
+                &recipient_pubkey,
+                amount + 1,
+                timestamp,
+                &[0x42; 32],
+            );
             assert!(schnorr::schnorr_verify(&signature, &wrong_message, &alice_pubkey).is_err());
         }
 
         // Test signature format validation
         let message_timestamp = 1743379200000u64;
-        let message = schnorr::signing_message(&alice_pubkey, &bob_pubkey, 1000, message_timestamp);
+        let message = schnorr::signing_message(
+            &alice_pubkey,
+            &bob_pubkey,
+            1000,
+            message_timestamp,
+            &[0x42; 32],
+        );
         let signature = schnorr::schnorr_sign(&message, &alice_secret, &alice_pubkey)
             .expect("Failed to create signature");
 
@@ -496,7 +515,8 @@ mod comprehensive_tests {
         let amount = 1000u64;
         let timestamp = 1234567890u64;
 
-        let message = schnorr::signing_message(&pubkey, &recipient_pubkey, amount, timestamp);
+        let message =
+            schnorr::signing_message(&pubkey, &recipient_pubkey, amount, timestamp, &[0x42; 32]);
 
         // Create two signatures with the same input
         // Note: Since we use random nonces, these will be different

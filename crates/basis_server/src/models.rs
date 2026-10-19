@@ -52,6 +52,9 @@ pub struct CreateNoteRequest {
     pub timestamp: u64,
     pub signature: String,
     pub issuer_pubkey: String,
+    /// Tracker NFT ID the note is bound to (part of the signed message, issue #15 C3).
+    /// Must match this tracker's configured `ergo.tracker_nft_id`.
+    pub tracker_nft_id: String,
 }
 
 // Response structure for API responses
@@ -99,6 +102,8 @@ pub struct SerializableIouNote {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    /// Tracker NFT ID this note is bound to (part of the signed message, issue #15 C3).
+    pub tracker_nft_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<NoteConfirmationSummary>,
 }
@@ -112,6 +117,8 @@ pub struct SerializableIouNoteWithAge {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    /// Tracker NFT ID this note is bound to (part of the signed message, issue #15 C3).
+    pub tracker_nft_id: String,
     pub age_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<NoteConfirmationSummary>,
@@ -126,6 +133,7 @@ impl From<IouNote> for SerializableIouNote {
             amount_redeemed: note.amount_redeemed,
             timestamp: note.timestamp,
             signature: hex::encode(note.signature),
+            tracker_nft_id: hex::encode(note.tracker_nft_id),
             confirmation: None,
         }
     }
@@ -229,12 +237,20 @@ pub struct ProofResponse {
 
 // Request for tracker signature
 // Following specs/server/redemption_state_spec.md - POST /tracker/signature
+// Request for tracker signature
+// Following specs/server/redemption_state_spec.md - POST /tracker/signature
+//
+// The server signs only server-authoritative values (issue #15 S4): a stored note
+// for (issuer, recipient) must exist, and the message covers the stored
+// `amount_collected`/`timestamp`. `total_debt`/`timestamp` must match the stored
+// note; a mismatch is rejected with 409 Conflict.
 #[derive(Debug, Deserialize)]
 pub struct TrackerSignatureRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Must equal the stored note's total debt (rejected otherwise).
     pub total_debt: u64,
-    /// Payment timestamp in milliseconds since Unix epoch
+    /// Must equal the stored note's payment timestamp (rejected otherwise).
     pub timestamp: u64,
     #[serde(default)]
     pub emergency: bool,
@@ -257,8 +273,14 @@ pub struct TrackerSignatureResponse {
 pub struct RedemptionPreparationRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Intended redemption amount. Used only for the acceptance-policy check; the
+    /// signed message always covers the stored note's cumulative debt.
     pub amount: u64,
+    /// Must equal the stored note's payment timestamp (rejected with 409 otherwise).
     pub timestamp: u64,
+    /// Whether this is an emergency redemption (exempt from the acceptance-policy check)
+    #[serde(default)]
+    pub emergency: bool,
 }
 
 // Response for redemption preparation
@@ -386,6 +408,15 @@ pub struct ReserveCreationResponse {
     pub requests: Vec<ReservePaymentRequest>,
     pub fee: u64,
     pub change_address: String,
+    /// Opaque permit proving this exact payload came from `POST /reserves/create`.
+    ///
+    /// `POST /reserves/submit` forwards the payload to the node's `/wallet/payment/send` with the
+    /// node `api_key`, which signs it with the tracker's wallet key. It therefore only accepts a
+    /// payload whose fingerprint matches a live, unused permit, so a caller cannot substitute their
+    /// own destination address, value, assets or registers. Echoed back unchanged; clients that do
+    /// not care about it can ignore it, but it is not optional in practice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_permit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +443,10 @@ pub struct TrackerBoxIdResponse {
     pub tracker_box_id: String,
     pub timestamp: u64,
     pub height: u64,
+    /// Tracker NFT ID (hex) that notes must bind to in their signed message (issue #15 C3).
+    /// Empty when not configured.
+    #[serde(default)]
+    pub tracker_nft_id: String,
 }
 
 // Reserve-token configuration exposed to clients so they can display and create

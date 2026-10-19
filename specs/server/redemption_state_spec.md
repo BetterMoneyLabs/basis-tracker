@@ -164,7 +164,7 @@ The redemption process begins when a recipient initiates a redemption request:
    - Return `RedemptionError::AvlProofError` if proof generation fails
 
 9. **Request Signatures**
-    - Build signing message: `message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
+    - Build signing message: `message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
     - Emergency redemption uses the same message format; tracker signature verification is bypassed after 3 days
     - Request reserve owner's signature on message (generated locally by the redeemer's CLI using the issuer's secret key)
     - Request tracker's signature on message from the tracker server via its `/tracker/signature` API
@@ -246,7 +246,7 @@ After the unsigned redemption transaction is built:
 5. **Reserve Existence**: A matching reserve must exist for the issuer
 6. **Sufficient Collateral**: Reserve must have sufficient collateral to cover redemption
 7. **Tracker Box Validity**: Tracker box must exist and NFT ID must match reserve's R6
-8. **Acceptance Policy Compliance**: For normal (non-emergency) redemptions, the tracker simulates the post-redemption collateralization state and rejects the request (HTTP 400) if it would newly violate another debt holder's acceptance policy (`failed_policy_violation`), or — when the reserve is already distressed (all other holders already violated) — if the redeemer does not hold the issuer's oldest outstanding note (`failed_not_oldest_note`). The check runs after the reserve lookup and before the tracker signature is issued, in both `POST /redeem` and `POST /redemption/build`. Emergency redemptions bypass the tracker and are not policy-checked. See `specs/redemption_acceptance_policy.md` for the full design.
+8. **Acceptance Policy Compliance**: For normal (non-emergency) redemptions, the tracker simulates the post-redemption collateralization state and rejects the request (HTTP 400) if it would newly violate another debt holder's acceptance policy (`failed_policy_violation`), or — when the reserve is already distressed (all other holders already violated) — if the redeemer does not hold the issuer's oldest outstanding note (`failed_not_oldest_note`). The check runs after the reserve lookup and before the tracker signature is issued, in `POST /redeem`, `POST /redemption/build`, `POST /redemption/prepare`, and `POST /tracker/signature`. Emergency redemptions bypass the tracker and are not policy-checked. See `specs/redemption_acceptance_policy.md` for the full design.
 
 ### Post-Redemption Validation
 1. **State Consistency**: Reserve's AVL tree must be properly updated
@@ -324,7 +324,11 @@ Prepare a complete redemption with real AVL proofs and tracker signatures from E
 
 **Response:**
 - Success: `200 OK` with complete redemption preparation data
-- Failure: `400 Bad Request` or `500 Internal Server Error` with error message
+- Failure: `400 Bad Request` (validation or policy/oldest-note rejection) or
+  `500 Internal Server Error` with error message
+- `404 Not Found`: no stored note for the (issuer, recipient) pair; `409 Conflict`:
+  the request's `total_debt`/`timestamp` do not match the stored note (the tracker
+  signs stored state only)
 
 **Success Response:**
 ```json
@@ -394,7 +398,16 @@ Request tracker signature for redemption.
 
 **Response:**
 - Success: `200 OK` with tracker signature
-- Failure: `400 Bad Request` or `500 Internal Server Error` with error message
+- `400 Bad Request`: malformed public keys, or a policy/oldest-note rejection
+- `404 Not Found`: no stored note for the (issuer, recipient) pair
+- `409 Conflict`: the request's `total_debt`/`timestamp` do not match the stored note.
+  The tracker signs its **stored** `(totalDebt, timestamp)` only and rejects mismatched
+  requests rather than silently overwriting them, so a client working from stale state
+  gets a clear error instead of a signature for something it did not ask for.
+- `500 Internal Server Error`: internal failure
+
+For normal (non-emergency) requests the acceptance-policy check (see step 8 above) runs
+before the signature is issued. `emergency: true` requests are not policy-checked.
 
 **Success Response:**
 ```json

@@ -39,7 +39,7 @@ The simple demo has **several critical mismatches** with the current `basis.es` 
 **Contract expects:**
 ```scala
 val message = key ++ longToByteArray(totalDebt) ++ longToByteArray(timestamp)
-// 32 bytes + 8 bytes + 8 bytes = 48 bytes
+// 32 bytes + 8 bytes + 8 bytes = 48 bytes (now 80 bytes: the contract appends the 32-byte tracker NFT id from SELF.R6)
 ```
 
 **Demo note.json has:**
@@ -254,16 +254,16 @@ val value = Longs.toByteArray(amount)
 **Section 5.1 - Message Construction:**
 ```markdown
 val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
-// Total: 48 bytes (32 + 8 + 8)
+// Total: 48 bytes (32 + 8 + 8) — now 80 bytes including the 32-byte tracker NFT id
 ```
-✅ **CORRECT** - 48 bytes: `key ++ totalDebt ++ timestamp`
+✅ **CORRECT** - 48 bytes (now 80 bytes incl. tracker NFT id): `key ++ totalDebt ++ timestamp`
 
 **Section 6 - Contract Conditions:**
 ```markdown
 properReserveSignature:
 - Schnorr signature verification with message = `key || totalDebt || timestamp`
 ```
-✅ **CORRECT** - Message is `key || totalDebt || timestamp` (48 bytes)
+✅ **CORRECT** - Message is `key || totalDebt || timestamp` (48 bytes; now 80 bytes incl. tracker NFT id)
 
 ---
 

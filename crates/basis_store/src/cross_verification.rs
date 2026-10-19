@@ -39,11 +39,11 @@ fn test_basic_cryptography() -> Result<(), String> {
     let owner_pubkey = [1u8; 33];
     let receiver_pubkey = [2u8; 33];
     let timestamp = 1743379200000u64;
-    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65]);
+    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65], [0x42; 32]);
 
-    // Format: key (32) || totalDebt (8) || timestamp (8) = 48 bytes
+    // Format: key (32) || totalDebt (8) || timestamp (8) || trackerNftId (32) = 80 bytes
     let message = note.signing_message(&owner_pubkey);
-    assert_eq!(message.len(), 48);
+    assert_eq!(message.len(), 80);
 
     Ok(())
 }
@@ -88,32 +88,39 @@ fn test_edge_cases() -> Result<(), String> {
     let receiver_pubkey = [0xFEu8; 33];
     let timestamp = 1743379200000u64;
 
-    let note = IouNote::new(receiver_pubkey, max_amount, 0, timestamp, [0x01u8; 65]);
+    let note = IouNote::new(
+        receiver_pubkey,
+        max_amount,
+        0,
+        timestamp,
+        [0x01u8; 65],
+        [0x42; 32],
+    );
     let message = note.signing_message(&owner_pubkey);
-    assert_eq!(message.len(), 48);
+    assert_eq!(message.len(), 80);
 
     // Test 3: Zero values
-    let zero_note = IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]);
+    let zero_note = IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65], [0x42; 32]);
     let zero_message = zero_note.signing_message(&owner_pubkey);
-    assert_eq!(zero_message.len(), 48);
+    assert_eq!(zero_message.len(), 80);
 
     Ok(())
 }
 
 /// Verify that the message format matches the new spec
 fn test_message_format_compatibility() -> Result<(), String> {
-    // New spec format: message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+    // New spec format: message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
     // Where key = blake2b256(ownerKeyBytes || receiverBytes)
-    // Total: 48 bytes (32 byte key + 8 byte totalDebt + 8 byte timestamp)
+    // Total: 80 bytes (32 byte key + 8 byte totalDebt + 8 byte timestamp + 32 byte trackerNftId)
 
     let owner_pubkey = [1u8; 33];
     let receiver_pubkey = [2u8; 33];
     let timestamp = 1743379200000u64;
-    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65]);
+    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65], [0x42; 32]);
     let message = note.signing_message(&owner_pubkey);
 
-    // Verify structure: key_hash (32) + total_debt (8) + timestamp (8)
-    assert_eq!(message.len(), 48);
+    // Verify structure: key_hash (32) + total_debt (8) + timestamp (8) + tracker_nft_id (32)
+    assert_eq!(message.len(), 80);
 
     Ok(())
 }
@@ -126,11 +133,12 @@ pub fn generate_compatibility_report() -> String {
 Implementation: Rust (basis_store crate)
 
 Cryptographic Features:
-✓ Message format: key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+✓ Message format: key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
   - key = blake2b256(ownerKeyBytes || receiverBytes) (32 bytes)
   - totalDebt = 8-byte big-endian cumulative debt amount
   - timestamp = 8-byte big-endian payment timestamp (ms since Unix epoch)
-  - All messages: 48 bytes total (both normal and emergency redemption)
+  - trackerNftId = 32-byte tracker NFT id
+  - All messages: 80 bytes total (both normal and emergency redemption)
   - Emergency redemption: tracker signature optional after 2160 blocks
 ✓ Hash function: Blake2b256
 ✓ Signature verification: Schnorr secp256k1

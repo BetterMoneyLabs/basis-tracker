@@ -25,8 +25,14 @@ pub fn create_test_note(amount: u64, timestamp: u64) -> IouNote {
     let (issuer_secret, _) = generate_test_keypair();
     let (_, recipient_pubkey) = generate_test_keypair();
 
-    IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &issuer_secret)
-        .expect("Failed to create test note")
+    IouNote::create_and_sign(
+        recipient_pubkey,
+        amount,
+        timestamp,
+        &issuer_secret,
+        &[0x42; 32],
+    )
+    .expect("Failed to create test note")
 }
 
 /// Create test transaction context following chaincash-rs patterns
@@ -61,8 +67,14 @@ pub fn create_test_note_with_keys(
     amount: u64,
     timestamp: u64,
 ) -> IouNote {
-    IouNote::create_and_sign(recipient_pubkey, amount, timestamp, issuer_secret)
-        .expect("Failed to create test note with specific keys")
+    IouNote::create_and_sign(
+        recipient_pubkey,
+        amount,
+        timestamp,
+        issuer_secret,
+        &[0x42; 32],
+    )
+    .expect("Failed to create test note with specific keys")
 }
 
 /// Generate test note key for consistent testing
@@ -163,6 +175,7 @@ pub fn generate_performance_test_data(num_notes: usize) -> Vec<IouNote> {
             1000 + (i as u64 * 100),
             1234567890 + (i as u64 * 60),
             issuer_secret,
+            &[0x42; 32],
         )
         .expect("Failed to create performance test note");
 
@@ -181,6 +194,7 @@ pub fn create_invalid_note() -> IouNote {
         0,         // zero redeemed
         0,         // zero timestamp
         [0u8; 65], // zero signature
+        [0x42; 32],
     )
 }
 

@@ -69,6 +69,7 @@ mod integration_tests {
             1000,       // amount collected
             1234567890, // timestamp
             &secret_key.secret_bytes(),
+            &[0x42; 32],
         )
         .expect("Should be able to create a valid signed note");
 

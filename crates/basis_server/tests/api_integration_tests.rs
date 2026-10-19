@@ -7,7 +7,7 @@ mod api_tests {
     #[test]
     fn test_note_creation_validation() {
         // Test that note creation validates required fields
-        let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [2u8; 65]);
+        let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [2u8; 65], [0x42; 32]);
 
         assert_eq!(note.amount_collected, 1000);
         assert_eq!(note.amount_redeemed, 0);
@@ -46,13 +46,13 @@ mod api_tests {
 
     #[test]
     fn test_outstanding_debt_calculation() {
-        let note = IouNote::new([1u8; 33], 1000, 250, 1234567890, [2u8; 65]);
+        let note = IouNote::new([1u8; 33], 1000, 250, 1234567890, [2u8; 65], [0x42; 32]);
 
         assert_eq!(note.outstanding_debt(), 750);
         assert!(!note.is_fully_redeemed());
 
         // Test fully redeemed case
-        let fully_redeemed = IouNote::new([1u8; 33], 1000, 1000, 1234567890, [2u8; 65]);
+        let fully_redeemed = IouNote::new([1u8; 33], 1000, 1000, 1234567890, [2u8; 65], [0x42; 32]);
 
         assert_eq!(fully_redeemed.outstanding_debt(), 0);
         assert!(fully_redeemed.is_fully_redeemed());
@@ -61,13 +61,13 @@ mod api_tests {
     #[test]
     fn test_note_validation_edge_cases() {
         // Test zero amount
-        let zero_note = IouNote::new([1u8; 33], 0, 0, 1234567890, [2u8; 65]);
+        let zero_note = IouNote::new([1u8; 33], 0, 0, 1234567890, [2u8; 65], [0x42; 32]);
 
         assert_eq!(zero_note.outstanding_debt(), 0);
         assert!(zero_note.is_fully_redeemed());
 
         // Test redemption exceeds collection
-        let over_redeemed = IouNote::new([1u8; 33], 1000, 1500, 1234567890, [2u8; 65]);
+        let over_redeemed = IouNote::new([1u8; 33], 1000, 1500, 1234567890, [2u8; 65], [0x42; 32]);
 
         // Should handle overflow gracefully
         assert_eq!(over_redeemed.outstanding_debt(), 0);

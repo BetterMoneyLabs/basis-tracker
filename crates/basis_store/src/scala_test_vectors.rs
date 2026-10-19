@@ -5,7 +5,7 @@
 //!
 //! This module provides additional structure and tests around those vectors to
 //! verify cross-compatibility with the Scala redemption logic:
-//! - Message format: key || totalDebt || timestamp (48 bytes)
+//! - Message format: key || totalDebt || timestamp || trackerNftId (80 bytes)
 //! - Schnorr signatures: 65-byte format (33-byte a + 32-byte z)
 //! - AVL tree proofs: tracker lookup, reserve insert, reserve lookup
 //! - Ergo constant serialization prefixes
@@ -151,6 +151,9 @@ mod tests {
     use super::*;
     use crate::schnorr;
 
+    /// Tracker NFT ID shared with the Scala TestVectorGenerator (32 bytes of 0x42).
+    const TEST_TRACKER_NFT_ID: [u8; 32] = [0x42; 32];
+
     // -------------------------------------------------------------------------
     // Helper: decode hex to fixed-size arrays
     // -------------------------------------------------------------------------
@@ -215,6 +218,7 @@ mod tests {
                 &recipient_pubkey,
                 vector.amount,
                 vector.timestamp,
+                &TEST_TRACKER_NFT_ID,
             );
 
             // Hardcoded Scala message
@@ -226,11 +230,11 @@ mod tests {
                 vector.id
             );
 
-            // Also verify the constructed message is exactly 48 bytes
+            // Also verify the constructed message is exactly 80 bytes
             assert_eq!(
                 rust_message.len(),
-                48,
-                "Vector {}: Constructed message must be exactly 48 bytes",
+                80,
+                "Vector {}: Constructed message must be exactly 80 bytes",
                 vector.id
             );
         }
@@ -333,6 +337,7 @@ mod tests {
                 &recipient_pubkey,
                 vector.amount,
                 vector.timestamp,
+                &TEST_TRACKER_NFT_ID,
             );
 
             let expected = hex::decode(vector.message_hex).expect("Invalid message hex");
@@ -508,23 +513,59 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Test 12: Tracker signature verifies against tracker pubkey (TV003)
+    // Test 12: a tracker signature verifies only if it is usable ON-CHAIN
     // -------------------------------------------------------------------------
+    //
+    // Regression test for PR #14 S5, found via this very vector.
+    //
+    // TV003 used to be the "valid tracker signature" example, and the verifier accepted it. Its `z`
+    // is fine, but its challenge begins with 0xf7 -- which ErgoScript's `byteArrayToBigInt` reads as
+    // NEGATIVE, so the contract's `pubKey.exp(e)` throws. Accepting such a signature let the tracker
+    // pin a note the node would refuse, permanently stranding the creditor's funds.
+    //
+    // The contract is what ultimately decides, so the verifier must not be more permissive than it.
     #[test]
-    fn test_tracker_signature_verifies() {
-        // TV003 is the tracker signature vector
-        let tracker_vector = &SCHNORR_TEST_VECTORS[2]; // TV003
-        assert_eq!(tracker_vector.id, "TV003");
+    fn test_tracker_signature_verifies_only_when_contract_compatible() {
+        // A contract-compatible tracker signature still verifies.
+        let compatible = SCHNORR_TEST_VECTORS
+            .iter()
+            .find(|v| v.id == "TV001")
+            .expect("TV001 present");
+        assert!(compatible.should_verify);
+        let pubkey = decode_pubkey(compatible.issuer_pubkey_hex);
+        let message = hex::decode(compatible.message_hex).expect("Invalid message hex");
+        let signature = decode_signature(compatible.signature_hex);
+        assert!(
+            schnorr::schnorr_verify(&signature, &message, &pubkey).is_ok(),
+            "a contract-compatible signature must verify"
+        );
 
+        // TV003, whose challenge has the top bit set, must NOT.
+        let tracker_vector = SCHNORR_TEST_VECTORS
+            .iter()
+            .find(|v| v.id == "TV003")
+            .expect("TV003 present");
+        assert!(!tracker_vector.should_verify);
         let tracker_pubkey = decode_pubkey(tracker_vector.issuer_pubkey_hex);
         let message = hex::decode(tracker_vector.message_hex).expect("Invalid message hex");
         let signature = decode_signature(tracker_vector.signature_hex);
 
+        // The `z` alone satisfies the old rule -- only the challenge rules it out.
+        let z = &signature[33..65];
+        assert!(
+            u64::from_be_bytes({
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&z[24..32]);
+                b
+            }) >> 1
+                > 0,
+            "z must be non-zero"
+        );
+
         let result = schnorr::schnorr_verify(&signature, &message, &tracker_pubkey);
         assert!(
-            result.is_ok(),
-            "Tracker signature (TV003) should verify against tracker pubkey: {:?}",
-            result.err()
+            result.is_err(),
+            "a signature the contract cannot evaluate must be rejected (TV003)"
         );
     }
 

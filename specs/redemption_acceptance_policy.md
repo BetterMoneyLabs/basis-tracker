@@ -13,13 +13,18 @@ The tracker now verifies, at redemption time, that a redemption does not **newly
 violate** the acceptance policy of any other debt holder of the same reserve
 (issuer). The check is implemented in
 `crates/basis_server/src/acceptance/redemption_check.rs`
-(`check_redemption_policy_compliance`) and is enforced by both redemption flows:
+(`check_redemption_policy_compliance`) and is enforced by all redemption flows
+that can produce a tracker signature:
 
 - Legacy `POST /redeem` (`crates/basis_server/src/api.rs`, `initiate_redemption`):
   after the reserve lookup, before the tracker signature is issued.
 - Split flow `POST /redemption/build` (`crates/basis_server/src/redemption_build.rs`,
   `build_redemption_inner`): after a reserve with sufficient collateral is selected,
   before the unsigned transaction is built.
+- `POST /redemption/prepare` and `POST /tracker/signature`
+  (`crates/basis_server/src/api.rs`): before the tracker signs, so a signature that
+  would let a caller bypass the check (by assembling the transaction from
+  `/reserve/proof` + `/tracker/proof`) can never be issued.
 
 ## Simulated ratio math
 

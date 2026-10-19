@@ -341,16 +341,17 @@ The redemption action encodes the reserve output index in context var `#0` (`ind
 **All Redemptions (normal and emergency):**
 ```
 key = blake2b256(ownerKeyBytes || receiverBytes)
-message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
 ```
 
 - **key**: 32 bytes, `blake2b256(ownerKeyBytes || receiverBytes)`
 - **totalDebt**: 8 bytes big-endian
 - **timestamp**: 8 bytes big-endian, milliseconds since Unix epoch
-- **Total message length**: 48 bytes
+- **trackerNftId**: 32 bytes, the tracker's NFT id (read on-chain from `SELF.R6[Coll[Byte]]`), binding the signature to this tracker/contract
+- **Total message length**: 80 bytes
 
 **Emergency Redemption:**
-- Uses the same 48-byte message format as normal redemption
+- Uses the same 80-byte message format as normal redemption
 - Tracker signature bytes must still be provided in context var #6, but verification is bypassed after 3 days (3*720 blocks)
 - Reserve owner signature is always required
 - The contract checks `enoughTimeSpent` flag to bypass tracker signature verification
@@ -428,8 +429,8 @@ verify: trackerTotalDebt == totalDebt
 ```
 
 ### Signature Requirements
-- Reserve owner's signature on `key || totalDebt || timestamp` (48 bytes, always required)
-- Tracker's signature on `key || totalDebt || timestamp` (48 bytes, required in transaction but verification bypassed for emergency redemption after 3 days)
+- Reserve owner's signature on `key || totalDebt || timestamp || trackerNftId` (80 bytes, always required)
+- Tracker's signature on `key || totalDebt || timestamp || trackerNftId` (80 bytes, required in transaction but verification bypassed for emergency redemption after 3 days)
 - Signatures must be provided as 65-byte Schnorr signatures (33 bytes 'a' + 32 bytes 'z')
 - Signatures are attached via context extension variables #2 and #6
 

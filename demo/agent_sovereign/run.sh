@@ -225,17 +225,15 @@ PY
     wait_for_tx_confirm "$txid" "fee box"
 }
 
-# Fixed demo tracker keypair (same as demo/agent_celaut_use); override with
-# TRACKER_PUBKEY/TRACKER_SECRET to reuse an existing on-chain tracker box.
-DEFAULT_TRACKER_PUBKEY="039aa1478e19ad14e55c51bd306514636c608b0236edffbf03ca4028c063c4c99b"
-DEFAULT_TRACKER_SECRET="bd9c331161cb8432c4037c198e33deb77c99b2b36a6f7956be1d1e6f829c5eca"
-
+# SECURITY (PR #14 S7): this keypair was committed here and in demo/agent_celaut_use, so it is public
+# and must not be treated as a secret. Set TRACKER_PUBKEY/TRACKER_SECRET to pin a specific tracker box
+# (for example to reuse an existing on-chain tracker box); otherwise an ephemeral pair is generated for
+# this run.
 if [[ -n "${TRACKER_PUBKEY:-}" && -n "${TRACKER_SECRET:-}" ]]; then
     log_info "Using provided tracker keypair."
 else
-    TRACKER_PUBKEY="$DEFAULT_TRACKER_PUBKEY"
-    TRACKER_SECRET="$DEFAULT_TRACKER_SECRET"
-    log_info "Using fixed demo tracker keypair."
+    read -r TRACKER_PUBKEY TRACKER_SECRET <<<"$(python3 "$SCRIPT_DIR/../demo_keygen.py")"
+    log_info "Generated an ephemeral tracker keypair for this run."
 fi
 
 check_env() {

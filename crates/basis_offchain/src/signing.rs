@@ -41,21 +41,23 @@ pub enum SigningError {
     NotDlogSecret,
 }
 
-/// Redemption signing message: `blake2b256(issuer || receiver) || totalDebt(8 BE) || timestamp(8 BE)`.
+/// Redemption signing message: `blake2b256(issuer || receiver) || totalDebt(8 BE) || timestamp(8 BE) || trackerNftId(32)`.
 pub fn redemption_signing_message(
     issuer_pk: &[u8; 33],
     receiver_pk: &[u8; 33],
     total_debt: u64,
     timestamp: u64,
-) -> [u8; 48] {
+    tracker_nft_id: &[u8; 32],
+) -> [u8; 80] {
     let mut h = Blake2b::<U32>::new();
     h.update(issuer_pk);
     h.update(receiver_pk);
     let key = h.finalize();
-    let mut msg = [0u8; 48];
+    let mut msg = [0u8; 80];
     msg[..32].copy_from_slice(&key);
     msg[32..40].copy_from_slice(&total_debt.to_be_bytes());
     msg[40..48].copy_from_slice(&timestamp.to_be_bytes());
+    msg[48..80].copy_from_slice(tracker_nft_id);
     msg
 }
 
@@ -251,19 +253,22 @@ fn build_context<'ctx>(
 mod tests {
     use super::*;
 
+    const TEST_TRACKER_NFT_ID: [u8; 32] = [0x42u8; 32];
+
     #[test]
-    fn redemption_signing_message_is_48_bytes() {
+    fn redemption_signing_message_is_80_bytes() {
         let issuer = [0x02u8; 33];
         let receiver = [0x03u8; 33];
-        let msg = redemption_signing_message(&issuer, &receiver, 123, 456);
-        assert_eq!(msg.len(), 48);
+        let msg = redemption_signing_message(&issuer, &receiver, 123, 456, &TEST_TRACKER_NFT_ID);
+        assert_eq!(msg.len(), 80);
         assert_eq!(&msg[32..40], &123u64.to_be_bytes());
         assert_eq!(&msg[40..48], &456u64.to_be_bytes());
+        assert_eq!(&msg[48..80], &TEST_TRACKER_NFT_ID);
     }
 
     /// Cross-validation against the Scala reference implementation: test vector TV001 from
     /// specs/SCHNORR_SIGNATURE_SPEC.md (message = blake2b256(owner||receiver) || totalDebt BE
-    /// || timestamp BE).
+    /// || timestamp BE || trackerNftId).
     #[test]
     fn redemption_signing_message_matches_scala_vector_tv001() {
         let issuer: [u8; 33] =
@@ -276,10 +281,19 @@ mod tests {
                 .unwrap()
                 .try_into()
                 .unwrap();
-        let msg = redemption_signing_message(&issuer, &receiver, 1_000_000_000, 1_743_379_200_000);
+        // FIXME(c3-vectors): placeholder until Scala TestVectorGenerator is rerun with the
+        // shared TEST_TRACKER_NFT_ID; the expected hex must be regenerated from Scala.
+        let msg = redemption_signing_message(
+            &issuer,
+            &receiver,
+            1_000_000_000,
+            1_743_379_200_000,
+            &TEST_TRACKER_NFT_ID,
+        );
+        assert_eq!(msg.len(), 80);
         assert_eq!(
-            hex::encode(&msg),
-            "07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800"
+            &msg[..48],
+            &hex::decode("07b67390866bedf6c19b3fab1e29993ea6878e0d0dd0577ac6b6368c96a1220b000000003b9aca0000000195e97f7800").unwrap()[..]
         );
     }
 }

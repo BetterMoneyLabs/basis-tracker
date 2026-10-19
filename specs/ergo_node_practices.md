@@ -120,8 +120,11 @@ curl -s -X POST http://127.0.0.1:3048/reserves/create \
      -H "Content-Type: application/json" \
      -d '<ReserveCreationResponse JSON>'
    ```
-   The tracker converts `token_id` to `tokenId` and forwards the payload to its
-   configured Ergo node's `/wallet/payment/send`.
+   The tracker binds the exact `/reserves/create` response to a single-use
+   `submission_permit` (returned in the response and consumed on submit), converts
+   `token_id` to `tokenId`, and forwards the payload to its configured Ergo node's
+   `/wallet/payment/send`. A payload without a live, unused permit is rejected, so
+   this endpoint cannot be used as an open transaction-spending proxy.
 
    **Option B — Submit manually to your own Ergo node:**
    - Replace `token_id` with **`tokenId`** (camelCase).
