@@ -261,6 +261,9 @@ mod http_api_tests {
                 tls_cert_path: None,
                 tls_key_path: None,
                 auth: config::AuthConfig::default(),
+                reserve_creation_max_erg_nano: 10_000_000_000,
+                reserve_creation_max_token_amount: 1_000_000_000,
+                redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: config::ErgoConfig {
                 node: basis_store::ergo_scanner::NodeConfig {
@@ -320,8 +323,11 @@ mod http_api_tests {
             tracker_storage,
             acceptance_predicate: None,
             policy_storage,
-            reserve_submission_permits: std::sync::Arc::new(
-                basis_server::reserve_submission::PermitRegistry::new(),
+            pending_redemptions: std::sync::Arc::new(
+                basis_server::redemption_build::PendingRedemptionRegistry::new(),
+            ),
+            redemption_build_rate: std::sync::Arc::new(
+                basis_server::redemption_build::BuildRateLimiter::new(),
             ),
         }
     }

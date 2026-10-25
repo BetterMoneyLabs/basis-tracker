@@ -42,8 +42,11 @@ object BasisDeployer extends App {
   val basisAddress = Constants.getAddressFromErgoTree(basisErgoTree)
 
   // Use Constants.chainCashPlasmaParameters for consistency with BasisNoteRedeemer and TrackerBoxSetup
-  val InsertOnly = AvlTreeFlags(insertAllowed = true, updateAllowed = false, removeAllowed = false)
-  def emptyPlasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](InsertOnly, Constants.chainCashPlasmaParameters)
+  // SECURITY: the RESERVE tree (R5 of the reserve box) must allow insert + update -- the contract
+  // calls insertOrUpdate on redemption. InsertOnly would brick the reserve after the first
+  // redemption of a given (owner, receiver) pair. The TRACKER tree correctly stays InsertOnly.
+  val InsertUpdate = AvlTreeFlags(insertAllowed = true, updateAllowed = true, removeAllowed = false)
+  def emptyPlasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](InsertUpdate, Constants.chainCashPlasmaParameters)
   val emptyTreeErgoValue: ErgoValue[AvlTree] = emptyPlasmaMap.ergoValue
   val emptyTree: AvlTree = emptyTreeErgoValue.getValue
 

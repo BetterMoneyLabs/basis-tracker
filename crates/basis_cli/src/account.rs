@@ -228,6 +228,8 @@ mod tests {
             },
             server_url: "http://127.0.0.1:3048".to_string(),
             server_auth_mode: None,
+            node_url: None,
+            node_api_key: None,
             server_api_key: None,
             server_auth_pubkey: None,
             server_auth_secret_key: None,

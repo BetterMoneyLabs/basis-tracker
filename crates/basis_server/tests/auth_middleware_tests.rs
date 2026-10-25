@@ -381,8 +381,8 @@ async fn signature_mode_rejects_oversized_body() {
     let (pubkey_hex, secret_key) = generate_keypair();
     let app = test_app(write_mode_config(&pubkey_hex));
 
-    // One byte over the 1 MiB limit.
-    let body = vec![b'a'; 1024 * 1024 + 1];
+    // One byte over the limit the auth middleware shares with the router's DefaultBodyLimit.
+    let body = vec![b'a'; basis_server::auth_middleware::MAX_BODY_BYTES + 1];
     let request = sign_request_full(
         Request::builder().uri("/notes").method("POST"),
         body,
@@ -394,4 +394,148 @@ async fn signature_mode_rejects_oversized_body() {
 
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn api_key_without_admin_key_keeps_admin_role() {
+    // Backward compatibility: when admin_api_key is not configured, the shared
+    // api_key keeps its full-Admin meaning.
+    let mut config = AuthConfig::default();
+    config.mode = AuthMode::ApiKey;
+    config.api_key = Some("super-secret".to_string());
+
+    let app = test_app(config);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/acceptance/policy")
+                .method("POST")
+                .header("Authorization", "Bearer super-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"role=Admin");
+}
+
+#[tokio::test]
+async fn api_key_with_admin_key_set_grants_only_write() {
+    // With a separate admin_api_key configured, the shared api_key is Write-only:
+    // readable routes pass, operator-only (Admin) routes are rejected with 403.
+    let mut config = AuthConfig::default();
+    config.mode = AuthMode::ApiKey;
+    config.api_key = Some("shared-key".to_string());
+    config.admin_api_key = Some("operator-key".to_string());
+
+    let app = test_app(config);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/notes")
+                .header("Authorization", "Bearer shared-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"role=Write");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/acceptance/policy")
+                .method("POST")
+                .header("Authorization", "Bearer shared-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn admin_api_key_grants_admin_role() {
+    let mut config = AuthConfig::default();
+    config.mode = AuthMode::ApiKey;
+    config.api_key = Some("shared-key".to_string());
+    config.admin_api_key = Some("operator-key".to_string());
+
+    let app = test_app(config);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/acceptance/policy")
+                .method("POST")
+                .header("Authorization", "Bearer operator-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"role=Admin");
+}
+
+#[tokio::test]
+async fn signature_mode_rejects_zero_padded_timestamp_replay() {
+    // Regression test: the signature covers the PARSED timestamp, so replaying
+    // a captured request with a zero-padded X-Signature-Timestamp string
+    // ("01745000000000") yields the same canonical message and a still-valid
+    // signature. Replay protection must key the cache on the parsed value so
+    // the variant is rejected instead of replayed.
+    let (pubkey_hex, secret_key) = generate_keypair();
+    let app = test_app(write_mode_config(&pubkey_hex));
+
+    let timestamp = current_timestamp_ms();
+    let nonce = "padded-replay-nonce";
+    let request1 = sign_request_full(
+        Request::builder().uri("/notes").method("GET"),
+        Vec::new(),
+        &pubkey_hex,
+        &secret_key,
+        timestamp,
+        nonce,
+    );
+
+    // First request succeeds.
+    let response = app.clone().oneshot(request1).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Replay with the EXACT same headers and signature, except the timestamp
+    // string is zero-padded. The signature still verifies (it covers the
+    // parsed value), so only the replay cache can stop it.
+    let mut request2 = sign_request_full(
+        Request::builder().uri("/notes").method("GET"),
+        Vec::new(),
+        &pubkey_hex,
+        &secret_key,
+        timestamp,
+        nonce,
+    );
+    request2.headers_mut().insert(
+        "X-Signature-Timestamp",
+        format!("0{}", timestamp).parse().unwrap(),
+    );
+
+    let response = app.oneshot(request2).await.unwrap();
+    assert!(
+        response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN,
+        "zero-padded replay must be rejected, got {}",
+        response.status()
+    );
 }

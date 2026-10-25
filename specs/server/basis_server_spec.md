@@ -73,7 +73,6 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `GET /reserves/{box_id}` - Get a single reserve by its box id
 - `GET /key-status/{pubkey}` - Get status information for a public key
 - `POST /reserves/create` - Create a reserve creation payload for Ergo node's `/wallet/payment/send` API
-- `POST /reserves/submit` - Submit a reserve creation payload to the tracker's configured Ergo node for broadcast
 
 ### Acceptance Policy Endpoints
 
@@ -240,24 +239,19 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
     - `address`: Reserve contract P2S address (hardcoded in configuration)
     - `value`: ERG amount from request
     - `assets`: Array containing the NFT asset
-      - `token_id`: NFT ID from request (snake_case in the response; converted to `tokenId` by the submission endpoint)
+      - `token_id`: NFT ID from request (snake_case in the response; the node expects `tokenId`, camelCase)
       - `amount`: Always 1 for NFTs
     - `registers`: Map of register values
       - `R4`: Owner public key from request (GroupElement)
       - `R5`: Initial AVL tree (empty tree for new reserve)
       - `R6`: Tracker NFT ID (bytes) - identifies which tracker server this reserve is linked to
   - `fee`: Transaction fee amount from configuration
-  - `change_address`: Change address derived from tracker public key configuration (fallback to owner pubkey if unavailable)
+  - `change_address`: Owner's P2PK address derived from the request's `owner_pubkey`
 
-- `POST /reserves/submit` - Submit a previously generated reserve creation payload to the tracker's configured Ergo node for on-chain broadcast.
-  - Accepts the same `ReserveCreationResponse` JSON returned by `/reserves/create`.
-  - Converts `token_id` to the camelCase `tokenId` required by the Ergo node.
-  - Forwards the `requests` array to `POST {ergo_node}/wallet/payment/send` using the configured `api_key`.
-  - Returns:
-    - `tx_id`: String - the transaction id returned by the Ergo node.
-  - Errors:
-    - `503 Service Unavailable` if no Ergo node is configured.
-    - `502 Bad Gateway` if the Ergo node returns an error or is unreachable.
+There is **no** `/reserves/submit` endpoint (removed in PR #16 B4): the tracker never
+broadcasts reserve creations. The owner posts the returned `requests` array to their own
+Ergo node's `/wallet/payment/send`; the CLI does this with `reserve create --submit` when
+`node_url` is set in `cli.toml`.
 
 ### Debt Transfer Support — NOT IMPLEMENTED
 
@@ -360,9 +354,12 @@ Role-based access control assigns each request a role:
 
 - `Read`: `GET` endpoints and read-only `POST` queries (`/notes/state`, `/acceptance/check`).
 - `Write`: state-changing endpoints such as `/notes`, `/redeem`, `/redemption/prepare`, `/tracker/signature`.
-- `Admin`: reserve creation/submission (`/reserves/create`, `/reserves/submit`) and policy management (`/acceptance/policy`).
+- `Admin`: reserve creation (`/reserves/create`), redemption completion (`/redeem/complete`) and policy management (`/acceptance/policy`).
 
-In `none` and `api_key` modes all authenticated requests receive `Admin`. In `signature` mode the role is taken from the matching `authorized_clients` entry.
+In `none` mode every request receives `Admin`. In `api_key` mode the shared key receives
+`Admin`, unless `admin_api_key` is configured — then `api_key` grants only `Write` and the
+admin key grants `Admin`. In `signature` mode the role is taken from the matching
+`authorized_clients` entry.
 
 TLS should be enabled (`tls_cert_path` / `tls_key_path`) whenever authentication is used in production, otherwise credentials and signatures travel in plaintext.
 

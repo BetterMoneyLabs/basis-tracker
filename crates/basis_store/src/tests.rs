@@ -1010,3 +1010,161 @@ mod debt_monotonicity_tests {
         assert_eq!(stored.amount_redeemed, 600);
     }
 }
+
+#[cfg(test)]
+mod contract_range_tests {
+    use crate::{IouNote, NoteError, TrackerStateManager};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    fn make_manager() -> TrackerStateManager {
+        TrackerStateManager::new_with_temp_storage()
+    }
+
+    fn issuer_pubkey(secret_key: &[u8; 32]) -> [u8; 33] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(secret_key).expect("valid secret key");
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+    }
+
+    fn create_note(
+        issuer_secret: &[u8; 32],
+        recipient: &[u8; 33],
+        amount: u64,
+        timestamp: u64,
+    ) -> IouNote {
+        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret, &[0x42; 32]).unwrap()
+    }
+
+    #[test]
+    fn debt_above_contract_range_rejected_on_add_note() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        // The contract reads totalDebt with the signed byteArrayToLong, so
+        // amount_collected >= 2^63 would come out negative on-chain.
+        for amount in [u64::MAX, i64::MAX as u64 + 1] {
+            let note = create_note(&issuer_secret, &recipient, amount, 1);
+            let result = manager.add_note(&issuer, &note);
+            assert!(
+                matches!(
+                    result,
+                    Err(NoteError::AmountExceedsContractRange {
+                        field: "amount_collected",
+                        value,
+                    }) if value == amount
+                ),
+                "expected AmountExceedsContractRange for amount {}, got {:?}",
+                amount,
+                result
+            );
+        }
+
+        // The rejected postings must not poison state: a later sane note is accepted.
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 2))
+            .unwrap();
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_collected, 1000);
+    }
+
+    #[test]
+    fn debt_above_contract_range_rejected_on_update_note() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .unwrap();
+
+        for amount in [u64::MAX, i64::MAX as u64 + 1] {
+            let note = create_note(&issuer_secret, &recipient, amount, 2);
+            let result = manager.update_note(&issuer, &note);
+            assert!(
+                matches!(
+                    result,
+                    Err(NoteError::AmountExceedsContractRange {
+                        field: "amount_collected",
+                        value,
+                    }) if value == amount
+                ),
+                "expected AmountExceedsContractRange for amount {}, got {:?}",
+                amount,
+                result
+            );
+        }
+
+        // A later sane note is still accepted.
+        manager
+            .update_note(&issuer, &create_note(&issuer_secret, &recipient, 2000, 3))
+            .unwrap();
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_collected, 2000);
+    }
+
+    #[test]
+    fn debt_at_contract_range_max_accepted() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        // i64::MAX exactly still fits the contract's signed long.
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient, i64::MAX as u64, 1),
+            )
+            .unwrap();
+        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        assert_eq!(stored.amount_collected, i64::MAX as u64);
+    }
+
+    #[test]
+    fn timestamp_above_contract_range_rejected() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let recipient = [2u8; 33];
+
+        // u64::MAX is also a future timestamp, but the contract-range check must
+        // fire first: FutureTimestamp alone would not explain the on-chain bricking.
+        for timestamp in [u64::MAX, i64::MAX as u64 + 1] {
+            let note = create_note(&issuer_secret, &recipient, 1000, timestamp);
+            let result = manager.add_note(&issuer, &note);
+            assert!(
+                matches!(
+                    result,
+                    Err(NoteError::AmountExceedsContractRange {
+                        field: "timestamp",
+                        value,
+                    }) if value == timestamp
+                ),
+                "expected AmountExceedsContractRange for timestamp {}, got {:?}",
+                timestamp,
+                result
+            );
+            let result = manager.update_note(&issuer, &note);
+            assert!(
+                matches!(
+                    result,
+                    Err(NoteError::AmountExceedsContractRange {
+                        field: "timestamp",
+                        value,
+                    }) if value == timestamp
+                ),
+                "expected AmountExceedsContractRange for timestamp {}, got {:?}",
+                timestamp,
+                result
+            );
+        }
+
+        // A later sane note is accepted.
+        manager
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .unwrap();
+    }
+}

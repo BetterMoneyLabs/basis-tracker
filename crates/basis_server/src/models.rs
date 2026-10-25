@@ -402,21 +402,17 @@ pub struct CreateReserveRequest {
     pub token_id: String,
 }
 
-// Response for reserve creation - formatted for Ergo node's /wallet/payment/send API
+// Response for reserve creation - formatted for the Ergo node's /wallet/payment/send API.
+//
+// The OWNER submits this payload to their own node, which signs it with the owner's wallet.
+// The tracker's wallet is never involved: `change_address` is the owner's P2PK address derived
+// from `owner_pubkey`. (The old `POST /reserves/submit` route and its `submission_permit` were
+// removed because that route paid from the tracker's wallet, PR #16 B4.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReserveCreationResponse {
     pub requests: Vec<ReservePaymentRequest>,
     pub fee: u64,
     pub change_address: String,
-    /// Opaque permit proving this exact payload came from `POST /reserves/create`.
-    ///
-    /// `POST /reserves/submit` forwards the payload to the node's `/wallet/payment/send` with the
-    /// node `api_key`, which signs it with the tracker's wallet key. It therefore only accepts a
-    /// payload whose fingerprint matches a live, unused permit, so a caller cannot substitute their
-    /// own destination address, value, assets or registers. Echoed back unchanged; clients that do
-    /// not care about it can ignore it, but it is not optional in practice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub submission_permit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,12 +427,6 @@ pub struct ReservePaymentRequest {
 pub struct Asset {
     pub token_id: String,
     pub amount: u64,
-}
-
-// Response for reserve submission via the tracker's Ergo node.
-#[derive(Debug, Clone, Serialize)]
-pub struct ReserveSubmissionResponse {
-    pub tx_id: String,
 }
 #[derive(Debug, Serialize)]
 pub struct TrackerBoxIdResponse {

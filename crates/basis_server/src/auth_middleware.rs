@@ -33,11 +33,15 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-use crate::config::{AuthConfig, AuthMode, ClientRole};
+use crate::config::{is_loopback_host, AuthConfig, AuthMode, ClientRole};
 
 /// Maximum request body size accepted in signature mode. Requests with larger
 /// bodies are rejected with 413 Payload Too Large.
-const MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+///
+/// The router's `DefaultBodyLimit` uses this same value, so the middleware
+/// limit and the extractor limit cannot drift apart. The largest legitimate
+/// tracker payload is a few KiB; 256 KiB is generous headroom.
+pub const MAX_BODY_BYTES: usize = 256 * 1024; // 256 KiB
 
 /// Error produced while authenticating a request.
 enum AuthError {
@@ -69,10 +73,18 @@ impl AuthState {
         }
     }
 
-    /// TTL for replay-cache entries. Using twice the timestamp tolerance gives a
-    /// small safety margin while bounding memory growth.
+    /// TTL for replay-cache entries. Three times the timestamp tolerance, not
+    /// two: entry expiry is measured with `Instant` from insertion, while the
+    /// timestamp freshness check uses wall-clock time. A request dated at the
+    /// very end of its tolerance window could otherwise be replayed in the
+    /// final instants of a 2x TTL; the extra tolerance closes that gap while
+    /// still bounding memory growth.
     fn replay_ttl(&self) -> Duration {
-        Duration::from_millis(self.config.signature_timestamp_tolerance_ms * 2)
+        Duration::from_millis(
+            self.config
+                .signature_timestamp_tolerance_ms
+                .saturating_mul(3),
+        )
     }
 }
 
@@ -167,6 +179,35 @@ fn verify_api_key(config: &AuthConfig, request: &Request) -> Result<AuthContext,
         .or_else(|| extract_header(request, "X-API-Key"))
         .ok_or("Missing API key: provide Authorization: Bearer <key> or X-API-Key: <key>")?;
 
+    // When a separate admin key is configured it is checked first, and the
+    // regular api_key then only grants Write: the key shared with ordinary
+    // clients cannot drive operator-only routes.
+    if let Some(admin) = config.admin_api_key.as_ref().filter(|k| !k.is_empty()) {
+        if subtle::constant_time_eq(provided.as_bytes(), admin.as_bytes()) {
+            return Ok(AuthContext {
+                pubkey: None,
+                role: ClientRole::Admin,
+                auth_mode: AuthMode::ApiKey,
+            });
+        }
+        let expected = config
+            .api_key
+            .as_ref()
+            .filter(|k| !k.is_empty())
+            .ok_or("Server is not configured with an API key")?;
+        return if subtle::constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+            Ok(AuthContext {
+                pubkey: None,
+                role: ClientRole::Write,
+                auth_mode: AuthMode::ApiKey,
+            })
+        } else {
+            Err("Invalid API key".to_string())
+        };
+    }
+
+    // Backward compatibility: without an admin_api_key, the shared api_key
+    // keeps its full-Admin meaning.
     let expected = config
         .api_key
         .as_ref()
@@ -208,6 +249,9 @@ async fn verify_signature(
     state: &AuthState,
     request: Request,
 ) -> Result<(AuthContext, Request), AuthError> {
+    // Every cheap header validation runs BEFORE the body is buffered: a request
+    // that fails here must not make the server read (and allocate) up to
+    // MAX_BODY_BYTES first.
     let pubkey_hex = extract_header(&request, "X-Signature-Pubkey")
         .ok_or_else(|| AuthError::Unauthorized("Missing X-Signature-Pubkey header".to_string()))?;
     let signature_hex = extract_header(&request, "X-Signature")
@@ -222,15 +266,33 @@ async fn verify_signature(
         .filter(|n| !n.is_empty())
         .ok_or_else(|| AuthError::Unauthorized("Missing X-Signature-Nonce header".to_string()))?;
 
-    // Validate pubkey format.
-    if hex::decode(&pubkey_hex)
-        .map(|b| b.len() != 33)
-        .unwrap_or(true)
-    {
+    // Validate signature format (hex, exactly 65 bytes).
+    let signature_bytes = hex::decode(&signature_hex).map_err(|_| {
+        AuthError::Unauthorized("Invalid X-Signature: expected hex string".to_string())
+    })?;
+    if signature_bytes.len() != 65 {
+        return Err(format!(
+            "Invalid signature length: expected 130 hex characters, got {}",
+            signature_hex.len()
+        )
+        .into());
+    }
+    let mut signature_array = [0u8; 65];
+    signature_array.copy_from_slice(&signature_bytes);
+
+    // Validate pubkey format (hex, exactly 33 bytes).
+    let pubkey_bytes = hex::decode(&pubkey_hex).map_err(|_| {
+        AuthError::Unauthorized(
+            "Invalid X-Signature-Pubkey: expected 66 hex characters".to_string(),
+        )
+    })?;
+    if pubkey_bytes.len() != 33 {
         return Err("Invalid X-Signature-Pubkey: expected 66 hex characters"
             .to_string()
             .into());
     }
+    let mut pubkey_array = [0u8; 33];
+    pubkey_array.copy_from_slice(&pubkey_bytes);
 
     // Locate the authorized client entry.
     let client = state
@@ -273,7 +335,8 @@ async fn verify_signature(
         }
     }
 
-    // Build canonical message and verify signature.
+    // All header checks passed: buffer the body, build the canonical message
+    // and verify the signature.
     let (parts, body) = request.into_parts();
     let body_bytes = to_bytes(body, MAX_BODY_BYTES).await.map_err(|_| {
         AuthError::PayloadTooLarge(format!(
@@ -291,24 +354,6 @@ async fn verify_signature(
         "{}\n{}\n{}\n{}\n{}\n{}",
         method, path, query, timestamp_ms, nonce, body_hash
     );
-
-    let signature_bytes = hex::decode(&signature_hex).map_err(|_| {
-        AuthError::Unauthorized("Invalid X-Signature: expected hex string".to_string())
-    })?;
-    if signature_bytes.len() != 65 {
-        return Err(format!(
-            "Invalid signature length: expected 130 hex characters, got {}",
-            signature_hex.len()
-        )
-        .into());
-    }
-    let mut signature_array = [0u8; 65];
-    signature_array.copy_from_slice(&signature_bytes);
-
-    let pubkey_bytes = hex::decode(&pubkey_hex)
-        .map_err(|_| AuthError::Unauthorized("Invalid public key hex".to_string()))?;
-    let mut pubkey_array = [0u8; 33];
-    pubkey_array.copy_from_slice(&pubkey_bytes);
 
     basis_offchain::schnorr::schnorr_verify(&signature_array, canonical.as_bytes(), &pubkey_array)
         .map_err(|_| AuthError::Unauthorized("Invalid request signature".to_string()))?;
@@ -345,6 +390,72 @@ fn current_timestamp_ms() -> u64 {
 fn prune_cache(cache: &mut HashMap<(String, String), Instant>, ttl: Duration) {
     let now = Instant::now();
     cache.retain(|_, instant| now.duration_since(*instant) < ttl);
+}
+
+/// Strip a `:port` suffix from a Host header value (or the authority part of an
+/// Origin). Bracketed IPv6 literals keep their brackets; a bare IPv6 literal
+/// (multiple colons, no port) is returned unchanged.
+fn host_without_port(authority: &str) -> &str {
+    let authority = authority.trim();
+    if authority.starts_with('[') {
+        // Bracketed IPv6 literal: the host ends at ']', bracket included.
+        return match authority.find(']') {
+            Some(idx) => &authority[..=idx],
+            None => authority,
+        };
+    }
+    match authority.rsplit_once(':') {
+        // A single colon with a numeric suffix is a port.
+        Some((host, port)) if !host.contains(':') && port.bytes().all(|b| b.is_ascii_digit()) => {
+            host
+        }
+        _ => authority,
+    }
+}
+
+/// True when an `Origin` header value refers to a loopback HTTP(S) origin, on
+/// any port. Used as the CORS origin predicate when auth is disabled: the
+/// unauthenticated loopback server must not be callable cross-origin from an
+/// arbitrary web page.
+pub fn is_loopback_origin(origin: &axum::http::HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    is_loopback_host(host_without_port(authority))
+}
+
+/// DNS-rebinding guard, active only when auth is disabled (`auth.mode = "none"`).
+///
+/// A `none`-mode server bound to loopback grants every caller Admin. Browsers
+/// always send a `Host` header, so a page on `evil.com` that rebinds its DNS to
+/// `127.0.0.1` would arrive with `Host: evil.com` -- reject anything whose
+/// Host (after stripping the port) is not loopback. Requests without a Host
+/// header (HTTP/1.0, non-browser tools) are let through: they cannot be a
+/// browser-driven rebinding attack.
+pub async fn loopback_host_guard(request: Request, next: Next) -> Response {
+    let allowed = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|host| is_loopback_host(host_without_port(host)))
+        .unwrap_or(true);
+    if allowed {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+            r#"{"success":false,"data":null,"error":"Forbidden: Host header is not a loopback address"}"#,
+        )
+            .into_response()
+    }
 }
 
 // `subtle` is not a direct dependency, so implement a small constant-time comparison.
@@ -391,5 +502,31 @@ mod tests {
             ..Default::default()
         };
         assert!(verify_api_key(&config, &request).is_err());
+    }
+
+    #[test]
+    fn host_without_port_strips_ports() {
+        assert_eq!(host_without_port("localhost"), "localhost");
+        assert_eq!(host_without_port("localhost:3048"), "localhost");
+        assert_eq!(host_without_port("127.0.0.1:8080"), "127.0.0.1");
+        assert_eq!(host_without_port("[::1]:3048"), "[::1]");
+        assert_eq!(host_without_port("::1"), "::1");
+        assert_eq!(host_without_port("evil.com:1234"), "evil.com");
+    }
+
+    #[test]
+    fn is_loopback_origin_accepts_only_loopback() {
+        use axum::http::HeaderValue;
+        let v = |s: &str| HeaderValue::from_str(s).unwrap();
+        assert!(is_loopback_origin(&v("http://localhost")));
+        assert!(is_loopback_origin(&v("http://localhost:3048")));
+        assert!(is_loopback_origin(&v("http://127.0.0.1:8080")));
+        assert!(is_loopback_origin(&v("http://[::1]:9000")));
+        assert!(is_loopback_origin(&v("https://localhost:3048")));
+
+        assert!(!is_loopback_origin(&v("https://evil.com")));
+        assert!(!is_loopback_origin(&v("http://localhost.evil.com")));
+        assert!(!is_loopback_origin(&v("http://127.0.0.1.evil.com")));
+        assert!(!is_loopback_origin(&v("file://localhost")));
     }
 }

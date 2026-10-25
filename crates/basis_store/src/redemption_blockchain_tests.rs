@@ -330,6 +330,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         // Initiate redemption through manager
@@ -748,6 +749,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         // Initiate redemption
@@ -1081,6 +1083,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let first_data = redemption_manager
@@ -1194,6 +1197,7 @@ mod tests {
             fee_input_box_ids: vec!["test_fee_input".to_string()],
             fee_input_total_value: 1_000_000,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let second_proof = crate::NoteProof {

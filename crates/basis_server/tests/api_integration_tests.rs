@@ -36,6 +36,7 @@ mod api_tests {
             fee_input_box_ids: vec![],
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: "test_reserve_ergo_tree".to_string(),
         };
 
         assert!(!request.issuer_pubkey.is_empty());

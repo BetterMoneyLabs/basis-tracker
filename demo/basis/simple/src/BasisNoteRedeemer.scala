@@ -283,14 +283,16 @@ object BasisNoteRedeemer extends App {
    * Generates a real AVL proof for inserting redeemed amount into reserve tree.
    * For first redemption, creates a tree from scratch and generates insert proof.
    *
-   * Note: Uses InsertOnly flags and Constants.chainCashPlasmaParameters to match
-   * the reserve box creation (BasisDeployer).
+   * Note: Uses InsertUpdate flags (insert + update allowed) and
+   * Constants.chainCashPlasmaParameters to match the reserve box creation (BasisDeployer).
+   * The reserve tree must allow updates because the contract calls insertOrUpdate;
+   * an InsertOnly reserve is redeemable exactly once per key.
    * Tree value format: timestamp (8 bytes) ++ redeemedAmount (8 bytes) = 16 bytes
    */
   def generateReserveInsertProof(payerKey: String, payeeKey: String, timestamp: Long, redeemedAmount: Long): (Array[Byte], AvlTree) = {
-    // Create PlasmaMap with InsertOnly flags and correct parameters (must match reserve box)
-    val InsertOnly = AvlTreeFlags(insertAllowed = true, updateAllowed = false, removeAllowed = false)
-    val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](InsertOnly, Constants.chainCashPlasmaParameters)
+    // Create PlasmaMap with insert+update flags and correct parameters (must match reserve box).
+    // InsertUpdate is defined above (line ~88); the tracker tree correctly stays InsertOnly.
+    val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](InsertUpdate, Constants.chainCashPlasmaParameters)
 
     // Create the key: hash(payerKey || payeeKey)
     val key = Blake2b256(

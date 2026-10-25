@@ -71,6 +71,11 @@ use crate::{
     ExtendedReserveInfo, ReserveTracker,
 };
 
+/// Page size for `POST /blockchain/box/unspent/byAddress`. The node defaults to
+/// 5 boxes (newest first) when no limit is given, which silently dropped older
+/// reserves from tracking (issue: scanner only saw 5 reserve boxes per address).
+const RESERVE_BOX_PAGE_LIMIT: u64 = 1000;
+
 #[derive(Error, Debug)]
 pub enum ScannerError {
     #[error("Scanner error: {0}")]
@@ -379,53 +384,72 @@ impl ServerState {
         for address in addresses {
             info!("Fetching unspent reserve boxes for contract: {}", address);
 
-            let response = self
-                .request_builder(reqwest::Method::POST, &url)
-                .json(&address)
-                .send()
-                .await
-                .map_err(|e| {
-                    ScannerError::HttpError(format!(
-                        "Failed to fetch reserve boxes for {}: {}",
-                        address, e
-                    ))
-                })?;
-
-            let status = response.status();
-            if !status.is_success() {
-                let response_text = response
-                    .text()
+            // The node applies a default limit of 5 boxes (newest first) when no
+            // `limit` is given, which silently drops older reserves. Page through
+            // the full result set: keep fetching until a page comes back short.
+            let mut offset: u64 = 0;
+            let mut address_box_count = 0usize;
+            loop {
+                let response = self
+                    .request_builder(reqwest::Method::POST, &url)
+                    .query(&[
+                        ("offset", offset.to_string()),
+                        ("limit", RESERVE_BOX_PAGE_LIMIT.to_string()),
+                    ])
+                    .json(&address)
+                    .send()
                     .await
-                    .unwrap_or_else(|_| "Unable to read response".to_string());
-                error!(
-                    "Failed to get reserve boxes for {} with status {}: {}",
-                    address, status, response_text
-                );
-                return Err(ScannerError::NodeError(format!(
-                    "Failed to get reserve boxes for {} with status: {}",
-                    address, status
-                )));
-            }
+                    .map_err(|e| {
+                        ScannerError::HttpError(format!(
+                            "Failed to fetch reserve boxes for {}: {}",
+                            address, e
+                        ))
+                    })?;
 
-            let parsed: ByAddressResponse = crate::http::read_json_capped(response)
-                .await
-                .map_err(|e| {
-                    ScannerError::JsonError(format!(
-                        "Failed to parse reserve boxes response for {}: {}",
-                        address, e
-                    ))
-                })
-                .and_then(|value| {
-                    serde_json::from_value(value).map_err(|e| {
+                let status = response.status();
+                if !status.is_success() {
+                    let response_text = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unable to read response".to_string());
+                    error!(
+                        "Failed to get reserve boxes for {} with status {}: {}",
+                        address, status, response_text
+                    );
+                    return Err(ScannerError::NodeError(format!(
+                        "Failed to get reserve boxes for {} with status: {}",
+                        address, status
+                    )));
+                }
+
+                let parsed: ByAddressResponse = crate::http::read_json_capped(response)
+                    .await
+                    .map_err(|e| {
                         ScannerError::JsonError(format!(
                             "Failed to parse reserve boxes response for {}: {}",
                             address, e
                         ))
                     })
-                })?;
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|e| {
+                            ScannerError::JsonError(format!(
+                                "Failed to parse reserve boxes response for {}: {}",
+                                address, e
+                            ))
+                        })
+                    })?;
 
-            info!("Found {} reserve boxes for {}", parsed.len(), address);
-            all_boxes.extend(parsed.into_iter().map(Into::into));
+                let page_len = parsed.len();
+                address_box_count += page_len;
+                all_boxes.extend(parsed.into_iter().map(Into::into));
+
+                if (page_len as u64) < RESERVE_BOX_PAGE_LIMIT {
+                    break;
+                }
+                offset += RESERVE_BOX_PAGE_LIMIT;
+            }
+
+            info!("Found {} reserve boxes for {}", address_box_count, address);
         }
 
         // Deduplicate by box_id in case both contracts somehow return the same box.
@@ -673,7 +697,11 @@ impl ServerState {
         info!("Retrieved {} scan boxes to process", scan_boxes.len());
 
         let mut current_box_ids = Vec::new();
-        let mut parse_failures = 0usize;
+        // Box IDs that failed to parse, normalized the same way
+        // `ExtendedReserveInfo.box_id` is stored (hex-encoded raw bytes). A
+        // quarantined box is skipped but never triggers removal of itself, and
+        // it must not block removal of OTHER genuinely-spent reserves.
+        let mut quarantined_box_ids: Vec<String> = Vec::new();
 
         for scan_box in &scan_boxes {
             debug!(
@@ -707,9 +735,12 @@ impl ServerState {
                     }
                 }
                 Err(e) => {
-                    parse_failures += 1;
+                    quarantined_box_ids.push(hex::encode(
+                        hex::decode(&scan_box.box_id)
+                            .unwrap_or_else(|_| scan_box.box_id.as_bytes().to_vec()),
+                    ));
                     warn!(
-                        "Failed to parse reserve box {}: {} - registers: {:?}",
+                        "Skipping unparseable reserve box {}: {} - registers: {:?}",
                         scan_box.box_id, e, scan_box.additional_registers
                     );
                 }
@@ -728,9 +759,11 @@ impl ServerState {
 
         // Only remove reserves if we actually found VALID boxes in the scan.
         // If no valid reserves were parsed (e.g., all failed validation), don't remove manually-inserted reserves.
-        if !current_box_ids.is_empty() && parse_failures == 0 {
+        if !current_box_ids.is_empty() {
             for reserve in all_reserves {
-                if !current_box_ids.contains(&reserve.box_id) {
+                if !current_box_ids.contains(&reserve.box_id)
+                    && !quarantined_box_ids.contains(&reserve.box_id)
+                {
                     info!(
                         "Removing spent reserve: {} (not found in current scan)",
                         reserve.box_id
@@ -751,17 +784,6 @@ impl ServerState {
                     }
                 }
             }
-        } else if parse_failures > 0 {
-            // Fail closed: a snapshot with unparseable boxes is not
-            // authoritative. Removing reserves not present in
-            // `current_box_ids` could delete a live reserve whose box merely
-            // failed to parse (corrupted node response, new register
-            // serialization), so the previous state is preserved.
-            warn!(
-                "Skipping reserve removal: {} of {} scan boxes failed to parse",
-                parse_failures,
-                scan_boxes.len()
-            );
         } else {
             info!("Scan returned 0 boxes, skipping reserve removal to preserve manually-inserted reserves");
         }
@@ -1373,13 +1395,14 @@ mod tests {
         );
     }
 
-    async fn test_process_scan_boxes_preserves_reserves_when_boxes_fail_to_parse() {
+    #[tokio::test]
+    async fn test_process_scan_boxes_removes_spent_reserve_despite_garbage_box() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         // Mock node returning one valid reserve box and one malformed box
-        // (missing R4). A pre-existing stored reserve must survive: the
-        // malformed box makes the snapshot non-authoritative, so the removal
-        // phase must be skipped (fail closed).
+        // (missing R4). The malformed box is quarantined individually: it is
+        // skipped with a warning, but it must NOT block removal of a tracked
+        // reserve that is genuinely spent (absent from the scan).
         let prefixed_pubkey = VALID_PREFIXED_PUBKEY;
         let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
         let empty_tree = empty_reserve_tree_register();
@@ -1435,8 +1458,7 @@ mod tests {
         let server_state =
             ServerState::new(config, &data_dir).expect("Failed to create server state");
 
-        // Pre-existing reserve that is NOT in the scan result; previously it
-        // would have been removed because one valid box was parsed.
+        // Pre-existing reserve that is NOT in the scan result (genuinely spent).
         let preexisting = ExtendedReserveInfo {
             base_info: crate::ReserveInfo {
                 collateral_amount: 500,
@@ -1474,10 +1496,144 @@ mod tests {
             remaining
         );
         assert!(
-            remaining.contains(&"preexisting_box".to_string()),
-            "pre-existing reserve must be preserved when any scan box fails to parse: {:?}",
+            !remaining.contains(&hex::encode("bad_box_2")),
+            "unparseable box must be skipped, not tracked: {:?}",
             remaining
         );
+        assert!(
+            !remaining.contains(&"preexisting_box".to_string()),
+            "one garbage box must not block removal of a genuinely spent reserve: {:?}",
+            remaining
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_unspent_reserve_boxes_paginates_all_pages() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The node defaults to 5 boxes per page; the scanner must pass an
+        // explicit limit and keep paging until a short page comes back.
+        // Mock node: page 1 is full (RESERVE_BOX_PAGE_LIMIT boxes), page 2 has
+        // 7 more; ALL of them must end up tracked.
+        let full_page = RESERVE_BOX_PAGE_LIMIT as usize;
+        let extra_page = 7usize;
+        let total = full_page + extra_page;
+
+        let prefixed_pubkey = VALID_PREFIXED_PUBKEY;
+        let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let empty_tree = empty_reserve_tree_register();
+
+        let box_json = |i: usize| {
+            format!(
+                "{{\"boxId\":\"{:064x}\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
+                i
+            ) + &format!(
+                "\"transactionId\":\"{:064x}\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                i, prefixed_pubkey, empty_tree, tracker_nft_id
+            )
+        };
+        let page = |from: usize, count: usize| {
+            format!(
+                "[{}]",
+                (from..from + count)
+                    .map(box_json)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        let page1 = page(0, full_page);
+        let page2 = page(full_page, extra_page);
+
+        let seen_offsets = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+        let seen_offsets_server = seen_offsets.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let page1 = page1.clone();
+                let page2 = page2.clone();
+                let seen_offsets = seen_offsets_server.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = match socket.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let request_line = request.lines().next().unwrap_or_default();
+                    let offset: u64 = request_line
+                        .split('&')
+                        .flat_map(|part| part.split('?'))
+                        .find_map(|part| part.strip_prefix("offset="))
+                        .and_then(|v| {
+                            v.chars()
+                                .take_while(|c| c.is_ascii_digit())
+                                .collect::<String>()
+                                .parse()
+                                .ok()
+                        })
+                        .unwrap_or(0);
+                    seen_offsets.lock().unwrap().push(offset);
+
+                    let body = match offset {
+                        0 => page1,
+                        o if o == RESERVE_BOX_PAGE_LIMIT => page2,
+                        _ => "[]".to_string(),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        let config = NodeConfig {
+            node_url: format!("http://{}", addr),
+            reserve_contract_p2s: Some("test_p2s".to_string()),
+            ..Default::default()
+        };
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_pagination_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let server_state =
+            ServerState::new(config, &data_dir).expect("Failed to create server state");
+
+        server_state.process_scan_boxes().await.unwrap();
+
+        assert_eq!(
+            seen_offsets.lock().unwrap().as_slice(),
+            &[0u64, RESERVE_BOX_PAGE_LIMIT],
+            "scanner must request page 2 after a full first page"
+        );
+
+        let tracked = server_state.reserve_tracker.get_all_reserves();
+        assert_eq!(
+            tracked.len(),
+            total,
+            "all reserves across every page must be tracked"
+        );
+        for i in 0..total {
+            let box_id = format!("{:064x}", i);
+            assert!(
+                tracked.iter().any(|r| r.box_id == box_id),
+                "reserve box {} from the scan must be tracked",
+                box_id
+            );
+        }
     }
 
     #[test]

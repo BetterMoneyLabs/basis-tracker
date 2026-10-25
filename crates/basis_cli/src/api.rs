@@ -189,16 +189,13 @@ pub struct CreateReserveRequest {
 pub struct ReserveCreationResponse {
     pub requests: Vec<ReservePaymentRequest>,
     pub fee: u64,
-    pub change_address: String,
-    /// Single-use permit proving this payload came from `POST /reserves/create`.
+    /// Owner's change address (derived from the owner pubkey by the tracker).
     ///
-    /// `POST /reserves/submit` forwards the payload to the tracker's Ergo node
-    /// (`/wallet/payment/send`) with the node `api_key`, so the node signs it with the tracker's
-    /// wallet key. The server therefore only accepts a payload whose fingerprint matches a live,
-    /// unused permit, which is what stops a caller from redirecting the payment. It must be echoed
-    /// back verbatim on submit -- hence `skip_serializing_if` so the field can be absent locally.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub submission_permit: Option<String>,
+    /// The tracker only *builds* this payload: the reserve owner submits it to
+    /// their own Ergo node's `/wallet/payment/send` (the requests array is the
+    /// request body), so the tracker's wallet is never involved. Use
+    /// [`submit_reserve_to_node`] or submit the payload manually.
+    pub change_address: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,10 +212,62 @@ pub struct Asset {
     pub amount: u64,
 }
 
-/// Response from reserve submission.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReserveSubmissionResponse {
-    pub tx_id: String,
+/// Asset shape the Ergo node's `/wallet/payment/send` expects (`tokenId`, camelCase).
+#[derive(Debug, Clone, Serialize)]
+struct NodeAsset {
+    #[serde(rename = "tokenId")]
+    token_id: String,
+    amount: u64,
+}
+
+/// Payment request shape the Ergo node's `/wallet/payment/send` expects.
+#[derive(Debug, Clone, Serialize)]
+struct NodePaymentRequest {
+    address: String,
+    value: u64,
+    assets: Vec<NodeAsset>,
+    registers: std::collections::HashMap<String, String>,
+}
+
+/// Submit a reserve creation payload to the OWNER's Ergo node for broadcast.
+///
+/// The node signs it with the owner's wallet key, so the owner's wallet must
+/// hold the reserve NFT (`nft_id`) and enough ERG for the reserve value and
+/// fee. Returns the transaction id.
+pub fn submit_reserve_to_node(
+    node_url: &str,
+    node_api_key: Option<&str>,
+    payload: &ReserveCreationResponse,
+) -> Result<String> {
+    let payment_requests: Vec<NodePaymentRequest> = payload
+        .requests
+        .iter()
+        .map(|req| NodePaymentRequest {
+            address: req.address.clone(),
+            value: req.value,
+            assets: req
+                .assets
+                .iter()
+                .map(|a| NodeAsset {
+                    token_id: a.token_id.clone(),
+                    amount: a.amount,
+                })
+                .collect(),
+            registers: req.registers.clone(),
+        })
+        .collect();
+
+    let url = format!("{}/wallet/payment/send", node_url.trim_end_matches('/'));
+    let mut request = ureq::post(&url);
+    if let Some(key) = node_api_key.filter(|k| !k.is_empty()) {
+        request = request.set("api_key", key);
+    }
+    let response = request
+        .send_json(&payment_requests)
+        .map_err(|e| anyhow::anyhow!("Ergo node /wallet/payment/send failed: {}", e))?;
+    // The node returns the transaction id as a quoted string.
+    let body = response.into_string()?;
+    Ok(body.trim().trim_matches('"').to_string())
 }
 
 /// Reserve-token configuration returned by the tracker.
@@ -971,32 +1020,6 @@ impl TrackerClient {
         } else {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to create reserve: {}", error_text))
-        }
-    }
-
-    /// Submit a reserve creation payload to the tracker's configured Ergo node for broadcast.
-    ///
-    /// The server only forwards payloads carrying a live single-use permit issued by
-    /// `POST /reserves/create` (it would otherwise sign arbitrary payment requests with
-    /// the tracker's wallet), so `payload.submission_permit` must be populated.
-    pub async fn submit_reserve(
-        &self,
-        payload: ReserveCreationResponse,
-    ) -> Result<ReserveSubmissionResponse> {
-        let url = format!("{}/reserves/submit", self.base_url);
-        let body = serde_json::to_value(payload)?;
-        let response = self.post(&url, &body)?.send_json(body)?;
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<ReserveSubmissionResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!("Failed to submit reserve: {}", error_text))
         }
     }
 

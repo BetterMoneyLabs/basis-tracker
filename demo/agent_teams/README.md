@@ -136,8 +136,9 @@ Same pattern as `demo/agent_coop` — one `basis-mcp` process per agent over std
 isolated `HOME` — plus the backed-money tools:
 
 * `account_create`, `policy_set`, `note_create`, `note_list` — as in the co-op demo;
-* `reserve_create` — builds the reserve-creation payload (submitted via the tracker's
-  `/reserves/submit` endpoint);
+* `reserve_create` — builds the reserve-creation payload (the demo then submits its
+  `requests` array to the demo's own Ergo node `/wallet/payment/send`; the tracker's
+  wallet is never involved);
 * `reserve_status` — polled until the scanner confirms collateral on-chain;
 * `note_redeem` — local-signing on-chain redemption of the prize.
 

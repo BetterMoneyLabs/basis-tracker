@@ -1738,21 +1738,35 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                     }
                     println!();
 
-                    let submit = read_input("Submit to tracker node for broadcast? (y/n): ");
+                    let submit = read_input("Submit to your Ergo node for broadcast? (y/n): ");
                     if submit == "y" || submit == "Y" {
-                        match app.client.submit_reserve(response).await {
-                            Ok(submission) => {
-                                app.set_notification(
-                                    format!(
-                                        "Reserve submitted, tx {}",
-                                        &submission.tx_id[..16.min(submission.tx_id.len())]
-                                    ),
-                                    false,
-                                );
+                        match app.node_url.as_deref() {
+                            Some(node_url) => {
+                                match basis_cli_lib::api::submit_reserve_to_node(
+                                    node_url,
+                                    app.node_api_key.as_deref(),
+                                    &response,
+                                ) {
+                                    Ok(tx_id) => {
+                                        app.set_notification(
+                                            format!(
+                                                "Reserve submitted, tx {}",
+                                                &tx_id[..16.min(tx_id.len())]
+                                            ),
+                                            false,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        app.set_notification(
+                                            format!("Failed to submit reserve: {}", e),
+                                            true,
+                                        );
+                                    }
+                                }
                             }
-                            Err(e) => {
+                            None => {
                                 app.set_notification(
-                                    format!("Failed to submit reserve: {}", e),
+                                    "No node_url in cli.toml — submit the payload to your node's /wallet/payment/send manually".to_string(),
                                     true,
                                 );
                             }

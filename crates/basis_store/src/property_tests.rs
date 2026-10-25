@@ -253,6 +253,7 @@ mod property_tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
             // Basic validation: amount should be positive
@@ -303,6 +304,8 @@ mod property_tests {
                 None, // First redemption: no reserve lookup proof
                 vec![0x03, 0x04],
                 redemption_amount,
+
+            &crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
             );
 
             prop_assert!(result.is_ok(), "Transaction building should succeed for valid amounts: {:?}", result.err());
@@ -349,6 +352,8 @@ mod property_tests {
                 None,
                 vec![0x03, 0x04],
                 redemption_amount,
+
+            &crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
             );
 
             prop_assert!(result.is_err(), "Transaction building should fail when redemption amount {} exceeds outstanding debt {}", redemption_amount, note_amount);
@@ -408,6 +413,7 @@ mod property_tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
                 // NOTE: this test previously used `if result.is_ok() { ... }`, which silently

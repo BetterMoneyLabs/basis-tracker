@@ -9,7 +9,10 @@
 //!     boxes the client needs to finish signing.
 //!   * the client (TUI) adds ONLY the reserve input's `proveDlog(receiver)` proof over the same
 //!     `bytes_to_sign`, then calls `POST /redemption/submit` with the fully-signed tx.
-//!   * `POST /redemption/submit` — the tracker broadcasts the fully-signed transaction.
+//!   * `POST /redemption/submit` — the tracker broadcasts the fully-signed transaction, but only
+//!     when its echoed `unsigned_tx` matches a live entry recorded by `/redemption/build`
+//!     (single-use, 30-minute expiry). The tracker state advance uses the STORED entry values,
+//!     never caller-supplied amounts (PR #16 B6).
 //!
 //! Neither end reorders the reserve-input context extension: the tracker emits it in Scala
 //! `ContextExtension` order, so both ends sign an identical `bytes_to_sign`.
@@ -22,6 +25,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use ergo_lib::chain::ergo_state_context::ErgoStateContext;
 use ergo_lib::chain::parameters::Parameters;
@@ -108,13 +112,20 @@ pub struct RedemptionBuildResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RedemptionSubmitRequest {
     pub signed_tx: Value,
-    /// Issuer (reserve owner) compressed public key, hex.
+    /// The exact `unsigned_tx` value returned by `POST /redemption/build`. Its SHA-256
+    /// identifies the pending build entry this submit binds to; without a live entry the
+    /// submit is rejected with 409 (PR #16 B6).
+    pub unsigned_tx: Value,
+    /// DEPRECATED and IGNORED: the issuer is taken from the pending build entry recorded by
+    /// `/redemption/build`. Kept on the wire only for client compatibility (PR #16 B6).
     pub issuer_pubkey: String,
-    /// Recipient (creditor) compressed public key, hex.
+    /// DEPRECATED and IGNORED: see `issuer_pubkey`.
     pub recipient_pubkey: String,
-    /// Amount redeemed by this transaction (nanoERG).
+    /// DEPRECATED and IGNORED: the redeemed amount is taken from the pending build entry.
+    /// Kept on the wire only for client compatibility (PR #16 B6).
     pub redeemed_amount: u64,
-    /// Cumulative reserve-tree `already_redeemed` from the build response.
+    /// DEPRECATED and IGNORED: the cumulative reserve-tree value is taken from the pending
+    /// build entry. Kept on the wire only for client compatibility (PR #16 B6).
     pub new_already_redeemed: u64,
 }
 
@@ -270,6 +281,247 @@ fn parse_broadcast_tx_id(body: &str) -> String {
     body.trim().trim_matches('"').to_string()
 }
 
+// ----- pending redemption registry (PR #16 B6) -----
+
+/// How long a pending redemption entry stays usable after `/redemption/build`.
+///
+/// Generous enough for a client to sign and submit, short enough that a captured build
+/// response is not a standing capability.
+pub const PENDING_REDEMPTION_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Largest number of outstanding pending entries. Each entry is small and the map is pruned
+/// on every call, so this only bounds memory if `/redemption/build` is hammered.
+const MAX_PENDING_REDEMPTIONS: usize = 1024;
+
+/// SHA-256 of the canonical JSON serialization of an `unsigned_tx` value.
+pub type UnsignedTxFingerprint = [u8; 32];
+
+/// Fingerprint of an unsigned transaction JSON value, as returned in `unsigned_tx` by
+/// `/redemption/build` and echoed back to `/redemption/submit`.
+///
+/// Both sides hash the same `serde_json::Value` type, so the digest is stable for a value the
+/// server itself produced; any modification by the caller changes the digest.
+pub fn unsigned_tx_fingerprint(unsigned_tx: &Value) -> Result<UnsignedTxFingerprint, String> {
+    use sha2::Digest as _;
+    let bytes = serde_json::to_vec(unsigned_tx)
+        .map_err(|e| format!("failed to serialize unsigned_tx: {e}"))?;
+    Ok(sha2::Sha256::digest(&bytes).into())
+}
+
+/// Server-side state recorded by `/redemption/build` and consumed by `/redemption/submit`.
+///
+/// Everything that mutates tracker state after a broadcast comes from this entry, never from
+/// caller-supplied request fields (PR #16 B6).
+#[derive(Debug, Clone)]
+pub struct PendingRedemption {
+    /// Reserve box the built transaction spends.
+    pub reserve_box_id: String,
+    /// Issuer (reserve owner) compressed public key, hex.
+    pub issuer_pubkey: String,
+    /// Recipient (creditor) compressed public key, hex.
+    pub recipient_pubkey: String,
+    /// Amount redeemed by the built transaction.
+    pub redeemed_amount: u64,
+    /// Cumulative reserve-tree `already_redeemed` value the build proved on-chain.
+    pub new_already_redeemed: u64,
+    /// Reserve AVL tree root digest (33 bytes) the build placed in the reserve output's R5.
+    pub reserve_r5_digest: Vec<u8>,
+    issued_at: Instant,
+}
+
+impl PendingRedemption {
+    /// Create an entry stamped with the current time.
+    pub fn new(
+        reserve_box_id: String,
+        issuer_pubkey: String,
+        recipient_pubkey: String,
+        redeemed_amount: u64,
+        new_already_redeemed: u64,
+        reserve_r5_digest: Vec<u8>,
+    ) -> Self {
+        Self {
+            reserve_box_id,
+            issuer_pubkey,
+            recipient_pubkey,
+            redeemed_amount,
+            new_already_redeemed,
+            reserve_r5_digest,
+            issued_at: Instant::now(),
+        }
+    }
+}
+
+/// Registry of outstanding, single-use pending redemptions.
+#[derive(Debug, Default)]
+pub struct PendingRedemptionRegistry {
+    entries: std::sync::Mutex<HashMap<UnsignedTxFingerprint, PendingRedemption>>,
+}
+
+impl PendingRedemptionRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a pending redemption for `fingerprint`, valid for [`PENDING_REDEMPTION_TTL`].
+    ///
+    /// Returns false when the registry is full, which the caller should surface as a
+    /// "try again" rather than silently dropping the entry.
+    pub fn record(&self, fingerprint: UnsignedTxFingerprint, entry: PendingRedemption) -> bool {
+        let mut entries = self.lock();
+        Self::prune(&mut entries);
+        if entries.len() >= MAX_PENDING_REDEMPTIONS && !entries.contains_key(&fingerprint) {
+            return false;
+        }
+        entries.insert(fingerprint, entry);
+        true
+    }
+
+    /// Validate `signed_tx` against the pending entry for `fingerprint` and consume the entry.
+    ///
+    /// The entry is removed on the FIRST submit attempt (single-use): an unknown or expired
+    /// fingerprint yields 409, a signed transaction that does not spend the build's reserve box
+    /// or whose reserve-output R5 digest differs from the build's yields 400. After a failed
+    /// attempt the client must call `/redemption/build` again.
+    pub fn validate_and_consume(
+        &self,
+        fingerprint: &UnsignedTxFingerprint,
+        signed_tx: &Value,
+    ) -> Result<PendingRedemption, (StatusCode, String)> {
+        let entry = {
+            let mut entries = self.lock();
+            Self::prune(&mut entries);
+            entries.remove(fingerprint)
+        };
+        let entry =
+            match entry {
+                Some(e) => e,
+                None => return Err((
+                    StatusCode::CONFLICT,
+                    "Unknown, expired or already-used unsigned_tx. Call POST /redemption/build \
+                     again to obtain a fresh one."
+                        .to_string(),
+                )),
+            };
+
+        // The signed transaction must spend the reserve box the build selected.
+        let spends_reserve = signed_tx
+            .get("inputs")
+            .and_then(Value::as_array)
+            .map(|inputs| {
+                inputs.iter().any(|input| {
+                    input.get("boxId").and_then(Value::as_str)
+                        == Some(entry.reserve_box_id.as_str())
+                })
+            })
+            .unwrap_or(false);
+        if !spends_reserve {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "signed_tx does not spend the reserve box {} from the matching \
+                     /redemption/build call",
+                    entry.reserve_box_id
+                ),
+            ));
+        }
+
+        // The reserve output (index 0 by construction) must carry the reserve-tree digest the
+        // build computed; otherwise the tracker's local tree would diverge from what lands
+        // on-chain. R5 serializes as `0x64 || 33-byte digest || flags || keylen || valuelen`.
+        let expected_digest_hex = hex::encode(&entry.reserve_r5_digest);
+        let r5_matches = signed_tx
+            .get("outputs")
+            .and_then(Value::as_array)
+            .and_then(|outputs| outputs.first())
+            .and_then(|o| o.get("additionalRegisters"))
+            .and_then(|r| r.get("R5"))
+            .and_then(Value::as_str)
+            .map(|r5| {
+                r5.len() >= 68
+                    && r5.starts_with("64")
+                    && r5[2..68].eq_ignore_ascii_case(&expected_digest_hex)
+            })
+            .unwrap_or(false);
+        if !r5_matches {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "signed_tx reserve output R5 does not match the reserve tree digest computed by \
+                 /redemption/build"
+                    .to_string(),
+            ));
+        }
+
+        Ok(entry)
+    }
+
+    /// Number of live entries. Used by tests.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        let mut entries = self.lock();
+        Self::prune(&mut entries);
+        entries.len()
+    }
+
+    /// Drop expired entries. Called on every record/validate, so no timer is needed.
+    fn prune(entries: &mut HashMap<UnsignedTxFingerprint, PendingRedemption>) {
+        let now = Instant::now();
+        entries.retain(|_, entry| now.duration_since(entry.issued_at) < PENDING_REDEMPTION_TTL);
+    }
+
+    /// Lock the map, recovering from a poisoned mutex.
+    ///
+    /// A panic while holding this lock would only ever mean the map is in a consistent state
+    /// (each entry is independent), so refusing all subsequent submissions would be worse than
+    /// continuing.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<UnsignedTxFingerprint, PendingRedemption>> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+// ----- per-pair build rate limiter (PR #16 M1) -----
+
+/// Sliding-window rate limiter for `/redemption/build`, keyed by (issuer, recipient).
+///
+/// The tracker pays the fee inputs of every build out of its own wallet, so an unbounded
+/// caller could drain it one fee at a time with self-redemption builds.
+#[derive(Debug, Default)]
+pub struct BuildRateLimiter {
+    buckets: std::sync::Mutex<HashMap<(String, String), Vec<Instant>>>,
+}
+
+impl BuildRateLimiter {
+    /// Create an empty limiter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a build attempt for `(issuer, recipient)`; returns Err when the pair has reached
+    /// `max_per_hour` builds within the last rolling hour.
+    pub fn check_and_record(
+        &self,
+        issuer: &str,
+        recipient: &str,
+        max_per_hour: u32,
+    ) -> Result<(), String> {
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let window = Duration::from_secs(3600);
+        let key = (issuer.to_string(), recipient.to_string());
+        let attempts = buckets.entry(key).or_default();
+        attempts.retain(|t| now.duration_since(*t) < window);
+        if attempts.len() >= max_per_hour as usize {
+            return Err(format!(
+                "rate limit exceeded: at most {} redemption builds per hour per \
+                 (issuer, recipient) pair",
+                max_per_hour
+            ));
+        }
+        attempts.push(now);
+        Ok(())
+    }
+}
+
 /// Select wallet boxes covering the required fee, excluding the reserve box and token-bearing boxes.
 fn select_fee_inputs(
     wallet_boxes: &[NodeBox],
@@ -340,6 +592,16 @@ async fn build_redemption_inner(
     let issuer_pubkey: basis_store::PubKey = issuer_pk;
     let recipient_pubkey: basis_store::PubKey = recipient_pk;
 
+    // M1: bound the fee cost a pair can impose on the tracker wallet — the tracker pays the
+    // fee inputs of every build, so an unbounded pair could drain it one fee at a time.
+    if let Err(msg) = state.redemption_build_rate.check_and_record(
+        &hex::encode(issuer_pk),
+        &hex::encode(recipient_pk),
+        state.config.server.redemption_build_max_per_pair_per_hour,
+    ) {
+        return api_err(StatusCode::TOO_MANY_REQUESTS, msg);
+    }
+
     let recipient_address = match pubkey_to_address(&payload.recipient_pubkey) {
         Ok(a) => a,
         Err(e) => return api_err(StatusCode::BAD_REQUEST, format!("recipient address: {e}")),
@@ -386,6 +648,15 @@ async fn build_redemption_inner(
             Err(_) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, "tracker unavailable"),
         }
     };
+
+    // SECURITY (PR #16 H2): fail closed when the issuer has more than one tracked reserve.
+    // A note is bound to `hash(owner || receiver)`, not to a reserve box, so with two reserves
+    // the same note redeems in full against EACH of them; building against one would let the
+    // creditor drain the others. Refuse until the owner consolidates to a single reserve.
+    if let Err(msg) = crate::api::ensure_single_issuer_reserve(state, &payload.issuer_pubkey).await
+    {
+        return api_err(StatusCode::CONFLICT, msg);
+    }
 
     // Select the smallest reserve that covers the redemption, leaves a valid remainder, is actually
     // unspent on-chain, AND whose on-chain R5 (reserve AVL tree) matches the tracker's current
@@ -907,12 +1178,33 @@ async fn build_redemption_inner(
     );
 
     // Context extension (Scala order applied below, before parsing).
+    // Debt and timestamp are serialized as SIGNED Longs on-chain; values above i64::MAX
+    // would wrap negative, so fail loudly instead of casting (stored notes are already
+    // capped at i64::MAX — this is defense in depth for legacy databases).
+    let total_debt_i64 = match i64::try_from(total_debt) {
+        Ok(v) => v,
+        Err(_) => {
+            return api_err(
+                StatusCode::CONFLICT,
+                "stored totalDebt exceeds the on-chain signed-Long range".to_string(),
+            )
+        }
+    };
+    let note_timestamp_i64 = match i64::try_from(note.timestamp) {
+        Ok(v) => v,
+        Err(_) => {
+            return api_err(
+                StatusCode::CONFLICT,
+                "stored note timestamp exceeds the on-chain signed-Long range".to_string(),
+            )
+        }
+    };
     let mut context_extension: HashMap<String, String> = HashMap::new();
     context_extension.insert("0".to_string(), serialize_ergo_byte(0));
     context_extension.insert("1".to_string(), format!("07{}", payload.recipient_pubkey));
     context_extension.insert("2".to_string(), serialize_coll_bytes(&issuer_signature));
-    context_extension.insert("3".to_string(), serialize_ergo_long(total_debt as i64));
-    context_extension.insert("4".to_string(), serialize_ergo_long(note.timestamp as i64));
+    context_extension.insert("3".to_string(), serialize_ergo_long(total_debt_i64));
+    context_extension.insert("4".to_string(), serialize_ergo_long(note_timestamp_i64));
     context_extension.insert("5".to_string(), serialize_coll_bytes(&insert_proof));
     // Context var #6 must ALWAYS be present. The contract reads it with
     // `getVar[Coll[Byte]](6).get`, and `.get` on an absent var throws -- so omitting the key
@@ -935,20 +1227,33 @@ async fn build_redemption_inner(
     context_extension.insert("8".to_string(), serialize_coll_bytes(&tracker_lookup_proof));
 
     // Output ergoTrees.
+    // The reserve output must carry exactly the script of the box being spent
+    // (the contract requires selfOut.propositionBytes == SELF.propositionBytes).
+    // Take it from the fetched on-chain box rather than a configured/hardcoded
+    // constant, so a contract change can never leave this builder stale (B5).
+    let reserve_ergo_tree = reserve_box.ergo_tree.clone();
     let reserve_contract_p2s = if is_token_reserve {
         state.config.basis_token_reserve_contract_p2s()
     } else {
         state.config.basis_reserve_contract_p2s()
     };
-    let reserve_ergo_tree = match address_to_ergo_tree(reserve_contract_p2s) {
-        Ok(t) => t,
+    match address_to_ergo_tree(reserve_contract_p2s) {
+        Ok(configured_tree) if configured_tree != reserve_ergo_tree => {
+            tracing::warn!(
+                "reserve box {} script differs from the configured contract P2S {}; \
+                 building with the box's own script",
+                reserve_box_id,
+                reserve_contract_p2s
+            );
+        }
+        Ok(_) => {}
         Err(e) => {
             return api_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("reserve contract P2S: {e}"),
             )
         }
-    };
+    }
     let recipient_ergo_tree = match address_to_ergo_tree(&recipient_address) {
         Ok(t) => t,
         Err(e) => return api_err(StatusCode::BAD_REQUEST, format!("recipient tree: {e}")),
@@ -1221,7 +1526,7 @@ async fn build_redemption_inner(
     let mut input_box_binaries = vec![reserve_box_binary];
     input_box_binaries.extend(fee_binaries);
 
-    Ok(RedemptionBuildResponse {
+    let response = RedemptionBuildResponse {
         unsigned_tx,
         partial_tx,
         input_box_binaries,
@@ -1238,128 +1543,107 @@ async fn build_redemption_inner(
         is_first_redemption,
         fee,
         new_already_redeemed,
-    })
+    };
+
+    // SECURITY (PR #16 B6): bind the future /redemption/submit to this exact build. The submit
+    // endpoint only accepts a signed transaction whose echoed `unsigned_tx` hashes to a live
+    // entry recorded here, and it advances tracker state from the STORED values below — never
+    // from caller-supplied amounts. The entry is single-use and expires after
+    // PENDING_REDEMPTION_TTL.
+    let fingerprint = match unsigned_tx_fingerprint(&response.unsigned_tx) {
+        Ok(fp) => fp,
+        Err(e) => {
+            return api_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to fingerprint unsigned transaction: {e}"),
+            )
+        }
+    };
+    if !state.pending_redemptions.record(
+        fingerprint,
+        PendingRedemption::new(
+            response.reserve_box_id.clone(),
+            payload.issuer_pubkey.clone(),
+            payload.recipient_pubkey.clone(),
+            payload.amount,
+            new_already_redeemed,
+            new_reserve_digest.clone(),
+        ),
+    ) {
+        return api_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Too many outstanding redemption builds; try again shortly.",
+        );
+    }
+
+    Ok(response)
 }
 
 /// Broadcast a fully-signed redemption transaction to the Ergo node.
 ///
-/// After a successful broadcast the tracker's local state is synced: the note's
-/// `amount_redeemed` is incremented by `redeemed_amount` and the reserve AVL tree entry
-/// is set to `new_already_redeemed` (the cumulative value proven on-chain by the build).
+/// SECURITY (PR #16 B6): the submit is bound to server-side state recorded by
+/// `/redemption/build`. The echoed `unsigned_tx` must hash to a live, single-use pending
+/// entry; the signed transaction must spend the entry's reserve box and carry the entry's
+/// reserve-output R5 digest. After a successful broadcast the tracker's local state is synced
+/// from the STORED entry (`redeemed_amount`, `new_already_redeemed`, issuer/recipient) — the
+/// caller-supplied amount fields on the wire are ignored (kept only for compatibility).
 #[axum::debug_handler]
 pub async fn submit_redemption(
     State(state): State<AppState>,
     Json(payload): Json<RedemptionSubmitRequest>,
 ) -> (StatusCode, Json<ApiResponse<RedemptionSubmitResponse>>) {
-    let issuer_pubkey_bytes = match hex::decode(&payload.issuer_pubkey) {
-        Ok(b) if b.len() == 33 => b,
-        _ => {
+    // (a) The echoed unsigned_tx must match a pending entry from /redemption/build.
+    let fingerprint = match unsigned_tx_fingerprint(&payload.unsigned_tx) {
+        Ok(fp) => fp,
+        Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(error_response(
-                    "issuer_pubkey must be 33-byte hex".to_string(),
-                )),
+                Json(error_response(format!(
+                    "failed to fingerprint unsigned_tx: {e}"
+                ))),
             )
         }
     };
-    let recipient_pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
-        Ok(b) if b.len() == 33 => b,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(error_response(
-                    "recipient_pubkey must be 33-byte hex".to_string(),
-                )),
-            )
-        }
-    };
-    let issuer_pubkey: basis_store::PubKey = issuer_pubkey_bytes.try_into().unwrap();
-    let recipient_pubkey: basis_store::PubKey = recipient_pubkey_bytes.try_into().unwrap();
 
-    // Validate the caller-supplied amounts against the stored note state BEFORE
-    // broadcasting (issue #15 S4): redeemed_amount must be positive and within the
-    // note's outstanding debt, and new_already_redeemed must equal the note's
-    // resulting cumulative redeemed amount. The tracker re-validates after
-    // broadcast; this pre-check avoids broadcasting a transaction whose local
-    // state sync would then be rejected.
-    //
-    // TODO(issue #15 S4): redemption state should ultimately be derived from the
-    // confirmed on-chain transaction rather than caller-supplied amounts.
+    // (b) + (d): validate the signed transaction against the stored entry and consume it
+    // (single-use — on any failure the client must call /redemption/build again).
+    let pending = match state
+        .pending_redemptions
+        .validate_and_consume(&fingerprint, &payload.signed_tx)
     {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if state
-            .tx
-            .send(TrackerCommand::GetNoteByIssuerAndRecipient {
-                issuer_pubkey,
-                recipient_pubkey,
-                response_tx: tx,
-            })
-            .await
-            .is_err()
-        {
+        Ok(p) => p,
+        Err((status, msg)) => return (status, Json(error_response(msg))),
+    };
+
+    // (c) Everything that touches tracker state comes from the STORED entry.
+    let issuer_pubkey: basis_store::PubKey = match hex::decode(&pending.issuer_pubkey)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+    {
+        Some(pk) => pk,
+        None => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(error_response("tracker thread unavailable".to_string())),
-            );
+                Json(error_response(
+                    "pending redemption entry has an invalid issuer_pubkey".to_string(),
+                )),
+            )
         }
-        let note = match rx.await {
-            Ok(Ok(Some(note))) => note,
-            Ok(Ok(None)) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(error_response(
-                        "note not found for issuer/recipient".to_string(),
-                    )),
-                )
-            }
-            Ok(Err(e)) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(error_response(format!("note lookup failed: {e:?}"))),
-                )
-            }
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(error_response("tracker unavailable".to_string())),
-                )
-            }
-        };
-
-        let outstanding = note.outstanding_debt();
-        if payload.redeemed_amount == 0 || payload.redeemed_amount > outstanding {
+    };
+    let recipient_pubkey: basis_store::PubKey = match hex::decode(&pending.recipient_pubkey)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+    {
+        Some(pk) => pk,
+        None => {
             return (
-                StatusCode::BAD_REQUEST,
-                Json(error_response(format!(
-                    "redeemed_amount {} is invalid for outstanding debt {}",
-                    payload.redeemed_amount, outstanding
-                ))),
-            );
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error_response(
+                    "pending redemption entry has an invalid recipient_pubkey".to_string(),
+                )),
+            )
         }
-        let expected_cumulative = match note.amount_redeemed.checked_add(payload.redeemed_amount) {
-            Some(v) => v,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(error_response(
-                        "cumulative redeemed amount overflows u64".to_string(),
-                    )),
-                )
-            }
-        };
-        if payload.new_already_redeemed != expected_cumulative {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(error_response(format!(
-                    "new_already_redeemed {} does not match note state ({} + {} = {})",
-                    payload.new_already_redeemed,
-                    note.amount_redeemed,
-                    payload.redeemed_amount,
-                    expected_cumulative
-                ))),
-            );
-        }
-    }
+    };
 
     let node = NodeClient::from_state(&state);
     let tx_id = match node.broadcast(&payload.signed_tx).await {
@@ -1382,8 +1666,8 @@ pub async fn submit_redemption(
         .send(TrackerCommand::CompleteRedemption {
             issuer_pubkey,
             recipient_pubkey,
-            redeemed_amount: payload.redeemed_amount,
-            new_already_redeemed: Some(payload.new_already_redeemed),
+            redeemed_amount: pending.redeemed_amount,
+            new_already_redeemed: Some(pending.new_already_redeemed),
             response_tx: tx,
         })
         .await
@@ -1521,5 +1805,150 @@ mod tests {
         assert!(r5_box(Some("0702aaaaaaaa")).r5_digest_hex().is_none());
         // Too short to contain a 33-byte digest.
         assert!(r5_box(Some("64abcd")).r5_digest_hex().is_none());
+    }
+
+    // ----- pending redemption registry (PR #16 B6) -----
+
+    fn pending_entry(box_id: &str) -> PendingRedemption {
+        PendingRedemption {
+            reserve_box_id: box_id.to_string(),
+            issuer_pubkey: "aa".repeat(33),
+            recipient_pubkey: "bb".repeat(33),
+            redeemed_amount: 1_000,
+            new_already_redeemed: 2_000,
+            reserve_r5_digest: vec![0x11; 33],
+            issued_at: Instant::now(),
+        }
+    }
+
+    fn signed_tx_for(entry: &PendingRedemption) -> Value {
+        json!({
+            "inputs": [{ "boxId": entry.reserve_box_id, "extension": {} }],
+            "outputs": [{
+                "additionalRegisters": {
+                    "R5": format!("64{}032000", hex::encode(&entry.reserve_r5_digest))
+                }
+            }]
+        })
+    }
+
+    #[test]
+    fn pending_entry_happy_path_returns_stored_state() {
+        let registry = PendingRedemptionRegistry::new();
+        let unsigned = json!({ "inputs": [], "outputs": [] });
+        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
+        assert!(registry.record(fp, pending_entry("reserve1")));
+
+        let signed = signed_tx_for(&pending_entry("reserve1"));
+        let entry = registry.validate_and_consume(&fp, &signed).unwrap();
+        assert_eq!(entry.reserve_box_id, "reserve1");
+        assert_eq!(entry.redeemed_amount, 1_000);
+        assert_eq!(entry.new_already_redeemed, 2_000);
+    }
+
+    #[test]
+    fn pending_entry_unknown_fingerprint_is_conflict() {
+        let registry = PendingRedemptionRegistry::new();
+        let fp = [7u8; 32];
+        let err = registry
+            .validate_and_consume(&fp, &json!({ "inputs": [] }))
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn pending_entry_is_single_use() {
+        let registry = PendingRedemptionRegistry::new();
+        let unsigned = json!({ "inputs": [], "outputs": [] });
+        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
+        let entry = pending_entry("reserve1");
+        let signed = signed_tx_for(&entry);
+        assert!(registry.record(fp, entry));
+
+        assert!(registry.validate_and_consume(&fp, &signed).is_ok());
+        let err = registry.validate_and_consume(&fp, &signed).unwrap_err();
+        assert_eq!(
+            err.0,
+            StatusCode::CONFLICT,
+            "a replayed fingerprint must be refused"
+        );
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn pending_entry_rejects_signed_tx_spending_a_different_box() {
+        let registry = PendingRedemptionRegistry::new();
+        let unsigned = json!({ "inputs": [], "outputs": [] });
+        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
+        let entry = pending_entry("reserve1");
+        assert!(registry.record(fp, entry.clone()));
+
+        let mut signed = signed_tx_for(&entry);
+        signed["inputs"][0]["boxId"] = json!("attacker_box");
+        let err = registry.validate_and_consume(&fp, &signed).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn pending_entry_rejects_signed_tx_with_wrong_r5_digest() {
+        let registry = PendingRedemptionRegistry::new();
+        let unsigned = json!({ "inputs": [], "outputs": [] });
+        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
+        let entry = pending_entry("reserve1");
+        assert!(registry.record(fp, entry.clone()));
+
+        let mut signed = signed_tx_for(&entry);
+        signed["outputs"][0]["additionalRegisters"]["R5"] =
+            json!(format!("64{}032000", "22".repeat(33)));
+        let err = registry.validate_and_consume(&fp, &signed).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn pending_entry_expired_is_conflict() {
+        let registry = PendingRedemptionRegistry::new();
+        let unsigned = json!({ "inputs": [], "outputs": [] });
+        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
+        let mut entry = pending_entry("reserve1");
+        entry.issued_at = Instant::now() - PENDING_REDEMPTION_TTL - Duration::from_secs(1);
+        // Bypass `record` so the stale timestamp survives (record sets nothing itself, but
+        // inserting directly makes the intent explicit).
+        registry.lock().insert(fp, entry);
+
+        let signed = signed_tx_for(&pending_entry("reserve1"));
+        let err = registry.validate_and_consume(&fp, &signed).unwrap_err();
+        assert_eq!(
+            err.0,
+            StatusCode::CONFLICT,
+            "an expired entry must be refused"
+        );
+    }
+
+    // ----- per-pair build rate limiter (PR #16 M1) -----
+
+    #[test]
+    fn build_rate_limiter_allows_up_to_limit_then_rejects() {
+        let limiter = BuildRateLimiter::new();
+        assert!(limiter.check_and_record("issuer", "recipient", 2).is_ok());
+        assert!(limiter.check_and_record("issuer", "recipient", 2).is_ok());
+        let err = limiter
+            .check_and_record("issuer", "recipient", 2)
+            .unwrap_err();
+        assert!(err.contains("rate limit exceeded"), "got: {err}");
+        // A different pair is unaffected.
+        assert!(limiter.check_and_record("issuer", "other", 2).is_ok());
+    }
+
+    #[test]
+    fn build_rate_limiter_prunes_attempts_older_than_an_hour() {
+        let limiter = BuildRateLimiter::new();
+        {
+            let mut buckets = limiter.buckets.lock().unwrap();
+            buckets.insert(
+                ("issuer".to_string(), "recipient".to_string()),
+                vec![Instant::now() - Duration::from_secs(3601)],
+            );
+        }
+        assert!(limiter.check_and_record("issuer", "recipient", 1).is_ok());
     }
 }

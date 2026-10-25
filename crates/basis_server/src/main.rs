@@ -12,7 +12,7 @@ use axum::{
 };
 use basis_server::{
     api::*,
-    auth_middleware::{auth_middleware, AuthState},
+    auth_middleware::{auth_middleware, is_loopback_origin, loopback_host_guard, AuthState},
     authorization::authorization_middleware,
     build_redemption,
     reserve_api::*,
@@ -26,14 +26,19 @@ use basis_store::{
     ReserveTracker,
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::timeout::TimeoutLayer;
 
-/// Maximum accepted request body size (8 MiB).
+/// Maximum accepted request body size.
 ///
 /// The signature-auth middleware hashes the raw body, so it must buffer it. That read used to pass
-/// `usize::MAX` explicitly, which made the buffer attacker-controlled in size.
-const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// `usize::MAX` explicitly, which made the buffer attacker-controlled in size. The limit is shared
+/// with the auth middleware (`MAX_BODY_BYTES`) so the extractor limit and the middleware limit
+/// cannot drift apart. The largest legitimate tracker payload is a few KiB; 256 KiB is generous
+/// headroom.
+const MAX_REQUEST_BODY_BYTES: usize = basis_server::auth_middleware::MAX_BODY_BYTES;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -736,8 +741,11 @@ async fn main() {
         tracker_storage,
         acceptance_predicate,
         policy_storage,
-        reserve_submission_permits: std::sync::Arc::new(
-            basis_server::reserve_submission::PermitRegistry::new(),
+        pending_redemptions: std::sync::Arc::new(
+            basis_server::redemption_build::PendingRedemptionRegistry::new(),
+        ),
+        redemption_build_rate: std::sync::Arc::new(
+            basis_server::redemption_build::BuildRateLimiter::new(),
         ),
     };
 
@@ -748,17 +756,20 @@ async fn main() {
     // tracker API from the browser -- including in `none` mode, where every such request is
     // Admin. With auth enabled and no explicit allow-list we now install NO CORS layer at all,
     // which means browsers refuse cross-origin calls while ordinary server-to-server clients
-    // (curl, the CLI, the MCP server) are unaffected. A wildcard origin is only used in `none`
-    // mode, where there is no credential to steal and refusing the request would be surprising.
+    // (curl, the CLI, the MCP server) are unaffected. In `none` mode the server is an
+    // unauthenticated loopback Admin API, so CORS is restricted to loopback origins (any port)
+    // and a Host-header guard (below) blocks DNS-rebinding from a rebound hostname.
     let auth_enabled = config.server.auth_enabled();
     let cors_layer: Option<CorsLayer> = if !auth_enabled {
         tracing::info!(
-            "Auth is disabled (auth.mode = \"none\"): allowing any CORS origin. \
+            "Auth is disabled (auth.mode = \"none\"): allowing only loopback CORS origins. \
              Requests are unauthenticated and granted Admin."
         );
         Some(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+                    is_loopback_origin(origin)
+                }))
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
@@ -847,10 +858,6 @@ async fn main() {
             "/reserves/create",
             post(create_reserve_payload).options(handle_options),
         )
-        .route(
-            "/reserves/submit",
-            post(submit_reserve_transaction).options(handle_options),
-        )
         // Most specific parameterized routes first
         .route(
             "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",
@@ -879,14 +886,27 @@ async fn main() {
 
     // SECURITY: cap the request body. The signature middleware buffers the whole body to hash it,
     // and it used to do so with an explicit `usize::MAX`, so an unauthenticated caller could make
-    // the tracker allocate without bound. 8 MiB is far above any legitimate tracker request.
+    // the tracker allocate without bound. 256 KiB is far above any legitimate tracker request.
     let app = app.layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES));
+
+    // Bound total request handling time so a stalled or slow request cannot hold a connection
+    // (and the resources behind it) open indefinitely.
+    let app = app.layer(TimeoutLayer::new(Duration::from_secs(30)));
 
     // CORS is the outermost layer so preflight requests are handled first. Absent when auth is on
     // and no origins are configured -- see the cors_layer construction above.
     let app = match cors_layer {
         Some(layer) => app.layer(layer),
         None => app,
+    };
+
+    // DNS-rebinding guard: with auth disabled the server is an unauthenticated Admin API meant
+    // for loopback use only, so reject requests whose Host header is not a loopback address.
+    // With auth enabled the request is authenticated regardless of Host, so no guard is needed.
+    let app = if auth_enabled {
+        app
+    } else {
+        app.layer(from_fn(loopback_host_guard))
     };
 
     tracing::debug!("Router built successfully");

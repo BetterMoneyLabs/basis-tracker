@@ -481,6 +481,8 @@ impl BasisMcp {
     }
 
     /// Build a reserve-creation payload (owner = current account) via the tracker.
+    /// The payload is not broadcast: the reserve owner submits it to their own
+    /// Ergo node's `/wallet/payment/send` (the tracker's wallet never pays).
     #[tool(annotations(read_only_hint = false, destructive_hint = false))]
     async fn reserve_create(
         &self,

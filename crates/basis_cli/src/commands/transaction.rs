@@ -648,12 +648,19 @@ async fn build_redemption_tx(
     let insert_proof = reserve_insert_proof.clone();
 
     // Build context extension map
+    // Debt and timestamp serialize as SIGNED Longs on-chain; reject values above
+    // i64::MAX instead of wrapping negative (defense in depth — stored notes are
+    // already capped at creation).
+    let total_debt_i64 = i64::try_from(total_debt)
+        .map_err(|_| anyhow::anyhow!("totalDebt exceeds the on-chain signed-Long range"))?;
+    let note_timestamp_i64 = i64::try_from(note_timestamp)
+        .map_err(|_| anyhow::anyhow!("note timestamp exceeds the on-chain signed-Long range"))?;
     let mut context_extension: HashMap<String, String> = HashMap::new();
     context_extension.insert("0".to_string(), serialize_ergo_byte(0));
     context_extension.insert("1".to_string(), format!("07{}", recipient_pubkey));
     context_extension.insert("2".to_string(), serialize_coll_bytes(&issuer_signature));
-    context_extension.insert("3".to_string(), serialize_ergo_long(total_debt as i64));
-    context_extension.insert("4".to_string(), serialize_ergo_long(note_timestamp as i64));
+    context_extension.insert("3".to_string(), serialize_ergo_long(total_debt_i64));
+    context_extension.insert("4".to_string(), serialize_ergo_long(note_timestamp_i64));
     context_extension.insert("5".to_string(), serialize_coll_bytes(&insert_proof));
     context_extension.insert("6".to_string(), serialize_coll_bytes(&tracker_signature));
     if let Some(ref proof) = reserve_lookup_proof {

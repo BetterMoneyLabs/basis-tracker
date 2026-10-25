@@ -356,7 +356,14 @@ paths:
   /reserves/create:
     post:
       summary: Create reserve transaction payload
-      description: Build an unsigned reserve creation transaction formatted for the Ergo node's /wallet/payment/send API.
+      description: |
+        Build a reserve creation transaction formatted for the Ergo node's
+        /wallet/payment/send API. The tracker never broadcasts it: the reserve
+        owner submits the returned `requests` array to their own node's
+        `/wallet/payment/send`, so the tracker's wallet is never involved. The
+        owner's wallet must hold the reserve NFT and enough ERG for the reserve
+        value plus fee. The `nft_id` must not be the tracker's own NFT, and the
+        amounts are bounded by `server.reserve_creation_max_*` config caps.
       operationId: createReservePayload
       tags:
         - Reserves
@@ -375,45 +382,6 @@ paths:
                 $ref: '#/components/schemas/ApiResponseReserveCreation'
         '400':
           description: Bad request - invalid input parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-
-  /reserves/submit:
-    post:
-      summary: Submit reserve creation transaction
-      description: |
-        Submit a reserve creation payload to the tracker's Ergo node for broadcast.
-
-        The payload must carry the live, single-use `submission_permit` issued by
-        `POST /reserves/create` for exactly this payload; the server forwards it to
-        the node's `/wallet/payment/send` with the node `api_key`, so the node signs
-        it with the tracker's wallet key. Permits expire after 30 minutes.
-      operationId: submitReserveTransaction
-      tags:
-        - Reserves
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ReserveCreationResponse'
-      responses:
-        '200':
-          description: Reserve transaction submitted successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseReserveSubmission'
-        '400':
-          description: Bad request - invalid transaction or missing/invalid submission permit
           content:
             application/json:
               schema:
@@ -1543,19 +1511,8 @@ components:
           example: 1100000
         change_address:
           type: string
-          description: Change address for leftover funds
+          description: Owner's change address (derived from the owner pubkey). Submit the `requests` array to the owner's own Ergo node `/wallet/payment/send`.
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
-        submission_permit:
-          type: string
-          description: >-
-            Single-use permit proving this exact payload came from POST /reserves/create.
-            POST /reserves/submit forwards the payload to the tracker's Ergo node
-            (/wallet/payment/send) with the node api_key, so the node signs it with the tracker's
-            wallet key. The server therefore only accepts a payload whose fingerprint matches a
-            live, unused permit, which prevents a caller from substituting their own destination
-            address, value, assets or registers. Echo it back unchanged; permits are valid for 30
-            minutes and can be used once.
-          example: "3f2a1c9e5b7d4081a2c3e4f5061728394a5b6c7d8e9f00112233445566778899"
 
     ReservePaymentRequest:
       type: object
@@ -1597,15 +1554,6 @@ components:
           format: uint64
           description: Token amount in raw units
           example: 1000000000
-
-    ReserveSubmissionResponse:
-      type: object
-      description: Response for reserve transaction submission
-      properties:
-        tx_id:
-          type: string
-          description: Transaction ID of the submitted reserve creation transaction
-          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
 
     # Redemption Schemas
     RedeemRequest:
@@ -2563,14 +2511,6 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/ReserveCreationResponse'
-
-    ApiResponseReserveSubmission:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/ReserveSubmissionResponse'
 
     ApiResponseEvents:
       allOf:

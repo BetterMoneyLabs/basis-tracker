@@ -98,6 +98,11 @@ pub struct RedemptionRequest {
     /// Refund initiation height from the reserve box's R7 register (0 if no refund pending)
     #[serde(default)]
     pub reserve_refund_initiation_height: u64,
+    /// ErgoTree (hex) of the reserve box being spent. The reserve output must carry
+    /// exactly this script; supplied by the API layer from the configured contract
+    /// P2S (never from a hardcoded constant, so contract changes cannot leave it stale).
+    #[serde(default)]
+    pub reserve_ergo_tree: String,
 }
 
 /// Redemption proof and transaction data
@@ -297,6 +302,7 @@ impl RedemptionManager {
                 reserve_lookup_proof.proof,
                 tracker_lookup_proof.proof,
                 request.amount,
+                &request.reserve_ergo_tree,
             )
             .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
@@ -582,6 +588,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -654,6 +661,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -726,6 +734,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -797,6 +806,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -868,6 +878,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -939,6 +950,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -1010,6 +1022,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -1428,6 +1441,90 @@ mod tests {
         // Clean up.
         let _ = fs::remove_dir_all(&storage_path);
     }
+
+    /// Emergency redemption must encode context var #6 (tracker signature) as an
+    /// EMPTY Coll[Byte] (`0e00`): the contract branches on
+    /// `trackerSigBytes.size > 0`, so a 65-byte zero placeholder would be
+    /// verified as a real signature and rejected, making emergency redemption
+    /// via `/redeem` unusable. A normal redemption keeps the 65-byte signature.
+    #[test]
+    fn test_emergency_redemption_sends_empty_tracker_signature_var() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+        let secp = Secp256k1::new();
+        let issuer_secret = [1u8; 32];
+        let issuer_pubkey =
+            PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&issuer_secret).unwrap())
+                .serialize();
+        let recipient_secret = [2u8; 32];
+        let recipient_pubkey =
+            PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&recipient_secret).unwrap())
+                .serialize();
+
+        let make_request = |emergency: bool, tracker_signature: Option<String>| RedemptionRequest {
+            issuer_pubkey: hex::encode(issuer_pubkey),
+            recipient_pubkey: hex::encode(recipient_pubkey),
+            amount: 1_000_000,
+            timestamp: 1672531200,
+            reserve_box_id: "aa".repeat(32),
+            tracker_box_id: "bb".repeat(32),
+            tracker_nft_id: "42".repeat(32),
+            current_height: 1000,
+            recipient_address: "9".repeat(51),
+            change_address: "9".repeat(51),
+            issuer_signature: "01".repeat(65),
+            emergency,
+            tracker_signature,
+            reserve_box_value: 20_000_000,
+            fee_input_box_ids: Vec::new(),
+            fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+        };
+
+        let var6 = |emergency: bool, tracker_signature: Option<String>| {
+            let mut tracker = TrackerStateManager::new_with_temp_storage();
+            let note = IouNote::create_and_sign(
+                recipient_pubkey,
+                10_000_000,
+                1672531200,
+                &issuer_secret,
+                &[0x42; 32],
+            )
+            .expect("sign note");
+            tracker.add_note(&issuer_pubkey, &note).expect("add note");
+            let proof = crate::NoteProof {
+                note: note.clone(),
+                avl_proof: vec![],
+                operations: vec![],
+            };
+            let request = make_request(emergency, tracker_signature);
+            let data = build_redemption_transaction(&mut tracker, &note, &proof, &request)
+                .expect("redemption build must succeed");
+            let tx_bytes = hex::decode(&data.transaction_bytes).expect("tx hex");
+            let tx_json: serde_json::Value = serde_json::from_slice(&tx_bytes).expect("tx JSON");
+            tx_json["tx"]["inputs"][0]["extension"]["6"]
+                .as_str()
+                .expect("context var #6 must always be present")
+                .to_string()
+        };
+
+        // Emergency: empty Coll[Byte] serializes as 0e + length 0x00.
+        assert_eq!(
+            var6(true, None),
+            "0e00",
+            "emergency redemption must send an empty Coll[Byte] as context var #6"
+        );
+
+        // Normal redemption: the 65-byte tracker signature is preserved
+        // (0e + length 0x41 + 130 hex chars).
+        let normal = var6(false, Some("02".repeat(65)));
+        assert!(
+            normal.starts_with("0e41") && normal.len() == 4 + 130,
+            "normal redemption must send the 65-byte tracker signature, got {}",
+            normal
+        );
+    }
 }
 
 // Helper function to build redemption transaction using the transaction builder
@@ -1468,11 +1565,15 @@ fn build_redemption_transaction(
         )));
     }
 
-    // Get tracker signature from request or generate placeholder for emergency
+    // Get tracker signature from request, or an empty Coll[Byte] for emergency.
     let tracker_signature_bytes = if request.emergency {
-        // Emergency redemption - tracker signature not required by contract after 3 days
-        // Use a dummy signature (contract will bypass verification based on HEIGHT)
-        vec![0u8; 65]
+        // Emergency redemption: the tracker signature is not required by the
+        // contract after the waiting period. Context var #6 must be an EMPTY
+        // Coll[Byte] here -- the contract branches on `trackerSigBytes.size > 0`,
+        // so a 65-byte zero "signature" would be verified (and rejected) instead
+        // of taking the emergency path. This matches the server's redemption
+        // build and the Scala reference implementation.
+        Vec::new()
     } else if let Some(ref tracker_sig_hex) = request.tracker_signature {
         // Normal redemption with tracker signature provided
         hex::decode(tracker_sig_hex).map_err(|e| {
@@ -1486,7 +1587,9 @@ fn build_redemption_transaction(
         ));
     };
 
-    if tracker_signature_bytes.len() != 65 && !request.emergency {
+    // The 65-byte length check applies only to real signatures; the emergency
+    // path's empty Coll[Byte] is valid by construction.
+    if !request.emergency && tracker_signature_bytes.len() != 65 {
         return Err(RedemptionError::TransactionError(format!(
             "Tracker signature must be 65 bytes, got {}",
             tracker_signature_bytes.len()
@@ -1566,6 +1669,7 @@ fn build_redemption_transaction(
         reserve_lookup_proof_bytes,
         tracker_lookup_proof_bytes,
         request.amount,
+        &request.reserve_ergo_tree,
     )
     .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 

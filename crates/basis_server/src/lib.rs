@@ -8,7 +8,6 @@ pub mod config;
 pub mod models;
 pub mod redemption_build;
 pub mod reserve_api;
-pub mod reserve_submission;
 pub mod store;
 pub mod tracker_box_updater;
 
@@ -43,12 +42,18 @@ pub struct AppState {
     pub tracker_storage: basis_store::persistence::TrackerStorage,
     pub acceptance_predicate: Option<std::sync::Arc<dyn acceptance::NotePredicate>>,
     pub policy_storage: basis_store::persistence::AcceptancePolicyStorage,
-    /// Single-use permits for `POST /reserves/submit`, issued by `POST /reserves/create`.
+    /// Single-use pending redemptions recorded by `POST /redemption/build`, keyed by the
+    /// SHA-256 of the unsigned transaction it returned.
     ///
-    /// Without this the submit endpoint would forward caller-chosen payment instructions to the
-    /// node's `/wallet/payment/send` together with the node `api_key`, letting any reachable caller
-    /// spend from the tracker's wallet. See `reserve_submission` for the full rationale.
-    pub reserve_submission_permits: std::sync::Arc<reserve_submission::PermitRegistry>,
+    /// `POST /redemption/submit` only broadcasts a signed transaction whose echoed `unsigned_tx`
+    /// matches a live entry, and it advances tracker state from the STORED entry values — never
+    /// from caller-supplied amounts (PR #16 B6). See `redemption_build::PendingRedemptionRegistry`.
+    pub pending_redemptions: std::sync::Arc<redemption_build::PendingRedemptionRegistry>,
+    /// Per-(issuer, recipient) rate limiter for `POST /redemption/build`.
+    ///
+    /// The tracker pays the fee inputs of every build out of its own wallet, so an unbounded
+    /// caller could drain it one fee at a time (PR #16 M1).
+    pub redemption_build_rate: std::sync::Arc<redemption_build::BuildRateLimiter>,
     // Note: tracker_scanner is not stored here due to Send trait bounds
     // Tracker box ID is fetched from tracker_storage directly
 }

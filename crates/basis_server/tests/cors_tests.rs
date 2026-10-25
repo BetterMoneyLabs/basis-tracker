@@ -265,6 +265,9 @@ mod cors_tests {
                 tls_cert_path: None,
                 tls_key_path: None,
                 auth: basis_server::config::AuthConfig::default(),
+                reserve_creation_max_erg_nano: 10_000_000_000,
+                reserve_creation_max_token_amount: 1_000_000_000,
+                redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: basis_server::config::ErgoConfig {
                 node: basis_store::ergo_scanner::NodeConfig {
@@ -324,8 +327,11 @@ mod cors_tests {
             tracker_storage,
             acceptance_predicate: None,
             policy_storage,
-            reserve_submission_permits: std::sync::Arc::new(
-                basis_server::reserve_submission::PermitRegistry::new(),
+            pending_redemptions: std::sync::Arc::new(
+                basis_server::redemption_build::PendingRedemptionRegistry::new(),
+            ),
+            redemption_build_rate: std::sync::Arc::new(
+                basis_server::redemption_build::BuildRateLimiter::new(),
             ),
         };
 
@@ -366,6 +372,153 @@ mod cors_tests {
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
+    }
+
+    // Test helper replicating the main server when auth is DISABLED
+    // (`auth.mode = "none"`): CORS restricted to loopback origins (any port)
+    // plus the DNS-rebinding Host guard as the outermost layer.
+    async fn create_mock_app_none_mode() -> Router {
+        use basis_server::auth_middleware::{is_loopback_origin, loopback_host_guard};
+        create_mock_app_without_cors()
+            .await
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+                        is_loopback_origin(origin)
+                    }))
+                    .allow_methods(Any)
+                    .allow_headers(Any),
+            )
+            .layer(axum::middleware::from_fn(loopback_host_guard))
+    }
+
+    #[tokio::test]
+    async fn none_mode_rejects_non_loopback_host_header() {
+        // DNS-rebinding scenario: a page on evil.com whose DNS rebinds to
+        // 127.0.0.1 arrives with `Host: evil.com` and must be rejected.
+        let app = create_mock_app_none_mode().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .header("Host", "evil.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn none_mode_accepts_loopback_host_with_port() {
+        let app = create_mock_app_none_mode().await;
+
+        for host in [
+            "localhost:3048",
+            "127.0.0.1:3048",
+            "[::1]:3048",
+            "localhost",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/")
+                        .header("Host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "loopback Host {} must be accepted",
+                host
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn none_mode_rejects_cross_origin_preflight() {
+        // A browser page on a non-loopback origin must not get CORS approval:
+        // the preflight response carries no access-control-allow-origin header,
+        // so the browser blocks the actual request.
+        let app = create_mock_app_none_mode().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/")
+                    .header("Host", "localhost:3048")
+                    .header("Origin", "https://evil.com")
+                    .header("Access-Control-Request-Method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "cross-origin preflight must not receive CORS headers in none mode"
+        );
+
+        // Same-origin-style loopback browser clients still work.
+        let app = create_mock_app_none_mode().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/")
+                    .header("Host", "localhost:3048")
+                    .header("Origin", "http://localhost:3048")
+                    .header("Access-Control-Request-Method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "http://localhost:3048"
+        );
+    }
+
+    #[tokio::test]
+    async fn none_mode_allows_loopback_origin_requests() {
+        let app = create_mock_app_none_mode().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .header("Host", "127.0.0.1:3048")
+                    .header("Origin", "http://127.0.0.1:8080")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "http://127.0.0.1:8080"
+        );
     }
 
     #[tokio::test]
