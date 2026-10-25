@@ -71,6 +71,12 @@ REDEEM_AMOUNT = 100                      # amount bob redeems on-chain (0.1 USE)
 # Tracker server URL (shared by all agents).
 SERVER_URL = os.environ.get("BASIS_SERVER_URL", "http://127.0.0.1:3048")
 
+# Ergo node whose wallet funds the demo reserves. The tracker only BUILDS the
+# reserve-creation payload; the owner submits it to their own node's
+# /wallet/payment/send, so the tracker's wallet is never involved (PR #16 B4).
+NODE_URL = os.environ.get("BASIS_NODE_URL", "http://127.0.0.1:9053")
+NODE_API_KEY = os.environ.get("BASIS_NODE_API_KEY", "")
+
 # Path to the basis-mcp binary. Override with BASIS_MCP env var.
 BASIS_MCP = os.environ.get("BASIS_MCP", PROJECT_ROOT / "target" / "debug" / "basis-mcp")
 
@@ -136,10 +142,26 @@ def get_reserve_token_config() -> Dict[str, Any]:
 
 
 def submit_reserve(payload: Any) -> Dict[str, Any]:
-    resp = http_post("/reserves/submit", payload)
-    if not resp.get("success"):
-        raise RuntimeError(f"/reserves/submit error: {resp.get('error')}")
-    return resp["data"]
+    """Broadcast the tracker-built reserve payload via the demo's Ergo node.
+
+    `payload` is the tracker server's ReserveCreationResponse; its `requests`
+    array is posted verbatim to the node's /wallet/payment/send, so the owner's
+    node wallet funds the reserve (never the tracker's wallet)."""
+    req = urllib.request.Request(
+        NODE_URL.rstrip("/") + "/wallet/payment/send",
+        data=json.dumps(payload["requests"]).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    if NODE_API_KEY:
+        req.add_header("api_key", NODE_API_KEY)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            tx_id = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"node /wallet/payment/send failed ({e.code}): {body[:300]}")
+    return {"tx_id": tx_id}
 
 
 # ---------------------------------------------------------------------------

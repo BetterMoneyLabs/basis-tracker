@@ -74,6 +74,12 @@ MIN_JUDGE_RATIO = 1.0           # judge's money must be fully backed
 # Tracker server URL (shared by all agents).
 SERVER_URL = os.environ.get("BASIS_SERVER_URL", "http://127.0.0.1:3048")
 
+# Ergo node whose wallet funds the demo reserves. The tracker only BUILDS the
+# reserve-creation payload; the owner submits it to their own node's
+# /wallet/payment/send, so the tracker's wallet is never involved (PR #16 B4).
+NODE_URL = os.environ.get("BASIS_NODE_URL", "http://127.0.0.1:9053")
+NODE_API_KEY = os.environ.get("BASIS_NODE_API_KEY", "")
+
 # Path to the basis-mcp binary. Override with BASIS_MCP env var.
 BASIS_MCP = os.environ.get("BASIS_MCP", PROJECT_ROOT / "target" / "debug" / "basis-mcp")
 
@@ -110,6 +116,27 @@ def http_post(path: str, payload: Any) -> Dict[str, Any]:
 def http_get(path: str) -> Dict[str, Any]:
     with urllib.request.urlopen(SERVER_URL + path, timeout=15) as resp:
         return json.loads(resp.read().decode())
+
+
+def node_payment_send(requests: Any) -> str:
+    """Broadcast the reserve-creation payment via the demo's Ergo node wallet.
+
+    The tracker returns a `/wallet/payment/send`-shaped payload; its `requests`
+    array is posted verbatim to the node. Returns the transaction id."""
+    req = urllib.request.Request(
+        NODE_URL.rstrip("/") + "/wallet/payment/send",
+        data=json.dumps(requests).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    if NODE_API_KEY:
+        req.add_header("api_key", NODE_API_KEY)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"node /wallet/payment/send failed ({e.code}): {body[:300]}")
 
 
 def acceptance_check(issuer: str, recipient: str, total_debt: int) -> Dict[str, Any]:
@@ -364,10 +391,8 @@ def create_reserve(agent: Agent, nft_id: str, amount: int) -> None:
           f"(NFT {nft_id[:12]}...)")
     result = agent.client.call_tool("reserve_create", {"nft_id": nft_id, "amount": amount})
 
-    submission = http_post("/reserves/submit", result["payload"])
-    if not submission.get("success"):
-        raise RuntimeError(f"reserve submission failed: {submission.get('error')}")
-    print(f"  submitted -> tx_id {submission['data']['tx_id']}")
+    tx_id = node_payment_send(result["payload"]["requests"])
+    print(f"  submitted -> tx_id {tx_id}")
 
     # Wait for the scanner to report the collateral.
     deadline = time.time() + RESERVE_POLL_TIMEOUT

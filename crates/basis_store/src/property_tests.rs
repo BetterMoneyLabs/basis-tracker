@@ -1,7 +1,7 @@
 use crate::{
     schnorr::{self, generate_keypair},
     transaction_builder::{RedemptionTransactionBuilder, TxContext},
-    IouNote, RedemptionError, RedemptionManager, RedemptionRequest, TrackerStateManager,
+    IouNote, RedemptionManager, RedemptionRequest, TrackerStateManager,
 };
 
 #[cfg(test)]
@@ -18,7 +18,7 @@ mod property_tests {
         ) {
             // Test that signing and verification always works for valid inputs
             let (_, recipient_pubkey) = generate_keypair();
-            let note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret);
+            let note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret, &[0x42; 32]);
 
             // Note creation should succeed with valid inputs
             prop_assume!(note.is_ok());
@@ -45,8 +45,8 @@ mod property_tests {
             let (secret, _) = generate_keypair();
             let (_, recipient_pubkey) = generate_keypair();
 
-            let note1 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret).unwrap();
-            let note2 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret).unwrap();
+            let note1 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret, &[0x42; 32]).unwrap();
+            let note2 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret, &[0x42; 32]).unwrap();
 
             // Same inputs should produce same note structure
             prop_assert_eq!(note1.recipient_pubkey, note2.recipient_pubkey);
@@ -54,7 +54,7 @@ mod property_tests {
             prop_assert_eq!(note1.timestamp, note2.timestamp);
 
             // Different inputs should produce different notes
-            let note3 = IouNote::create_and_sign(recipient_pubkey, amount2, timestamp2, &secret).unwrap();
+            let note3 = IouNote::create_and_sign(recipient_pubkey, amount2, timestamp2, &secret, &[0x42; 32]).unwrap();
             prop_assert_ne!(note1.amount_collected, note3.amount_collected);
         }
 
@@ -71,7 +71,7 @@ mod property_tests {
                 amount_collected,
                 amount_redeemed,
                 1234567890,
-                [2u8; 65],
+                [2u8; 65], [0x42; 32]
             );
 
             let expected_debt = amount_collected - amount_redeemed;
@@ -118,7 +118,7 @@ mod property_tests {
             // Test that note serialization preserves all fields
             let (secret, _) = generate_keypair();
             let (_, recipient_pubkey) = generate_keypair();
-            let original_note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret).unwrap();
+            let original_note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret, &[0x42; 32]).unwrap();
 
             // Simulate serialization by checking field access
             let reconstructed_note = IouNote::new(
@@ -126,7 +126,7 @@ mod property_tests {
                 original_note.amount_collected,
                 original_note.amount_redeemed,
                 original_note.timestamp,
-                original_note.signature,
+                original_note.signature, [0x42; 32]
             );
 
             prop_assert_eq!(original_note.recipient_pubkey, reconstructed_note.recipient_pubkey);
@@ -152,7 +152,7 @@ mod property_tests {
                 1000,
                 0,
                 note_timestamp,
-                [2u8; 65],
+                [2u8; 65], [0x42; 32]
             );
 
             // Verify note was created successfully
@@ -176,7 +176,7 @@ mod property_tests {
                 amount_collected,
                 amount_redeemed,
                 1234567890,
-                [2u8; 65],
+                [2u8; 65], [0x42; 32]
             );
 
             // Outstanding debt should never be negative
@@ -202,7 +202,7 @@ mod property_tests {
                 1000,
                 0,
                 1234567890,
-                signature_array,
+                signature_array, [0x42; 32]
             );
 
             // Signature should always be 65 bytes
@@ -253,6 +253,7 @@ mod property_tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
             // Basic validation: amount should be positive
@@ -276,7 +277,7 @@ mod property_tests {
 
             // Create a note with sufficient outstanding debt
             let total_debt = redemption_amount + 1; // Ensure outstanding_debt >= redemption_amount
-            let note = IouNote::create_and_sign(recipient_pubkey, total_debt, 1234567890, &secret).unwrap();
+            let note = IouNote::create_and_sign(recipient_pubkey, total_debt, 1234567890, &secret, &[0x42; 32]).unwrap();
 
             prop_assume!(redemption_amount <= note.outstanding_debt());
 
@@ -303,6 +304,8 @@ mod property_tests {
                 None, // First redemption: no reserve lookup proof
                 vec![0x03, 0x04],
                 redemption_amount,
+
+            &crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
             );
 
             prop_assert!(result.is_ok(), "Transaction building should succeed for valid amounts: {:?}", result.err());
@@ -324,7 +327,7 @@ mod property_tests {
             let (secret, issuer_pubkey) = generate_keypair();
             let (_, recipient_pubkey) = generate_keypair();
 
-            let note = IouNote::create_and_sign(recipient_pubkey, note_amount, 1234567890, &secret).unwrap();
+            let note = IouNote::create_and_sign(recipient_pubkey, note_amount, 1234567890, &secret, &[0x42; 32]).unwrap();
 
             let context = TxContext {
                 current_height: 1000,
@@ -349,6 +352,8 @@ mod property_tests {
                 None,
                 vec![0x03, 0x04],
                 redemption_amount,
+
+            &crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
             );
 
             prop_assert!(result.is_err(), "Transaction building should fail when redemption amount {} exceeds outstanding debt {}", redemption_amount, note_amount);
@@ -377,7 +382,7 @@ mod property_tests {
             let (_, recipient_pubkey) = generate_keypair();
 
             // Create and add a note
-            let note = IouNote::create_and_sign(recipient_pubkey, initial_amount, 1234567890, &secret).unwrap();
+            let note = IouNote::create_and_sign(recipient_pubkey, initial_amount, 1234567890, &secret, &[0x42; 32]).unwrap();
             redemption_manager.tracker.add_note(&issuer_pubkey, &note).unwrap();
 
             let mut total_redeemed: u64 = 0;
@@ -408,6 +413,7 @@ mod property_tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
                 // NOTE: this test previously used `if result.is_ok() { ... }`, which silently
@@ -428,31 +434,27 @@ mod property_tests {
                 //
                 // See specs/PRODUCTION_READINESS_AUDIT.md Issue #6 (multi-redemption coverage).
                 let result = redemption_manager.initiate_redemption(&request);
-                if i == 0 {
-                    prop_assert!(
-                        result.is_ok(),
-                        "first redemption must succeed, got: {:?}",
-                        result.err()
-                    );
-                    let data = result.unwrap();
-                    prop_assert!(!data.transaction_bytes.is_empty());
-                    total_redeemed += redeem_amount;
-                    redemption_manager
-                        .complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount, None)
-                        .expect("complete_redemption should succeed for the first redemption");
-                } else {
-                    // Documented limitation: subsequent redemptions via initiate_redemption
-                    // are rejected because complete_redemption invalidated the note signature.
-                    prop_assert!(
-                        matches!(result, Err(RedemptionError::InvalidNoteSignature)),
-                        "redemption {} should be rejected with InvalidNoteSignature \
-                         (note signature invalidated by complete_redemption), got: {:?}",
-                        i,
-                        result.err()
-                    );
-                    // Stop early: without completing, further iterations add nothing.
-                    break;
-                }
+                // SECURITY (PR #14 S4): EVERY redemption in the sequence must now succeed.
+                //
+                // This previously asserted that redemptions after the first were rejected with
+                // InvalidNoteSignature, documenting a bug as expected behaviour:
+                // `complete_redemption` refreshed the note's timestamp, which is part of the signed
+                // message, so the stored issuer signature stopped verifying and the creditor could
+                // only ever redeem once per note. `complete_redemption` no longer touches the
+                // timestamp (it records redemptions via `record_redemption`), so the sequence works
+                // end to end.
+                prop_assert!(
+                    result.is_ok(),
+                    "redemption {} must succeed, got: {:?}",
+                    i,
+                    result.err()
+                );
+                let data = result.unwrap();
+                prop_assert!(!data.transaction_bytes.is_empty());
+                total_redeemed += redeem_amount;
+                redemption_manager
+                    .complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount, None)
+                    .unwrap_or_else(|e| panic!("complete_redemption {} should succeed: {:?}", i, e));
             }
 
             // Only the first redemption completes (see the note above), so the accounting

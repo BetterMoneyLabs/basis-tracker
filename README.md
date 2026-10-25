@@ -49,8 +49,12 @@ As a simple but pretty secure solution, the following design is proposed, which 
   behaves honestly. The design is trying to minimize trust in tracker. For example, a tracker cant redeem IOU notes made
   to other parties, as they are signed, and the signature is check in redemption on-chain contract. If tracker is
   disappearing, after some period last tracker state snapshot committed on-chain becomes redeemable without it. If tracker
-  is starting censoring notes associated with a public key, by not including them into on-chain update, it is still
-  possible to redeem them. There could be different improvements to the tracker design, see "Future Extensions" section.
+  is starting censoring notes associated with a public key, by not including them into on-chain update, it is NOT
+  currently possible to redeem them: every redemption path, the emergency one included, requires
+  `trackerTree[key] == totalDebt`, so a tracker that omits a note (or lowers its value) blocks it permanently.
+  Anti-censorship protection is listed under "Future Extensions" in specs/basis_protocol.md and is not
+  implemented. A tracker that recreates its box at least every 3 days never triggers the emergency path
+  either, so that path is an availability mechanism rather than a censorship remedy.
 * IOU note from A to B represents cumulative debt with format: cumulative debt amount tracked by tracker, where the tracker
   stores `hash(A_pubkey || B_pubkey) -> totalDebt` mappings. The signature from A (sig_A) is computed over
   `key || totalDebt || timestamp` where `key = blake2b256(ownerKey || receiverKey)`. Only one updateable note is stored by a tracker

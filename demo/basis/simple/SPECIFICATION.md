@@ -236,7 +236,7 @@ val proof = lookupResult.proof.bytes  // 113 bytes
 ```scala
 val key = Blake2b256(ownerKeyBytes ++ receiverKeyBytes)
 val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
-// Total: 48 bytes (32 + 8 + 8)
+// Total: 80 bytes (32 + 8 + 8 + 32): contract appends the tracker NFT id from SELF.R6 (was 48 bytes)
 ```
 
 **Example:**

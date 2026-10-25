@@ -163,8 +163,8 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
       val receiverBytes = receiverPk.getEncoded
       val key = Blake2b256(ownerKeyBytes.toArray ++ receiverBytes.toArray)
 
-      // Create message for signatures: key || total debt || timestamp
-      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+      // Create message for signatures: key || total debt || timestamp || tracker NFT id (SELF.R6)
+      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
       // Create signatures
       val reserveSig = SigUtils.sign(message, ownerSecret)
@@ -328,8 +328,8 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
       val receiverBytes = receiverPk.getEncoded
       val key = Blake2b256(ownerKeyBytes.toArray ++ receiverBytes.toArray)
 
-      // Create message for signatures: key || total debt || timestamp (emergency format adds || 0L)
-      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ Longs.toByteArray(0L)
+      // Create message for signatures: key || total debt || timestamp || tracker NFT id (SELF.R6)
+      val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
       // Create valid reserve signature but invalid tracker signature
       val reserveSig = SigUtils.sign(message, ownerSecret)
@@ -439,8 +439,8 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
       val receiverBytes = receiverPk.getEncoded
       val key = Blake2b256(ownerKeyBytes.toArray ++ receiverBytes.toArray)
 
-      // Create message for signatures: key || total debt || timestamp
-      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp)
+      // Create message for signatures: key || total debt || timestamp || tracker NFT id (SELF.R6)
+      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
       // Create signatures
       val reserveSig = SigUtils.sign(message, ownerSecret)
@@ -542,8 +542,8 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
       val receiverBytes = receiverPk.getEncoded
       val key = Blake2b256(ownerKeyBytes.toArray ++ receiverBytes.toArray)
 
-      // Create message for signatures: key || total debt || timestamp
-      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp)
+      // Create message for signatures: key || total debt || timestamp || tracker NFT id (SELF.R6)
+      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
       // Create valid reserve signature but invalid tracker signature
       val reserveSig = SigUtils.sign(message, ownerSecret)
@@ -1185,8 +1185,8 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
       val receiverBytes = receiverPk.getEncoded
       val key = Blake2b256(ownerKeyBytes.toArray ++ receiverBytes.toArray)
 
-      // Create message for signatures: key || total debt || timestamp
-      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp)
+      // Create message for signatures: key || total debt || timestamp || tracker NFT id (SELF.R6)
+      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
       // Create signatures
       val reserveSig = SigUtils.sign(message, ownerSecret)
@@ -1288,8 +1288,8 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
       val receiverBytes = receiverPk.getEncoded
       val key = Blake2b256(ownerKeyBytes.toArray ++ receiverBytes.toArray)
 
-      // Create message for signatures: key || total debt || timestamp
-      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp)
+      // Create message for signatures: key || total debt || timestamp || tracker NFT id (SELF.R6)
+      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
       // Create signatures
       val reserveSig = SigUtils.sign(message, ownerSecret)
@@ -1395,8 +1395,8 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
       val receiverBytes = receiverPk.getEncoded
       val key = Blake2b256(ownerKeyBytes.toArray ++ receiverBytes.toArray)
 
-      // Create message for signatures: key || total debt || timestamp
-      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp)
+      // Create message for signatures: key || total debt || timestamp || tracker NFT id (SELF.R6)
+      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
       // Create valid tracker signature but invalid reserve signature (using wrong secret)
       val invalidReserveSig = SigUtils.sign(message, trackerSecret) // Wrong secret for reserve
@@ -1499,7 +1499,7 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
       val key = Blake2b256(ownerKeyBytes.toArray ++ receiverBytes.toArray)
 
       // Create message for signatures
-      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp)
+      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
       // Create valid reserve signature but invalid tracker signature
       val reserveSig = SigUtils.sign(message, ownerSecret)
@@ -1600,7 +1600,7 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
       val key = Blake2b256(ownerKeyBytes.toArray ++ receiverBytes.toArray)
 
       // Create message for signatures
-      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp)
+      val message = key ++ Longs.toByteArray(debtAmount) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
       // Create signatures
       val reserveSig = SigUtils.sign(message, ownerSecret)
@@ -1721,16 +1721,17 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
   def mkKey(ownerKey: GroupElement, receiverKey: GroupElement): Array[Byte] =
     Blake2b256(ownerKey.getEncoded.toArray ++ receiverKey.getEncoded.toArray)
 
-  // Message for normal redemption: key || totalDebt || timestamp
+  // Message for redemption: key || totalDebt || timestamp || tracker NFT id (the same bytes as the reserve box's R6)
   def mkMessage(key: Array[Byte], totalDebt: Long, timestamp: Long = System.currentTimeMillis()): Array[Byte] =
-    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
-  // NOTE: Emergency redemption uses the SAME message format as normal redemption.
-  // The only difference is that tracker signature becomes OPTIONAL after 3 days (2160 blocks).
+  // NOTE: Emergency redemption uses the SAME message format as normal redemption:
+  // key || totalDebt || timestamp || tracker NFT id. The only difference is that the tracker
+  // signature becomes OPTIONAL after 3 days (2160 blocks). Kept as a named alias for readability.
   // This function is kept for documentation purposes to show what an "emergency format" would look like,
   // but it is NOT used by the actual contract.
   def mkEmergencyMessage(key: Array[Byte], totalDebt: Long, timestamp: Long = System.currentTimeMillis()): Array[Byte] =
-    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ Longs.toByteArray(0L)
+    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
   def mkSigBytes(sig: (GroupElement, BigInt)): Array[Byte] =
     GroupElementSerializer.toBytes(sig._1) ++ sig._2.toByteArray
@@ -2319,7 +2320,7 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
   // ========== EMERGENCY EXIT TESTS ==========
   // Emergency redemption allows redemption after 3 days (3 * 720 blocks) WITHOUT tracker signature.
   // The contract uses the SAME message format for both normal and emergency redemption:
-  //   Message: key || totalDebt || timestamp
+  //   Message: key || totalDebt || timestamp || tracker NFT id (SELF.R6)
   // The only difference is:
   //   - Normal: tracker signature REQUIRED
   //   - Emergency (3+ days): tracker signature OPTIONAL
@@ -2433,7 +2434,7 @@ class BasisSpec extends PropSpec with Matchers with ScalaCheckDrivenPropertyChec
   // 1. Normal redemption: tracker signature required (any time)
   // 2. Emergency redemption: no tracker signature needed (after 3 days)
   //
-  // Both paths use the SAME message format: key || totalDebt || timestamp
+  // Both paths use the SAME message format: key || totalDebt || timestamp || tracker NFT id (SELF.R6)
   // The only difference is tracker signature optionality after emergency period.
 
   property("Emergency exit: should succeed without tracker signature after emergency period") {

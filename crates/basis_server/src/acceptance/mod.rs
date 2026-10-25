@@ -161,7 +161,12 @@ impl NotePredicate for CollateralizationPredicate {
             None => return false,
         };
 
-        let reserve = match tracker.get_reserve_by_owner(&hex::encode(ctx.issuer_pubkey)) {
+        // SECURITY (PR #14 C3 / PR #16 H2): fail closed when the issuer has more than one
+        // tracked reserve. A note is bound to `hash(owner || receiver)`, not to a reserve box,
+        // so with two reserves the same note redeems in full against EACH of them; any single
+        // collateral figure would be a lie. `resolve_issuer_reserve` refuses the ambiguous
+        // configuration instead of returning whichever entry the map yielded first.
+        let reserve = match tracker.resolve_issuer_reserve(&hex::encode(ctx.issuer_pubkey)) {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -220,7 +225,9 @@ impl NotePredicate for NoPendingRefundPredicate {
             None => return false,
         };
 
-        let reserve = match tracker.get_reserve_by_owner(&hex::encode(ctx.issuer_pubkey)) {
+        // Fail closed on ambiguous reserve configuration (more than one reserve for the
+        // issuer), same rationale as the collateralization predicate above.
+        let reserve = match tracker.resolve_issuer_reserve(&hex::encode(ctx.issuer_pubkey)) {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -1008,5 +1015,41 @@ mod tests {
         ctx.reserve_tracker = None;
         ctx.issuer_gross_debt = Some(200);
         assert!(!pred.acceptable(&ctx));
+    }
+
+    /// SECURITY (PR #16 H2): with two reserves under one owner the same note redeems in
+    /// full against each of them, so the predicates must reject rather than evaluate
+    /// against whichever reserve the map happened to yield first.
+    #[test]
+    fn test_reserve_based_predicates_fail_closed_with_two_reserves() {
+        use basis_store::{ReserveInfo, ReserveTracker};
+
+        let tracker = ReserveTracker::new();
+        let reserve = |box_id: &str| basis_store::reserve_tracker::ExtendedReserveInfo {
+            base_info: ReserveInfo {
+                collateral_amount: 1_000_000,
+                last_updated_height: 0,
+                contract_address: "test".to_string(),
+                tracker_nft_id: "test".to_string(),
+                refund_initiation_height: 0,
+                reserve_token_id: String::new(),
+            },
+            total_debt: 0,
+            box_id: box_id.to_string(),
+            owner_pubkey: hex::encode(test_pubkey(1)),
+            last_updated_timestamp: 0,
+        };
+        tracker.update_reserve(reserve("box1")).unwrap();
+        tracker.update_reserve(reserve("box2")).unwrap();
+
+        // Ample aggregate collateral, yet the ambiguous configuration must be rejected.
+        let collat = CollateralizationPredicate::new("collat", 1.0);
+        let mut ctx = test_context(1, 100);
+        ctx.reserve_tracker = Some(tracker.clone());
+        ctx.issuer_gross_debt = Some(100);
+        assert!(!collat.acceptable(&ctx));
+
+        let no_refund = NoPendingRefundPredicate::new("no_refund");
+        assert!(!no_refund.acceptable(&ctx));
     }
 }

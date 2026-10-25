@@ -12,7 +12,10 @@ mod cors_tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tower::ServiceExt;
-    use tower_http::cors::{Any, CorsLayer};
+    use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+
+    /// Origin on the CORS allow-list used by the mock app.
+    const ALLOWED_ORIGIN: &str = "https://allowed.example";
 
     /// Global lock to serialize Fjall storage initialization across concurrent tests.
     ///
@@ -21,8 +24,9 @@ mod cors_tests {
     /// directory" errors. Holding this lock while creating test storage avoids that.
     static STORAGE_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    // Test helper to create a mock app state with CORS enabled
-    async fn create_mock_app_with_cors() -> Router {
+    // Test helper to create a mock app router without any CORS layer,
+    // matching the main server when `server.auth.allowed_origins` is empty.
+    async fn create_mock_app_without_cors() -> Router {
         let (tx, mut rx) = mpsc::channel(100);
         let event_store = Arc::new(EventStore::new().await.unwrap());
 
@@ -84,8 +88,7 @@ mod cors_tests {
                     } => {
                         let result = redemption_manager
                             .tracker
-                            .lookup_note(&issuer_pubkey, &recipient_pubkey)
-                            .map(Some);
+                            .get_note_optional(&issuer_pubkey, &recipient_pubkey);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::InitiateRedemption {
@@ -122,7 +125,9 @@ mod cors_tests {
                     } => {
                         // For testing purposes, return a mock proof
                         let mock_proof = basis_store::NoteProof {
-                            note: basis_store::IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]),
+                            note: basis_store::IouNote::new(
+                                [0u8; 33], 0, 0, 0, [0u8; 65], [0x42; 32],
+                            ),
                             avl_proof: vec![1, 2, 3, 4], // Mock proof data
                             operations: vec![],
                         };
@@ -135,6 +140,19 @@ mod cors_tests {
                         response_tx,
                     } => {
                         // Mock tracker lookup proof
+                        let mock_proof = basis_store::TrackerLookupProof {
+                            key: vec![0u8; 64],
+                            value: vec![0u8; 8],
+                            proof: vec![1, 2, 3, 4],
+                        };
+                        let _ = response_tx.send(Ok(mock_proof));
+                    }
+                    TrackerCommand::GetCommittedTrackerLookupProof {
+                        issuer_pubkey: _,
+                        recipient_pubkey: _,
+                        response_tx,
+                    } => {
+                        // Mock committed tracker lookup proof
                         let mock_proof = basis_store::TrackerLookupProof {
                             key: vec![0u8; 64],
                             value: vec![0u8; 8],
@@ -199,13 +217,14 @@ mod cors_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::ConfirmPendingNotes {
+                        digest,
                         box_id,
                         height,
                         response_tx,
                     } => {
                         let result = redemption_manager
                             .tracker
-                            .confirm_pending_notes(&box_id, height);
+                            .confirm_pending_notes(digest, &box_id, height);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::RevertPendingNotes { response_tx } => {
@@ -246,6 +265,9 @@ mod cors_tests {
                 tls_cert_path: None,
                 tls_key_path: None,
                 auth: basis_server::config::AuthConfig::default(),
+                reserve_creation_max_erg_nano: 10_000_000_000,
+                reserve_creation_max_token_amount: 1_000_000_000,
+                redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: basis_server::config::ErgoConfig {
                 node: basis_store::ergo_scanner::NodeConfig {
@@ -305,9 +327,16 @@ mod cors_tests {
             tracker_storage,
             acceptance_predicate: None,
             policy_storage,
+            pending_redemptions: std::sync::Arc::new(
+                basis_server::redemption_build::PendingRedemptionRegistry::new(),
+            ),
+            redemption_build_rate: std::sync::Arc::new(
+                basis_server::redemption_build::BuildRateLimiter::new(),
+            ),
         };
 
-        // Build the app with CORS enabled (same as main server)
+        // Build the app without a CORS layer (same as the main server when
+        // `server.auth.allowed_origins` is empty)
         Router::new()
             // Root route
             .route("/", get(root))
@@ -329,12 +358,167 @@ mod cors_tests {
             .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
             .route("/key-status/{pubkey}", get(get_key_status))
             .with_state(app_state)
+    }
+
+    // Test helper to create a mock app with the same CORS behavior as the
+    // main server when `server.auth.allowed_origins` is non-empty: an
+    // explicit origin allow-list, never a wildcard.
+    async fn create_mock_app_with_cors() -> Router {
+        create_mock_app_without_cors().await.layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list([ALLOWED_ORIGIN
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap()]))
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+    }
+
+    // Test helper replicating the main server when auth is DISABLED
+    // (`auth.mode = "none"`): CORS restricted to loopback origins (any port)
+    // plus the DNS-rebinding Host guard as the outermost layer.
+    async fn create_mock_app_none_mode() -> Router {
+        use basis_server::auth_middleware::{is_loopback_origin, loopback_host_guard};
+        create_mock_app_without_cors()
+            .await
             .layer(
                 CorsLayer::new()
-                    .allow_origin(Any)
+                    .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+                        is_loopback_origin(origin)
+                    }))
                     .allow_methods(Any)
                     .allow_headers(Any),
             )
+            .layer(axum::middleware::from_fn(loopback_host_guard))
+    }
+
+    #[tokio::test]
+    async fn none_mode_rejects_non_loopback_host_header() {
+        // DNS-rebinding scenario: a page on evil.com whose DNS rebinds to
+        // 127.0.0.1 arrives with `Host: evil.com` and must be rejected.
+        let app = create_mock_app_none_mode().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .header("Host", "evil.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn none_mode_accepts_loopback_host_with_port() {
+        let app = create_mock_app_none_mode().await;
+
+        for host in [
+            "localhost:3048",
+            "127.0.0.1:3048",
+            "[::1]:3048",
+            "localhost",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/")
+                        .header("Host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "loopback Host {} must be accepted",
+                host
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn none_mode_rejects_cross_origin_preflight() {
+        // A browser page on a non-loopback origin must not get CORS approval:
+        // the preflight response carries no access-control-allow-origin header,
+        // so the browser blocks the actual request.
+        let app = create_mock_app_none_mode().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/")
+                    .header("Host", "localhost:3048")
+                    .header("Origin", "https://evil.com")
+                    .header("Access-Control-Request-Method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "cross-origin preflight must not receive CORS headers in none mode"
+        );
+
+        // Same-origin-style loopback browser clients still work.
+        let app = create_mock_app_none_mode().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/")
+                    .header("Host", "localhost:3048")
+                    .header("Origin", "http://localhost:3048")
+                    .header("Access-Control-Request-Method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "http://localhost:3048"
+        );
+    }
+
+    #[tokio::test]
+    async fn none_mode_allows_loopback_origin_requests() {
+        let app = create_mock_app_none_mode().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .header("Host", "127.0.0.1:3048")
+                    .header("Origin", "http://127.0.0.1:8080")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "http://127.0.0.1:8080"
+        );
     }
 
     #[tokio::test]
@@ -349,7 +533,7 @@ mod cors_tests {
                 Request::builder()
                     .method("OPTIONS")
                     .uri("/")
-                    .header("Origin", "http://localhost:3048")
+                    .header("Origin", ALLOWED_ORIGIN)
                     .header("Access-Control-Request-Method", "GET")
                     .body(Body::empty())
                     .unwrap(),
@@ -363,7 +547,7 @@ mod cors_tests {
                 .headers()
                 .get("access-control-allow-origin")
                 .unwrap(),
-            "*"
+            ALLOWED_ORIGIN
         );
         assert!(response
             .headers()
@@ -393,7 +577,7 @@ mod cors_tests {
                     Request::builder()
                         .method(method)
                         .uri(*route)
-                        .header("Origin", "https://example.com")
+                        .header("Origin", ALLOWED_ORIGIN)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -412,7 +596,7 @@ mod cors_tests {
                     .headers()
                     .get("access-control-allow-origin")
                     .unwrap(),
-                "*",
+                ALLOWED_ORIGIN,
                 "Wrong CORS origin on route: {}",
                 route
             );
@@ -433,7 +617,7 @@ mod cors_tests {
                     Request::builder()
                         .method("OPTIONS")
                         .uri("/")
-                        .header("Origin", "http://test-origin.com")
+                        .header("Origin", ALLOWED_ORIGIN)
                         .header("Access-Control-Request-Method", *method)
                         .body(Body::empty())
                         .unwrap(),
@@ -479,7 +663,7 @@ mod cors_tests {
                     Request::builder()
                         .method("OPTIONS")
                         .uri("/")
-                        .header("Origin", "http://test-origin.com")
+                        .header("Origin", ALLOWED_ORIGIN)
                         .header("Access-Control-Request-Method", "GET")
                         .header("Access-Control-Request-Headers", header.to_string())
                         .body(Body::empty())
@@ -523,7 +707,7 @@ mod cors_tests {
                     Request::builder()
                         .method("GET")
                         .uri(*route)
-                        .header("Origin", "https://different-domain.com")
+                        .header("Origin", ALLOWED_ORIGIN)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -542,14 +726,14 @@ mod cors_tests {
                     .headers()
                     .get("access-control-allow-origin")
                     .unwrap(),
-                "*"
+                ALLOWED_ORIGIN
             );
         }
     }
 
     #[tokio::test]
-    async fn test_cors_multiple_origins_allowed() {
-        // Test that any origin is allowed (wildcard *)
+    async fn test_cors_disallowed_origins_get_no_headers() {
+        // Origins not on the allow-list must not receive CORS headers.
         let app = create_mock_app_with_cors().await;
 
         let test_origins = [
@@ -574,16 +758,78 @@ mod cors_tests {
                 .await
                 .unwrap();
 
-            assert_eq!(
+            assert!(
                 response
                     .headers()
                     .get("access-control-allow-origin")
-                    .unwrap(),
-                "*",
-                "Wrong CORS origin for origin: {}",
+                    .is_none(),
+                "Unexpected CORS origin header for disallowed origin: {}",
                 origin
             );
         }
+
+        // The allow-listed origin is echoed back, never a wildcard.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .header("Origin", ALLOWED_ORIGIN)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            ALLOWED_ORIGIN
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cors_disabled_when_allowlist_empty() {
+        // With an empty allow-list the main server attaches a restrictive
+        // CORS layer that allows no origins, so responses carry no CORS
+        // headers and preflight requests get none either.
+        let app = create_mock_app_without_cors().await.layer(CorsLayer::new());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .header("Origin", "https://example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/")
+                    .header("Origin", "https://example.com")
+                    .header("Access-Control-Request-Method", "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
     }
 
     #[tokio::test]
@@ -598,7 +844,7 @@ mod cors_tests {
                 Request::builder()
                     .method("GET")
                     .uri("/events")
-                    .header("Origin", "https://frontend-app.com")
+                    .header("Origin", ALLOWED_ORIGIN)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -611,7 +857,7 @@ mod cors_tests {
                 .headers()
                 .get("access-control-allow-origin")
                 .unwrap(),
-            "*"
+            ALLOWED_ORIGIN
         );
 
         // Test GET /notes/issuer/{pubkey} endpoint
@@ -621,7 +867,7 @@ mod cors_tests {
                 Request::builder()
                     .method("GET")
                     .uri("/notes/issuer/010101010101010101010101010101010101010101010101010101010101010101")
-                    .header("Origin", "https://different-domain.com")
+                    .header("Origin", ALLOWED_ORIGIN)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -634,7 +880,7 @@ mod cors_tests {
                 .headers()
                 .get("access-control-allow-origin")
                 .unwrap(),
-            "*"
+            ALLOWED_ORIGIN
         );
     }
 
@@ -650,7 +896,7 @@ mod cors_tests {
                 Request::builder()
                     .method("OPTIONS")
                     .uri("/notes")
-                    .header("Origin", "https://complex-app.com")
+                    .header("Origin", ALLOWED_ORIGIN)
                     .header("Access-Control-Request-Method", "POST")
                     .header(
                         "Access-Control-Request-Headers",
@@ -668,7 +914,7 @@ mod cors_tests {
                 .headers()
                 .get("access-control-allow-origin")
                 .unwrap(),
-            "*"
+            ALLOWED_ORIGIN
         );
 
         let allowed_headers = response
@@ -720,7 +966,7 @@ mod cors_tests {
                 Request::builder()
                     .method("GET")
                     .uri("/nonexistent-route")
-                    .header("Origin", "https://test-app.com")
+                    .header("Origin", ALLOWED_ORIGIN)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -734,7 +980,7 @@ mod cors_tests {
                 .headers()
                 .get("access-control-allow-origin")
                 .unwrap(),
-            "*"
+            ALLOWED_ORIGIN
         );
 
         // Test with invalid pubkey format (400)
@@ -744,7 +990,7 @@ mod cors_tests {
                 Request::builder()
                     .method("GET")
                     .uri("/notes/issuer/invalid-hex")
-                    .header("Origin", "https://test-app.com")
+                    .header("Origin", ALLOWED_ORIGIN)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -757,7 +1003,7 @@ mod cors_tests {
                 .headers()
                 .get("access-control-allow-origin")
                 .unwrap(),
-            "*"
+            ALLOWED_ORIGIN
         );
     }
 }

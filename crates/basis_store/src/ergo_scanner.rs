@@ -71,6 +71,11 @@ use crate::{
     ExtendedReserveInfo, ReserveTracker,
 };
 
+/// Page size for `POST /blockchain/box/unspent/byAddress`. The node defaults to
+/// 5 boxes (newest first) when no limit is given, which silently dropped older
+/// reserves from tracking (issue: scanner only saw 5 reserve boxes per address).
+const RESERVE_BOX_PAGE_LIMIT: u64 = 1000;
+
 #[derive(Error, Debug)]
 pub enum ScannerError {
     #[error("Scanner error: {0}")]
@@ -119,6 +124,9 @@ pub struct NodeConfig {
     /// Reserve token ID (hex-encoded, 32 bytes). When set, collateral for reserves holding
     /// this token is taken from the token amount rather than the box ERG value.
     pub reserve_token_id: Option<String>,
+    /// This tracker's NFT ID (hex-encoded, 32 bytes). When set, reserve boxes whose R6
+    /// register does not reference this NFT are rejected (C4 validation).
+    pub tracker_nft_id: Option<String>,
     /// Ergo node URL
     pub node_url: String,
     /// Scan registration name
@@ -154,14 +162,12 @@ impl ServerState {
 
         let mut request = self.client.request(method, url);
 
-        // Add API key header if configured
+        // Add API key header if configured (never log the key itself)
         if let Some(api_key) = &self.config.api_key {
-            debug!("Using API key '{}' for request to: {}", api_key, url);
-            info!("Adding HTTP header: api_key: {}", api_key);
+            debug!("Using configured API key for request to: {}", url);
             request = request.header("api_key", api_key);
         } else {
             debug!("No API key configured for request to: {}", url);
-            info!("No API key header added to HTTP request");
         }
 
         request
@@ -173,10 +179,10 @@ impl ServerState {
         let client = crate::http::bounded_client();
         let data_dir = data_dir.as_ref();
 
-        // Log which Ergo node is being used (INFO level)
+        // Log which Ergo node is being used (INFO level); never log the API key
         info!("Initializing Ergo scanner with node: {}", config.node_url);
-        if let Some(api_key) = &config.api_key {
-            info!("Using API key: {}", api_key);
+        if config.api_key.is_some() {
+            info!("Ergo node API key is configured");
         } else {
             warn!("No API key configured for Ergo node");
         }
@@ -378,53 +384,72 @@ impl ServerState {
         for address in addresses {
             info!("Fetching unspent reserve boxes for contract: {}", address);
 
-            let response = self
-                .request_builder(reqwest::Method::POST, &url)
-                .json(&address)
-                .send()
-                .await
-                .map_err(|e| {
-                    ScannerError::HttpError(format!(
-                        "Failed to fetch reserve boxes for {}: {}",
-                        address, e
-                    ))
-                })?;
-
-            let status = response.status();
-            if !status.is_success() {
-                let response_text = response
-                    .text()
+            // The node applies a default limit of 5 boxes (newest first) when no
+            // `limit` is given, which silently drops older reserves. Page through
+            // the full result set: keep fetching until a page comes back short.
+            let mut offset: u64 = 0;
+            let mut address_box_count = 0usize;
+            loop {
+                let response = self
+                    .request_builder(reqwest::Method::POST, &url)
+                    .query(&[
+                        ("offset", offset.to_string()),
+                        ("limit", RESERVE_BOX_PAGE_LIMIT.to_string()),
+                    ])
+                    .json(&address)
+                    .send()
                     .await
-                    .unwrap_or_else(|_| "Unable to read response".to_string());
-                error!(
-                    "Failed to get reserve boxes for {} with status {}: {}",
-                    address, status, response_text
-                );
-                return Err(ScannerError::NodeError(format!(
-                    "Failed to get reserve boxes for {} with status: {}",
-                    address, status
-                )));
-            }
+                    .map_err(|e| {
+                        ScannerError::HttpError(format!(
+                            "Failed to fetch reserve boxes for {}: {}",
+                            address, e
+                        ))
+                    })?;
 
-            let parsed: ByAddressResponse = crate::http::read_json_capped(response)
-                .await
-                .map_err(|e| {
-                    ScannerError::JsonError(format!(
-                        "Failed to parse reserve boxes response for {}: {}",
-                        address, e
-                    ))
-                })
-                .and_then(|value| {
-                    serde_json::from_value(value).map_err(|e| {
+                let status = response.status();
+                if !status.is_success() {
+                    let response_text = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unable to read response".to_string());
+                    error!(
+                        "Failed to get reserve boxes for {} with status {}: {}",
+                        address, status, response_text
+                    );
+                    return Err(ScannerError::NodeError(format!(
+                        "Failed to get reserve boxes for {} with status: {}",
+                        address, status
+                    )));
+                }
+
+                let parsed: ByAddressResponse = crate::http::read_json_capped(response)
+                    .await
+                    .map_err(|e| {
                         ScannerError::JsonError(format!(
                             "Failed to parse reserve boxes response for {}: {}",
                             address, e
                         ))
                     })
-                })?;
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|e| {
+                            ScannerError::JsonError(format!(
+                                "Failed to parse reserve boxes response for {}: {}",
+                                address, e
+                            ))
+                        })
+                    })?;
 
-            info!("Found {} reserve boxes for {}", parsed.len(), address);
-            all_boxes.extend(parsed.into_iter().map(Into::into));
+                let page_len = parsed.len();
+                address_box_count += page_len;
+                all_boxes.extend(parsed.into_iter().map(Into::into));
+
+                if (page_len as u64) < RESERVE_BOX_PAGE_LIMIT {
+                    break;
+                }
+                offset += RESERVE_BOX_PAGE_LIMIT;
+            }
+
+            info!("Found {} reserve boxes for {}", address_box_count, address);
         }
 
         // Deduplicate by box_id in case both contracts somehow return the same box.
@@ -527,6 +552,23 @@ impl ServerState {
             ))
         })?;
 
+        // C4: R4 must be a valid compressed secp256k1 point, otherwise the
+        // reserve can never be redeemed against on-chain.
+        let owner_pubkey_array: &[u8; 33] =
+            owner_pubkey_bytes.as_slice().try_into().map_err(|_| {
+                ScannerError::InvalidReserveBox(format!(
+                    "Invalid owner pubkey length in box {}: expected 33 bytes, got {}",
+                    box_id,
+                    owner_pubkey_bytes.len()
+                ))
+            })?;
+        basis_core::impls::validate_public_key(owner_pubkey_array).map_err(|_| {
+            ScannerError::InvalidReserveBox(format!(
+                "Invalid owner pubkey (not a valid curve point) in box {}",
+                box_id
+            ))
+        })?;
+
         // Decode the hex-encoded tracker NFT ID to actual bytes
         // R6 contains a Coll[Byte] value with Ergo serialization prefix: 0e20 (type + length)
         // We need to strip the first 2 bytes (4 hex chars) to get the actual data
@@ -551,9 +593,64 @@ impl ServerState {
             )));
         }
 
+        // C4: when this tracker's NFT ID is configured, R6 must reference it,
+        // otherwise the reserve is bound to a different (or fake) tracker.
+        if let Some(configured_nft) = self
+            .config
+            .tracker_nft_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+        {
+            if !tracker_nft_hex.eq_ignore_ascii_case(configured_nft) {
+                return Err(ScannerError::InvalidReserveBox(format!(
+                    "Tracker NFT ID mismatch in box {}: R6 references {}, this tracker is {}",
+                    box_id, tracker_nft_hex, configured_nft
+                )));
+            }
+        }
+
+        // C4: R7 must be a serialized Long (type byte 0x05) when present. Any
+        // other type (e.g. Int) makes SELF.R7[Long] throw on-chain, bricking
+        // the box, while the scanner would silently read it as 0.
+        if let Some(r7_raw) = scan_box.additional_registers.get("R7") {
+            if !r7_raw.starts_with("05") {
+                return Err(ScannerError::InvalidReserveBox(format!(
+                    "R7 register in box {} is not a Long (expected 0x05 prefix): {}",
+                    box_id, r7_raw
+                )));
+            }
+        }
+
         // Extract refund initiation height from R7 register (optional; absent = 0)
         let refund_initiation_height =
             decode_ergo_long_register(scan_box.additional_registers.get("R7"));
+
+        // C4: validate setup only when the reserve is first seen. A reserve
+        // created with a pending refund (R7 != 0) can be withdrawn immediately,
+        // and a reserve created with a non-empty tree (R5) can block creditors
+        // from ever redeeming, so neither must be counted as collateral.
+        let first_seen = self
+            .reserve_tracker
+            .get_reserve_by_owner(&owner_pubkey)
+            .is_err();
+        if first_seen {
+            if refund_initiation_height != 0 {
+                return Err(ScannerError::InvalidReserveBox(format!(
+                    "Reserve box {} created with a pending refund (R7 = {})",
+                    box_id, refund_initiation_height
+                )));
+            }
+            let empty_tree_register = empty_reserve_tree_register();
+            match scan_box.additional_registers.get("R5") {
+                Some(r5) if r5.eq_ignore_ascii_case(&empty_tree_register) => {}
+                other => {
+                    return Err(ScannerError::InvalidReserveBox(format!(
+                        "Reserve box {} created with a non-empty AVL tree (R5 = {:?})",
+                        box_id, other
+                    )));
+                }
+            }
+        }
 
         // Determine collateral: if a reserve token is configured and the box holds it,
         // use the token amount as collateral; otherwise fall back to the box ERG value.
@@ -600,7 +697,11 @@ impl ServerState {
         info!("Retrieved {} scan boxes to process", scan_boxes.len());
 
         let mut current_box_ids = Vec::new();
-        let mut parse_failures = 0usize;
+        // Box IDs that failed to parse, normalized the same way
+        // `ExtendedReserveInfo.box_id` is stored (hex-encoded raw bytes). A
+        // quarantined box is skipped but never triggers removal of itself, and
+        // it must not block removal of OTHER genuinely-spent reserves.
+        let mut quarantined_box_ids: Vec<String> = Vec::new();
 
         for scan_box in &scan_boxes {
             debug!(
@@ -634,9 +735,12 @@ impl ServerState {
                     }
                 }
                 Err(e) => {
-                    parse_failures += 1;
+                    quarantined_box_ids.push(hex::encode(
+                        hex::decode(&scan_box.box_id)
+                            .unwrap_or_else(|_| scan_box.box_id.as_bytes().to_vec()),
+                    ));
                     warn!(
-                        "Failed to parse reserve box {}: {} - registers: {:?}",
+                        "Skipping unparseable reserve box {}: {} - registers: {:?}",
                         scan_box.box_id, e, scan_box.additional_registers
                     );
                 }
@@ -655,9 +759,11 @@ impl ServerState {
 
         // Only remove reserves if we actually found VALID boxes in the scan.
         // If no valid reserves were parsed (e.g., all failed validation), don't remove manually-inserted reserves.
-        if !current_box_ids.is_empty() && parse_failures == 0 {
+        if !current_box_ids.is_empty() {
             for reserve in all_reserves {
-                if !current_box_ids.contains(&reserve.box_id) {
+                if !current_box_ids.contains(&reserve.box_id)
+                    && !quarantined_box_ids.contains(&reserve.box_id)
+                {
                     info!(
                         "Removing spent reserve: {} (not found in current scan)",
                         reserve.box_id
@@ -678,17 +784,6 @@ impl ServerState {
                     }
                 }
             }
-        } else if parse_failures > 0 {
-            // Fail closed: a snapshot with unparseable boxes is not
-            // authoritative. Removing reserves not present in
-            // `current_box_ids` could delete a live reserve whose box merely
-            // failed to parse (corrupted node response, new register
-            // serialization), so the previous state is preserved.
-            warn!(
-                "Skipping reserve removal: {} of {} scan boxes failed to parse",
-                parse_failures,
-                scan_boxes.len()
-            );
         } else {
             info!("Scan returned 0 boxes, skipping reserve removal to preserve manually-inserted reserves");
         }
@@ -796,7 +891,8 @@ impl Default for NodeConfig {
             reserve_contract_p2s: None,
             token_reserve_contract_p2s: None,
             reserve_token_id: None,
-            node_url: "http://159.89.116.15:11088".to_string(), // Your Ergo node
+            tracker_nft_id: None,
+            node_url: "http://localhost:9053".to_string(), // Local Ergo node
             scan_name: Some("Basis Reserve Scanner".to_string()),
             api_key: None,
         }
@@ -879,6 +975,14 @@ pub async fn reserve_scanner_loop(state: Arc<ServerState>) -> Result<(), Scanner
     }
 }
 
+/// Serialized value of the R5 register of a freshly created reserve: the empty
+/// AVL+ tree (32-byte keys, insert+update flags `0x03`, no fixed value length).
+/// Format: `0x64` (AvlTree type) || 33-byte digest || `03` || `20` || `00`.
+pub fn empty_reserve_tree_register() -> String {
+    let tree = basis_trees::BasisAvlTree::new().expect("failed to create empty AVL tree");
+    format!("64{}032000", hex::encode(tree.root_digest()))
+}
+
 /// Decode an Ergo `Long` constant from its serialized hex representation.
 /// Format: type byte `05` followed by zigzag-VLQ encoded value.
 /// Missing, malformed, or negative values are treated as `0`.
@@ -921,14 +1025,30 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// Valid compressed secp256k1 point (generator) with the 0x07 GroupElement prefix.
+    const VALID_PREFIXED_PUBKEY: &str =
+        "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    #[test]
+    fn test_empty_reserve_tree_register_constant() {
+        // The empty AVL+ tree register value is a protocol constant: reserves are
+        // only accepted when first seen with exactly this tree in R5.
+        assert_eq!(
+            empty_reserve_tree_register(),
+            "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000"
+        );
+    }
+
     #[test]
     fn test_parse_reserve_box_with_r6_register() {
         // Create a mock scan box with a public key that has the 0x07 prefix
         // and a valid 32-byte tracker NFT ID in R6 register
         let mut registers = HashMap::new();
         // This is a 33-byte public key with 0x07 prefix (GroupElement format)
-        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        let prefixed_pubkey = VALID_PREFIXED_PUBKEY;
         registers.insert("R4".to_string(), prefixed_pubkey.to_string());
+        // Fresh reserves must carry the empty AVL+ tree in R5 (C4)
+        registers.insert("R5".to_string(), empty_reserve_tree_register());
         // This is a 32-byte tracker NFT ID with Ergo Coll[Byte] serialization prefix (0e20 + 64 hex chars)
         let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
         let tracker_nft_id_serialized = format!("0e20{}", tracker_nft_id);
@@ -989,7 +1109,7 @@ mod tests {
         // Create a mock scan box with a public key but missing R6 register
         let mut registers = HashMap::new();
         // This is a 33-byte public key with 0x07 prefix (GroupElement format)
-        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        let prefixed_pubkey = VALID_PREFIXED_PUBKEY;
         registers.insert("R4".to_string(), prefixed_pubkey.to_string());
         // Note: R6 register is intentionally missing
 
@@ -1040,7 +1160,7 @@ mod tests {
         // Create a mock scan box with an invalid R6 register (not 32 bytes)
         let mut registers = HashMap::new();
         // This is a 33-byte public key with 0x07 prefix (GroupElement format)
-        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        let prefixed_pubkey = VALID_PREFIXED_PUBKEY;
         registers.insert("R4".to_string(), prefixed_pubkey.to_string());
         // This is an invalid tracker NFT ID with wrong length (only 16 bytes = 32 hex chars, should be 32 bytes = 64 hex chars)
         let invalid_tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f304";
@@ -1095,16 +1215,17 @@ mod tests {
         // Mock node returns one valid reserve box. A pre-existing stored reserve
         // that is absent from the scan should be removed because the snapshot is
         // fully parseable and therefore authoritative.
-        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        let prefixed_pubkey = VALID_PREFIXED_PUBKEY;
         let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let empty_tree = empty_reserve_tree_register();
         let body = format!(
             concat!(
                 "[",
                 "{{\"boxId\":\"valid_box_1\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
-                "\"transactionId\":\"tx1\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                "\"transactionId\":\"tx1\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
                 "]"
             ),
-            prefixed_pubkey, tracker_nft_id
+            prefixed_pubkey, empty_tree, tracker_nft_id
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1274,26 +1395,28 @@ mod tests {
         );
     }
 
-    async fn test_process_scan_boxes_preserves_reserves_when_boxes_fail_to_parse() {
+    #[tokio::test]
+    async fn test_process_scan_boxes_removes_spent_reserve_despite_garbage_box() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         // Mock node returning one valid reserve box and one malformed box
-        // (missing R4). A pre-existing stored reserve must survive: the
-        // malformed box makes the snapshot non-authoritative, so the removal
-        // phase must be skipped (fail closed).
-        let prefixed_pubkey = "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4";
+        // (missing R4). The malformed box is quarantined individually: it is
+        // skipped with a warning, but it must NOT block removal of a tracked
+        // reserve that is genuinely spent (absent from the scan).
+        let prefixed_pubkey = VALID_PREFIXED_PUBKEY;
         let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let empty_tree = empty_reserve_tree_register();
         let body = format!(
             concat!(
                 "[",
                 "{{\"boxId\":\"valid_box_1\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
-                "\"transactionId\":\"tx1\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                "\"transactionId\":\"tx1\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
                 ",",
                 "{{\"boxId\":\"bad_box_2\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
                 "\"transactionId\":\"tx2\",\"additionalRegisters\":{{}}}}",
                 "]"
             ),
-            prefixed_pubkey, tracker_nft_id
+            prefixed_pubkey, empty_tree, tracker_nft_id
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1335,8 +1458,7 @@ mod tests {
         let server_state =
             ServerState::new(config, &data_dir).expect("Failed to create server state");
 
-        // Pre-existing reserve that is NOT in the scan result; previously it
-        // would have been removed because one valid box was parsed.
+        // Pre-existing reserve that is NOT in the scan result (genuinely spent).
         let preexisting = ExtendedReserveInfo {
             base_info: crate::ReserveInfo {
                 collateral_amount: 500,
@@ -1374,10 +1496,144 @@ mod tests {
             remaining
         );
         assert!(
-            remaining.contains(&"preexisting_box".to_string()),
-            "pre-existing reserve must be preserved when any scan box fails to parse: {:?}",
+            !remaining.contains(&hex::encode("bad_box_2")),
+            "unparseable box must be skipped, not tracked: {:?}",
             remaining
         );
+        assert!(
+            !remaining.contains(&"preexisting_box".to_string()),
+            "one garbage box must not block removal of a genuinely spent reserve: {:?}",
+            remaining
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_unspent_reserve_boxes_paginates_all_pages() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The node defaults to 5 boxes per page; the scanner must pass an
+        // explicit limit and keep paging until a short page comes back.
+        // Mock node: page 1 is full (RESERVE_BOX_PAGE_LIMIT boxes), page 2 has
+        // 7 more; ALL of them must end up tracked.
+        let full_page = RESERVE_BOX_PAGE_LIMIT as usize;
+        let extra_page = 7usize;
+        let total = full_page + extra_page;
+
+        let prefixed_pubkey = VALID_PREFIXED_PUBKEY;
+        let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let empty_tree = empty_reserve_tree_register();
+
+        let box_json = |i: usize| {
+            format!(
+                "{{\"boxId\":\"{:064x}\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
+                i
+            ) + &format!(
+                "\"transactionId\":\"{:064x}\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                i, prefixed_pubkey, empty_tree, tracker_nft_id
+            )
+        };
+        let page = |from: usize, count: usize| {
+            format!(
+                "[{}]",
+                (from..from + count)
+                    .map(box_json)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        let page1 = page(0, full_page);
+        let page2 = page(full_page, extra_page);
+
+        let seen_offsets = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+        let seen_offsets_server = seen_offsets.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let page1 = page1.clone();
+                let page2 = page2.clone();
+                let seen_offsets = seen_offsets_server.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = match socket.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let request_line = request.lines().next().unwrap_or_default();
+                    let offset: u64 = request_line
+                        .split('&')
+                        .flat_map(|part| part.split('?'))
+                        .find_map(|part| part.strip_prefix("offset="))
+                        .and_then(|v| {
+                            v.chars()
+                                .take_while(|c| c.is_ascii_digit())
+                                .collect::<String>()
+                                .parse()
+                                .ok()
+                        })
+                        .unwrap_or(0);
+                    seen_offsets.lock().unwrap().push(offset);
+
+                    let body = match offset {
+                        0 => page1,
+                        o if o == RESERVE_BOX_PAGE_LIMIT => page2,
+                        _ => "[]".to_string(),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        let config = NodeConfig {
+            node_url: format!("http://{}", addr),
+            reserve_contract_p2s: Some("test_p2s".to_string()),
+            ..Default::default()
+        };
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_pagination_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let server_state =
+            ServerState::new(config, &data_dir).expect("Failed to create server state");
+
+        server_state.process_scan_boxes().await.unwrap();
+
+        assert_eq!(
+            seen_offsets.lock().unwrap().as_slice(),
+            &[0u64, RESERVE_BOX_PAGE_LIMIT],
+            "scanner must request page 2 after a full first page"
+        );
+
+        let tracked = server_state.reserve_tracker.get_all_reserves();
+        assert_eq!(
+            tracked.len(),
+            total,
+            "all reserves across every page must be tracked"
+        );
+        for i in 0..total {
+            let box_id = format!("{:064x}", i);
+            assert!(
+                tracked.iter().any(|r| r.box_id == box_id),
+                "reserve box {} from the scan must be tracked",
+                box_id
+            );
+        }
     }
 
     #[test]
@@ -1385,10 +1641,11 @@ mod tests {
         let reserve_token_id =
             "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669".to_string();
         let nft_id = "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string();
-        let owner_pubkey = "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12";
+        let owner_pubkey = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
         let mut registers = std::collections::HashMap::new();
         registers.insert("R4".to_string(), format!("07{}", owner_pubkey));
+        registers.insert("R5".to_string(), empty_reserve_tree_register());
         registers.insert("R6".to_string(), format!("0e20{}", nft_id));
         registers.insert("R7".to_string(), "05000000000000000000".to_string());
 
@@ -1439,5 +1696,135 @@ mod tests {
             "reserve_token_id should be recorded"
         );
         assert_eq!(reserve_info.base_info.tracker_nft_id, nft_id);
+    }
+
+    /// Build a minimal valid first-seen reserve box for the C4 rejection tests.
+    fn c4_test_box() -> ScanBox {
+        let nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let mut registers = HashMap::new();
+        registers.insert("R4".to_string(), VALID_PREFIXED_PUBKEY.to_string());
+        registers.insert("R5".to_string(), empty_reserve_tree_register());
+        registers.insert("R6".to_string(), format!("0e20{}", nft_id));
+        ScanBox {
+            box_id: "c4_test_box".to_string(),
+            value: 1000000000,
+            creation_height: 1000,
+            ergo_tree: "test_ergo_tree".to_string(),
+            transaction_id: "test_tx_id".to_string(),
+            additional_registers: registers,
+            assets: vec![],
+        }
+    }
+
+    fn c4_test_state(config: NodeConfig) -> ServerState {
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_c4_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        ServerState::new(config, &data_dir).expect("Failed to create server state")
+    }
+
+    #[test]
+    fn test_parse_reserve_box_rejects_non_long_r7() {
+        // An Int-typed R7 would make SELF.R7[Long] throw on-chain, bricking the
+        // box, while the scanner would read it as 0.
+        let mut scan_box = c4_test_box();
+        scan_box
+            .additional_registers
+            .insert("R7".to_string(), "0401".to_string()); // Int 1
+        let state = c4_test_state(NodeConfig::default());
+        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        assert!(
+            err.to_string().contains("not a Long"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_reserve_box_rejects_first_seen_pending_refund() {
+        // R7 = Long 1 (zigzag 2 -> VLQ 0x02): refund pending from creation.
+        let mut scan_box = c4_test_box();
+        scan_box
+            .additional_registers
+            .insert("R7".to_string(), "0502".to_string());
+        let state = c4_test_state(NodeConfig::default());
+        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        assert!(
+            err.to_string().contains("pending refund"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_reserve_box_rejects_prefilled_tree() {
+        let mut scan_box = c4_test_box();
+        scan_box.additional_registers.insert(
+            "R5".to_string(),
+            "64ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff032000"
+                .to_string(),
+        );
+        let state = c4_test_state(NodeConfig::default());
+        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        assert!(
+            err.to_string().contains("non-empty AVL tree"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_reserve_box_rejects_foreign_tracker_nft() {
+        let scan_box = c4_test_box();
+        let config = NodeConfig {
+            tracker_nft_id: Some(
+                "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+            ),
+            ..Default::default()
+        };
+        let state = c4_test_state(config);
+        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        assert!(
+            err.to_string().contains("Tracker NFT ID mismatch"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_reserve_box_accepts_own_tracker_nft() {
+        let scan_box = c4_test_box();
+        let config = NodeConfig {
+            tracker_nft_id: Some(
+                "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
+            ),
+            ..Default::default()
+        };
+        let state = c4_test_state(config);
+        state
+            .parse_reserve_box(&scan_box)
+            .expect("reserve bound to the configured tracker NFT should parse");
+    }
+
+    #[test]
+    fn test_parse_reserve_box_rejects_invalid_pubkey() {
+        let mut scan_box = c4_test_box();
+        scan_box.additional_registers.insert(
+            "R4".to_string(),
+            "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4".to_string(),
+        );
+        let state = c4_test_state(NodeConfig::default());
+        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid owner pubkey"),
+            "unexpected error: {}",
+            err
+        );
     }
 }

@@ -164,6 +164,10 @@ pub struct RedemptionTransactionData {
     pub fee: u64,
     /// Tracker NFT ID from R6 register (hex-encoded, 32 bytes = 64 hex chars)
     pub tracker_nft_id: String,
+    /// ErgoTree (hex) of the reserve box being spent; the reserve output carries
+    /// exactly this script. Supplied by the caller (derived from the configured
+    /// contract P2S or the on-chain box) — never from a hardcoded constant.
+    pub reserve_ergo_tree: String,
     /// Context extension variables for contract validation
     pub context_extension: Option<ContextExtension>,
     /// Total debt amount from tracker's AVL tree
@@ -232,7 +236,7 @@ impl RedemptionTransactionBuilder {
     /// - `recipient_address`: Address where redeemed funds are sent
     /// - `avl_proof`: AVL proof for the debt in tracker's AVL tree (for insert operation)
     /// - `issuer_sig`: 65-byte Schnorr signature from issuer
-    /// - `tracker_sig`: 65-byte Schnorr signature from tracker
+    /// - `tracker_sig`: 65-byte Schnorr signature from tracker, or empty for emergency redemption
     /// - `context`: Transaction context (fee, height, network)
     /// - `reserve_box_value`: Value of the reserve box being spent (in nanoERG)
     /// - `reserve_refund_initiation_height`: Refund initiation height from the reserve box's R7 register (0 if none)
@@ -258,6 +262,7 @@ impl RedemptionTransactionBuilder {
         reserve_lookup_proof: Option<Vec<u8>>,
         tracker_lookup_proof: Vec<u8>,
         redemption_amount: u64,
+        reserve_ergo_tree: &str,
     ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
         // Validate all required transaction components
         // Reserve box validation
@@ -320,9 +325,15 @@ impl RedemptionTransactionBuilder {
             ));
         }
 
-        if tracker_sig.len() != 65 {
+        // A real tracker signature must be 65 bytes (33-byte a + 32-byte z).
+        // An EMPTY tracker signature is the emergency-redemption encoding: the
+        // contract reads context var #6 as Coll[Byte] and branches on
+        // `trackerSigBytes.size > 0`, so "no signature" must be an empty
+        // collection, not a 65-byte placeholder.
+        if !tracker_sig.is_empty() && tracker_sig.len() != 65 {
             return Err(TransactionBuilderError::Configuration(
-                "Tracker signature must be 65 bytes".to_string(),
+                "Tracker signature must be 65 bytes (or empty for emergency redemption)"
+                    .to_string(),
             ));
         }
 
@@ -344,6 +355,18 @@ impl RedemptionTransactionBuilder {
         if reserve_box_value == 0 {
             return Err(TransactionBuilderError::Configuration(
                 "Reserve box value must be greater than 0".to_string(),
+            ));
+        }
+
+        // The reserve output must carry the spent box's script. The caller supplies
+        // it (derived from the configured contract P2S or the on-chain box); a
+        // hardcoded constant here would silently go stale on contract changes.
+        if hex::decode(reserve_ergo_tree)
+            .map(|b| b.is_empty())
+            .unwrap_or(true)
+        {
+            return Err(TransactionBuilderError::Configuration(
+                "reserve_ergo_tree must be non-empty hex".to_string(),
             ));
         }
 
@@ -373,6 +396,15 @@ impl RedemptionTransactionBuilder {
         let is_first_redemption = already_redeemed == 0;
         let total_debt = note.amount_collected; // Total debt from tracker's AVL tree
 
+        // Debt and timestamp serialize as SIGNED Longs on-chain. Stored notes are capped
+        // at i64::MAX at creation; reject anything larger here as defense in depth
+        // (a silent `as i64` cast would wrap to a negative on-chain value).
+        if total_debt > i64::MAX as u64 || note.timestamp > i64::MAX as u64 {
+            return Err(TransactionBuilderError::Configuration(
+                "note totalDebt/timestamp exceeds the on-chain signed-Long range".to_string(),
+            ));
+        }
+
         // Use the reserve_lookup_proof passed as parameter
         // This should be None for first redemption, Some(proof) for subsequent redemptions
         let reserve_lookup_proof_to_use = reserve_lookup_proof;
@@ -399,6 +431,7 @@ impl RedemptionTransactionBuilder {
             tracker_signature: tracker_sig.to_vec(),
             fee: context.fee,
             tracker_nft_id: tracker_nft_id.to_string(),
+            reserve_ergo_tree: reserve_ergo_tree.to_string(),
             context_extension: Some(context_extension),
             total_debt,
             already_redeemed,
@@ -443,6 +476,7 @@ impl RedemptionTransactionBuilder {
         tracker_lookup_proof: Vec<u8>,
         redemption_amount: u64,
         recipient_min_value: u64,
+        reserve_ergo_tree: &str,
     ) -> Result<RedemptionTransactionData, TransactionBuilderError> {
         if reserve_token_id.is_empty() {
             return Err(TransactionBuilderError::Configuration(
@@ -493,6 +527,7 @@ impl RedemptionTransactionBuilder {
             reserve_lookup_proof,
             tracker_lookup_proof,
             redemption_amount,
+            reserve_ergo_tree,
         )?;
 
         tx_data.reserve_token_id = Some(reserve_token_id.to_string());
@@ -606,7 +641,7 @@ impl RedemptionTransactionBuilder {
             Self::serialize_ergo_coll_bytes(&ctx.insert_proof),
         );
 
-        // #6: Tracker signature (Coll[Byte] constant, 65 bytes)
+        // #6: Tracker signature (Coll[Byte] constant, 65 bytes; empty for emergency redemption)
         extension.insert(
             "6".to_string(),
             Self::serialize_ergo_coll_bytes(&ctx.tracker_signature),
@@ -629,22 +664,9 @@ impl RedemptionTransactionBuilder {
         // Determine whether this is a token-backed redemption.
         let token_reserve = tx_data.reserve_token_id.is_some();
 
-        // Get the reserve contract ErgoTree (P2S) for the reserve output
-        let reserve_ergo_tree = if token_reserve {
-            crate::contract_compiler::get_basis_token_reserve_ergo_tree_hex().map_err(|e| {
-                TransactionBuilderError::TransactionBuilding(format!(
-                    "Failed to get token reserve contract: {}",
-                    e
-                ))
-            })?
-        } else {
-            crate::contract_compiler::get_basis_reserve_ergo_tree_hex().map_err(|e| {
-                TransactionBuilderError::TransactionBuilding(format!(
-                    "Failed to get reserve contract: {}",
-                    e
-                ))
-            })?
-        };
+        // The reserve output carries exactly the script of the box being spent
+        // (supplied by the caller from the configured P2S / on-chain box).
+        let reserve_ergo_tree = tx_data.reserve_ergo_tree.clone();
 
         // Reserve NFT ID from the transaction data (from reserve box R6)
         let reserve_nft_id = &tx_data.tracker_nft_id;
@@ -880,6 +902,7 @@ mod tests {
             reserve_token_id: None,
             reserve_token_amount_in: 0,
             recipient_min_value: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -960,6 +983,8 @@ mod tests {
                 reserve_token_id: None,
                 reserve_token_amount_in: 0,
                 recipient_min_value: 0,
+                reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex()
+                    .unwrap(),
             };
 
             let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -1035,6 +1060,8 @@ mod tests {
                 reserve_token_id: None,
                 reserve_token_amount_in: 0,
                 recipient_min_value: 0,
+                reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex()
+                    .unwrap(),
             };
 
             let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -1093,6 +1120,7 @@ mod tests {
             reserve_token_id: None,
             reserve_token_amount_in: 0,
             recipient_min_value: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -1134,6 +1162,7 @@ mod tests {
             reserve_token_id: None,
             reserve_token_amount_in: 0,
             recipient_min_value: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -1185,6 +1214,7 @@ mod tests {
             reserve_token_id: None,
             reserve_token_amount_in: 0,
             recipient_min_value: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);
@@ -1244,6 +1274,7 @@ mod tests {
             reserve_token_id: Some(reserve_token_id.to_string()),
             reserve_token_amount_in: 1000,
             recipient_min_value: 1000000,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let result = RedemptionTransactionBuilder::build_redemption_transaction(&tx_data);

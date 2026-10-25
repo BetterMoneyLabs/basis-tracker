@@ -24,9 +24,11 @@ When auth is enabled, the server also logs a warning if TLS is not configured, b
 `server.auth.mode` to `"none"` when the key is absent; `config/basis.toml.example` states the same).
 
 In `none` mode the middleware attaches `ClientRole::Admin` to **every request, including
-unauthenticated ones**. Out of the box this leaves all state-mutating endpoints open to the
-network, including `POST /redeem/complete`, `POST /reserves/create`, `POST /reserves/submit`, and
-`POST /acceptance/policy`.
+unauthenticated ones**. Because this leaves all state-mutating endpoints open
+(including `POST /redeem/complete`, `POST /reserves/create`, and
+`POST /acceptance/policy`), the server **refuses to start** when `mode = "none"`
+and `server.host` is not a loopback address (`127.0.0.1`, `::1`, or
+`localhost`). Running auth-less on loopback logs an explicit warning.
 
 The example below uses `mode = "signature"` because that is the recommended production
 configuration — **it is not the default.** Do not read it as an out-of-the-box baseline. See
@@ -56,7 +58,9 @@ role = "admin"
 pubkey = "030303030303030303030303030303030303030303030303030303030303030303"
 role = "write"
 
-# CORS origins allowed when auth is enabled. Empty = any origin (not recommended for browsers).
+# CORS origins allowed by the server. Empty (the default) = CORS disabled: no
+# CORS headers are emitted and only same-origin or non-browser clients can
+# connect. Wildcard origins are never used.
 allowed_origins = ["https://tracker.example.com"]
 
 # Request signature timestamp tolerance in milliseconds (signature mode only).
@@ -77,7 +81,7 @@ In signature mode each request must carry:
 | `X-Signature-Pubkey` | Hex-encoded 33-byte compressed secp256k1 public key (66 characters). |
 | `X-Signature` | Hex-encoded 65-byte Schnorr signature (130 characters). |
 | `X-Signature-Timestamp` | Unix timestamp in milliseconds. |
-| `X-Signature-Nonce` | Random nonce (recommended; required for strong replay protection). |
+| `X-Signature-Nonce` | Random nonce (required; requests without one are rejected). |
 
 ### Canonical Message
 
@@ -107,7 +111,7 @@ Verification uses `basis_offchain::schnorr::schnorr_verify` and the challenge `e
 
 ### Replay Protection
 
-The server keeps an in-memory cache of seen `(pubkey_lowercase, nonce)` pairs. If a client omits a nonce, the server falls back to `(pubkey_lowercase, timestamp)`, which allows at most one request per timestamp tick. Entries are pruned after twice the configured timestamp tolerance.
+The server keeps an in-memory cache of seen `(pubkey_lowercase, timestamp_ms, nonce)` combinations, keyed on the *parsed* timestamp and the nonce. The nonce header is mandatory: requests without one are rejected with 401. A pair is inserted into the cache only **after** the signature has been verified, so a forged request cannot burn a legitimate client's nonce. Entries are pruned after twice the configured timestamp tolerance.
 
 ### Timestamp Tolerance
 
@@ -132,7 +136,6 @@ Every authenticated request receives an effective role. Routes require the follo
 | `/acceptance/check` | `POST` | `Read` |
 | `/acceptance/policy` | `POST` | `Admin` |
 | `/reserves/create` | `POST` | `Admin` |
-| `/reserves/submit` | `POST` | `Admin` |
 | unknown routes/verbs | any | `Admin` |
 
 Role hierarchy: `Admin` > `Write` > `Read`. A higher role can access endpoints requiring a lower role.
@@ -184,7 +187,34 @@ The TUI wallet uses the same `~/.basis/cli.toml` auth settings as `basis_cli`. I
 
 ## CORS Considerations
 
-When auth is enabled, the server restricts CORS origins if `allowed_origins` is non-empty. If `allowed_origins` is empty while auth is enabled, the server allows any origin but logs a warning, because browser-based clients should use an explicit allow-list.
+When auth is enabled, the server restricts CORS origins to `allowed_origins`. If `allowed_origins`
+is empty while auth is enabled, **no CORS layer is installed at all**, so browsers refuse
+cross-origin requests while non-browser clients (curl, the CLI, the MCP server) are unaffected.
+There is no wildcard-origin branch any more.
+
+This changed after PR #14 (S1). The previous behaviour fell through to `allow_origin(Any)` whenever
+auth was enabled but `allowed_origins` was empty, which is the default — so any web page the operator
+had open in their browser could call the tracker API. In `none` mode every such request is `Admin`.
+A wildcard origin is now used only when auth is disabled, where there is no credential to steal.
+
+### Mandatory authentication off loopback
+
+`auth.mode = "none"` grants `ClientRole::Admin` to every request. The server therefore **refuses to
+start** when `mode = "none"` is combined with a non-loopback bind address, unless
+`server.auth.allow_anonymous_non_loopback = true` is set explicitly (default `false`). Loopback is
+recognised as `127.0.0.0/8`, `::1`, and the name `localhost`.
+
+Two related changes from the same review:
+
+- A failed `AppConfig::load()` now **exits**. It used to log a warning, retry, and fall back to a
+  hardcoded default whose auth mode was `none` — so an operator who wrote the documented
+  `mode = "api_key"` (which did not match the serde name `apikey`) silently got an anonymous Admin
+  server on `0.0.0.0`. `api_key` is now the canonical spelling; `apikey` is accepted as an alias.
+- In signature mode the replay cache is written **after** the signature verifies (it used to be
+  written first, so a forged request could burn a client's nonce) and is keyed on the **parsed**
+  timestamp rather than the raw header, which otherwise allowed unlimited replay by sending
+  `X-Signature-Timestamp: 0<ts>` (leading zeros parse to the same integer but produced a fresh cache
+  key). The request body is also capped.
 
 ## Security Checklist
 

@@ -16,7 +16,7 @@
     //    A key->value dictionary is used to store the data as hash(A_pubkey || B_pubkey) -> totalDebt,
     //    where totalDebt is the cumulative amount of debt A owes to B (in token units).
     //  * to make a (new payment) to B, A is taking current AB record, increasing cumulative debt,
-    //    signing the updated record (message: hash(A||B) || totalDebt || timestamp) and sending it to the tracker.
+    //    signing the updated record (message: hash(A||B) || totalDebt || timestamp || trackerNftId) and sending it to the tracker.
     //    The timestamp is in milliseconds since Unix epoch (Java time format).
     //  * tracker is periodically committing to its state (dictionary) by posting its digest on chain
     //    via an AVL tree in register R5. The tree stores hash(A||B) -> totalDebt mappings.
@@ -25,14 +25,14 @@
     //    The AVL tree stores: hash(ownerKey||receiverKey) -> (timestamp, cumulativeRedeemedAmount)
     //    where timestamp is the latest payment timestamp and cumulativeRedeemedAmount is total redeemed.
     //    Redemption requires BOTH reserve owner's signature AND tracker's signature on message:
-    //    hash(ownerKey||receiverKey) || totalDebt || timestamp.
+    //    hash(ownerKey||receiverKey) || totalDebt || timestamp || trackerNftId.
     //    The tracker signature guarantees that the offchain state is consistent and prevents double-spending.
     //    Additionally, the contract verifies that totalDebt is committed in the tracker's AVL tree (context var #8 provides lookup proof).
-    //    The contract also verifies that the note's timestamp is greater than any previously redeemed timestamp,
+    //    The contract also verifies that the note's timestamp is not older than any previously redeemed timestamp,
     //    preventing replay attacks with old notes.
     //  * to redeem: B contacts tracker to obtain signature on the debt note, then presents reserve owner's signature
     //    (from original IOU note) and tracker's signature to the on-chain contract along with AVL tree proofs:
-    //    - proof for reserve tree lookup (context var #7, optional for first redemption)
+    //    - proof for reserve tree lookup (context var #7, optional; required from the second redemption on)
     //    - proof for tracker tree lookup (context var #8, required)
     //  * always possible to top up the reserve. To redeem partially, reserve holder can make an offchain payment to self (A -> A)
     //    updating the cumulative debt, then redeem the desired amount.
@@ -57,14 +57,17 @@
     //
     // Debt Transfer (Novation):
     //  * The scheme supports transferring debt obligations between creditors with debtor consent.
-    //  * Example: A owes debt to B. B wants to buy from C. If A agrees, A can sign new notes:
-    //    - Note 1: A -> B for remaining amount (e.g., 5 tokens)
-    //    - Note 2: A -> C for transferred amount (e.g., 5 tokens)
+    //  * Example: A owes debt to B. B wants to buy from C. If A agrees, A signs a new note:
+    //    - Note: A -> C for transferred amount (e.g., 5 tokens)
     //  * Process:
     //    1. B initiates transfer: requests payment from C via A's debt
-    //    2. A signs two new notes: one to B (remaining), one to C (transferred)
-    //    3. Tracker signs both new notes
-    //    4. Tracker updates ledger: cancels old A->B note, adds new A->B and A->C notes
+    //    2. A signs the new note to C (transferred amount)
+    //    3. Tracker signs the new note
+    //    4. Tracker updates ledger: adds the A->C note; the A->B note keeps its cumulative total
+    //  * Note: per-creditor cumulative totals never decrease on the tracker (a lower total would
+    //    break the creditor's on-chain redemption). After a novation B simply refrains from
+    //    redeeming the transferred part of the A->B note; a creditor-signed decrease mechanism
+    //    is future work.
     //  * This allows debt to circulate in the network: A's credit with B can be used to pay C,
     //    effectively making debt notes transferrable with debtor consent.
     //  * Benefits:
@@ -96,7 +99,8 @@
     // * At any time, B can redeem the debt by presenting both signatures to the reserve contract along with
     //   an AVL tree proof showing the cumulative redeemed amount. The contract verifies both signatures and
     //   ensures the redeemed amount doesn't exceed (totalDebt - alreadyRedeemed).
-    //   The contract also verifies timestamp > storedTimestamp, preventing replay attacks.
+    //   The contract also verifies timestamp >= storedTimestamp; together with the cumulative
+    //   redeemed-amount counter this prevents replay attacks.
     // * At any time, A can make another payment to B by signing a message with increased cumulative debt amount
     //   and new timestamp.
     // * A can refund by redeeming like B (in pseudonymous environments, A may have multiple keys).
@@ -105,14 +109,14 @@
     // Debt Transfer Workflow (Triangular Trade):
     // * Scenario: A owes 10 tokens to B. B wants to buy 5 tokens worth of services from C.
     // * Step 1: B proposes to C that B will pay via debt transfer from A. C agrees.
-    // * Step 2: B requests payment from A: sign new notes for remaining debt and transferred debt.
-    // * Step 3: A signs two new notes:
-    //   - Note 1: A -> B for 5 tokens (remaining debt)
-    //   - Note 2: A -> C for 5 tokens (transferred debt)
-    // * Step 4: Tracker signs both new notes
-    // * Step 5: Tracker updates ledger: cancels old A->B (10 tokens), adds A->B (5 tokens) and A->C (5 tokens)
-    // * Result: B is paid (debt reduced), C is creditor (new note received), A owes C instead of part of B.
-    // * C can now redeem from A's reserve or further transfer the debt to D (with A's consent).
+    // * Step 2: B requests payment from A: sign a new note for the transferred debt.
+    // * Step 3: A signs the new note:
+    //   - Note: A -> C for 5 tokens (transferred debt)
+    // * Step 4: Tracker signs the new note
+    // * Step 5: Tracker updates ledger: adds A->C (5 tokens); A->B keeps its cumulative total (10 tokens)
+    // * Result: B is paid (B gives up the transferred claim off-chain), C is creditor (new note
+    //   received), A additionally owes C. C can now redeem from A's reserve or further transfer
+    //   the debt to D (with A's consent).
 
     // Tracker's role here is to guarantee fairness of payments. Tracker can't steal A's onchain funds as A's signature is
     // required. Tracker cannot enable double-redemption as the contract tracks cumulative redeemed amounts in AVL tree.
@@ -159,13 +163,15 @@
 
     // Context extension variables for redemption:
     // #1 - receiver pubkey (as a GroupElement)
-    // #2 - reserve owner's signature bytes (Schnorr signature on key || totalDebt || timestamp)
+    // #2 - reserve owner's signature bytes (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
     // #3 - current total debt amount (Long)
     // #4 - timestamp of the payment (Long, milliseconds since Unix epoch)
     // #5 - proof for insertOrUpdate into reserve's AVL tree (Coll[Byte])
-    // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp)
+    // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
     // #7 - [OPTIONAL] proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)
-    //      Not needed for first redemption (when redeemedDebt = 0)
+    //      Omitted only for a first redemption. If omitted, the contract uses AvlTree.insert,
+    //      which fails if the key is already present -- so omitting #7 for an already-redeemed
+    //      note is rejected rather than treated as "nothing redeemed yet".
     // #8 - proof for AVL tree lookup in tracker's tree for hash(ownerKey||receiverKey) -> totalDebt (required)
 
     // action and reserve output index. By passing them instead of hard-coding, we allow for multiple notes to be
@@ -190,30 +196,44 @@
 
     // common checks for all the paths (not incl. token #1 value and R5 check)
     // Note: selfOut.tokens == SELF.tokens is NOT used here because token #1 amount changes
+    val uniqueReserveInput = INPUTS.filter({ (in: Box) =>
+      in.propositionBytes == SELF.propositionBytes &&
+      in.R4[GroupElement].isDefined && in.R4[GroupElement].get == ownerKey
+    }).size == 1
+
     val selfPreserved =
+            uniqueReserveInput &&
             selfOut.propositionBytes == SELF.propositionBytes &&
             selfOut.R4[GroupElement].get == SELF.R4[GroupElement].get &&
             selfOut.R6[Coll[Byte]].get == SELF.R6[Coll[Byte]].get
 
-    // Verify token IDs at positions #0 and #1 are preserved in output
-    // Token #0 value is always 1 (0-value tokens not possible in Ergo)
+    // Verify token IDs at positions #0 and #1 are preserved in output, and that token #0 (the
+    // reserve NFT) keeps its amount. SECURITY: without the amount check, an output could carry more
+    // units of the reserve NFT than the input, i.e. mint additional reserve NFTs.
     // Token #1 value changes according to redemption/top-up logic
     val tokenIdsPreserved = 
         selfOut.tokens.size == 2 &&
         selfOut.tokens(0)._1 == tokenId0 &&
+        selfOut.tokens(0)._2 == SELF.tokens(0)._2 &&
         selfOut.tokens(1)._1 == tokenId1
+
+    // SECURITY: the reserve box's ERG must never decrease on the redemption or top-up paths.
+    // Action #1 (top up) requires no signature, so without this check anybody could add one token
+    // unit and take the whole ERG balance. Action #0 computed the redeemed amount from the token
+    // delta only, which likewise left selfOut.value unconstrained during a redemption.
+    val ergPreserved = selfOut.value >= SELF.value
 
     if (action == 0) {
       // redemption path
       // context extension variables used:
       // #1 - receiver pubkey (as a GroupElement)
-      // #2 - reserve owner's signature bytes for the debt record (Schnorr signature on key || totalDebt || timestamp)
+      // #2 - reserve owner's signature bytes for the debt record (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
       // #3 - current total debt amount (Long)
       // #4 - timestamp of the payment (Long, milliseconds since Unix epoch)
       // #5 - proof for insertOrUpdate into reserve's AVL tree (Coll[Byte])
-      // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp)
+      // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
       // #7 - [OPTIONAL] proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)
-      //      Not needed for first redemption (when redeemedDebt = 0)
+      //      Omitted only for a first redemption (see the insert/insertOrUpdate branch below)
       // #8 - proof for AVL tree lookup in tracker's tree for hash(ownerKey||receiverKey) -> totalDebt (required)
 
       // Base point for elliptic curve operations
@@ -271,9 +291,12 @@
         0L
       }
 
-      // Verify that the new timestamp is greater than the stored timestamp
-      // This prevents replay attacks with old notes
-      val timestampCorrect = timestamp > storedTimestamp
+      // Verify that the new timestamp is not older than the stored one.
+      // SECURITY: >= (not >) so the remainder of a partially redeemed note can still be claimed
+      // after the reserve is topped up. This cannot weaken replay protection: redeemedDebt below
+      // accumulates across redemptions and properlyRedeemed requires redeemed <= totalDebt -
+      // redeemedDebt. It also cannot lower the stored timestamp.
+      val timestampCorrect = timestamp >= storedTimestamp
 
       // Check if enough time has passed for emergency redemption (without tracker signature)
       // NOTE: After 3 days (2160 blocks), the tracker signature becomes optional.
@@ -283,8 +306,10 @@
       val trackerUpdateTime = tracker.creationInfo._1
       val enoughTimeSpent = (HEIGHT - trackerUpdateTime) > 3 * 720 // 3 days passed
 
-      // Message to verify signatures: key || totalDebt || timestamp
-      val message = key ++ longToByteArray(totalDebt) ++ longToByteArray(timestamp)
+      // Message to verify signatures: key || totalDebt || timestamp || trackerNftId
+      // The tracker NFT ID (SELF.R6, 32 bytes) binds every signature to this tracker,
+      // its reserve contract deployment and its chain (issue #15 C3).
+      val message = key ++ longToByteArray(totalDebt) ++ longToByteArray(timestamp) ++ SELF.R6[Coll[Byte]].get
 
       // Tracker's signature (optional after emergency period)
       val trackerSigBytes = getVar[Coll[Byte]](6).get
@@ -350,8 +375,19 @@
       val newRedeemed = redeemedDebt + redeemed
       val treeValue = longToByteArray(timestamp) ++ longToByteArray(newRedeemed)
       val redeemedKeyVal = (key, treeValue)  // key -> (timestamp, redeemed debt value)
-      val insertOrUpdateProof = getVar[Coll[Byte]](5).get // Merkle proof for insertOrUpdate
-      val nextTree: AvlTree = SELF.R5[AvlTree].get.insertOrUpdate(Coll(redeemedKeyVal), insertOrUpdateProof).get
+      val insertOrUpdateProof = getVar[Coll[Byte]](5).get // Merkle proof for the AVL update
+      // SECURITY (replay protection): context var #7 stays optional, but omitting it no longer
+      // means "never redeemed". Without #7 we use insert instead of insertOrUpdate, and sigma's
+      // AvlTree.insert THROWS when the key is already present. So a redemption that omits #7 for a
+      // note which has already been redeemed against this reserve is rejected, while a genuine
+      // first redemption (key absent) still succeeds. Because this branch can only complete when
+      // the key was absent, the storedTimestamp/redeemedDebt = 0 read above is self-proving here.
+      val nextTree: AvlTree = if (lookupProofOpt.isDefined) {
+        SELF.R5[AvlTree].get.insertOrUpdate(Coll(redeemedKeyVal), insertOrUpdateProof).get
+      } else {
+        // insert yields None (and so this .get throws) when the key is already present
+        SELF.R5[AvlTree].get.insert(Coll(redeemedKeyVal), insertOrUpdateProof).get
+      }
       // Verify tree was properly updated in output
       val properRedemptionTree = nextTree == selfOut.R5[AvlTree].get
 
@@ -365,6 +401,7 @@
       // Combine all validation conditions
       sigmaProp(selfPreserved &&
                 tokenIdsPreserved &&
+                ergPreserved &&
                 trackerIdCorrect &&
                 trackerDebtCorrect &&
                 timestampCorrect &&
@@ -384,6 +421,7 @@
       sigmaProp(
         selfPreserved &&
         tokenIdsPreserved &&
+        ergPreserved &&
         selfOut.R5[AvlTree].get == SELF.R5[AvlTree].get && // as R5 register preservation is not checked in selfPreserved
         selfOut.R7[Long].getOrElse(0L) == refundHeight && // pending refund flag (if any) must be preserved
         (tokenAmountOut - tokenAmountIn >= 1) // at least 1 token unit added

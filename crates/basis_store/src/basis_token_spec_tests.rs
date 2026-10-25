@@ -9,7 +9,7 @@
 //! 3. Token-specific calculations: redemption amount, top-up delta, preservation
 //!    of token IDs and the reserve NFT.
 //! 4. Schnorr signature/message compatibility (the token reserve uses the same
-//!    48-byte message format as the ERG-backed reserve).
+//!    80-byte message format as the ERG-backed reserve).
 //! 5. Debt transfer / triangular trade scenarios denominated in token units.
 //!
 //! See: `scala/tests/BasisTokenSpec.scala` for the original on-chain tests.
@@ -30,6 +30,16 @@ mod tests {
     // ========== Test Constants ==========
 
     const TEST_TIMESTAMP: u64 = 1_000_000_000;
+
+    /// Tracker NFT ID matching the Scala token spec fixture (BasisTokenSpec.trackerNFT).
+    fn tracker_nft_bytes() -> [u8; 32] {
+        let mut id = [0u8; 32];
+        id.copy_from_slice(
+            &hex::decode("3c45f29a5165b030fdb5eaf5d81f8108f9d8f507b31487dd51f4ae08fe07cf4a")
+                .unwrap(),
+        );
+        id
+    }
 
     // ========== Helpers ==========
 
@@ -313,8 +323,14 @@ mod tests {
         let total_debt: u64 = 1_000; // token units
         let timestamp: u64 = TEST_TIMESTAMP;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
-        assert_eq!(message.len(), 48);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
+        assert_eq!(message.len(), 80);
 
         let sig = schnorr_sign(&message, &owner_secret, &owner_pk).unwrap();
         assert!(schnorr_verify(&sig, &message, &owner_pk).is_ok());
@@ -328,7 +344,13 @@ mod tests {
 
         let total_debt = 250u64;
         let timestamp = TEST_TIMESTAMP;
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         let owner_sig = schnorr_sign(&message, &owner_secret, &owner_pk).unwrap();
         let tracker_sig = schnorr_sign(&message, &tracker_secret, &tracker_pk).unwrap();
@@ -348,7 +370,13 @@ mod tests {
         let total_debt = 100u64;
         let timestamp = TEST_TIMESTAMP;
 
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
         let owner_sig = schnorr_sign(&message, &owner_secret, &owner_pk).unwrap();
 
         assert!(schnorr_verify(&owner_sig, &message, &owner_pk).is_ok());
@@ -362,7 +390,13 @@ mod tests {
 
         let total_debt = 100u64;
         let timestamp = TEST_TIMESTAMP;
-        let message = core_signing_message(&owner_pk, &receiver_pk, total_debt, timestamp);
+        let message = core_signing_message(
+            &owner_pk,
+            &receiver_pk,
+            total_debt,
+            timestamp,
+            &tracker_nft_bytes(),
+        );
 
         // Owner signs correctly.
         let owner_sig = schnorr_sign(&message, &owner_secret, &owner_pk).unwrap();
@@ -397,8 +431,20 @@ mod tests {
         let transferred = 40u64;
         let remaining = 60u64;
 
-        let msg_bob = core_signing_message(&alice_pk, &bob_pk, remaining, TEST_TIMESTAMP);
-        let msg_carol = core_signing_message(&alice_pk, &carol_pk, transferred, TEST_TIMESTAMP + 1);
+        let msg_bob = core_signing_message(
+            &alice_pk,
+            &bob_pk,
+            remaining,
+            TEST_TIMESTAMP,
+            &tracker_nft_bytes(),
+        );
+        let msg_carol = core_signing_message(
+            &alice_pk,
+            &carol_pk,
+            transferred,
+            TEST_TIMESTAMP + 1,
+            &tracker_nft_bytes(),
+        );
 
         let sig_bob = schnorr_sign(&msg_bob, &alice_secret.secret_bytes(), &alice_pk).unwrap();
         let sig_carol = schnorr_sign(&msg_carol, &alice_secret.secret_bytes(), &alice_pk).unwrap();
@@ -424,7 +470,13 @@ mod tests {
         let carol_pk = secp256k1::PublicKey::from_secret_key(&secp, &carol_secret).serialize();
 
         let transfer_amount = 40u64;
-        let message = core_signing_message(&alice_pk, &carol_pk, transfer_amount, TEST_TIMESTAMP);
+        let message = core_signing_message(
+            &alice_pk,
+            &carol_pk,
+            transfer_amount,
+            TEST_TIMESTAMP,
+            &tracker_nft_bytes(),
+        );
 
         // Bob forges a signature with his own secret.
         let forged = schnorr_sign(&message, &bob_secret.secret_bytes(), &bob_pk).unwrap();
@@ -442,8 +494,14 @@ mod tests {
         let (issuer_secret, issuer_pk) = random_keypair();
         let (_, recipient_pk) = random_keypair();
 
-        let note =
-            IouNote::create_and_sign(recipient_pk, 1_000, TEST_TIMESTAMP, &issuer_secret).unwrap();
+        let note = IouNote::create_and_sign(
+            recipient_pk,
+            1_000,
+            TEST_TIMESTAMP,
+            &issuer_secret,
+            &[0x42; 32],
+        )
+        .unwrap();
         tracker.add_note(&issuer_pk, &note).unwrap();
 
         let proof = tracker

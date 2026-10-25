@@ -34,6 +34,11 @@ object BasisNoteCreator extends App {
   val trackerPublicKey: GroupElement = ParticipantKeys.trackerPublicKey
   val trackerSecret: BigInt = ParticipantKeys.trackerSecret
 
+  // Tracker NFT ID (must match the tracker box / reserve R6 used at redemption time;
+  // same constant as BasisNoteRedeemer and TrackerBoxSetup)
+  val trackerNftId = "8b1ab583bb085ecbd8fa9bc2fd59784afcdfce5496eb146bb3dd04664b56822a"
+  val trackerNftIdBytes: Array[Byte] = Base16.decode(trackerNftId).get
+
   case class IOUNote(
     payerKey: GroupElement,
     payeeKey: GroupElement,
@@ -49,13 +54,15 @@ object BasisNoteCreator extends App {
     signatureZ: BigInt
   )
 
-  def createNoteMessage(payerKey: GroupElement, payeeKey: GroupElement, totalDebt: Long, timestamp: Long): Array[Byte] = {
-    Blake2b256(payerKey.getEncoded.toArray ++ payeeKey.getEncoded.toArray) ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+  // Message: key || totalDebt (8 bytes BE) || timestamp (8 bytes BE) || trackerNftId (32 bytes),
+  // matching basis.es which appends SELF.R6[Coll[Byte]] to the signed message.
+  def createNoteMessage(payerKey: GroupElement, payeeKey: GroupElement, totalDebt: Long, timestamp: Long, nftIdBytes: Array[Byte] = trackerNftIdBytes): Array[Byte] = {
+    Blake2b256(payerKey.getEncoded.toArray ++ payeeKey.getEncoded.toArray) ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ nftIdBytes
   }
 
-  def createNote(payerSecret: BigInt, payeeKey: GroupElement, totalDebt: Long, timestamp: Long): IOUNote = {
+  def createNote(payerSecret: BigInt, payeeKey: GroupElement, totalDebt: Long, timestamp: Long, nftIdBytes: Array[Byte] = trackerNftIdBytes): IOUNote = {
     val payerKey = g.exp(payerSecret.bigInteger)
-    val message = createNoteMessage(payerKey, payeeKey, totalDebt, timestamp)
+    val message = createNoteMessage(payerKey, payeeKey, totalDebt, timestamp, nftIdBytes)
     val (a, z) = SigUtils.sign(message, payerSecret)
     IOUNote(payerKey, payeeKey, totalDebt, timestamp, a, z, message)
   }
@@ -65,8 +72,8 @@ object BasisNoteCreator extends App {
     TrackerSignature(a, z)
   }
 
-  def verifyNote(note: IOUNote): Boolean = {
-    val message = createNoteMessage(note.payerKey, note.payeeKey, note.totalDebt, note.timestamp)
+  def verifyNote(note: IOUNote, nftIdBytes: Array[Byte] = trackerNftIdBytes): Boolean = {
+    val message = createNoteMessage(note.payerKey, note.payeeKey, note.totalDebt, note.timestamp, nftIdBytes)
     SigUtils.verify(message, note.payerKey, note.signatureA, note.signatureZ)
   }
 
@@ -88,7 +95,8 @@ object BasisNoteCreator extends App {
        |  "payerSignature": {"a": "$sigAHex", "z": "${note.signatureZ.toString(16)}"},
        |  "trackerSignature": {"a": "$trackerSigAHex", "z": "${trackerSig.signatureZ.toString(16)}"},
        |  "message": "${Base16.encode(note.message)}",
-       |  "messageFormat": "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes)",
+       |  "messageFormat": "key (32 bytes) || totalDebt (8 bytes) || timestamp (8 bytes) || trackerNftId (32 bytes)",
+       |  "trackerNftId": "$trackerNftId",
        |  "noteKey": "${Base16.encode(Blake2b256((payerKeyHex ++ payeeKeyHex).getBytes))}"
        |}""".stripMargin
   }

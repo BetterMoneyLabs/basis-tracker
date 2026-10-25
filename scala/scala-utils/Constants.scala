@@ -49,6 +49,14 @@ object Constants {
   val emptyTreeErgoValue: ErgoValue[AvlTree] = emptyPlasmaMap.ergoValue
   val emptyTree: AvlTree = emptyTreeErgoValue.getValue
 
+  // SECURITY: the RESERVE tree (R5 of the reserve box) must allow insert + update -- the contract
+  // calls insertOrUpdate on redemption once a (owner, receiver) key exists, and AvlTree rejects
+  // updates on an InsertOnly tree, bricking the reserve after the first redemption per key.
+  // Use this variant for reserve trees ONLY; the tracker tree correctly stays InsertOnly.
+  val reserveTreeFlags: AvlTreeFlags =
+    AvlTreeFlags(insertAllowed = true, updateAllowed = true, removeAllowed = false)
+  def emptyReservePlasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](reserveTreeFlags, chainCashPlasmaParameters)
+
   val g: GroupElement = CGroupElement(CryptoConstants.dlogGroup.generator)
 
   val reserveContract = readContract("onchain/reserve.es", Map.empty)

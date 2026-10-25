@@ -25,9 +25,11 @@ basis_cli transaction generate-redemption ... --local-sign
 | Fee payer | fee-payer secret | `proveDlog(feePayer)` over the transaction bytes |
 | Ergo node | (none required) | validates only; does not sign |
 
-The issuer and tracker signatures are computed over the fixed 48-byte message
-`blake2b256(ownerKey \|\| receiverKey) \|\| longToBytes(totalDebt) \|\| longToBytes(timestamp)`
-(see [SCHNORR_SIGNATURE_SPEC.md](../SCHNORR_SIGNATURE_SPEC.md)) and are independent of the
+The issuer and tracker signatures are computed over the fixed 80-byte message
+`blake2b256(ownerKey \|\| receiverKey) \|\| longToBytes(totalDebt) \|\| longToBytes(timestamp) \|\| trackerNftId`
+(see [SCHNORR_SIGNATURE_SPEC.md](../SCHNORR_SIGNATURE_SPEC.md)). The `trackerNftId` (32 bytes) is
+the tracker's NFT id, which the client learns from the note / tracker box; it binds the signature to
+that tracker so it cannot be replayed on another. The signatures are independent of the
 transaction. Only the two `proveDlog` proofs are computed over the transaction itself, which is
 where off-chain signing must be byte-exact.
 
@@ -174,7 +176,7 @@ in [redemption_execution_report.md](../redemption_execution_report.md)).
 
 | Party | Produces in this variant |
 |-------|--------------------------|
-| Issuer (client) | issuer Schnorr signature over the 48-byte message (build request) |
+| Issuer (client) | issuer Schnorr signature over the 80-byte message (build request) |
 | Tracker server | unsigned tx, all AVL proofs, tracker Schnorr signature (`#6`), **fee-input `proveDlog`**, broadcast, state sync |
 | Receiver (client) | `proveDlog(receiver)` over `bytes_to_sign` spliced into the reserve input |
 | Ergo node | validates only; does not sign |
@@ -182,6 +184,6 @@ in [redemption_execution_report.md](../redemption_execution_report.md)).
 ## References
 
 - [redemption_transaction_format_spec.md](../server/redemption_transaction_format_spec.md) — transaction and context-extension layout
-- [SCHNORR_SIGNATURE_SPEC.md](../SCHNORR_SIGNATURE_SPEC.md) — issuer/tracker 48-byte Schnorr signatures
+- [SCHNORR_SIGNATURE_SPEC.md](../SCHNORR_SIGNATURE_SPEC.md) — issuer/tracker 80-byte Schnorr signatures
 - [redemption_cli_spec.md](../redemption_cli_spec.md) — CLI redemption command (node-signing path)
 - sigmastate-interpreter: `sigma.interpreter.ContextExtension` (serializer), `org.ergoplatform.sdk.JsonCodecs` (JSON encoder)

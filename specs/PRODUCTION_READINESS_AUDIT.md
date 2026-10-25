@@ -1177,7 +1177,7 @@ These remain fixed and should not be re-litigated:
 - [ ] `sbt test` (Scala contract tests) passing
 
 ### Core Protocol
-- [x] Signing message format (`key || totalDebt || timestamp`, 48 bytes)
+- [x] Signing message format (`key || totalDebt || timestamp`, 48 bytes — now 80 bytes incl. tracker NFT id, issue #15 C3)
 - [x] Emergency redemption uses same message format, tracker signature becomes optional
 - [x] Context extension variables (#0-#8)
 - [x] Tracker AVL tree storage (`hash(A||B) -> totalDebt`)

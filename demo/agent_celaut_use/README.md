@@ -101,7 +101,7 @@ Each agent runs its own isolated `basis-mcp` process over stdio. Tools used:
 * `policy_set` — publish acceptance policies.
 * `note_create` — issue a service-payment note.
 * `note_list` / `note_redeem` — query and redeem notes.
-* `reserve_create` — build the USE-backed reserve payload (submitted via the tracker's `/reserves/submit`).
+* `reserve_create` — build the USE-backed reserve payload (the demo then submits it via its own Ergo node's `/wallet/payment/send`; the tracker's wallet is never involved).
 * `reserve_status` — poll until the scanner confirms collateral on-chain.
 
 ## Notes

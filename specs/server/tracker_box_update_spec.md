@@ -172,6 +172,8 @@ The background task executes the following algorithm in a continuous loop:
 3. **Access Shared State**: Read the current AVL tree root digest and tracker public key
 4. **Skip Unchanged State**: If the AVL root digest hasn't changed since the last confirmed submission, skip the update cycle
 5. **Find Tracker Box**: Query the blockchain for the tracker box using the tracker NFT ID via `/blockchain/box/unspent/byTokenId`
+   - **NFT singleton check**: the tracker NFT must be a singleton (`amount == 1`) in the box. A non-singleton amount is a setup error (logged as an error): the reserve contract's singleton guarantees break if the tracker NFT is divisible.
+   - If multiple non-reserve boxes hold the NFT, a warning is logged and the first box is used.
 6. **Check On-Chain State**: If the on-chain tracker box already has the current AVL root digest in R5, skip the update
 7. **Create Register Constants**:
    - R4: Tracker public key as EcPoint constant (33 bytes, compressed secp256k1 point) - identifies the tracker server

@@ -65,6 +65,9 @@ mod create_reserve_tests {
                 tls_cert_path: None,
                 tls_key_path: None,
                 auth: crate::config::AuthConfig::default(),
+                reserve_creation_max_erg_nano: 10_000_000_000,
+                reserve_creation_max_token_amount: 1_000_000_000,
+                redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: crate::config::ErgoConfig {
                 node: NodeConfig {
@@ -133,6 +136,12 @@ mod create_reserve_tests {
             tracker_storage,
             acceptance_predicate: None,
             policy_storage,
+            pending_redemptions: std::sync::Arc::new(
+                crate::redemption_build::PendingRedemptionRegistry::new(),
+            ),
+            redemption_build_rate: std::sync::Arc::new(
+                crate::redemption_build::BuildRateLimiter::new(),
+            ),
         }
     }
 
@@ -152,7 +161,7 @@ mod create_reserve_tests {
 
         let request_payload = CreateReserveRequest {
             nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+            owner_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 .to_string(), // 33-byte public key
             erg_amount: 1000000000, // 1 ERG in nanoERG
             token_amount: 0,
@@ -188,7 +197,7 @@ mod create_reserve_tests {
                 );
                 assert_eq!(
                     reserve_response.requests[0].registers.get("R4").unwrap(),
-                    "0703e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+                    "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 );
                 assert!(reserve_response.fee > 0); // Should be the configured fee amount
             }
@@ -251,7 +260,7 @@ mod create_reserve_tests {
 
         let request_payload = CreateReserveRequest {
             nft_id: "".to_string(), // Empty NFT ID
-            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+            owner_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 .to_string(),
             erg_amount: 1000000000,
             token_amount: 0,
@@ -281,7 +290,7 @@ mod create_reserve_tests {
 
         let request_payload = CreateReserveRequest {
             nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+            owner_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 .to_string(),
             erg_amount: 0, // Zero amount
             token_amount: 0,
@@ -311,7 +320,7 @@ mod create_reserve_tests {
 
         let request_payload = CreateReserveRequest {
             nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+            owner_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 .to_string(),
             erg_amount: 10000000, // 0.01 ERG for min-box-value
             token_amount: 1000,
@@ -352,7 +361,7 @@ mod create_reserve_tests {
 
         let request_payload = CreateReserveRequest {
             nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-            owner_pubkey: "03e8c3e4877e2f7b79e0e407421a81a1619ea64e37e5e4e77454d1e361e6f80b12"
+            owner_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 .to_string(),
             erg_amount: 10000000,
             token_amount: 1000,
@@ -401,5 +410,106 @@ mod create_reserve_tests {
         );
         assert_eq!(config.reserve_token_decimals, 6);
         assert_eq!(config.basis_token_reserve_contract_p2s, "test_token");
+    }
+
+    #[tokio::test]
+    async fn test_create_reserve_payload_rejects_tracker_nft_as_reserve_nft() {
+        let state = create_test_app_state();
+
+        // The reserve NFT must never be the tracker NFT (PR #16 B4): a reserve box carrying
+        // the tracker NFT would collide with the tracker state box this server scans for.
+        let request_payload = CreateReserveRequest {
+            nft_id: "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
+            owner_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                .to_string(),
+            erg_amount: 1000000000,
+            token_amount: 0,
+            token_id: "".to_string(),
+        };
+
+        let (status, response_json) =
+            create_reserve_payload(State(state), Json(request_payload)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!response_json.success);
+        assert!(response_json.error.clone().unwrap().contains("tracker NFT"));
+    }
+
+    #[tokio::test]
+    async fn test_create_reserve_payload_rejects_erg_above_configured_cap() {
+        let state = create_test_app_state();
+
+        let request_payload = CreateReserveRequest {
+            nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+            owner_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                .to_string(),
+            erg_amount: 10_000_000_001, // one nanoERG above the configured 10 ERG cap
+            token_amount: 0,
+            token_id: "".to_string(),
+        };
+
+        let (status, response_json) =
+            create_reserve_payload(State(state), Json(request_payload)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!response_json.success);
+        assert!(response_json
+            .error
+            .clone()
+            .unwrap()
+            .contains("exceeds the configured per-reserve limit"));
+    }
+
+    #[tokio::test]
+    async fn test_create_token_reserve_payload_rejects_token_amount_above_cap() {
+        let state = create_token_test_app_state();
+
+        let request_payload = CreateReserveRequest {
+            nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+            owner_pubkey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                .to_string(),
+            erg_amount: 10000000,
+            token_amount: 1_000_000_001, // one unit above the configured cap
+            token_id: "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
+                .to_string(),
+        };
+
+        let (status, response_json) =
+            create_reserve_payload(State(state), Json(request_payload)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!response_json.success);
+        assert!(response_json
+            .error
+            .clone()
+            .unwrap()
+            .contains("exceeds the configured per-reserve limit"));
+    }
+
+    #[tokio::test]
+    async fn test_create_reserve_payload_change_address_is_owner_p2pk() {
+        // PR #16 B4: the owner submits the payload to their own node, so change must return
+        // to the owner's P2PK address derived from owner_pubkey — never to the tracker wallet.
+        let state = create_test_app_state();
+
+        let owner_pubkey =
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string();
+        let request_payload = CreateReserveRequest {
+            nft_id: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+            owner_pubkey: owner_pubkey.clone(),
+            erg_amount: 1000000000,
+            token_amount: 0,
+            token_id: "".to_string(),
+        };
+
+        let (status, response_json) =
+            create_reserve_payload(State(state), Json(request_payload)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let reserve_response: ReserveCreationResponse = response_json.data.clone().unwrap();
+        assert_eq!(
+            reserve_response.change_address,
+            basis_offchain::ergo_tx::pubkey_to_address(&owner_pubkey).unwrap()
+        );
     }
 }

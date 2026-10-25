@@ -80,6 +80,7 @@ pub struct CreateNoteRequest {
     pub amount: u64,
     pub timestamp: u64,
     pub signature: String,
+    pub tracker_nft_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +91,8 @@ pub struct SerializableIouNote {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    #[serde(default)]
+    pub tracker_nft_id: String,
 }
 
 impl SerializableIouNote {
@@ -186,6 +189,12 @@ pub struct CreateReserveRequest {
 pub struct ReserveCreationResponse {
     pub requests: Vec<ReservePaymentRequest>,
     pub fee: u64,
+    /// Owner's change address (derived from the owner pubkey by the tracker).
+    ///
+    /// The tracker only *builds* this payload: the reserve owner submits it to
+    /// their own Ergo node's `/wallet/payment/send` (the requests array is the
+    /// request body), so the tracker's wallet is never involved. Use
+    /// [`submit_reserve_to_node`] or submit the payload manually.
     pub change_address: String,
 }
 
@@ -203,10 +212,62 @@ pub struct Asset {
     pub amount: u64,
 }
 
-/// Response from submitting a reserve creation payload to the tracker's Ergo node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReserveSubmissionResponse {
-    pub tx_id: String,
+/// Asset shape the Ergo node's `/wallet/payment/send` expects (`tokenId`, camelCase).
+#[derive(Debug, Clone, Serialize)]
+struct NodeAsset {
+    #[serde(rename = "tokenId")]
+    token_id: String,
+    amount: u64,
+}
+
+/// Payment request shape the Ergo node's `/wallet/payment/send` expects.
+#[derive(Debug, Clone, Serialize)]
+struct NodePaymentRequest {
+    address: String,
+    value: u64,
+    assets: Vec<NodeAsset>,
+    registers: std::collections::HashMap<String, String>,
+}
+
+/// Submit a reserve creation payload to the OWNER's Ergo node for broadcast.
+///
+/// The node signs it with the owner's wallet key, so the owner's wallet must
+/// hold the reserve NFT (`nft_id`) and enough ERG for the reserve value and
+/// fee. Returns the transaction id.
+pub fn submit_reserve_to_node(
+    node_url: &str,
+    node_api_key: Option<&str>,
+    payload: &ReserveCreationResponse,
+) -> Result<String> {
+    let payment_requests: Vec<NodePaymentRequest> = payload
+        .requests
+        .iter()
+        .map(|req| NodePaymentRequest {
+            address: req.address.clone(),
+            value: req.value,
+            assets: req
+                .assets
+                .iter()
+                .map(|a| NodeAsset {
+                    token_id: a.token_id.clone(),
+                    amount: a.amount,
+                })
+                .collect(),
+            registers: req.registers.clone(),
+        })
+        .collect();
+
+    let url = format!("{}/wallet/payment/send", node_url.trim_end_matches('/'));
+    let mut request = ureq::post(&url);
+    if let Some(key) = node_api_key.filter(|k| !k.is_empty()) {
+        request = request.set("api_key", key);
+    }
+    let response = request
+        .send_json(&payment_requests)
+        .map_err(|e| anyhow::anyhow!("Ergo node /wallet/payment/send failed: {}", e))?;
+    // The node returns the transaction id as a quoted string.
+    let body = response.into_string()?;
+    Ok(body.trim().trim_matches('"').to_string())
 }
 
 /// Reserve-token configuration returned by the tracker.
@@ -222,8 +283,9 @@ pub struct ReserveTokenConfig {
 pub struct TrackerSignatureRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Legacy field, ignored by the server: the stored note's total debt is signed.
     pub total_debt: u64,
-    /// Payment timestamp in milliseconds since Unix epoch
+    /// Legacy field, ignored by the server: the stored note's payment timestamp is signed.
     pub timestamp: u64,
     #[serde(default)]
     pub emergency: bool,
@@ -550,6 +612,10 @@ impl TrackerClient {
 
     /// Request tracker signature for redemption
     /// Following the Basis protocol specification - POST /tracker/signature
+    ///
+    /// The server signs the stored note's total debt and timestamp; the
+    /// `total_debt` and `timestamp` arguments are sent for backward
+    /// compatibility but ignored by the server.
     pub async fn request_tracker_signature(
         &self,
         issuer_pubkey: &str,
@@ -592,7 +658,12 @@ impl TrackerClient {
 pub struct RedemptionPreparationRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Intended redemption amount. Used by the server only for the
+    /// acceptance-policy check; the signed message always covers the stored
+    /// note's cumulative debt.
     pub amount: u64,
+    /// Legacy field, ignored by the server: the stored note's payment
+    /// timestamp is signed.
     pub timestamp: u64,
 }
 
@@ -613,6 +684,9 @@ pub struct RedemptionBuildRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub amount: u64,
+    /// Legacy field, ignored by the server: the stored note's payment
+    /// timestamp is used for the signature, context extension, and reserve
+    /// tree value.
     pub timestamp: u64,
     /// Issuer's 65-byte Schnorr signature (hex) over the redemption signing message.
     pub issuer_signature: String,
@@ -620,6 +694,7 @@ pub struct RedemptionBuildRequest {
     pub emergency: bool,
     #[serde(default)]
     pub tracker_box_id: Option<String>,
+    /// Deprecated: ignored by the tracker, which always pays change to its own wallet.
     #[serde(default)]
     pub change_address: Option<String>,
 }
@@ -754,6 +829,11 @@ impl TrackerClient {
         }
     }
 
+    /// Prepare a redemption via POST /redemption/prepare.
+    ///
+    /// The note must exist in the tracker state. The server signs the stored
+    /// note's cumulative debt and payment timestamp; `amount` is used only for
+    /// the acceptance-policy check and the `timestamp` sent here is ignored.
     pub async fn prepare_redemption(
         &self,
         issuer_pubkey: &str,
@@ -943,28 +1023,6 @@ impl TrackerClient {
         }
     }
 
-    /// Submit a reserve creation payload to the tracker's configured Ergo node for broadcast.
-    pub async fn submit_reserve(
-        &self,
-        payload: ReserveCreationResponse,
-    ) -> Result<ReserveSubmissionResponse> {
-        let url = format!("{}/reserves/submit", self.base_url);
-        let body = serde_json::to_value(payload)?;
-        let response = self.post(&url, &body)?.send_json(body)?;
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<ReserveSubmissionResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!("Failed to submit reserve: {}", error_text))
-        }
-    }
-
     /// Fetch the tracker's reserve-token configuration.
     pub async fn get_reserve_token_config(&self) -> Result<ReserveTokenConfig> {
         let url = format!("{}/config/reserve-token", self.base_url);
@@ -1071,6 +1129,8 @@ pub struct TrackerBoxIdResponse {
     pub tracker_box_id: String,
     pub timestamp: u64,
     pub height: u64,
+    #[serde(default)]
+    pub tracker_nft_id: String,
 }
 
 /// Response from `GET /tracker/state`.

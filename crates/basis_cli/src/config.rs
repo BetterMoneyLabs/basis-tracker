@@ -21,6 +21,14 @@ pub struct CliConfig {
     /// Hex-encoded secret key when `server_auth_mode` is `signature`.
     #[serde(default)]
     pub server_auth_secret_key: Option<String>,
+    /// Ergo node URL used when submitting reserve creation payloads
+    /// (`reserve create --submit`). The node's wallet must be the reserve
+    /// owner's wallet — the tracker never pays for reserves.
+    #[serde(default)]
+    pub node_url: Option<String>,
+    /// API key for the configured Ergo node, if it requires one.
+    #[serde(default)]
+    pub node_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +71,8 @@ impl ConfigManager {
                 server_api_key: None,
                 server_auth_pubkey: None,
                 server_auth_secret_key: None,
+                node_url: None,
+                node_api_key: None,
             }
         };
 
@@ -190,6 +200,8 @@ mod tests {
             server_api_key: None,
             server_auth_pubkey: None,
             server_auth_secret_key: None,
+            node_url: None,
+            node_api_key: None,
         };
         fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
         ConfigManager::new(Some(path)).unwrap()

@@ -84,8 +84,7 @@ mod http_api_tests {
                     } => {
                         let result = redemption_manager
                             .tracker
-                            .lookup_note(&issuer_pubkey, &recipient_pubkey)
-                            .map(Some);
+                            .get_note_optional(&issuer_pubkey, &recipient_pubkey);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::InitiateRedemption {
@@ -122,7 +121,9 @@ mod http_api_tests {
                     } => {
                         // For testing purposes, return a mock proof
                         let mock_proof = basis_store::NoteProof {
-                            note: basis_store::IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65]),
+                            note: basis_store::IouNote::new(
+                                [0u8; 33], 0, 0, 0, [0u8; 65], [0x42; 32],
+                            ),
                             avl_proof: vec![1, 2, 3, 4], // Mock proof data
                             operations: vec![],
                         };
@@ -135,6 +136,19 @@ mod http_api_tests {
                         response_tx,
                     } => {
                         // Mock tracker lookup proof
+                        let mock_proof = basis_store::TrackerLookupProof {
+                            key: vec![0u8; 64],
+                            value: vec![0u8; 8],
+                            proof: vec![1, 2, 3, 4],
+                        };
+                        let _ = response_tx.send(Ok(mock_proof));
+                    }
+                    TrackerCommand::GetCommittedTrackerLookupProof {
+                        issuer_pubkey: _,
+                        recipient_pubkey: _,
+                        response_tx,
+                    } => {
+                        // Mock committed tracker lookup proof
                         let mock_proof = basis_store::TrackerLookupProof {
                             key: vec![0u8; 64],
                             value: vec![0u8; 8],
@@ -199,13 +213,14 @@ mod http_api_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::ConfirmPendingNotes {
+                        digest,
                         box_id,
                         height,
                         response_tx,
                     } => {
                         let result = redemption_manager
                             .tracker
-                            .confirm_pending_notes(&box_id, height);
+                            .confirm_pending_notes(digest, &box_id, height);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::RevertPendingNotes { response_tx } => {
@@ -246,6 +261,9 @@ mod http_api_tests {
                 tls_cert_path: None,
                 tls_key_path: None,
                 auth: config::AuthConfig::default(),
+                reserve_creation_max_erg_nano: 10_000_000_000,
+                reserve_creation_max_token_amount: 1_000_000_000,
+                redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: config::ErgoConfig {
                 node: basis_store::ergo_scanner::NodeConfig {
@@ -305,6 +323,12 @@ mod http_api_tests {
             tracker_storage,
             acceptance_predicate: None,
             policy_storage,
+            pending_redemptions: std::sync::Arc::new(
+                basis_server::redemption_build::PendingRedemptionRegistry::new(),
+            ),
+            redemption_build_rate: std::sync::Arc::new(
+                basis_server::redemption_build::BuildRateLimiter::new(),
+            ),
         }
     }
 
@@ -481,9 +505,14 @@ mod http_api_tests {
         let secp = secp256k1::Secp256k1::new();
         let sk = secp256k1::SecretKey::from_slice(&issuer_secret).unwrap();
         let issuer = secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize();
-        let note =
-            basis_store::IouNote::create_and_sign(recipient, amount, timestamp, &issuer_secret)
-                .unwrap();
+        let note = basis_store::IouNote::create_and_sign(
+            recipient,
+            amount,
+            timestamp,
+            &issuer_secret,
+            &[0x42; 32],
+        )
+        .unwrap();
         (issuer, note)
     }
 

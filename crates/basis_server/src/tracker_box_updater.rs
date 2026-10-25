@@ -298,6 +298,29 @@ pub fn confirmation_depth(current_height: u64, inclusion_height: u64) -> u64 {
 /// Tracker box updater service
 pub struct TrackerBoxUpdater;
 
+/// Number of consecutive update cycles in which a submitted update transaction
+/// may be missing from the node (mempool and blockchain) before it is treated
+/// as dropped/rejected and the pending notes are reverted. With the default
+/// 600s update interval this bounds the stall to roughly 30 minutes.
+const MAX_PENDING_MISSING_CYCLES: u32 = 3;
+
+/// Whether a pending update transaction that the node has not seen for
+/// `missing_cycles` consecutive cycles should be treated as dropped/rejected
+/// (and the pending notes reverted so a fresh update can be submitted).
+fn pending_tx_is_dropped(missing_cycles: u32) -> bool {
+    missing_cycles >= MAX_PENDING_MISSING_CYCLES
+}
+
+/// Whether the previously confirmed tracker box has disappeared from the chain
+/// (the box now carrying the tracker NFT has a different id), indicating a reorg
+/// of the confirming update (issue #15 S6).
+fn confirmed_box_orphaned(confirmed_box_id: Option<&str>, current_box_id: &str) -> bool {
+    match confirmed_box_id {
+        Some(confirmed) => confirmed != current_box_id,
+        None => false,
+    }
+}
+
 impl TrackerBoxUpdater {
     /// Start the tracker box updater service as an async background task
     pub async fn start(
@@ -310,6 +333,11 @@ impl TrackerBoxUpdater {
 
         let mut last_submitted_digest: Option<[u8; 33]> = None;
         let mut pending_tx: Option<(String, [u8; 33])> = None;
+        // Consecutive cycles in which the pending update tx was not found on the
+        // node (neither mempool nor blockchain). A dropped/rejected tx would
+        // otherwise stay `pending` forever and block all future updates
+        // (issue #15 S6).
+        let mut pending_missing_cycles: u32 = 0;
 
         info!(
             "Tracker box updater started with {}s interval",
@@ -325,12 +353,12 @@ impl TrackerBoxUpdater {
                 }
             }
 
-            if let Some((ref tx_id, expected_digest)) = pending_tx {
-                match Self::check_transaction_confirmation(&config, tx_id).await {
+            if let Some((tx_id, expected_digest)) = pending_tx.clone() {
+                match Self::check_transaction_confirmation(&config, &tx_id).await {
                     Ok(true) => {
                         // Look up the confirming box to record its height/id.
                         let (box_id, height) =
-                            match Self::fetch_tracker_box_summary(&config, tx_id).await {
+                            match Self::fetch_tracker_box_summary(&config, &tx_id).await {
                                 Ok(summary) => summary,
                                 Err(e) => {
                                     error!(
@@ -368,6 +396,7 @@ impl TrackerBoxUpdater {
 
                         info!("Transaction {} confirmed on chain. Update complete.", tx_id);
                         last_submitted_digest = Some(expected_digest);
+                        pending_missing_cycles = 0;
 
                         shared_state.set_confirmed(expected_digest, box_id.clone(), height);
                         shared_state.clear_pending();
@@ -377,6 +406,7 @@ impl TrackerBoxUpdater {
                             let (rtx, rrx) = tokio::sync::oneshot::channel();
                             let _ = tx
                                 .send(crate::TrackerCommand::ConfirmPendingNotes {
+                                    digest: expected_digest,
                                     box_id,
                                     height,
                                     response_tx: rtx,
@@ -386,10 +416,38 @@ impl TrackerBoxUpdater {
                         }
                     }
                     Ok(false) => {
-                        info!(
-                            "Transaction {} still pending, waiting for next cycle...",
-                            tx_id
-                        );
+                        pending_missing_cycles += 1;
+                        if pending_tx_is_dropped(pending_missing_cycles) {
+                            // The tx has been missing from both mempool and
+                            // blockchain for several cycles: it was dropped or
+                            // rejected. Keeping it `pending` would block every
+                            // future update, so revert the pending notes, clear
+                            // the pending state, and let a fresh update be built
+                            // and submitted on the next cycle (issue #15 S6).
+                            error!(
+                                "Transaction {} not found for {} consecutive cycles; assuming it was dropped/rejected. Reverting pending notes and re-submitting.",
+                                tx_id, pending_missing_cycles
+                            );
+                            shared_state.clear_pending();
+                            pending_tx = None;
+                            last_submitted_digest = None;
+                            pending_missing_cycles = 0;
+
+                            if let Some(ref tx) = cmd_tx {
+                                let (rtx, rrx) = tokio::sync::oneshot::channel();
+                                let _ = tx
+                                    .send(crate::TrackerCommand::RevertPendingNotes {
+                                        response_tx: rtx,
+                                    })
+                                    .await;
+                                let _ = rrx.await;
+                            }
+                        } else {
+                            info!(
+                                "Transaction {} still pending, waiting for next cycle...",
+                                tx_id
+                            );
+                        }
                         continue;
                     }
                     Err(e) => {
@@ -428,6 +486,29 @@ impl TrackerBoxUpdater {
 
             // Refresh the confirmed box id in shared state from the live node.
             shared_state.set_tracker_box_id(tracker_box.box_id.clone());
+
+            // Reorg re-validation: if the box previously treated as confirmed is no
+            // longer the one carrying the tracker NFT, the confirming update was
+            // orphaned (or the chain was reorganized). Revert any pending notes so
+            // a fresh update can be built; the reconcile step below re-aligns
+            // per-note confirmations with the newly observed box (issue #15 S6).
+            if confirmed_box_orphaned(
+                shared_state.get_confirmed().box_id.as_deref(),
+                &tracker_box.box_id,
+            ) {
+                warn!(
+                    "Previously confirmed tracker box {} is no longer on-chain (found {} instead); possible reorg. Re-syncing confirmation state.",
+                    shared_state.get_confirmed().box_id.unwrap_or_default(),
+                    tracker_box.box_id
+                );
+                if let Some(ref tx) = cmd_tx {
+                    let (rtx, rrx) = tokio::sync::oneshot::channel();
+                    let _ = tx
+                        .send(crate::TrackerCommand::RevertPendingNotes { response_tx: rtx })
+                        .await;
+                    let _ = rrx.await;
+                }
+            }
 
             if let Some(r5_value) = tracker_box.additional_registers.get("R5") {
                 if let Ok(r5_bytes) = hex::decode(r5_value) {
@@ -637,6 +718,33 @@ impl TrackerBoxUpdater {
 
         if candidates.is_empty() {
             return Err(TrackerBoxUpdaterError::NoTrackerBoxFound);
+        }
+
+        // NFT singleton sanity check (issue #15 C4): the tracker NFT must be a
+        // singleton (amount == 1) held by the tracker box. A non-singleton NFT or
+        // a box not actually holding it is a setup error that breaks the
+        // singleton guarantees the reserve contract relies on.
+        for candidate in &candidates {
+            match candidate
+                .assets
+                .iter()
+                .find(|a| a.token_id == tracker_nft_id)
+            {
+                Some(asset) if asset.amount != 1 => {
+                    error!(
+                        "Tracker NFT {} has amount {} in box {} — expected a singleton (amount 1). \
+                         This is a setup error: the tracker NFT must not be divisible.",
+                        tracker_nft_id, asset.amount, candidate.box_id
+                    );
+                }
+                None => {
+                    warn!(
+                        "Tracker box candidate {} does not hold tracker NFT {} in its assets",
+                        candidate.box_id, tracker_nft_id
+                    );
+                }
+                _ => {}
+            }
         }
 
         if candidates.len() > 1 {
@@ -1187,5 +1295,27 @@ mod tests {
     fn test_tracker_box_update_config_default_depth() {
         let config = TrackerBoxUpdateConfig::default();
         assert_eq!(config.min_confirmation_depth, 2);
+    }
+
+    /// Issue #15 S6: a dropped/rejected update transaction must not block future
+    /// updates forever — after a bounded number of consecutive missing cycles the
+    /// pending state is reverted.
+    #[test]
+    fn test_pending_tx_drop_detection_is_bounded() {
+        assert!(!pending_tx_is_dropped(0));
+        assert!(!pending_tx_is_dropped(1));
+        assert!(!pending_tx_is_dropped(MAX_PENDING_MISSING_CYCLES - 1));
+        assert!(pending_tx_is_dropped(MAX_PENDING_MISSING_CYCLES));
+        assert!(pending_tx_is_dropped(MAX_PENDING_MISSING_CYCLES + 10));
+    }
+
+    /// Issue #15 S6: a confirmed tracker box that disappears from the NFT scan is
+    /// treated as orphaned (reorg) and triggers re-sync; the same box id or no
+    /// prior confirmation does not.
+    #[test]
+    fn test_confirmed_box_orphaned_detection() {
+        assert!(!confirmed_box_orphaned(None, "box_a"));
+        assert!(!confirmed_box_orphaned(Some("box_a"), "box_a"));
+        assert!(confirmed_box_orphaned(Some("box_a"), "box_b"));
     }
 }

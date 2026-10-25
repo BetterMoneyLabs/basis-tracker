@@ -18,8 +18,14 @@ fn manager_with_note(amount: u64) -> (TrackerStateManager, [u8; 32], [u8; 33], [
     let (secret, issuer_pubkey) = generate_keypair();
     let (_, recipient_pubkey) = generate_keypair();
 
-    let note = IouNote::create_and_sign(recipient_pubkey, amount, 1_700_000_000_000, &secret)
-        .expect("create_and_sign should succeed");
+    let note = IouNote::create_and_sign(
+        recipient_pubkey,
+        amount,
+        1_700_000_000_000,
+        &secret,
+        &[0x42; 32],
+    )
+    .expect("create_and_sign should succeed");
     manager
         .add_note(&issuer_pubkey, &note)
         .expect("add_note should succeed");
@@ -74,8 +80,9 @@ fn test_get_total_debt_is_per_pair() {
     let (mut manager, secret, issuer, recipient_a) = manager_with_note(1_000);
     let (_, recipient_b) = generate_keypair();
 
-    let note_b = IouNote::create_and_sign(recipient_b, 7_000, 1_700_000_001_000, &secret)
-        .expect("create_and_sign should succeed");
+    let note_b =
+        IouNote::create_and_sign(recipient_b, 7_000, 1_700_000_001_000, &secret, &[0x42; 32])
+            .expect("create_and_sign should succeed");
     manager
         .add_note(&issuer, &note_b)
         .expect("add_note should succeed");

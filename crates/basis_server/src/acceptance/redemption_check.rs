@@ -387,6 +387,7 @@ mod tests {
             amount_redeemed: redeemed,
             timestamp,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         }
     }
 

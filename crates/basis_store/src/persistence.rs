@@ -310,6 +310,7 @@ impl NoteStorage {
         value_bytes.extend_from_slice(&note.timestamp.to_be_bytes());
         value_bytes.extend_from_slice(&note.signature);
         value_bytes.extend_from_slice(&note.recipient_pubkey);
+        value_bytes.extend_from_slice(&note.tracker_nft_id);
 
         self.notes_partition
             .insert(&key_bytes, &value_bytes)
@@ -334,7 +335,7 @@ impl NoteStorage {
         match self.notes_partition.get(&key_bytes) {
             Ok(Some(value_bytes)) => {
                 // Manual deserialization
-                if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+                if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
                     return Err(NoteError::StorageError(
                         "Invalid stored note format".to_string(),
                     ));
@@ -361,6 +362,9 @@ impl NoteStorage {
                 offset += 65;
 
                 let recipient_pubkey: PubKey = value_bytes[offset..offset + 33].try_into().unwrap();
+                offset += 33;
+
+                let tracker_nft_id: [u8; 32] = value_bytes[offset..offset + 32].try_into().unwrap();
 
                 let note = IouNote {
                     recipient_pubkey,
@@ -368,6 +372,7 @@ impl NoteStorage {
                     amount_redeemed,
                     timestamp,
                     signature,
+                    tracker_nft_id,
                 };
 
                 Ok(Some(note))
@@ -443,7 +448,7 @@ impl NoteStorage {
             let key_bytes = key.to_bytes();
             match self.notes_partition.get(&key_bytes) {
                 Ok(Some(value_bytes)) => {
-                    if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+                    if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
                         continue; // Skip invalid entries
                     }
                     let amount_collected =
@@ -453,6 +458,7 @@ impl NoteStorage {
                     let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
                     let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
                     let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+                    let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
 
                     notes.push(IouNote {
                         recipient_pubkey,
@@ -460,6 +466,7 @@ impl NoteStorage {
                         amount_redeemed,
                         timestamp,
                         signature,
+                        tracker_nft_id,
                     });
                 }
                 Ok(None) => {}
@@ -478,7 +485,7 @@ impl NoteStorage {
             let key_bytes = key.to_bytes();
             match self.notes_partition.get(&key_bytes) {
                 Ok(Some(value_bytes)) => {
-                    if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+                    if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
                         continue; // Skip invalid entries
                     }
                     let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
@@ -489,6 +496,7 @@ impl NoteStorage {
                     let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
                     let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
                     let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+                    let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
 
                     notes.push((
                         issuer_pubkey,
@@ -498,6 +506,7 @@ impl NoteStorage {
                             amount_redeemed,
                             timestamp,
                             signature,
+                            tracker_nft_id,
                         },
                     ));
                 }
@@ -602,7 +611,7 @@ impl NoteStorage {
             })?;
 
             // Manual deserialization to extract issuer and recipient
-            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
                 continue; // Skip invalid entries
             }
 
@@ -637,7 +646,7 @@ impl NoteStorage {
             })?;
 
             // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
                 continue; // Skip invalid entries
             }
 
@@ -647,6 +656,7 @@ impl NoteStorage {
             let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
             let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
             let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+            let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
 
             let note = IouNote {
                 recipient_pubkey,
@@ -654,6 +664,7 @@ impl NoteStorage {
                 amount_redeemed,
                 timestamp,
                 signature,
+                tracker_nft_id,
             };
 
             notes.push(note);
@@ -672,7 +683,7 @@ impl NoteStorage {
             })?;
 
             // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
                 continue; // Skip invalid entries
             }
 
@@ -682,6 +693,7 @@ impl NoteStorage {
             let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
             let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
             let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+            let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
 
             let note = IouNote {
                 recipient_pubkey,
@@ -689,6 +701,7 @@ impl NoteStorage {
                 amount_redeemed,
                 timestamp,
                 signature,
+                tracker_nft_id,
             };
 
             notes_with_issuer.push((issuer_pubkey, note));
@@ -703,7 +716,7 @@ impl NoteStorage {
 
         match self.notes_partition.get(&key_bytes) {
             Ok(Some(value_bytes)) => {
-                if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 {
+                if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
                     return Err(NoteError::StorageError(
                         "Invalid stored note format".to_string(),
                     ));
@@ -714,6 +727,7 @@ impl NoteStorage {
                 let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
                 let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
                 let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+                let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
 
                 Ok(Some(IouNote {
                     recipient_pubkey,
@@ -721,6 +735,7 @@ impl NoteStorage {
                     amount_redeemed,
                     timestamp,
                     signature,
+                    tracker_nft_id,
                 }))
             }
             Ok(None) => Ok(None),

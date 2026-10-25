@@ -648,12 +648,19 @@ async fn build_redemption_tx(
     let insert_proof = reserve_insert_proof.clone();
 
     // Build context extension map
+    // Debt and timestamp serialize as SIGNED Longs on-chain; reject values above
+    // i64::MAX instead of wrapping negative (defense in depth — stored notes are
+    // already capped at creation).
+    let total_debt_i64 = i64::try_from(total_debt)
+        .map_err(|_| anyhow::anyhow!("totalDebt exceeds the on-chain signed-Long range"))?;
+    let note_timestamp_i64 = i64::try_from(note_timestamp)
+        .map_err(|_| anyhow::anyhow!("note timestamp exceeds the on-chain signed-Long range"))?;
     let mut context_extension: HashMap<String, String> = HashMap::new();
     context_extension.insert("0".to_string(), serialize_ergo_byte(0));
     context_extension.insert("1".to_string(), format!("07{}", recipient_pubkey));
     context_extension.insert("2".to_string(), serialize_coll_bytes(&issuer_signature));
-    context_extension.insert("3".to_string(), serialize_ergo_long(total_debt as i64));
-    context_extension.insert("4".to_string(), serialize_ergo_long(note_timestamp as i64));
+    context_extension.insert("3".to_string(), serialize_ergo_long(total_debt_i64));
+    context_extension.insert("4".to_string(), serialize_ergo_long(note_timestamp_i64));
     context_extension.insert("5".to_string(), serialize_coll_bytes(&insert_proof));
     context_extension.insert("6".to_string(), serialize_coll_bytes(&tracker_signature));
     if let Some(ref proof) = reserve_lookup_proof {
@@ -861,7 +868,17 @@ pub async fn execute_local_redemption(
             issuer_pubkey
         ));
     }
-    let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, note.timestamp);
+    let tracker_nft_id: [u8; 32] = hex::decode(&note.tracker_nft_id)
+        .map_err(|e| anyhow::anyhow!("Invalid tracker NFT ID on note: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Tracker NFT ID must be 32 bytes"))?;
+    let message = redemption_signing_message(
+        &issuer_pk,
+        &recipient_pk,
+        total_debt,
+        note.timestamp,
+        &tracker_nft_id,
+    );
     let issuer_signature = current.sign_message(&message)?;
     let issuer_signature_hex = hex::encode(issuer_signature);
 
@@ -1009,11 +1026,16 @@ pub async fn generate_redemption_transaction(
         .try_into()
         .map_err(|_| anyhow::anyhow!("Recipient public key must be 33 bytes"))?;
 
+    let tracker_nft_id: [u8; 32] = hex::decode(&note.tracker_nft_id)
+        .map_err(|e| anyhow::anyhow!("Invalid tracker NFT ID on note: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Tracker NFT ID must be 32 bytes"))?;
     let message = redemption_signing_message(
         &issuer_pk,
         &recipient_pk,
         note.amount_collected,
         note.timestamp,
+        &tracker_nft_id,
     );
     let issuer_signature = current_account.sign_message(&message)?;
     let issuer_signature_hex = hex::encode(issuer_signature);
@@ -1165,7 +1187,17 @@ pub async fn redeem_tracker_assisted(
             &issuer_pubkey[..16]
         );
     }
-    let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, timestamp);
+    let tracker_nft_id: [u8; 32] = hex::decode(&note.tracker_nft_id)
+        .map_err(|e| anyhow::anyhow!("Invalid tracker NFT ID on note: {}", e))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Tracker NFT ID must be 32 bytes"))?;
+    let message = redemption_signing_message(
+        &issuer_pk,
+        &recipient_pk,
+        total_debt,
+        timestamp,
+        &tracker_nft_id,
+    );
     let issuer_sig = current.sign_message(&message)?;
     progress!("✅ issuer signature ({} bytes)", issuer_sig.len());
 

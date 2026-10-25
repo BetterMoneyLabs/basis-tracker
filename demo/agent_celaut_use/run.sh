@@ -230,7 +230,8 @@ ensure_use_reserve() {
     # Lock the reserve NFT into the token reserve contract before the tracker
     # server starts.  Otherwise the tracker's box updater may select the
     # unspent NFT box as a fee input.
-    if ! DAVE_PUBKEY="${DAVE_PUBKEY:-$DEFAULT_DAVE_PUBKEY}" \
+    # DAVE_PUBKEY is required by the time we get here (generated above when not supplied).
+    if ! DAVE_PUBKEY="${DAVE_PUBKEY:?DAVE_PUBKEY must be set}" \
          DAVE_RESERVE_AMOUNT="$MIN_USE_UNITS" \
          python3 "$SCRIPT_DIR/reserve_helper.py"; then
         log_error "Reserve preflight failed"
@@ -238,29 +239,30 @@ ensure_use_reserve() {
     fi
 }
 
-# Use a provided tracker keypair if available; otherwise fall back to the fixed
-# demo keypair so the on-chain reserve / tracker box state stays consistent.
+# Use a provided tracker keypair if available; otherwise generate a fresh ephemeral one for this
+# run. The previously hardcoded demo pair was committed to the repository (and to a committed
+# config/basis.toml), so it is public and must not be treated as a secret.
 # The secret key lets the server sign tracker updates and redemption transactions.
-# Demo keys only — never reuse outside of tests.
-DEFAULT_TRACKER_PUBKEY="039aa1478e19ad14e55c51bd306514636c608b0236edffbf03ca4028c063c4c99b"
-DEFAULT_TRACKER_SECRET="bd9c331161cb8432c4037c198e33deb77c99b2b36a6f7956be1d1e6f829c5eca"
-DEFAULT_DAVE_PUBKEY="0278fc7226b1e34340709d55c088f5dc41b55426b10d2853ea8ed039d467e95c39"
-DEFAULT_DAVE_SECRET="b584139c010b9e0178cd30cb8bc70e3995e99ca5551e5588439fdc7990fa55a7"
-
+#
+# SECURITY (PR #14 S7): these demo keypairs were previously committed both here and in
+# demo/agent_celaut_use/config/basis.toml, and the tracker pair also appears in the deployed test
+# documentation, so they must be considered PUBLIC and rotated. They are now generated per run into
+# config/basis.toml (which is gitignored) instead of being baked into the repository.
+#
+# Set TRACKER_PUBKEY/TRACKER_SECRET (and DAVE_PUBKEY/DAVE_SECRET) to pin a specific keypair;
+# otherwise a fresh ephemeral one is generated below.
 if [[ -n "${TRACKER_PUBKEY:-}" && -n "${TRACKER_SECRET:-}" ]]; then
     log_info "Using provided tracker keypair."
 else
-    TRACKER_PUBKEY="$DEFAULT_TRACKER_PUBKEY"
-    TRACKER_SECRET="$DEFAULT_TRACKER_SECRET"
-    log_info "Using fixed demo tracker keypair."
+    read -r TRACKER_PUBKEY TRACKER_SECRET <<<"$(python3 "$SCRIPT_DIR/../demo_keygen.py")"
+    log_info "Generated an ephemeral tracker keypair for this run."
 fi
 
 if [[ -n "${DAVE_PUBKEY:-}" && -n "${DAVE_SECRET:-}" ]]; then
     log_info "Using provided Dave keypair."
 else
-    DAVE_PUBKEY="$DEFAULT_DAVE_PUBKEY"
-    DAVE_SECRET="$DEFAULT_DAVE_SECRET"
-    log_info "Using fixed demo Dave keypair."
+    read -r DAVE_PUBKEY DAVE_SECRET <<<"$(python3 "$SCRIPT_DIR/../demo_keygen.py")"
+    log_info "Generated an ephemeral Dave keypair for this run."
 fi
 
 check_env() {
@@ -416,10 +418,10 @@ if [[ "$START_HEIGHT" -lt 0 ]]; then
 fi
 
 # ERG-backed reserve contract P2S from the server defaults.
-RESERVE_P2S="3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT"
+RESERVE_P2S="2XoR96YVZfWybxeo7qdMkA1BRhxFivm8gTuLLuKREiW6833XWK4mA43DrJMDCvLqB9AwyduGgHBnGmmg2jrkUZAunRDu7t8718EkwiJTvp9rtEWEXMMJeMStjQB5BeuxsUc9ujW3aCMvxdS8VeYyZ14B8sSGu7CwJFmeaZDHiftsT3tUBqBfgau4wZTvhEtYEsFsqvpwsjcPAe4aGhFzJNSPhKqdSBrFKee3Dg4qFmGhb8Wu6DsdmhTrW6jnucnf17PDi2rQ9pgJvKrfs2KPbeZf9gV89vEga4kZk4u3bbSFTVk3s9EhuoUmfyhvC3ZaNv9DSPtzCcjvnL7x6smyLigsgb4QSEDnzX4HjJg5CfA6mh4Jn9hoL1412EVnY2xb8cYz76VEgU8J12n4DHrVsV9NzYAHxe6ogVNptUbAgykiru81pz3aZ6LfYySJt6ESVVGxm6i49ScGjawqsKCxjykCndh3MNQnRajZMgQMH2qFZhbd9KXCnLQkS6NAjtNfMVcx1KykdiSrLVTu3nphUZhT9MjhfxtZcojSZoQmGAy95zhAJpDMgUXBfuCSoUFUzPAuSMv2pBuEXiUR3wDQC7pDFYUDy68QCtTUTDtn9cYyNgc8EZWQSB76wsKhCNod1Q9RV85piLF5PJDMBXh4M8gjEzsq244xDdW6t2f4W4A2ZVDNw2gdSU3FHYxfB45c5cxkyR5qrXyoJT56c2STfFm3vK1ZfXzvckq48uAE1QRGpM9xALiXtdTx1iQaQjy2LkaURha6ewN5NDufyqntwBPk72NLadL8BDtLyReRtUWqbFZo94h4prjHVT25ABHbAqiJuTCHvmfTqi2V5gDwRW7oLk4gvBwswxJVvKmuKSG6sH5HAzQGoF6Kwcwdvq8Lbv5RbuAnm3N7hLnS1rBUWKXfaJCJjptMkeKxzMPhjfjnZTkMXwW3jSBxhpLeuWxrBrfjTFaVR93erQFVTvF9C1FsULgqUPjzPmcHn5Drp4cp4Y2pjv793k6KdykbugL6M6wt75hmKG5jsmrfsSL6AN13j3"
 
 # Token-backed reserve contract P2S from the config example.
-TOKEN_RESERVE_P2S="96HrjMftJd4NbjzufhMHXyZqzaUbdc5zUqtSySUnyEZoHogM9TD9RsRNkhq83tGaWTH4ZiFeDKzAdHkQyi1SWwMdkKtDaDhobhsrb5tjEDZkYhhF5aPGf3b4fUo3W23tec9N7GyzA6buyhRYzf3DqVWRsJGzCEdYeDfcMYKXon3wMxMFgQPX4FUbCAGe32dCd1aiFwQwx4Rnjy19G6qPaACdZvfSNFLgM1ur3U6HSSMX22g5o8MbbxzNeKScWFedW76z1zCmC38BrgiSv1qC7395yi9y4dDy2y26Tgrc2MPxvned5j1F3cTTTY9HVPYcS9U4vQocDRHufEkMG4dyu7eQqiHbqa6962B1jKQUMofyNV2mehQDrTzfzT5yHPsTeAGMTbDHeDECsmmJ2ideonha9VBuEP6fivixWjej43spbMZDcy3SCNa5gTrLuhh8gN4j8CbMncTXYghrxNdRqPbiUfJy8rMpcdeRaDnbodibGAyJqzzh95ZC6FHPwL7UQZbFbc472WSPtPRXU9g7QpZasdYtZb4GrHqvUJASsLwgYsRevJ4QZ24nrcUXv5ttziaVsGfeCW35viGB5zc3Sxk8e37smwQzWPfAGvsLfgy98dJfmNFyQUCNUyGX5qq4uJrKNaRamouL4S1VNFcgVaJTdGDTT7ykcy6qLmaFg6tUiAsLLC2p4GGB83fqsw13hfmxCxMGuFQUFu6aNc9W31wMMJ2beCN7Xb7cUkffzEXZnjiqFKMicTHsmvLz2mZuAgiKykrxqNTMqmTd2DjGsuYmQNtLXqS4j5d9qXnSVxmeVGp3cqcC7NYF9ujvLT38yqfnk5tZ5X9gnMXgkkKk8MfuUgY5a2ccSgbetkj7yNk1ciHK1QYGrvydDPWB2kJEQb9yAb72Uf1jZXVH1kSAr7vv1BBRQWveJcsjD6GQVKXJrLTGLrR5XV1uYK7uQSR4XYEi5yJsjk4rPMCDtt2FDsrUk7bo9suFWq2sqZxQZZWEgoKkwog6DtvyX4cyMpT45eeqjctBTjnAnJRf8CgBuyEhfU8RMfG7dPNVk9EWS3JbGmwow4R95Ae5P"
+TOKEN_RESERVE_P2S="EUNip3sGUdzr5Leg8rRwRMyZGUis42syLiBYwsj5JbmrVNAh41LUzNFnFTEzpEvf3jMUzJdyfkJi6aVjbs6NLskmHiuCPYwcRFjdqfBwc9NXUnf4hv3heFRDnzXDWK92KAz8JpXSx9Rnd2b4HnkBq8HzbnfSRpRVQqRJZqQaVoceZqcT87sBTNii4Hu6zUPrGaQwsR3QFnNjoKsDrALMTELk8eUcxHhyWbJPPcSYWdf5nFTskqt5F2yZ5FBsKfkCsxskM31FKXRXt7RAWrJWA6QTUzrQT2kk4a8G1G7AYrXRFc2kXHGTH9bjXaNvM4JRu1CkDb2hqLzt5jouzT1UdZkCHqG9LwWa7ULSDfzvdgybQhBv8UC9LnHegQ7FEYyqHhL4ZZpsqr8cGbznE1QCWWbxcGLKWoDhCCt3j6Bv36AoaTPRcffevReEWMk7FTE6s2n391CLV6W8G2HS2zkStnmAKDmdardZJJ2tb3zQPrqM5Y2umufxDV9VCj6t18XBPSNDF8YtPXfwkPLUAyfeEE8JM4wCPNQ33vvH8irVphUagT92U5jLp9B8Z54ceJrLFodaj74kxECULy9ufmC6jGDNbeGj6AM6pxV6HBPgYpBNw8Qupc35se4YW7odPjErov8pZuVHnGusNu4huP1LFm2VL4aqMnLpriHTvx61DG7SCEUxZhEjWtnS5xxnp67fAzibCckBsKZeFsqEGro8pJnS1ZiPAwggz2dLorMoK285Rx8QZNLiRzfULwnWzSGgtoqKZCkKc7QJXiEzivAe4FHC32grsU2KvAb9sv79ardmpgpJTmbNLRAWiDwBXbTLGbF5AJkCcfPCvEoiaLCRERVYpJRZ4XZHo5A14eCFgwvUhDtPpZeJJXqNgGmsbaXZGPXKwdzaE8mA9uZ3ANcZ3KrdYL5HV7w7wrNNMWNzvBSfzM3uC5LiZmaxuWNph9YFLXHEbEfbhjXvGeAMZTGKntErw7NobRPQB6yCVeGMUk5HCDxJxkHAbn9oLxC2Nv3Wpp4cVMf6ixeTS5qL7he36pqkNPAcspPGHFJEajbs4fkaQd9wTgtbGCa7CXAWaP5s1S5pWCBSjnYkgxhjRYa6CwCnnV1u9ksA3Gb3PBr6Z8T2wicYqW925b3wxzNJKs5qotwCDzYthZjiGHGdtFA1vg32vKyGbeoPCXMgmn9uh1dcmnu2m7GVBEjQZ7LYHvuPZp34ykfTTFA"
 
 # Write the server config relative to the demo directory.
 cat > "$SCRIPT_DIR/config/basis.toml" <<EOF

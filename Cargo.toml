@@ -25,3 +25,9 @@ ergotree-interpreter = { path = "/home/kushti/ergo/sigma-rust/ergotree-interpret
 # insert-or-update) so the Basis reserve contract can be reduced locally for
 # sequential redemptions.
 ergo_avltree_rust = { path = "temp/vendors/ergo_avltree_rust" }
+
+# Arithmetic overflows in release builds must panic instead of wrapping
+# (issue #15 S4: redemption accounting uses checked arithmetic; this is the
+# defense-in-depth backstop).
+[profile.release]
+overflow-checks = true

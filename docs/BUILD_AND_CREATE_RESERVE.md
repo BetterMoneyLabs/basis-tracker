@@ -60,9 +60,10 @@ The CLI command will output a JSON payload that you can use with the Ergo wallet
       }
     ],
     "registers": {
-      "R4": "03bc58014bd741ea06d6f3b1de5d0847b71758a64c6f04e6c98639dcf3d12be273",
-      "R5": "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900012000",
-      "R6": "0e20160aca8aaa854a47a58f1d84f9d2e40cea473bd670982631884c76b4ebfca2a4"
+      "R4": "0703bc58014bd741ea06d6f3b1de5d0847b71758a64c6f04e6c98639dcf3d12be273",
+      "R5": "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000",
+      "R6": "0e20160aca8aaa854a47a58f1d84f9d2e40cea473bd670982631884c76b4ebfca2a4",
+      "R7": "05000000000000000000"
     }
   }
 ]
@@ -87,9 +88,10 @@ curl -X POST http://your-ergo-node:9053/wallet/payment/send \
       }
     ],
     "registers": {
-      "R4": "03bc58014bd741ea06d6f3b1de5d0847b71758a64c6f04e6c98639dcf3d12be273",
-      "R5": "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900012000",
-      "R6": "0e20160aca8aaa854a47a58f1d84f9d2e40cea473bd670982631884c76b4ebfca2a4"
+      "R4": "0703bc58014bd741ea06d6f3b1de5d0847b71758a64c6f04e6c98639dcf3d12be273",
+      "R5": "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000",
+      "R6": "0e20160aca8aaa854a47a58f1d84f9d2e40cea473bd670982631884c76b4ebfca2a4",
+      "R7": "05000000000000000000"
     }
   }
 ]'
@@ -111,9 +113,10 @@ If you want the exact JSON array format that the wallet/payment/send API expects
       }
     ],
     "registers": {
-      "R4": "03bc58014bd741ea06d6f3b1de5d0847b71758a64c6f04e6c98639dcf3d12be273",
-      "R5": "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900012000",
-      "R6": "0e20160aca8aaa854a47a58f1d84f9d2e40cea473bd670982631884c76b4ebfca2a4"
+      "R4": "0703bc58014bd741ea06d6f3b1de5d0847b71758a64c6f04e6c98639dcf3d12be273",
+      "R5": "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000",
+      "R6": "0e20160aca8aaa854a47a58f1d84f9d2e40cea473bd670982631884c76b4ebfca2a4",
+      "R7": "05000000000000000000"
     }
   }
 ]
@@ -121,22 +124,32 @@ If you want the exact JSON array format that the wallet/payment/send API expects
 
 This JSON array is ready to be submitted directly to the `wallet/payment/send` API endpoint of your Ergo node.
 
-## Alternative: Submit via the Tracker
+## Submitting via the CLI or TUI
 
-If the tracker server is configured with an Ergo node, you can ask it to broadcast the reserve payload for you. The TUI wallet prompts for this after generating the payload, and the CLI supports a `--submit` flag:
+The tracker only **builds** the payload; it never broadcasts it, so the tracker's
+wallet is never involved (PR #16 B4). The reserve owner submits the payload to
+**their own Ergo node** — the node wallet must hold the reserve NFT and enough ERG
+for the reserve value plus fee.
+
+With `node_url` (and `node_api_key` if needed) set in `~/.basis/cli.toml`, the CLI
+can submit for you:
 
 ```bash
 basis-cli reserve create --nft-id <your_nft_id> --amount 1000000000 --submit
 ```
 
-Or submit the full `ReserveCreationResponse` JSON manually:
+Without `--submit` (or without node settings) the CLI prints the payload; submit it
+to your node manually:
 
 ```bash
-curl -X POST http://127.0.0.1:3048/reserves/submit \
+curl -X POST http://127.0.0.1:9053/wallet/payment/send \
   -H "Content-Type: application/json" \
-  -d '<ReserveCreationResponse JSON>'
+  -H "api_key: <your_node_api_key>" \
+  -d '<the requests array from the payload>'
 ```
 
-The tracker converts the payload to the camelCase `tokenId` format expected by the Ergo node and returns the broadcast transaction id.
+The TUI wallet offers the same flow after generating the payload. The requests array
+already uses the camelCase `tokenId` format the node expects and is returned as the
+transaction id.
 
 Note: Make sure your Ergo node is running and you have the correct API key. Also, ensure that your wallet has sufficient ERG and the specified NFT to create the reserve.

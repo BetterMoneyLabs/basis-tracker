@@ -29,7 +29,7 @@ import sigma.GroupElement
  * - payeeKey: Public key of the creditor (Bob)
  * - totalDebt: Total amount owed in nanoERG
  * - timestamp: Timestamp of the payment (milliseconds since Unix epoch)
- * - signature: Alice's signature on (payerKey || payeeKey || totalDebt || timestamp)
+ * - signature: Alice's signature on (payerKey || payeeKey || totalDebt || timestamp || trackerNftId)
  * - trackerSignature: Tracker's signature certifying the note is witnessed
  *
  * ## Tracker's Role
@@ -83,13 +83,27 @@ object BasisNoteCreator extends App {
     signatureZ: BigInt
   )
 
-  def createNoteMessage(payerKey: GroupElement, payeeKey: GroupElement, totalDebt: Long, timestamp: Long): Array[Byte] = {
-    Blake2b256(payerKey.getEncoded.toArray ++ payeeKey.getEncoded.toArray) ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+  // Message: key || totalDebt (8 bytes BE) || timestamp (8 bytes BE) || trackerNftId (32 bytes),
+  // matching contract/basis.es which appends SELF.R6[Coll[Byte]] to the signed message.
+  def createNoteMessage(
+    payerKey: GroupElement,
+    payeeKey: GroupElement,
+    totalDebt: Long,
+    timestamp: Long,
+    trackerNftId: Array[Byte] = BasisConstants.testTrackerNftId
+  ): Array[Byte] = {
+    Blake2b256(payerKey.getEncoded.toArray ++ payeeKey.getEncoded.toArray) ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ trackerNftId
   }
 
-  def createNote(payerSecret: BigInt, payeeKey: GroupElement, totalDebt: Long, timestamp: Long): IOUNote = {
+  def createNote(
+    payerSecret: BigInt,
+    payeeKey: GroupElement,
+    totalDebt: Long,
+    timestamp: Long,
+    trackerNftId: Array[Byte] = BasisConstants.testTrackerNftId
+  ): IOUNote = {
     val payerKey = g.exp(payerSecret.bigInteger)
-    val message = createNoteMessage(payerKey, payeeKey, totalDebt, timestamp)
+    val message = createNoteMessage(payerKey, payeeKey, totalDebt, timestamp, trackerNftId)
     val (a, z) = SigUtils.sign(message, payerSecret)
     IOUNote(payerKey, payeeKey, totalDebt, timestamp, a, z, message)
   }
@@ -99,8 +113,8 @@ object BasisNoteCreator extends App {
     TrackerSignature(a, z)
   }
 
-  def verifyNote(note: IOUNote): Boolean = {
-    val message = createNoteMessage(note.payerKey, note.payeeKey, note.totalDebt, note.timestamp)
+  def verifyNote(note: IOUNote, trackerNftId: Array[Byte] = BasisConstants.testTrackerNftId): Boolean = {
+    val message = createNoteMessage(note.payerKey, note.payeeKey, note.totalDebt, note.timestamp, trackerNftId)
     SigUtils.verify(message, note.payerKey, note.signatureA, note.signatureZ)
   }
 

@@ -23,6 +23,9 @@ pub enum RedemptionError {
     StorageError(String),
     #[error("Invalid public key: {0}")]
     InvalidPublicKey(String),
+    /// Caller-supplied redemption amounts that do not match the stored note state.
+    #[error("Invalid redemption amount: {0}")]
+    InvalidAmount(String),
 }
 
 impl From<NoteError> for RedemptionError {
@@ -33,6 +36,14 @@ impl From<NoteError> for RedemptionError {
                 RedemptionError::StorageError("Future timestamp".to_string())
             }
             NoteError::PastTimestamp => RedemptionError::StorageError("Past timestamp".to_string()),
+            NoteError::DebtDecreaseNotPermitted {
+                previous,
+                requested,
+            } => RedemptionError::StorageError(format!(
+                "Cumulative debt cannot decrease without the creditor's consent \
+                     (existing {}, requested {})",
+                previous, requested
+            )),
             NoteError::RedemptionTooEarly => RedemptionError::RedemptionTooEarly(0, 0),
             NoteError::StorageError(msg) => RedemptionError::StorageError(msg),
             _ => RedemptionError::StorageError(format!("{:?}", err)),
@@ -64,7 +75,7 @@ pub struct RedemptionRequest {
     /// Change address for transaction outputs (derived from tracker pubkey if not specified)
     pub change_address: String,
     /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    /// Signs: key || totalDebt || timestamp (48 bytes)
+    /// Signs: key || totalDebt || timestamp || trackerNftId (80 bytes)
     /// where key = blake2b256(ownerKey || receiverKey)
     pub issuer_signature: String,
     /// Whether this is an emergency redemption (after 3 days tracker unavailability)
@@ -87,6 +98,11 @@ pub struct RedemptionRequest {
     /// Refund initiation height from the reserve box's R7 register (0 if no refund pending)
     #[serde(default)]
     pub reserve_refund_initiation_height: u64,
+    /// ErgoTree (hex) of the reserve box being spent. The reserve output must carry
+    /// exactly this script; supplied by the API layer from the configured contract
+    /// P2S (never from a hardcoded constant, so contract changes cannot leave it stale).
+    #[serde(default)]
+    pub reserve_ergo_tree: String,
 }
 
 /// Redemption proof and transaction data
@@ -235,7 +251,14 @@ impl RedemptionManager {
 
         // Generate reserve insert proof (for inserting redeemed amount into reserve tree)
         // This also updates the reserve AVL tree and returns the updated tree digest for R5
-        let new_already_redeemed = note.amount_redeemed + request.amount;
+        let new_already_redeemed = note
+            .amount_redeemed
+            .checked_add(request.amount)
+            .ok_or_else(|| {
+                RedemptionError::InvalidAmount(
+                    "cumulative redeemed amount overflows u64".to_string(),
+                )
+            })?;
         let (reserve_insert_proof, updated_reserve_tree) = self
             .tracker
             .generate_reserve_insert_proof(
@@ -279,6 +302,7 @@ impl RedemptionManager {
                 reserve_lookup_proof.proof,
                 tracker_lookup_proof.proof,
                 request.amount,
+                &request.reserve_ergo_tree,
             )
             .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 
@@ -355,28 +379,75 @@ impl RedemptionManager {
             .lookup_note(issuer_pubkey, recipient_pubkey)
             .map_err(|_| RedemptionError::NoteNotFound)?;
 
-        // Capture the note's payment timestamp before it is refreshed; the reserve AVL tree value
-        // is `payment_timestamp || already_redeemed` and must match the on-chain reserve entry.
+        // SECURITY (PR #14 S4): the note's timestamp is PART OF THE SIGNED MESSAGE
+        // (`key || totalDebt || timestamp`). Refreshing it here made the stored issuer signature stop
+        // verifying, so the creditor's note silently became unredeemable. Redemptions do not change
+        // the debt figure, so the timestamp must stay exactly as the issuer signed it.
         let payment_timestamp = note.timestamp;
 
-        // Update the redeemed amount
-        note.amount_redeemed += redeemed_amount;
+        // The caller supplies `redeemed_amount` (and optionally the cumulative
+        // `new_already_redeemed`); validate both against the stored note state
+        // instead of applying them blindly (issue #15 S4).
+        if redeemed_amount == 0 {
+            return Err(RedemptionError::InvalidAmount(
+                "redeemed amount must be positive".to_string(),
+            ));
+        }
 
-        // Update the timestamp to ensure it's newer than the existing one
-        note.timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| RedemptionError::StorageError("Failed to get current time".to_string()))?
-            .as_millis() as u64;
+        // SECURITY: do not let the caller drive the cumulative redeemed amount past the debt.
+        // `redeemed_amount` arrives from the request body (`/redeem/complete`,
+        // `/redemption/submit`), and a plain `+=` would accept more than was ever owed, permanently
+        // consuming the note's headroom.
+        let outstanding = note.amount_collected.saturating_sub(note.amount_redeemed);
+        if redeemed_amount > outstanding {
+            return Err(RedemptionError::InvalidAmount(format!(
+                "redemption of {} exceeds the outstanding debt of {} for this note \
+                 (totalDebt {}, already redeemed {})",
+                redeemed_amount, outstanding, note.amount_collected, note.amount_redeemed
+            )));
+        }
 
-        // Update the note in tracker
+        // SECURITY: checked arithmetic. A plain `+=` panics in debug builds and wraps in release
+        // builds, so a large caller-supplied amount could roll the counter over and make the note
+        // look freshly redeemable.
+        note.amount_redeemed = note
+            .amount_redeemed
+            .checked_add(redeemed_amount)
+            .ok_or_else(|| {
+                RedemptionError::StorageError(format!(
+                    "redemption amount overflow: {} + {}",
+                    note.amount_redeemed, redeemed_amount
+                ))
+            })?;
+
+        // An explicit cumulative value from the on-chain build must match the
+        // note's resulting state; a mismatch means the caller's view of the
+        // reserve tree diverges from the tracker's (issue #15 S4).
+        if let Some(explicit) = new_already_redeemed {
+            if explicit != note.amount_redeemed {
+                return Err(RedemptionError::InvalidAmount(format!(
+                    "new_already_redeemed {} does not match note state ({} + {} = {})",
+                    explicit,
+                    note.amount_redeemed - redeemed_amount,
+                    redeemed_amount,
+                    note.amount_redeemed
+                )));
+            }
+        }
+
+        // Update the note in tracker.
+        //
+        // `record_redemption` rather than `update_note`: a redemption is not a new signed note, so it
+        // must not require a strictly newer timestamp, must not re-verify an issuer signature that
+        // did not change, and must not rewrite the committed `amount_collected`.
         self.tracker
-            .update_note(issuer_pubkey, &note)
+            .record_redemption(issuer_pubkey, recipient_pubkey, note.amount_redeemed)
             .map_err(RedemptionError::from)?;
 
         // Keep the reserve AVL tree in sync with the cumulative redeemed amount so subsequent
         // redemptions generate insert/lookup proofs that verify against the on-chain reserve R5.
-        // When the on-chain build used an explicit cumulative value (e.g. a fresh reserve whose
-        // tree did not yet contain earlier redemptions), that value takes precedence.
+        // An explicit value from the on-chain build was validated above to equal the note's
+        // resulting cumulative redeemed amount.
         let tree_value = new_already_redeemed.unwrap_or(note.amount_redeemed);
         self.tracker
             .update_already_redeemed(
@@ -495,7 +566,8 @@ mod tests {
             amount_collected: 10000,
             amount_redeemed: 0,
             timestamp: 1672531200,
-            signature: [0u8; 65], // dummy signature
+            signature: [0u8; 65], // dummy signature,
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -516,6 +588,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -567,6 +640,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -587,6 +661,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -638,6 +713,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -658,6 +734,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -708,6 +785,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -728,6 +806,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -778,6 +857,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -798,6 +878,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -848,6 +929,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -868,6 +950,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -918,6 +1001,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: 1672531200,
             signature: [0u8; 65],
+            tracker_nft_id: [0x42; 32],
         };
 
         let request = RedemptionRequest {
@@ -938,6 +1022,7 @@ mod tests {
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
         };
 
         let proof = crate::NoteProof {
@@ -968,12 +1053,16 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Regression test: `complete_redemption` must keep the reserve AVL tree in sync using the
-    /// note's PRE-refresh payment timestamp (the reserve tree value is
-    /// `payment_timestamp || cumulative_redeemed`, and the on-chain contract inserts exactly
-    /// that). Otherwise subsequent redemptions produce proofs that fail on-chain.
+    /// Regression test: `complete_redemption` must keep the reserve AVL tree in sync using the note's
+    /// payment timestamp (the reserve tree value is `payment_timestamp || cumulative_redeemed`, and
+    /// the on-chain contract inserts exactly that). Otherwise subsequent redemptions produce proofs
+    /// that fail on-chain.
+    ///
+    /// It must ALSO leave the note's own timestamp alone: that timestamp is part of the signed
+    /// message, so refreshing it invalidated the stored issuer signature and left the creditor's note
+    /// permanently unredeemable. Both halves are asserted below.
     #[test]
-    fn test_complete_redemption_syncs_reserve_tree_with_pre_refresh_timestamp() {
+    fn test_complete_redemption_preserves_timestamp_and_syncs_reserve_tree() {
         let tracker = TrackerStateManager::new_with_temp_storage();
         let mut redemption_manager = RedemptionManager::new(tracker);
 
@@ -994,6 +1083,7 @@ mod tests {
             &recipient_pubkey,
             total_debt,
             payment_timestamp,
+            &[0x42; 32],
         );
         let signature =
             crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
@@ -1005,6 +1095,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: payment_timestamp,
             signature,
+            tracker_nft_id: [0x42; 32],
         };
         redemption_manager
             .tracker
@@ -1022,10 +1113,17 @@ mod tests {
             .lookup_note(&issuer_pubkey, &recipient_pubkey)
             .expect("lookup note");
         assert_eq!(updated.amount_redeemed, redeemed);
-        assert!(
-            updated.timestamp > payment_timestamp,
-            "note timestamp must be refreshed"
+        // SECURITY (PR #14 S4): the timestamp is part of the signed message
+        // (`key || totalDebt || timestamp`), so a redemption must NOT refresh it. It used to, which
+        // made the stored issuer signature stop verifying and left the creditor's note permanently
+        // unredeemable. The issuer's signature must still validate after a redemption.
+        assert_eq!(
+            updated.timestamp, payment_timestamp,
+            "a redemption must not change the note timestamp"
         );
+        updated
+            .verify_signature(&issuer_pubkey)
+            .expect("issuer signature must still verify after a redemption");
 
         // Reserve tree must contain (key, payment_timestamp || cumulative_redeemed) with the
         // PRE-refresh timestamp — compare against an independently built reference tree.
@@ -1070,10 +1168,9 @@ mod tests {
         );
     }
 
-    /// When an explicit `new_already_redeemed` is provided (the cumulative value proven
-    /// on-chain by the build), the note still accumulates the redeemed amount but the
-    /// reserve tree is synced to the explicit value. This covers fresh reserves whose
-    /// tree did not contain earlier redemptions recorded against another reserve.
+    /// An explicit `new_already_redeemed` (the cumulative value proven on-chain by the
+    /// build) must match the note's resulting cumulative redeemed amount; mismatched
+    /// caller-supplied values are rejected (issue #15 S4).
     #[test]
     fn test_complete_redemption_with_explicit_reserve_tree_value() {
         let tracker = TrackerStateManager::new_with_temp_storage();
@@ -1095,32 +1192,53 @@ mod tests {
             &recipient_pubkey,
             total_debt,
             payment_timestamp,
+            &[0x42; 32],
         );
         let signature =
             crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
                 .expect("sign note");
 
-        // Note already has 100M redeemed (from an earlier redemption against another reserve).
+        // Note already has 100M redeemed.
         let note = IouNote {
             recipient_pubkey,
             amount_collected: total_debt,
             amount_redeemed: 100_000_000,
             timestamp: payment_timestamp,
             signature,
+            tracker_nft_id: [0x42; 32],
         };
         redemption_manager
             .tracker
             .add_note(&issuer_pubkey, &note)
             .expect("add note");
 
-        // On-chain build against a fresh (empty) reserve tree used cumulative 100M
-        // (0 + 100M redeemed now), while the note accumulates to 200M.
+        // A mismatched explicit cumulative value (100M instead of 100M + 100M) is rejected.
+        let result = redemption_manager.complete_redemption(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            100_000_000,
+            Some(100_000_000),
+        );
+        assert!(
+            matches!(result, Err(RedemptionError::InvalidAmount(_))),
+            "expected InvalidAmount, got {:?}",
+            result
+        );
+
+        // The note state is unchanged after the rejected completion.
+        let unchanged = redemption_manager
+            .tracker
+            .lookup_note(&issuer_pubkey, &recipient_pubkey)
+            .expect("lookup note");
+        assert_eq!(unchanged.amount_redeemed, 100_000_000);
+
+        // The matching explicit value is accepted and syncs the reserve tree.
         redemption_manager
             .complete_redemption(
                 &issuer_pubkey,
                 &recipient_pubkey,
                 100_000_000,
-                Some(100_000_000),
+                Some(200_000_000),
             )
             .expect("complete redemption");
 
@@ -1139,7 +1257,7 @@ mod tests {
                 &issuer_pubkey,
                 &recipient_pubkey,
                 payment_timestamp,
-                100_000_000,
+                200_000_000,
             )
             .expect("reference update");
         assert_eq!(
@@ -1147,7 +1265,86 @@ mod tests {
                 .tracker
                 .reserve_state_digest(&issuer_pubkey),
             reference.reserve_state_digest(&issuer_pubkey),
-            "reserve tree must use the explicit on-chain cumulative value"
+            "reserve tree must use the validated cumulative value"
+        );
+    }
+
+    /// `complete_redemption` rejects zero and over-debt redeemed amounts and would
+    /// overflow the cumulative counter without checked arithmetic (issue #15 S4).
+    #[test]
+    fn test_complete_redemption_validates_amounts() {
+        let tracker = TrackerStateManager::new_with_temp_storage();
+        let mut redemption_manager = RedemptionManager::new(tracker);
+
+        let secp = secp256k1::Secp256k1::new();
+        let issuer_secret = secp256k1::SecretKey::from_slice(&[5u8; 32]).unwrap();
+        let issuer_pubkey =
+            secp256k1::PublicKey::from_secret_key(&secp, &issuer_secret).serialize();
+        let recipient_secret = secp256k1::SecretKey::from_slice(&[6u8; 32]).unwrap();
+        let recipient_pubkey =
+            secp256k1::PublicKey::from_secret_key(&secp, &recipient_secret).serialize();
+
+        let total_debt: u64 = 100_000_000;
+        let payment_timestamp: u64 = 1_783_796_933_524;
+
+        let message = crate::schnorr::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            total_debt,
+            payment_timestamp,
+            &[0x42; 32],
+        );
+        let signature =
+            crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
+                .expect("sign note");
+
+        let note = IouNote {
+            recipient_pubkey,
+            amount_collected: total_debt,
+            amount_redeemed: 0,
+            timestamp: payment_timestamp,
+            signature,
+            tracker_nft_id: [0x42; 32],
+        };
+        redemption_manager
+            .tracker
+            .add_note(&issuer_pubkey, &note)
+            .expect("add note");
+
+        // Zero amount is rejected.
+        let result =
+            redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, 0, None);
+        assert!(
+            matches!(result, Err(RedemptionError::InvalidAmount(_))),
+            "expected InvalidAmount for zero amount, got {:?}",
+            result
+        );
+
+        // Amount exceeding outstanding debt is rejected.
+        let result = redemption_manager.complete_redemption(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            total_debt + 1,
+            None,
+        );
+        assert!(
+            matches!(result, Err(RedemptionError::InvalidAmount(_))),
+            "expected InvalidAmount for over-debt amount, got {:?}",
+            result
+        );
+
+        // An amount that would overflow the cumulative counter is rejected instead
+        // of wrapping. Craft a note with amount_redeemed near u64::MAX by redeeming
+        // the full debt first, then attempting another redemption.
+        redemption_manager
+            .complete_redemption(&issuer_pubkey, &recipient_pubkey, total_debt, None)
+            .expect("full redemption");
+        let result =
+            redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, 1, None);
+        assert!(
+            matches!(result, Err(RedemptionError::InvalidAmount(_))),
+            "expected InvalidAmount after full redemption, got {:?}",
+            result
         );
     }
 
@@ -1173,6 +1370,7 @@ mod tests {
             &recipient_pubkey,
             total_debt,
             payment_timestamp,
+            &[0x42; 32],
         );
         let signature =
             crate::schnorr::schnorr_sign(&message, issuer_secret.as_ref(), &issuer_pubkey)
@@ -1184,6 +1382,7 @@ mod tests {
             amount_redeemed: 0,
             timestamp: payment_timestamp,
             signature,
+            tracker_nft_id: [0x42; 32],
         };
 
         // Create a manager with on-disk storage so we can reopen it.
@@ -1242,6 +1441,90 @@ mod tests {
         // Clean up.
         let _ = fs::remove_dir_all(&storage_path);
     }
+
+    /// Emergency redemption must encode context var #6 (tracker signature) as an
+    /// EMPTY Coll[Byte] (`0e00`): the contract branches on
+    /// `trackerSigBytes.size > 0`, so a 65-byte zero placeholder would be
+    /// verified as a real signature and rejected, making emergency redemption
+    /// via `/redeem` unusable. A normal redemption keeps the 65-byte signature.
+    #[test]
+    fn test_emergency_redemption_sends_empty_tracker_signature_var() {
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+        let secp = Secp256k1::new();
+        let issuer_secret = [1u8; 32];
+        let issuer_pubkey =
+            PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&issuer_secret).unwrap())
+                .serialize();
+        let recipient_secret = [2u8; 32];
+        let recipient_pubkey =
+            PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&recipient_secret).unwrap())
+                .serialize();
+
+        let make_request = |emergency: bool, tracker_signature: Option<String>| RedemptionRequest {
+            issuer_pubkey: hex::encode(issuer_pubkey),
+            recipient_pubkey: hex::encode(recipient_pubkey),
+            amount: 1_000_000,
+            timestamp: 1672531200,
+            reserve_box_id: "aa".repeat(32),
+            tracker_box_id: "bb".repeat(32),
+            tracker_nft_id: "42".repeat(32),
+            current_height: 1000,
+            recipient_address: "9".repeat(51),
+            change_address: "9".repeat(51),
+            issuer_signature: "01".repeat(65),
+            emergency,
+            tracker_signature,
+            reserve_box_value: 20_000_000,
+            fee_input_box_ids: Vec::new(),
+            fee_input_total_value: 0,
+            reserve_refund_initiation_height: 0,
+            reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+        };
+
+        let var6 = |emergency: bool, tracker_signature: Option<String>| {
+            let mut tracker = TrackerStateManager::new_with_temp_storage();
+            let note = IouNote::create_and_sign(
+                recipient_pubkey,
+                10_000_000,
+                1672531200,
+                &issuer_secret,
+                &[0x42; 32],
+            )
+            .expect("sign note");
+            tracker.add_note(&issuer_pubkey, &note).expect("add note");
+            let proof = crate::NoteProof {
+                note: note.clone(),
+                avl_proof: vec![],
+                operations: vec![],
+            };
+            let request = make_request(emergency, tracker_signature);
+            let data = build_redemption_transaction(&mut tracker, &note, &proof, &request)
+                .expect("redemption build must succeed");
+            let tx_bytes = hex::decode(&data.transaction_bytes).expect("tx hex");
+            let tx_json: serde_json::Value = serde_json::from_slice(&tx_bytes).expect("tx JSON");
+            tx_json["tx"]["inputs"][0]["extension"]["6"]
+                .as_str()
+                .expect("context var #6 must always be present")
+                .to_string()
+        };
+
+        // Emergency: empty Coll[Byte] serializes as 0e + length 0x00.
+        assert_eq!(
+            var6(true, None),
+            "0e00",
+            "emergency redemption must send an empty Coll[Byte] as context var #6"
+        );
+
+        // Normal redemption: the 65-byte tracker signature is preserved
+        // (0e + length 0x41 + 130 hex chars).
+        let normal = var6(false, Some("02".repeat(65)));
+        assert!(
+            normal.starts_with("0e41") && normal.len() == 4 + 130,
+            "normal redemption must send the 65-byte tracker signature, got {}",
+            normal
+        );
+    }
 }
 
 // Helper function to build redemption transaction using the transaction builder
@@ -1282,11 +1565,15 @@ fn build_redemption_transaction(
         )));
     }
 
-    // Get tracker signature from request or generate placeholder for emergency
+    // Get tracker signature from request, or an empty Coll[Byte] for emergency.
     let tracker_signature_bytes = if request.emergency {
-        // Emergency redemption - tracker signature not required by contract after 3 days
-        // Use a dummy signature (contract will bypass verification based on HEIGHT)
-        vec![0u8; 65]
+        // Emergency redemption: the tracker signature is not required by the
+        // contract after the waiting period. Context var #6 must be an EMPTY
+        // Coll[Byte] here -- the contract branches on `trackerSigBytes.size > 0`,
+        // so a 65-byte zero "signature" would be verified (and rejected) instead
+        // of taking the emergency path. This matches the server's redemption
+        // build and the Scala reference implementation.
+        Vec::new()
     } else if let Some(ref tracker_sig_hex) = request.tracker_signature {
         // Normal redemption with tracker signature provided
         hex::decode(tracker_sig_hex).map_err(|e| {
@@ -1300,7 +1587,9 @@ fn build_redemption_transaction(
         ));
     };
 
-    if tracker_signature_bytes.len() != 65 && !request.emergency {
+    // The 65-byte length check applies only to real signatures; the emergency
+    // path's empty Coll[Byte] is valid by construction.
+    if !request.emergency && tracker_signature_bytes.len() != 65 {
         return Err(RedemptionError::TransactionError(format!(
             "Tracker signature must be 65 bytes, got {}",
             tracker_signature_bytes.len()
@@ -1380,6 +1669,7 @@ fn build_redemption_transaction(
         reserve_lookup_proof_bytes,
         tracker_lookup_proof_bytes,
         request.amount,
+        &request.reserve_ergo_tree,
     )
     .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
 

@@ -69,7 +69,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseEmpty'
         '400':
-          description: Bad request - invalid input parameters
+          description: Bad request - invalid input parameters (including malformed tracker_nft_id hex or wrong length)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '409':
+          description: Conflict - note's tracker_nft_id does not match this tracker's configured tracker NFT ID
           content:
             application/json:
               schema:
@@ -350,7 +356,14 @@ paths:
   /reserves/create:
     post:
       summary: Create reserve transaction payload
-      description: Build an unsigned reserve creation transaction formatted for the Ergo node's /wallet/payment/send API.
+      description: |
+        Build a reserve creation transaction formatted for the Ergo node's
+        /wallet/payment/send API. The tracker never broadcasts it: the reserve
+        owner submits the returned `requests` array to their own node's
+        `/wallet/payment/send`, so the tracker's wallet is never involved. The
+        owner's wallet must hold the reserve NFT and enough ERG for the reserve
+        value plus fee. The `nft_id` must not be the tracker's own NFT, and the
+        amounts are bounded by `server.reserve_creation_max_*` config caps.
       operationId: createReservePayload
       tags:
         - Reserves
@@ -369,39 +382,6 @@ paths:
                 $ref: '#/components/schemas/ApiResponseReserveCreation'
         '400':
           description: Bad request - invalid input parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-
-  /reserves/submit:
-    post:
-      summary: Submit reserve creation transaction
-      description: Submit a signed reserve creation transaction to the tracker's Ergo node for broadcast.
-      operationId: submitReserveTransaction
-      tags:
-        - Reserves
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ReserveCreationResponse'
-      responses:
-        '200':
-          description: Reserve transaction submitted successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseReserveSubmission'
-        '400':
-          description: Bad request - invalid transaction
           content:
             application/json:
               schema:
@@ -545,7 +525,13 @@ paths:
   /redeem/complete:
     post:
       summary: Complete a redemption
-      description: Mark a redemption as completed and update the note's redeemed amount.
+      description: |
+        Mark a redemption as completed and update the note's redeemed amount.
+        The server validates the amounts against the stored note state before
+        applying the update: `redeemed_amount` must be positive and within the
+        note's outstanding debt, and when `new_already_redeemed` is supplied it
+        must equal the note's cumulative redeemed amount plus `redeemed_amount`.
+        A mismatch is rejected with 400.
       operationId: completeRedemption
       tags:
         - Redemption
@@ -727,6 +713,12 @@ paths:
         Request a Schnorr signature from the tracker for redemption.
         The tracker signs: key || totalDebt || timestamp
         where key = blake2b256(ownerKey || receiverKey).
+
+        The signed `totalDebt` and `timestamp` always come from the tracker's
+        stored note for the given issuer/recipient pair; the `total_debt` and
+        `timestamp` request fields must match the stored note (mismatches are
+        rejected with 409). The acceptance policy is enforced for non-emergency
+        requests before signing. Returns 404 when no note is stored for the pair.
       operationId: requestTrackerSignature
       tags:
         - Redemption
@@ -745,6 +737,18 @@ paths:
                 $ref: '#/components/schemas/ApiResponseTrackerSignature'
         '400':
           description: Bad request - invalid public key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '404':
+          description: Note not found for the issuer/recipient pair
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '409':
+          description: Request values do not match the stored note
           content:
             application/json:
               schema:
@@ -825,6 +829,13 @@ paths:
       description: |
         Prepare a redemption by generating AVL proofs and tracker signature.
         Returns the legacy preparation response containing a single combined AVL proof.
+
+        The note for the issuer/recipient pair must exist in the tracker state;
+        otherwise the request is rejected with 404. The tracker signature always
+        covers the stored note's cumulative debt and payment timestamp — the
+        `timestamp` request field must match the stored note (409 on mismatch),
+        and `amount` is used only for the acceptance-policy check (skipped for
+        emergency requests).
       operationId: prepareRedemption
       tags:
         - Redemption
@@ -860,6 +871,12 @@ paths:
       description: |
         Build an unsigned redemption transaction and a fee-signed partial transaction.
         The client must add the reserve input's proveDlog proof and submit the signed result.
+
+        The tracker AVL proof is generated against the last on-chain-confirmed
+        tracker state digest (not the live local tree), so the proof verifies
+        against the digest stored in the tracker box. If no tracker state has
+        been confirmed on-chain yet, or the note is not part of the confirmed
+        state, the request is rejected with 400.
       operationId: buildRedemption
       tags:
         - Redemption
@@ -892,7 +909,11 @@ paths:
   /redemption/submit:
     post:
       summary: Submit a signed redemption transaction
-      description: Broadcast a fully signed redemption transaction to the Ergo network.
+      description: |
+        Broadcast a fully signed redemption transaction to the Ergo network.
+        Before broadcasting, the server validates the note key and redemption
+        amounts against the stored note state; a mismatch is rejected with 400
+        and nothing is broadcast.
       operationId: submitRedemption
       tags:
         - Redemption
@@ -1174,9 +1195,14 @@ components:
           example: 1234567890
         signature:
           type: string
-          description: Hex-encoded Schnorr signature (signs key || totalDebt || timestamp)
+          description: Hex-encoded Schnorr signature (signs key || totalDebt || timestamp || trackerNftId)
           pattern: '^[0-9a-fA-F]{130}$'
           example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        tracker_nft_id:
+          type: string
+          description: Hex-encoded tracker NFT ID (64 characters = 32 bytes) this note is bound to; part of the signed message
+          pattern: '^[0-9a-fA-F]{64}$'
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
         confirmation:
           $ref: '#/components/schemas/NoteConfirmationSummary'
 
@@ -1214,6 +1240,11 @@ components:
           description: Hex-encoded Schnorr signature (130 characters)
           pattern: '^[0-9a-fA-F]{130}$'
           example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        tracker_nft_id:
+          type: string
+          description: Hex-encoded tracker NFT ID (64 characters = 32 bytes) this note is bound to; part of the signed message
+          pattern: '^[0-9a-fA-F]{64}$'
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
         age_seconds:
           type: integer
           format: uint64
@@ -1277,6 +1308,7 @@ components:
         - timestamp
         - signature
         - issuer_pubkey
+        - tracker_nft_id
       properties:
         recipient_pubkey:
           type: string
@@ -1305,6 +1337,15 @@ components:
           description: Hex-encoded issuer public key (66 characters)
           pattern: '^[0-9a-fA-F]{66}$'
           example: "010101010101010101010101010101010101010101010101010101010101010101"
+        tracker_nft_id:
+          type: string
+          description: >-
+            Hex-encoded tracker NFT ID (64 characters = 32 bytes) the note is bound to.
+            Part of the signed message (appended after key || totalDebt || timestamp), so the
+            signature is valid only for this tracker. Must match this tracker's configured
+            ergo.tracker_nft_id.
+          pattern: '^[0-9a-fA-F]{64}$'
+          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
 
     NoteStateRequest:
       type: object
@@ -1470,7 +1511,7 @@ components:
           example: 1100000
         change_address:
           type: string
-          description: Change address for leftover funds
+          description: Owner's change address (derived from the owner pubkey). Submit the `requests` array to the owner's own Ergo node `/wallet/payment/send`.
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
 
     ReservePaymentRequest:
@@ -1513,15 +1554,6 @@ components:
           format: uint64
           description: Token amount in raw units
           example: 1000000000
-
-    ReserveSubmissionResponse:
-      type: object
-      description: Response for reserve transaction submission
-      properties:
-        tx_id:
-          type: string
-          description: Transaction ID of the submitted reserve creation transaction
-          example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
 
     # Redemption Schemas
     RedeemRequest:
@@ -1710,12 +1742,12 @@ components:
         total_debt:
           type: integer
           format: uint64
-          description: Total cumulative debt amount
+          description: Must equal the stored note's total debt; mismatches are rejected with 409
           example: 1000000000
         timestamp:
           type: integer
           format: uint64
-          description: Payment timestamp in milliseconds since Unix epoch
+          description: Must equal the stored note's payment timestamp; mismatches are rejected with 409
           example: 1234567890000
         emergency:
           type: boolean
@@ -1865,13 +1897,18 @@ components:
         amount:
           type: integer
           format: uint64
-          description: Amount to redeem in nanoERG
+          description: Intended redemption amount in nanoERG. Used only for the acceptance-policy check; the signed message always covers the stored note's cumulative debt
           example: 500000000
         timestamp:
           type: integer
           format: uint64
-          description: Note payment timestamp in milliseconds since Unix epoch
+          description: Must equal the stored note's payment timestamp; mismatches are rejected with 409
           example: 1234567890000
+        emergency:
+          type: boolean
+          default: false
+          description: Whether this is an emergency redemption (exempt from the acceptance-policy check)
+          example: false
 
     RedemptionPreparationResponse:
       type: object
@@ -1931,7 +1968,7 @@ components:
         timestamp:
           type: integer
           format: uint64
-          description: Note payment timestamp in milliseconds since Unix epoch
+          description: Legacy field, ignored by the server — the stored note's payment timestamp is used for the signature, context extension, and reserve tree value
           example: 1234567890000
         issuer_signature:
           type: string
@@ -1951,7 +1988,7 @@ components:
         change_address:
           type: string
           nullable: true
-          description: Optional change address; derived from the selected fee box if omitted
+          description: Deprecated and ignored. Change always goes to the owner of the tracker's selected fee box (falling back to the configured change address); a caller-supplied address is never used.
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
 
     RedemptionBuildResponse:
@@ -2011,7 +2048,7 @@ components:
           example: 123900000
         change_address:
           type: string
-          description: Address receiving change
+          description: Address receiving change (always derived from the tracker's own wallet)
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
         recipient_address:
           type: string
@@ -2474,14 +2511,6 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/ReserveCreationResponse'
-
-    ApiResponseReserveSubmission:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/ReserveSubmissionResponse'
 
     ApiResponseEvents:
       allOf:

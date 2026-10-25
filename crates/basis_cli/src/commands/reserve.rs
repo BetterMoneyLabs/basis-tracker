@@ -29,7 +29,8 @@ pub enum ReserveCommands {
         #[arg(long)]
         token_id: Option<String>,
 
-        /// Submit the generated payload to the tracker's Ergo node for broadcast
+        /// Submit the generated payload to the configured Ergo node (`node_url` in cli.toml);
+        /// the node's wallet must be the reserve owner's wallet — the tracker never pays.
         #[arg(long)]
         submit: bool,
     },
@@ -59,7 +60,7 @@ pub struct ReserveCreateResult {
     pub token_amount: Option<u64>,
     /// Payload to submit to an Ergo wallet to create the reserve on-chain.
     pub payload: ReserveCreationResponse,
-    /// Transaction id if the payload was submitted via the tracker node.
+    /// Transaction id if the payload was submitted via the configured Ergo node.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_id: Option<String>,
 }
@@ -134,7 +135,18 @@ pub async fn create_reserve(
     let payload = client.create_reserve(request).await?;
 
     let tx_id = if submit {
-        Some(client.submit_reserve(payload.clone()).await?.tx_id)
+        let cfg = account_manager.config_manager.get_config();
+        let node_url = cfg.node_url.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--submit requires an Ergo node: set node_url (and node_api_key) in cli.toml, \
+                 or submit the returned payload to your node's /wallet/payment/send yourself"
+            )
+        })?;
+        Some(crate::api::submit_reserve_to_node(
+            node_url,
+            cfg.node_api_key.as_deref(),
+            &payload,
+        )?)
     } else {
         None
     };

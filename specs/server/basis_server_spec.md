@@ -73,7 +73,6 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `GET /reserves/{box_id}` - Get a single reserve by its box id
 - `GET /key-status/{pubkey}` - Get status information for a public key
 - `POST /reserves/create` - Create a reserve creation payload for Ergo node's `/wallet/payment/send` API
-- `POST /reserves/submit` - Submit a reserve creation payload to the tracker's configured Ergo node for broadcast
 
 ### Acceptance Policy Endpoints
 
@@ -157,7 +156,7 @@ The `/tracker/signature` endpoint returns responses with the following structure
 - `tracker_signature`: 65-byte Schnorr signature (hex-encoded, 130 characters) proving tracker authorization
 - `tracker_pubkey`: Tracker's public key (hex-encoded, 66 characters)
 - `message_signed`: The hex-encoded message that was signed
-  - Normal and emergency: `hash(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
+  - Normal and emergency: `hash(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
 
 ### Redemption Preparation Request Structure
 
@@ -207,8 +206,8 @@ The server now implements real cryptographic functionality using the Ergo node's
 - **Authentication**: Remote requests to the signing API are authenticated using the tracker API key
 - **Implementation**: Tracker signature endpoints (`/tracker/signature` and `/redemption/prepare`) try local signing first, then fall back to Ergo node API
 - **Message Format**: 
-  - Normal and emergency: `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp)` (48 bytes)
-  - Emergency redemption (after 3 days): same 48-byte message format, tracker signature becomes optional
+  - Normal and emergency: `blake2b256(issuerKey||recipientKey) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
+  - Emergency redemption (after 3 days): same 80-byte message format, tracker signature becomes optional
 
 #### AVL Tree Proof Generation
 - **Real Proofs**: All proof endpoints now generate actual AVL tree lookup and insert/update proofs from the tracker's and reserve's AVL tree state
@@ -240,24 +239,19 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
     - `address`: Reserve contract P2S address (hardcoded in configuration)
     - `value`: ERG amount from request
     - `assets`: Array containing the NFT asset
-      - `token_id`: NFT ID from request (snake_case in the response; converted to `tokenId` by the submission endpoint)
+      - `token_id`: NFT ID from request (snake_case in the response; the node expects `tokenId`, camelCase)
       - `amount`: Always 1 for NFTs
     - `registers`: Map of register values
       - `R4`: Owner public key from request (GroupElement)
       - `R5`: Initial AVL tree (empty tree for new reserve)
       - `R6`: Tracker NFT ID (bytes) - identifies which tracker server this reserve is linked to
   - `fee`: Transaction fee amount from configuration
-  - `change_address`: Change address derived from tracker public key configuration (fallback to owner pubkey if unavailable)
+  - `change_address`: Owner's P2PK address derived from the request's `owner_pubkey`
 
-- `POST /reserves/submit` - Submit a previously generated reserve creation payload to the tracker's configured Ergo node for on-chain broadcast.
-  - Accepts the same `ReserveCreationResponse` JSON returned by `/reserves/create`.
-  - Converts `token_id` to the camelCase `tokenId` required by the Ergo node.
-  - Forwards the `requests` array to `POST {ergo_node}/wallet/payment/send` using the configured `api_key`.
-  - Returns:
-    - `tx_id`: String - the transaction id returned by the Ergo node.
-  - Errors:
-    - `503 Service Unavailable` if no Ergo node is configured.
-    - `502 Bad Gateway` if the Ergo node returns an error or is unreachable.
+There is **no** `/reserves/submit` endpoint (removed in PR #16 B4): the tracker never
+broadcasts reserve creations. The owner posts the returned `requests` array to their own
+Ergo node's `/wallet/payment/send`; the CLI does this with `reserve create --submit` when
+`node_url` is set in `cli.toml`.
 
 ### Debt Transfer Support — NOT IMPLEMENTED
 
@@ -293,9 +287,9 @@ Key configuration includes:
   - `mode`: `none`, `api_key`, or `signature`.
   - `api_key`: shared secret used when `mode = "api_key"`.
   - `authorized_clients`: list of `{ pubkey, role }` entries used when `mode = "signature"`.
-  - `allowed_origins`: CORS allow-list used when auth is enabled.
+  - `allowed_origins`: CORS origin allow-list. Empty (default) disables CORS entirely; wildcard origins are never used.
   - `signature_timestamp_tolerance_ms`: maximum age of a request signature in milliseconds (default 30 s).
-- **Ergo node connection details** (required): The server will abort with exit code 1 if `ergo.node.node_url` is not provided in the configuration - no default localhost value is used
+- **Ergo node connection details**: `ergo.node.node_url` defaults to `http://127.0.0.1:9053`; point it at your Ergo node for real deployments
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)
 - Tracker public key (for identifying the tracker server)
@@ -303,7 +297,7 @@ Key configuration includes:
 - Transaction fees
 
 **Critical Requirements**:
-1. The server requires a valid Ergo node URL to be provided in the configuration (`ergo.node.node_url` field). If this is missing or empty, the server will immediately exit with status code 1 during startup.
+1. `ergo.node.node_url` defaults to `http://127.0.0.1:9053` (local node); point it at your Ergo node for real deployments.
 2. The server requires access to an Ergo node with the Schnorr signing API (`/utils/schnorrSign`) enabled for endpoints that require tracker signatures. The tracker private key must be available in the Ergo node's wallet for signature generation.
 3. The tracker public key must be provided in the configuration for signature verification purposes.
 4. The tracker API key must be provided to authenticate requests to the Ergo node's signing API.
@@ -360,9 +354,12 @@ Role-based access control assigns each request a role:
 
 - `Read`: `GET` endpoints and read-only `POST` queries (`/notes/state`, `/acceptance/check`).
 - `Write`: state-changing endpoints such as `/notes`, `/redeem`, `/redemption/prepare`, `/tracker/signature`.
-- `Admin`: reserve creation/submission (`/reserves/create`, `/reserves/submit`) and policy management (`/acceptance/policy`).
+- `Admin`: reserve creation (`/reserves/create`), redemption completion (`/redeem/complete`) and policy management (`/acceptance/policy`).
 
-In `none` and `api_key` modes all authenticated requests receive `Admin`. In `signature` mode the role is taken from the matching `authorized_clients` entry.
+In `none` mode every request receives `Admin`. In `api_key` mode the shared key receives
+`Admin`, unless `admin_api_key` is configured — then `api_key` grants only `Write` and the
+admin key grants `Admin`. In `signature` mode the role is taken from the matching
+`authorized_clients` entry.
 
 TLS should be enabled (`tls_cert_path` / `tls_key_path`) whenever authentication is used in production, otherwise credentials and signatures travel in plaintext.
 
@@ -370,7 +367,7 @@ For full details see `specs/server/authentication_authorization.md`.
 
 ## Security Considerations
 
-- CORS headers configured for cross-origin requests, with origin restriction when auth is enabled and `allowed_origins` is non-empty
+- CORS headers only for the explicit `allowed_origins` allow-list; when it is empty (default), no CORS layer is installed at all
 - Input validation for all public keys and amounts
 - Signature verification for note creation and debt transfer
 - Channel-based communication to ensure thread safety

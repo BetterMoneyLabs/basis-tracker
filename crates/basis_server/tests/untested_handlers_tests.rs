@@ -1,4 +1,4 @@
-//! Coverage for the eight HTTP handlers that no existing test exercised.
+//! Coverage for the HTTP handlers that no existing test exercised.
 //!
 //! Verified by grep that neither the handler names nor the route paths appeared in any test
 //! file before this one:
@@ -12,12 +12,16 @@
 //! | `GET /config/reserve-contract-p2s` | `get_basis_reserve_contract_p2s` |
 //! | `GET /tracker/latest-box-id` | `get_latest_tracker_box_id` |
 //! | `POST /reserves/create` | `create_reserve_payload` |
-//! | `POST /reserves/submit` | `submit_reserve_transaction` |
 //!
-//! `POST /redemption/submit` is the notable one: it broadcasts a signed transaction and then
-//! advances tracker state from the request body at mempool-acceptance time, which the audit
-//! rates as a top open finding (Issue #4). These tests pin its *current* behaviour, including
-//! the state-advance-on-broadcast semantics, so that a future fix is a visible diff.
+//! (`POST /reserves/submit` was removed in PR #16 B4: it forwarded the payload to the
+//! tracker's node, so the tracker's wallet funded arbitrary reserves. The owner now submits
+//! the `/reserves/create` payload to their own node.)
+//!
+//! `POST /redemption/submit` is bound to server-side build state (PR #16 B6): the echoed
+//! `unsigned_tx` must hash to a live, single-use pending entry recorded by
+//! `/redemption/build`, the signed transaction must spend the entry's reserve box, and the
+//! tracker state advance uses the STORED entry values — caller-supplied amounts on the wire
+//! are ignored.
 
 mod untested_handlers {
     use axum::http::StatusCode;
@@ -25,9 +29,8 @@ mod untested_handlers {
         api::{
             create_reserve_payload, get_basis_reserve_contract_p2s, get_latest_tracker_box_id,
             get_reserve_proof, get_reserve_token_config, get_tracker_proof,
-            submit_reserve_transaction,
         },
-        models::{CreateReserveRequest, ReserveCreationResponse},
+        models::CreateReserveRequest,
         redemption_build::submit_redemption,
         AppState, TrackerCommand,
     };
@@ -88,8 +91,7 @@ mod untested_handlers {
                     } => {
                         let r = redemption_manager
                             .tracker
-                            .lookup_note(&issuer_pubkey, &recipient_pubkey)
-                            .map(Some);
+                            .get_note_optional(&issuer_pubkey, &recipient_pubkey);
                         let _ = response_tx.send(r);
                     }
                     TrackerCommand::CompleteRedemption {
@@ -124,6 +126,9 @@ mod untested_handlers {
                 tls_cert_path: None,
                 tls_key_path: None,
                 auth: basis_server::config::AuthConfig::default(),
+                reserve_creation_max_erg_nano: 10_000_000_000,
+                reserve_creation_max_token_amount: 1_000_000_000,
+                redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: basis_server::config::ErgoConfig {
                 node: basis_store::ergo_scanner::NodeConfig {
@@ -186,6 +191,12 @@ mod untested_handlers {
             tracker_storage,
             acceptance_predicate: None,
             policy_storage,
+            pending_redemptions: std::sync::Arc::new(
+                basis_server::redemption_build::PendingRedemptionRegistry::new(),
+            ),
+            redemption_build_rate: std::sync::Arc::new(
+                basis_server::redemption_build::BuildRateLimiter::new(),
+            ),
         }
     }
 
@@ -454,58 +465,17 @@ mod untested_handlers {
     }
 
     // ========================================================================
-    // POST /reserves/submit
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_submit_reserve_transaction_without_node_is_service_unavailable() {
-        // No node configured: the handler must refuse cleanly rather than panic or hang.
-        let state = mock_state_with_config("").await;
-
-        let (status, body) = submit_reserve_transaction(
-            axum::extract::State(state),
-            axum::extract::Json(ReserveCreationResponse {
-                requests: vec![],
-                fee: 1_000_000,
-                change_address: "9test".to_string(),
-            }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {:?}", body);
-        assert!(!body.success);
-    }
-
-    #[tokio::test]
-    async fn test_submit_reserve_transaction_unreachable_node_is_bad_gateway() {
-        // Port 1 is reserved and refuses connections, so this exercises the upstream-failure
-        // branch without needing a live node.
-        let state = mock_state_with_config("http://127.0.0.1:1").await;
-
-        let (status, body) = submit_reserve_transaction(
-            axum::extract::State(state),
-            axum::extract::Json(ReserveCreationResponse {
-                requests: vec![],
-                fee: 1_000_000,
-                change_address: "9test".to_string(),
-            }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {:?}", body);
-        assert!(!body.success);
-        assert!(body.error.is_some());
-    }
-
-    // ========================================================================
     // POST /redemption/submit
     //
-    // This handler broadcasts a client-supplied signed transaction and then advances tracker
-    // state from the request body. specs/PRODUCTION_READINESS_AUDIT.md Issue #4 rates this the
-    // top open finding: no confirmation-depth gate, the transaction's contents are never
-    // inspected, and redeemed_amount / new_already_redeemed are trusted verbatim. The tests
-    // below pin that behaviour so a future fix shows up as a failing test.
+    // Since PR #16 B6 the submit endpoint is bound to server-side state recorded by
+    // /redemption/build: the echoed `unsigned_tx` must hash to a live, single-use pending
+    // entry, the signed transaction must spend the entry's reserve box and carry its R5
+    // digest, and the tracker state advance uses the STORED entry values. These tests pin
+    // that behaviour.
     // ========================================================================
+
+    /// Reserve box id the pending entries below are recorded against.
+    const RESERVE_BOX_ID: &str = "abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123";
 
     /// Node stub that accepts any broadcast and returns a fixed tx id.
     async fn spawn_accepting_node() -> String {
@@ -536,22 +506,87 @@ mod untested_handlers {
         format!("http://{}", addr)
     }
 
-    fn submit_request() -> basis_server::redemption_build::RedemptionSubmitRequest {
+    /// Record a pending redemption entry the way `POST /redemption/build` would, returning
+    /// the unsigned transaction JSON whose fingerprint keys the entry.
+    fn record_pending(
+        state: &basis_server::AppState,
+        issuer_pubkey: &str,
+        recipient_pubkey: &str,
+        redeemed_amount: u64,
+    ) -> serde_json::Value {
+        use basis_server::redemption_build::{unsigned_tx_fingerprint, PendingRedemption};
+        let unsigned_tx = serde_json::json!({
+            "inputs": [{ "boxId": RESERVE_BOX_ID, "extension": {} }],
+            "dataInputs": [],
+            "outputs": []
+        });
+        let entry = PendingRedemption::new(
+            RESERVE_BOX_ID.to_string(),
+            issuer_pubkey.to_string(),
+            recipient_pubkey.to_string(),
+            redeemed_amount,
+            redeemed_amount,
+            vec![0x11; 33],
+        );
+        let fingerprint = unsigned_tx_fingerprint(&unsigned_tx).expect("fingerprint");
+        assert!(
+            state.pending_redemptions.record(fingerprint, entry),
+            "pending entry should be recorded"
+        );
+        unsigned_tx
+    }
+
+    /// A signed transaction spending `box_id` whose reserve output carries the R5 digest the
+    /// pending entries above are recorded with (`0x11` x 33).
+    fn signed_tx_spending(box_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "inputs": [{ "boxId": box_id, "extension": {} }],
+            "outputs": [{
+                "additionalRegisters": {
+                    "R5": format!("64{}032000", "11".repeat(33))
+                }
+            }]
+        })
+    }
+
+    fn submit_request(
+        unsigned_tx: serde_json::Value,
+        signed_tx: serde_json::Value,
+    ) -> basis_server::redemption_build::RedemptionSubmitRequest {
         basis_server::redemption_build::RedemptionSubmitRequest {
+            signed_tx,
+            unsigned_tx,
             issuer_pubkey: ISSUER_HEX.to_string(),
             recipient_pubkey: RECIPIENT_HEX.to_string(),
-            signed_tx: serde_json::json!({ "id": "unsigned-placeholder" }),
             redeemed_amount: 1_000,
             new_already_redeemed: 1_000,
         }
     }
 
     #[tokio::test]
-    async fn test_submit_redemption_rejects_invalid_issuer_pubkey() {
+    async fn test_submit_redemption_rejects_unknown_unsigned_tx() {
         let state = mock_state().await;
-        let mut req = submit_request();
-        req.issuer_pubkey = "not-hex".to_string();
 
+        // No /redemption/build ever happened, so there is no pending entry for this tx.
+        let req = submit_request(
+            serde_json::json!({ "inputs": [], "outputs": [] }),
+            signed_tx_spending(RESERVE_BOX_ID),
+        );
+        let (status, body) =
+            submit_redemption(axum::extract::State(state), axum::extract::Json(req)).await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "body: {:?}", body);
+        assert!(!body.success);
+    }
+
+    #[tokio::test]
+    async fn test_submit_redemption_rejects_signed_tx_spending_a_different_box() {
+        let node_url = spawn_accepting_node().await;
+        let state = mock_state_with_config(&node_url).await;
+
+        let unsigned_tx = record_pending(&state, ISSUER_HEX, RECIPIENT_HEX, 1_000);
+        // The signed transaction spends a box the build never selected.
+        let req = submit_request(unsigned_tx, signed_tx_spending("some_other_box"));
         let (status, body) =
             submit_redemption(axum::extract::State(state), axum::extract::Json(req)).await;
 
@@ -560,57 +595,17 @@ mod untested_handlers {
     }
 
     #[tokio::test]
-    async fn test_submit_redemption_rejects_wrong_length_pubkey() {
-        let state = mock_state().await;
-        let mut req = submit_request();
-        req.recipient_pubkey = "02".repeat(32); // 32 bytes, not 33
-
-        let (status, body) =
-            submit_redemption(axum::extract::State(state), axum::extract::Json(req)).await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {:?}", body);
-        assert!(!body.success);
-    }
-
-    #[tokio::test]
-    async fn test_submit_redemption_failed_broadcast_returns_500() {
-        let state = mock_state_with_config("http://127.0.0.1:1").await;
-
-        let (status, body) = submit_redemption(
-            axum::extract::State(state),
-            axum::extract::Json(submit_request()),
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "body: {:?}",
-            body
-        );
-        assert!(!body.success);
-        let msg = body.error.clone().unwrap_or_default();
-        assert!(
-            msg.contains("broadcast failed"),
-            "a failed broadcast must be reported as such, got: {}",
-            msg
-        );
-    }
-
-    #[tokio::test]
-    async fn test_submit_redemption_advances_state_on_broadcast_acceptance() {
-        // Characterisation test for audit Issue #4.
-        //
-        // The node stub accepts anything, and the handler still credits `redeemed_amount`
-        // from the request body: no confirmation-depth check, and no inspection of what the
-        // transaction actually does. Pinning this means the recommended fix surfaces as a
-        // failing test rather than silent behavioural drift.
+    async fn test_submit_redemption_advances_state_from_stored_entry() {
+        // The wire issuer/recipient/amounts are DEPRECATED and ignored: state must advance by
+        // the values recorded at build time. Proven by sending wildly different wire amounts.
         let node_url = spawn_accepting_node().await;
         let state = mock_state_with_config(&node_url).await;
 
         let (secret, issuer) = generate_keypair();
         let (_, recipient) = generate_keypair();
-        let note = IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret).unwrap();
+        let note =
+            IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret, &[0x42; 32])
+                .unwrap();
         state
             .tx
             .send(TrackerCommand::AddNote {
@@ -622,9 +617,13 @@ mod untested_handlers {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let mut req = submit_request();
-        req.issuer_pubkey = hex::encode(issuer);
-        req.recipient_pubkey = hex::encode(recipient);
+        let unsigned_tx =
+            record_pending(&state, &hex::encode(issuer), &hex::encode(recipient), 1_000);
+
+        let mut req = submit_request(unsigned_tx, signed_tx_spending(RESERVE_BOX_ID));
+        // Deliberately wrong wire values: the stored entry (redeemed_amount = 1_000) must win.
+        req.redeemed_amount = 20_000;
+        req.new_already_redeemed = 999_999;
 
         let (status, body) = submit_redemption(
             axum::extract::State(state.clone()),
@@ -653,7 +652,58 @@ mod untested_handlers {
 
         assert_eq!(
             note.amount_redeemed, 1_000,
-            "state was advanced from the request body on broadcast acceptance alone"
+            "state must advance by the stored entry amount, not the wire value"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submit_redemption_entry_is_single_use() {
+        let node_url = spawn_accepting_node().await;
+        let state = mock_state_with_config(&node_url).await;
+
+        let unsigned_tx = record_pending(&state, ISSUER_HEX, RECIPIENT_HEX, 1_000);
+        let req = submit_request(unsigned_tx, signed_tx_spending(RESERVE_BOX_ID));
+
+        let (first_status, first_body) = submit_redemption(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(req.clone()),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK, "body: {:?}", first_body);
+
+        let (second_status, second_body) =
+            submit_redemption(axum::extract::State(state), axum::extract::Json(req)).await;
+        assert_eq!(
+            second_status,
+            StatusCode::CONFLICT,
+            "a replayed unsigned_tx must be refused: body: {:?}",
+            second_body
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submit_redemption_failed_broadcast_returns_500() {
+        // Port 1 is reserved and refuses connections, so this exercises the upstream-failure
+        // branch without needing a live node.
+        let state = mock_state_with_config("http://127.0.0.1:1").await;
+
+        let unsigned_tx = record_pending(&state, ISSUER_HEX, RECIPIENT_HEX, 1_000);
+        let req = submit_request(unsigned_tx, signed_tx_spending(RESERVE_BOX_ID));
+        let (status, body) =
+            submit_redemption(axum::extract::State(state), axum::extract::Json(req)).await;
+
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "body: {:?}",
+            body
+        );
+        assert!(!body.success);
+        let msg = body.error.clone().unwrap_or_default();
+        assert!(
+            msg.contains("broadcast failed"),
+            "a failed broadcast must be reported as such, got: {}",
+            msg
         );
     }
 }

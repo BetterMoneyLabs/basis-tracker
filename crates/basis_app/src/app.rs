@@ -125,6 +125,11 @@ pub struct App {
     pub acceptance_config: AcceptanceConfig,
     pub policy_uploaded: bool,
     pub tui_config_manager: TuiConfigManager,
+    /// Ergo node used to submit reserve-creation payloads (from cli.toml
+    /// `node_url`/`node_api_key`). The node wallet must be the reserve
+    /// owner's wallet; the tracker never pays for reserves.
+    pub node_url: Option<String>,
+    pub node_api_key: Option<String>,
 }
 
 pub struct _ReserveCache {
@@ -288,6 +293,8 @@ impl App {
             acceptance_config,
             policy_uploaded: false,
             tui_config_manager,
+            node_url: config_manager.get_config().node_url.clone(),
+            node_api_key: config_manager.get_config().node_api_key.clone(),
         };
 
         app.refresh_data().await?;

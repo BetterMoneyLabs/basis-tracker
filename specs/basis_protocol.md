@@ -46,17 +46,49 @@ Anyone (presumably, owner in most cases) can top the reserve up.
 * If A has on-chain reserve, B may redeem offchain from A->B note, by providing proof of (amount, timestamp).
  Reserve contract UTXO is storing tree of hash(ownerKey||receiverKey) -> (timestamp, cumulativeRedeemedAmount) pairs.
  The value format is: timestamp (8 bytes big-endian) ++ cumulativeRedeemedAmount (8 bytes big-endian) = 16 bytes total.
- During redemption, the contract verifies that the note's timestamp is **greater than** the stored timestamp,
- which prevents replay attacks with old notes. After on-chain redemption, A and B should contact offchain tracker
+ During redemption, the contract verifies that the note's timestamp is **greater than or equal to** the stored
+ timestamp, which prevents replay attacks with old notes while still allowing the remainder of a partially
+ redeemed note to be redeemed later. After on-chain redemption, A and B should contact offchain tracker
  to update their records before next payment from A to B is done.
+
+ Redemption additionally enforces, in both contract variants:
+ - **Replay protection without a lookup proof:** context variable #7 (AVL+ lookup proof for the note
+   key in the reserve's redemption tree) is provided from the second redemption on. For a first
+   redemption it may be omitted, in which case the contract uses `AvlTree.insert`, which fails if the
+   key is already present — so replaying a redeemed note without #7 is rejected.
+ - **Single reserve input:** exactly one input with the reserve contract and the owner's public key in R4
+   may appear in a redemption transaction, so two reserves of the same owner cannot be mixed to redeem
+   the same note twice.
+ - **Token reserves preserve ERG:** in `basis-token.es` the reserve output must keep at least the input's
+   ERG value in both redemption and top-up actions, so the reserve cannot be drained of its ERG (storage
+   rent) while tokens are redeemed.
+
+ A reserve only counts as collateral once the tracker has validated its setup when first seen on-chain
+ (box creation is not a spend, so the contract cannot check it): R5 must hold the empty AVL+ tree
+ (flags `0x03`, 32-byte keys), R7 must be absent or `Long 0` (no pre-initiated refund), R6 must reference
+ the tracker's own NFT (a singleton token), and R4 must be a valid secp256k1 point. A reserve with a
+ pending refund is never counted as collateral.
 
 * Debt Transfer (Triangular Trade): The protocol supports transferring debt between creditors with debtor consent.
  Example: A owes 10 ERG to B. B wants to buy from C for 5 ERG. Instead of on-chain redemption:
-  1. B requests A to sign new notes: A->B (5 ERG remaining), A->C (5 ERG transferred)
-  2. A signs both notes, tracker signs both notes
-  3. Old note A->B (10 ERG) is cancelled, new notes A->B (5 ERG) and A->C (5 ERG) are created
+  1. B requests A to sign a new note A->C (5 ERG transferred)
+  2. A signs the note, tracker signs the note
+  3. New note A->C (5 ERG) is created; the A->B note keeps its cumulative total of 10 ERG on the tracker
   4. C can now redeem A->C note from A's reserve
  This enables efficient multi-party settlements without on-chain transactions.
+
+ **WARNING — step 3 is not safe as written, and is currently rejected by the tracker.** Lowering the
+ committed cumulative debt for an existing (A, B) pair requires B's consent, not just A's: the contract
+ pins every redemption to the tracker tree, so a lowered totalDebt makes all of B's existing notes fail
+ `trackerDebtCorrect` permanently (the emergency path requires the same tree match). Worse, B could
+ redeem 10 ERG before the change is committed and C could then redeem 5 ERG, so A pays 15; and if B had
+ already redeemed 8, "remaining 5" is meaningless against a cumulative redeemedDebt of 8.
+
+ As of PR #14 the tracker therefore **refuses any note that lowers the committed debt** for an existing
+ pair (`NoteError::DebtDecreaseNotPermitted`), and `amount_redeemed` carries forward instead of resetting.
+ Transferring debt to a *different* creditor is unaffected, because that is a different key in the tree.
+ Reviving the flow above requires a creditor co-signature endpoint that does not exist yet; until then a
+ debt transfer must be settled as redemption plus re-issuance. See specs/pr14_triage.md (S3).
 
 ## Basis Contract
 
@@ -83,7 +115,7 @@ should reject new notes backed by reserves with a pending refund.
 
 **Compiled Contract Address (P2S):**
 ```
-3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT
+2XoR96YVZfWybxeo7qdMkA1BRhxFivm8gTuLLuKREiW6833XWK4mA43DrJMDCvLqB9AwyduGgHBnGmmg2jrkUZAunRDu7t8718EkwiJTvp9rtEWEXMMJeMStjQB5BeuxsUc9ujW3aCMvxdS8VeYyZ14B8sSGu7CwJFmeaZDHiftsT3tUBqBfgau4wZTvhEtYEsFsqvpwsjcPAe4aGhFzJNSPhKqdSBrFKee3Dg4qFmGhb8Wu6DsdmhTrW6jnucnf17PDi2rQ9pgJvKrfs2KPbeZf9gV89vEga4kZk4u3bbSFTVk3s9EhuoUmfyhvC3ZaNv9DSPtzCcjvnL7x6smyLigsgb4QSEDnzX4HjJg5CfA6mh4Jn9hoL1412EVnY2xb8cYz76VEgU8J12n4DHrVsV9NzYAHxe6ogVNptUbAgykiru81pz3aZ6LfYySJt6ESVVGxm6i49ScGjawqsKCxjykCndh3MNQnRajZMgQMH2qFZhbd9KXCnLQkS6NAjtNfMVcx1KykdiSrLVTu3nphUZhT9MjhfxtZcojSZoQmGAy95zhAJpDMgUXBfuCSoUFUzPAuSMv2pBuEXiUR3wDQC7pDFYUDy68QCtTUTDtn9cYyNgc8EZWQSB76wsKhCNod1Q9RV85piLF5PJDMBXh4M8gjEzsq244xDdW6t2f4W4A2ZVDNw2gdSU3FHYxfB45c5cxkyR5qrXyoJT56c2STfFm3vK1ZfXzvckq48uAE1QRGpM9xALiXtdTx1iQaQjy2LkaURha6ewN5NDufyqntwBPk72NLadL8BDtLyReRtUWqbFZo94h4prjHVT25ABHbAqiJuTCHvmfTqi2V5gDwRW7oLk4gvBwswxJVvKmuKSG6sH5HAzQGoF6Kwcwdvq8Lbv5RbuAnm3N7hLnS1rBUWKXfaJCJjptMkeKxzMPhjfjnZTkMXwW3jSBxhpLeuWxrBrfjTFaVR93erQFVTvF9C1FsULgqUPjzPmcHn5Drp4cp4Y2pjv793k6KdykbugL6M6wt75hmKG5jsmrfsSL6AN13j3
 ```
 
 ## Basis-Token Contract (Token-Based Reserve)
@@ -131,7 +163,7 @@ On completion of the two-phase refund, the owner takes **all** ERG and **all** t
 
 **Compiled Contract Address (P2S):**
 ```
-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
+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
 ```
 
 ## Offchain Logic
@@ -165,9 +197,22 @@ Tracker can simply go offline, but then the latest state committed on-chain is s
 Tracker may remove debt notes of protocol participants. This problem can be tackled with the anti-censorship protection
 from "Future Extensions" section.
 
+**This is not implemented.** In the current contracts every redemption path, the emergency path included, requires
+`trackerTree[key] == totalDebt`, so a tracker that omits a note from its committed tree -- or lowers its value --
+blocks that note permanently. The 3-day emergency branch is not a remedy: it relaxes only the tracker's *signature*
+requirement, not the tree match, and it only becomes available once the tracker box is more than 3 days old.
+A tracker that recreates its box regularly therefore never triggers it. README.md was corrected to say so;
+see specs/pr14_triage.md for the full trust-model notes.
+
 Tracker may collude with a reserve holder to inject a note with fake timestamp in the past to redeem immediately. 
 Tracker would be caught in this case. For making this case impossible with contract, technique similar to anti-censorship 
 protection can be used.
+
+Known limitation: the note signing message (`key || totalDebt || timestamp`) is not bound to a specific reserve
+contract or collateral type. If the same owner operates multiple reserves (e.g. an ERG reserve and a token
+reserve), a note signed once could in principle be redeemed against either of them. Binding the reserve into
+the signed message is a deferred protocol change (it alters the message format on both chains of the
+implementation).
 
 ## Wallet
 
@@ -240,7 +285,8 @@ from the ChainCash repository:
 * **Basis reserve contract tests** — Scala contract tests (`BasisSpec`, `BasisTokenSpec`) are in
   `scala/src/test/scala/basis/contracts/` and run with `sbt test`.
 * **Token-based reserve contract** — `contract/basis-token.es` provides a custom-token-backed variant.
-* **Schnorr signing / verification** — Canonical 48-byte signing message and 65-byte Schnorr signatures
+* **Schnorr signing / verification** — Canonical 80-byte signing message (binding each signature to the
+  tracker's NFT id) and 65-byte Schnorr signatures
   are implemented in both Rust (`crates/basis_offchain/src/schnorr.rs`, `crates/basis_core/src/impls.rs`)
   and Scala (`scala/src/main/scala/basis/offchain/SigUtils.scala`), with shared test vectors in
   `specs/SCHNORR_SIGNATURE_SPEC.md`.

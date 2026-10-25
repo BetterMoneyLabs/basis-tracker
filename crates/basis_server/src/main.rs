@@ -4,6 +4,7 @@
 //! state manager thread, builds the axum router with authentication /
 //! authorization middleware, and serves HTTP or HTTPS traffic.
 
+use axum::extract::DefaultBodyLimit;
 use axum::{
     middleware::{from_fn, from_fn_with_state},
     routing::{get, post},
@@ -11,14 +12,13 @@ use axum::{
 };
 use basis_server::{
     api::*,
-    auth_middleware::{auth_middleware, AuthState},
+    auth_middleware::{auth_middleware, is_loopback_origin, loopback_host_guard, AuthState},
     authorization::authorization_middleware,
     build_redemption,
     reserve_api::*,
     store::EventStore,
-    submit_redemption, AppConfig, AppState, ErgoConfig, EventType, ServerConfig,
-    SharedTrackerState, TrackerBoxUpdateConfig, TrackerBoxUpdater, TrackerCommand, TrackerEvent,
-    TransactionConfig,
+    submit_redemption, AppConfig, AppState, EventType, ServerConfig, SharedTrackerState,
+    TrackerBoxUpdateConfig, TrackerBoxUpdater, TrackerCommand, TrackerEvent,
 };
 use basis_store::{
     ergo_scanner::{start_scanner, NodeConfig, ReserveEvent, ServerState},
@@ -26,8 +26,19 @@ use basis_store::{
     ReserveTracker,
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::timeout::TimeoutLayer;
+
+/// Maximum accepted request body size.
+///
+/// The signature-auth middleware hashes the raw body, so it must buffer it. That read used to pass
+/// `usize::MAX` explicitly, which made the buffer attacker-controlled in size. The limit is shared
+/// with the auth middleware (`MAX_BODY_BYTES`) so the extractor limit and the middleware limit
+/// cannot drift apart. The largest legitimate tracker payload is a few KiB; 256 KiB is generous
+/// headroom.
+const MAX_REQUEST_BODY_BYTES: usize = basis_server::auth_middleware::MAX_BODY_BYTES;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -35,52 +46,32 @@ async fn main() {
     tracing::info!("Starting basis server...");
     // Load configuration
     tracing::info!("Loading configuration...");
+    // SECURITY: a configuration that fails to load must stop the server, not degrade it.
+    //
+    // This used to log a warning, call `AppConfig::load()` a second time and finally fall back to
+    // a hardcoded struct whose `auth` was `AuthConfig::default()` -- i.e. `AuthMode::None` with no
+    // API key. The most likely cause of a parse error was an auth value the server did not accept
+    // (the documented `mode = "api_key"` did not match the serde name `apikey`), so an operator
+    // who followed the documentation got a silently anonymous, Admin-everything server listening on
+    // 0.0.0.0. Fail closed instead: a tracker holds other people's collateral.
     let config = match AppConfig::load() {
         Ok(config) => config,
         Err(e) => {
-            tracing::warn!("Failed to load configuration: {}", e);
-            tracing::info!("Using default configuration...");
-            AppConfig::load().unwrap_or_else(|_| {
-                // Fallback to hardcoded defaults if config loading fails completely
-                AppConfig {
-                    server: ServerConfig {
-                        host: "0.0.0.0".to_string(),
-                        port: 3048,
-                        data_dir: Some("data".to_string()),
-                        database_url: Some("sqlite:data/basis.db".to_string()),
-                        tls_cert_path: None,
-                        tls_key_path: None,
-                        auth: basis_server::config::AuthConfig::default(),
-                    },
-                    ergo: ErgoConfig {
-                        node: NodeConfig {
-                            start_height: None,
-                            reserve_contract_p2s: None,
-                            token_reserve_contract_p2s: None,
-                            reserve_token_id: None,
-                            node_url: "http://127.0.0.1:9053".to_string(),
-                            scan_name: Some("Basis Reserve Scanner".to_string()),
-                            api_key: None,
-                        },
-                        basis_reserve_contract_p2s: "3PQnJ92Krn6NeM1GdMSmNayw34Nuud7UKMoKSTRUTucsNybh99K1HEfjZqyvP7cPag1yBkDv3ruMAgb2NsVKq3tAygjHz7mKDzHK6CJGhD3WfNViD7DoViqbgsXrzvs6Kt8Wyzb48uGqJAFQFWes6ZPKELqUZowy8xtVCS5w1VwnyaeRiWpEyUVGaEHw3qWo5DcVxzmMAP8XXhVTw1rYYrUxsyGPNaBxQkkkTVD9L3bmw77EfeAJgJ1hLxghykNofHscHtMtES4v5FSfqke3Huun81S7gNoraEnsR6Dy6YnQgrBswwCZhyGc89YeNFQn1TCFh5Hct3nKGrd1bV5zoCw67Q9fKtoaCtvcPQ2GDWycGKNRNgyAnPEa8WbHbTEVcjAN25aBwhnY5LFGqYxnUAjhpfkTPJ4FJWRijSqMESzpyrmhTLZdivmn4YSwcchVZr7bHGbfncEDwqPKefdoxNnVPxuVdmeqQXL3aDL7TaqWgExzz1UPXHw3UiKYTUkNgQKCN4WV3LHqc9PecoisL77ydVbSCxPapaX2zTf26F8bGK3hsTVBZnMkt93SJP5GmPgZU5FT9NkFh4okjXK9ce2wmA4MV93ySyYnUKGwTRFJWwE7G1MYqBqTY3ESkn8PJHqVuL4cgtuV2GEPagKt19befRAuUV3FaLGVPJMzpKdANd7hKGZRcy3DnPfT1Q9dyFD4VpdBgFRXJWaaDqYjL7ni4nJcKKam9P395wRRnjGWhTV4hv3KoxC8Xk2CZAUjhkTzvuNHxQrLsWjyrKWJqZgs2uZxoAEHEobDegYWiTcnFCPU9EeJxZLSjysDFninqpQvA66Yt1SvJnSZm49RKsaoR98UJVScdiQfNZE76zTYBioXGatdRz7QVkXDzDPjPMu9Hhepc2XbHqo3ia8tszHptbnSzm2R3PC7iu2Tnhu3QT".to_string(),
-                        basis_token_reserve_contract_p2s: String::new(),
-                        tracker_nft_id: None,
-                        reserve_token_id: None,
-                        reserve_token_decimals: 0,
-                        tracker_public_key: None,
-                        tracker_secret_key: None,
-                    },
-                    transaction: TransactionConfig {
-                        fee: 1000000, // 0.001 ERG
-                        change_address: None, // Will be derived from tracker public key
-                    },
-                    acceptance: basis_server::acceptance::config::AcceptanceConfig::empty(),
-                    redemption: basis_server::config::RedemptionConfig::default(),
-                    confirmation: basis_server::config::ConfirmationConfig::default(),
-                }
-            })
+            tracing::error!("Failed to load configuration: {}", e);
+            tracing::error!(
+                "Refusing to start. Fix the configuration file (see config/basis.toml.example) \
+                 and start the tracker again; falling back to defaults could expose an \
+                 unauthenticated server."
+            );
+            std::process::exit(1);
         }
     };
+
+    // SECURITY: refuse an unauthenticated server reachable from outside this machine.
+    if let Err(msg) = config.validate_startup() {
+        tracing::error!("{}", msg);
+        std::process::exit(1);
+    }
 
     // Validate that tracker NFT ID is properly configured
     if config.tracker_nft_bytes().is_err() {
@@ -113,6 +104,7 @@ async fn main() {
     scanner_config.token_reserve_contract_p2s =
         Some(config.ergo.basis_token_reserve_contract_p2s.clone());
     scanner_config.reserve_token_id = config.ergo.reserve_token_id.clone();
+    scanner_config.tracker_nft_id = config.ergo.tracker_nft_id.clone();
 
     // Create real scanner state with configured node URL and contract template
     let ergo_scanner = match ServerState::new(scanner_config, &data_dir) {
@@ -353,8 +345,7 @@ async fn main() {
                 } => {
                     let result = redemption_manager
                         .tracker
-                        .lookup_note(&issuer_pubkey, &recipient_pubkey)
-                        .map(Some);
+                        .get_note_optional(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::InitiateRedemption {
@@ -409,6 +400,16 @@ async fn main() {
                     let result = redemption_manager
                         .tracker
                         .generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::GetCommittedTrackerLookupProof {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .generate_committed_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveLookupProof {
@@ -472,13 +473,14 @@ async fn main() {
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::ConfirmPendingNotes {
+                    digest,
                     box_id,
                     height,
                     response_tx,
                 } => {
                     let result = redemption_manager
                         .tracker
-                        .confirm_pending_notes(&box_id, height);
+                        .confirm_pending_notes(digest, &box_id, height);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::RevertPendingNotes { response_tx } => {
@@ -739,14 +741,39 @@ async fn main() {
         tracker_storage,
         acceptance_predicate,
         policy_storage,
+        pending_redemptions: std::sync::Arc::new(
+            basis_server::redemption_build::PendingRedemptionRegistry::new(),
+        ),
+        redemption_build_rate: std::sync::Arc::new(
+            basis_server::redemption_build::BuildRateLimiter::new(),
+        ),
     };
 
     // Build CORS layer based on auth configuration.
-    // When auth is enabled and an allow-list is provided, only those origins may
-    // send credentialed browser requests. Otherwise CORS is permissive but a
-    // warning is logged to remind operators to configure origins for production.
+    //
+    // SECURITY: there is no wildcard branch any more. This used to fall through to
+    // `allow_origin(Any)`, so ANY web page the operator happened to have open could call the
+    // tracker API from the browser -- including in `none` mode, where every such request is
+    // Admin. With auth enabled and no explicit allow-list we now install NO CORS layer at all,
+    // which means browsers refuse cross-origin calls while ordinary server-to-server clients
+    // (curl, the CLI, the MCP server) are unaffected. In `none` mode the server is an
+    // unauthenticated loopback Admin API, so CORS is restricted to loopback origins (any port)
+    // and a Host-header guard (below) blocks DNS-rebinding from a rebound hostname.
     let auth_enabled = config.server.auth_enabled();
-    let cors_layer = if auth_enabled && !config.server.auth.allowed_origins.is_empty() {
+    let cors_layer: Option<CorsLayer> = if !auth_enabled {
+        tracing::info!(
+            "Auth is disabled (auth.mode = \"none\"): allowing only loopback CORS origins. \
+             Requests are unauthenticated and granted Admin."
+        );
+        Some(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+                    is_loopback_origin(origin)
+                }))
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+    } else if !config.server.auth.allowed_origins.is_empty() {
         let origins: Vec<_> = config
             .server
             .auth
@@ -755,24 +782,22 @@ async fn main() {
             .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
             .collect();
         tracing::info!(
-            "Auth enabled: restricting CORS to {} origin(s)",
+            "Auth enabled: restricting CORS to {} configured origin(s)",
             origins.len()
         );
-        CorsLayer::new()
-            .allow_origin(AllowOrigin::list(origins))
-            .allow_methods(Any)
-            .allow_headers(Any)
+        Some(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
     } else {
-        if auth_enabled {
-            tracing::warn!(
-                "Auth is enabled but server.auth.allowed_origins is empty; \
-                 CORS will allow any origin. Configure allowed_origins for browser clients."
-            );
-        }
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
+        tracing::warn!(
+            "Auth is enabled but server.auth.allowed_origins is empty; installing NO CORS \
+             layer, so browsers cannot call this server cross-origin. Add allowed_origins only \
+             for web clients you trust."
+        );
+        None
     };
 
     // Auth/authorization state and layers.
@@ -833,10 +858,6 @@ async fn main() {
             "/reserves/create",
             post(create_reserve_payload).options(handle_options),
         )
-        .route(
-            "/reserves/submit",
-            post(submit_reserve_transaction).options(handle_options),
-        )
         // Most specific parameterized routes first
         .route(
             "/notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}",
@@ -861,9 +882,32 @@ async fn main() {
         // Authorization runs after auth so an AuthContext is always present.
         .layer(authz_layer)
         // Auth identifies the caller and must run before authorization.
-        .layer(auth_layer)
-        // CORS is the outermost layer so preflight requests are handled first.
-        .layer(cors_layer);
+        .layer(auth_layer);
+
+    // SECURITY: cap the request body. The signature middleware buffers the whole body to hash it,
+    // and it used to do so with an explicit `usize::MAX`, so an unauthenticated caller could make
+    // the tracker allocate without bound. 256 KiB is far above any legitimate tracker request.
+    let app = app.layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES));
+
+    // Bound total request handling time so a stalled or slow request cannot hold a connection
+    // (and the resources behind it) open indefinitely.
+    let app = app.layer(TimeoutLayer::new(Duration::from_secs(30)));
+
+    // CORS is the outermost layer so preflight requests are handled first. Absent when auth is on
+    // and no origins are configured -- see the cors_layer construction above.
+    let app = match cors_layer {
+        Some(layer) => app.layer(layer),
+        None => app,
+    };
+
+    // DNS-rebinding guard: with auth disabled the server is an unauthenticated Admin API meant
+    // for loopback use only, so reject requests whose Host header is not a loopback address.
+    // With auth enabled the request is authenticated regardless of Host, so no guard is needed.
+    let app = if auth_enabled {
+        app
+    } else {
+        app.layer(from_fn(loopback_host_guard))
+    };
 
     tracing::debug!("Router built successfully");
     tracing::debug!("Registered routes:");

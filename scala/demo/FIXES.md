@@ -21,7 +21,7 @@ val message = key ++ Longs.toByteArray(totalDebt)
 **Should be:**
 ```markdown
 val message = key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
-// Total: 48 bytes (32 + 8 + 8)
+// Total: 48 bytes (32 + 8 + 8) — now 80 bytes: the contract appends the 32-byte tracker NFT id from SELF.R6
 
 Example:
 6995ccf33c8a09705612e6ee3808bb4cedb48cb7b7c019ecdc68b74e7ed912a4 0000000002faf080 00000194f8c88000
@@ -72,11 +72,11 @@ val value = Longs.toByteArray(totalDebt)
 ```markdown
 properReserveSignature:
 - Schnorr signature verification with message = `key || totalDebt || timestamp`
-- Message is 48 bytes (32 + 8 + 8)
+- Message is 48 bytes (32 + 8 + 8) — now 80 bytes including the 32-byte tracker NFT id (from SELF.R6)
 - Both owner and tracker sign the SAME message including timestamp
 ```
 
-**Note:** This was previously documented as `key || totalDebt` (40 bytes) but the actual implementation and contract always used 48 bytes with timestamp.
+**Note:** This was previously documented as `key || totalDebt` (40 bytes) but the actual implementation and contract always used 48 bytes with timestamp. The message is now 80 bytes: the contract appends the 32-byte tracker NFT id read from `SELF.R6[Coll[Byte]]` (issue #15, finding C3).
 
 **Also add new condition:**
 ```markdown
@@ -222,7 +222,7 @@ sbt "runMain chaincash.contracts.BasisNoteRedeemer \
 ```markdown
 | Parameter | Value |
 |-----------|-------|
-| Message Format | `key (32) || totalDebt (8) || timestamp (8)` = 48 bytes |
+| Message Format | `key (32) || totalDebt (8) || timestamp (8) || trackerNftId (32)` = 80 bytes (was 48 bytes) |
 | Reserve Tree Value | `timestamp (8) || redeemedAmount (8)` = 16 bytes |
 | Tracker Tree Value | `totalDebt (8)` = 8 bytes |
 | Emergency Period | 2160 blocks (~3 days) |
@@ -257,7 +257,7 @@ if (note.timestamp < now - 31536000000L) {
 
 After applying fixes, verify:
 
-- [ ] SPECIFICATION.md message format shows 48 bytes
+- [ ] SPECIFICATION.md message format shows 80 bytes (incl. tracker NFT id)
 - [ ] SPECIFICATION.md value encoding shows 16 bytes for reserve tree
 - [ ] SPECIFICATION.md documents context variable #7
 - [ ] SPECIFICATION.md includes timestampCorrect condition

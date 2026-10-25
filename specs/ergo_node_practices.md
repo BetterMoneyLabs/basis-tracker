@@ -112,18 +112,22 @@ curl -s -X POST http://127.0.0.1:3048/reserves/create \
 ```
 
 2. The server returns a `ReserveCreationResponse` with `requests`, `fee`, and
-   `change_address`. You now have two options:
+   `change_address` (the owner's P2PK address derived from `owner_pubkey`).
 
-   **Option A — Submit via the tracker (recommended for testing):**
+   The tracker never broadcasts the payload — there is no `/reserves/submit`
+   endpoint. The reserve owner submits the payload to their **own** Ergo node,
+   so the tracker's wallet is never involved:
+
    ```bash
-   curl -s -X POST http://127.0.0.1:3048/reserves/submit \
+   curl -s -X POST http://127.0.0.1:9053/wallet/payment/send \
      -H "Content-Type: application/json" \
-     -d '<ReserveCreationResponse JSON>'
+     -H "api_key: <your_node_api_key>" \
+     -d '<the requests array from the response>'
    ```
-   The tracker converts `token_id` to `tokenId` and forwards the payload to its
-   configured Ergo node's `/wallet/payment/send`.
+   The CLI does this for you with `basis-cli reserve create ... --submit` when
+   `node_url` (and `node_api_key`) are set in `~/.basis/cli.toml`.
 
-   **Option B — Submit manually to your own Ergo node:**
+   When constructing the request manually from the `requests` array:
    - Replace `token_id` with **`tokenId`** (camelCase).
    - Pass only the `requests` array to `/wallet/payment/send`.
 

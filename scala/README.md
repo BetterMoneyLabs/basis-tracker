@@ -549,7 +549,7 @@ cat demo/note.json | jq .
 ## Development Checklist
 
 - [ ] Cryptography: Schnorr signature verification
-- [ ] Cryptography: IOU message construction (48 bytes)
+- [ ] Cryptography: IOU message construction (80 bytes incl. tracker NFT id)
 - [ ] AVL Tree: Insert operation with proof generation
 - [ ] AVL Tree: Lookup operation with proof generation
 - [ ] Core: Debt tracking (cumulative per pair)
@@ -572,7 +572,7 @@ See `reference/message-formats.md#13-common-pitfalls` for detailed list.
 
 **Top 3:**
 1. ❌ Wrong z-component encoding (must be unsigned 32 bytes)
-2. ❌ Missing timestamp in message (48 bytes, not 40)
+2. ❌ Missing timestamp/tracker NFT id in message (80 bytes, not 48/40)
 3. ❌ Uncompressed public keys (must be 33 bytes compressed)
 
 ---

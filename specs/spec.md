@@ -124,12 +124,12 @@ A owes debt to B. B wants to buy from C. If A agrees, A's debt to B can be decre
 
 ## Cryptographic Details
 
-### Message Format (48 bytes)
+### Message Format (80 bytes)
 
 All signatures (both payer/reserve owner and tracker) sign the **exact same message**:
 
 ```
-message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
 ```
 
 Where:
@@ -138,8 +138,9 @@ Where:
   - `receiverKeyBytes`: Recipient's compressed public key (33 bytes)
 - `totalDebt`: 8-byte big-endian representation of the total cumulative debt amount
 - `timestamp`: 8-byte big-endian representation of the payment timestamp (milliseconds since Unix epoch)
+- `trackerNftId`: 32-byte identifier of the tracker's NFT, binding the signature to one specific tracker/contract (on-chain, the contract reads it from `SELF.R6[Coll[Byte]]` and appends it)
 
-**Total message length**: 32 + 8 + 8 = **48 bytes**
+**Total message length**: 32 + 8 + 8 + 32 = **80 bytes**
 
 ### Schnorr Signature Format (65 bytes)
 
@@ -376,7 +377,7 @@ and a canonical Schnorr signing implementation used to generate cross-validation
 - `scala/src/main/scala/basis/contracts/` — `BasisConstants`, `BasisDeployer`, `BasisNoteCreator`,
   `ParticipantSecretsReader`, `AddressUtils`, `TestVectorGenerator`
 - `scala/src/main/scala/basis/offchain/SigUtils.scala` — Schnorr signing/verification and
-  48-byte message construction
+  80-byte message construction
 - `scala/src/test/scala/basis/contracts/` — `BasisSpec`, `BasisTokenSpec`, `BasisDeployerSpec`,
   `ParticipantSecretsSpec`
 

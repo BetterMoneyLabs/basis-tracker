@@ -55,12 +55,16 @@ fn required_role(path: &str, method: &str) -> ClientRole {
 
     match method {
         "POST" => match path {
-            // Admin-only: reserve creation submission and policy management.
-            "/reserves/create" | "/reserves/submit" | "/acceptance/policy" => ClientRole::Admin,
+            // Admin-only: reserve creation and policy management.
+            //
+            // `/redeem/complete` is Admin-only as well: it mutates tracker redemption state
+            // from caller-supplied values, so ordinary Write clients must not reach it
+            // (PR #16 B6). The removed `/reserves/submit` route fell through to the
+            // unknown-POST default below, which is also Admin.
+            "/reserves/create" | "/redeem/complete" | "/acceptance/policy" => ClientRole::Admin,
             // Write: state-changing redemption and note operations.
             "/notes"
             | "/redeem"
-            | "/redeem/complete"
             | "/redemption/prepare"
             | "/redemption/build"
             | "/redemption/submit"
@@ -125,6 +129,9 @@ mod tests {
         assert_eq!(required_role("/notes", "GET"), ClientRole::Read);
         assert_eq!(required_role("/notes", "POST"), ClientRole::Write);
         assert_eq!(required_role("/redeem", "POST"), ClientRole::Write);
+        assert_eq!(required_role("/redeem/complete", "POST"), ClientRole::Admin);
+        // The route was removed (PR #16 B4); unknown POSTs default to Admin.
+        assert_eq!(required_role("/reserves/submit", "POST"), ClientRole::Admin);
         assert_eq!(
             required_role("/redemption/build", "POST"),
             ClientRole::Write

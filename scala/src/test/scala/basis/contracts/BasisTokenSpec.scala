@@ -94,6 +94,22 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
   def getAddressFromString(string: String) =
     Try(BasisConstants.ergoAddressEncoder.fromString(string).get).getOrElse(throw new Exception(s"Invalid address [$string]"))
 
+  /** Plain ERG-only input, used to fund the creditor's redemption output and the fee.
+    *
+    * A token reserve pays out reserve TOKENS, never ERG: basis-token.es requires
+    * `selfOut.value >= SELF.value`, and the tracker builds redemptions with
+    * `reserve_output_value = reserve_box.value` (see crates/basis_server/src/redemption_build.rs).
+    * The recipient box and the fee must therefore be funded from a separate input, exactly as in
+    * production. Tests that used to route that ERG through the reserve box no longer describe a
+    * transaction the tracker can build.
+    */
+  def ergFundingBox(value: Long, txId: String = fakeTxId2)(implicit ctx: BlockchainContext): InputBox =
+    ctx.newTxBuilder().outBoxBuilder
+      .value(value)
+      .contract(ctx.compileContract(ConstantsBuilder.empty(), fakeScript))
+      .build()
+      .convertToInputWith(txId, fakeIndex)
+
   def decodeBigInt(encoded: String): BigInt = Try(BigInt(encoded, 10)).recover { case ex => BigInt(encoded, 16) }.get
 
   def createTx(
@@ -145,14 +161,17 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
   def mkKey(ownerKey: GroupElement, receiverKey: GroupElement): Array[Byte] =
     Blake2b256(ownerKey.getEncoded.toArray ++ receiverKey.getEncoded.toArray)
 
+  // Message for redemption: key || totalDebt || timestamp || tracker NFT id (the same bytes as the
+  // reserve box's R6, which is what the contract appends via SELF.R6[Coll[Byte]]).
   def mkMessage(key: Array[Byte], totalDebt: Long, timestamp: Long): Array[Byte] =
-    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp)
+    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
-  // NOTE: Emergency redemption uses the SAME message format as normal redemption.
-  // The only difference is that tracker signature becomes OPTIONAL after 3 days (2160 blocks).
+  // NOTE: Emergency redemption uses the SAME message format as normal redemption:
+  // key || totalDebt || timestamp || tracker NFT id. The only difference is that the tracker
+  // signature becomes OPTIONAL after 3 days (2160 blocks).
   // This function is kept for documentation purposes but is NOT used by the actual contract.
   def mkEmergencyMessage(key: Array[Byte], totalDebt: Long, timestamp: Long): Array[Byte] =
-    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ Longs.toByteArray(0L)
+    key ++ Longs.toByteArray(totalDebt) ++ Longs.toByteArray(timestamp) ++ trackerNFTBytes
 
   def mkSigBytes(sig: (GroupElement, BigInt)): Array[Byte] =
     GroupElementSerializer.toBytes(sig._1) ++ sig._2.toByteArray
@@ -334,15 +353,17 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       )
       val trackerDataInput = mkTrackerDataInput(trackerTree)
 
+      // The reserve keeps its full ERG on redemption; only tokens move to the creditor.
       val basisOutput = createOut(
-        BasisConstants.basisTokenContract, minValue,
+        BasisConstants.basisTokenContract, minValue * 2 + feeValue,
         Array(ErgoValue.of(ownerPk), outputTreeErgoValue, ErgoValue.of(trackerNFTBytes)),
         Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, reserveTokenAmount - redeemAmount))
       )
       val redemptionOutput = createOut(trueScript, minValue, Array(), Array(new ErgoToken(reserveTokenIdBytes, redeemAmount)))
+      val funding = ergFundingBox(minValue + feeValue, fakeTxId3)
 
       noException should be thrownBy {
-        createTx(Array(basisInput), Array(trackerDataInput), Array(basisOutput, redemptionOutput),
+        createTx(Array(basisInput, funding), Array(trackerDataInput), Array(basisOutput, redemptionOutput),
           fee = Some(feeValue), changeAddress, Array(receiverSecret.toString()), false)
       }
     }
@@ -695,16 +716,17 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       )
       val trackerDataInput = mkTrackerDataInput(trackerTree)
 
-      // R7 preserved in the reserve output
+      // R7 preserved in the reserve output; the reserve keeps its full ERG on redemption
       val basisOutput = createOut(
-        BasisConstants.basisTokenContract, minValue,
+        BasisConstants.basisTokenContract, minValue * 2 + feeValue,
         Array(ErgoValue.of(ownerPk), outputTreeErgoValue, ErgoValue.of(trackerNFTBytes), ErgoValue.of(refundHeight)),
         Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, reserveTokenAmount - redeemAmount))
       )
       val redemptionOutput = createOut(trueScript, minValue, Array(), Array(new ErgoToken(reserveTokenIdBytes, redeemAmount)))
+      val funding = ergFundingBox(minValue + feeValue, fakeTxId3)
 
       noException should be thrownBy {
-        createTx(Array(basisInput), Array(trackerDataInput), Array(basisOutput, redemptionOutput),
+        createTx(Array(basisInput, funding), Array(trackerDataInput), Array(basisOutput, redemptionOutput),
           fee = Some(feeValue), changeAddress, Array(receiverSecret.toString()), false)
       }
     }
@@ -1144,13 +1166,14 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val redemptionOutput = createOut(trueScript, minValue, Array(), Array(new ErgoToken(reserveTokenIdBytes, redeemAmount)))
 
       val basisOutput = createOut(
-        BasisConstants.basisTokenContract, minValue,
+        BasisConstants.basisTokenContract, minValue * 2 + feeValue,
         Array(ErgoValue.of(ownerPk), nextTree, ErgoValue.of(trackerNFTBytes)),
         Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, reserveTokenAmount - redeemAmount))
       )
+      val funding = ergFundingBox(minValue + feeValue, fakeTxId3)
 
       noException should be thrownBy {
-        createTx(Array(basisInput), Array(trackerDataInput), Array(basisOutput, redemptionOutput),
+        createTx(Array(basisInput, funding), Array(trackerDataInput), Array(basisOutput, redemptionOutput),
           fee = Some(feeValue), changeAddress, Array(receiverSecret.toString()), false)
       }
     }
@@ -1194,27 +1217,29 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val trackerDataInput = mkTrackerDataInput(trackerTree)
       val redemptionOutput = createOut(trueScript, minValue, Array(), Array(new ErgoToken(reserveTokenIdBytes, redeemAmount)))
 
+      val funding = ergFundingBox(minValue + feeValue, fakeTxId3)
+
       // Swapped token positions
       val badBasisOutputSwapped = createOut(
-        BasisConstants.basisTokenContract, minValue,
+        BasisConstants.basisTokenContract, minValue * 2 + feeValue,
         Array(ErgoValue.of(ownerPk), nextTree, ErgoValue.of(trackerNFTBytes)),
         Array(new ErgoToken(reserveTokenIdBytes, reserveTokenAmount - redeemAmount), new ErgoToken(reserveNFTBytes, 1))
       )
 
       a[Throwable] should be thrownBy {
-        createTx(Array(basisInput), Array(trackerDataInput), Array(badBasisOutputSwapped, redemptionOutput),
+        createTx(Array(basisInput, funding), Array(trackerDataInput), Array(badBasisOutputSwapped, redemptionOutput),
           fee = Some(feeValue), changeAddress, Array(receiverSecret.toString()), false)
       }
 
       // Control: correct positions should succeed
       val goodBasisOutput = createOut(
-        BasisConstants.basisTokenContract, minValue,
+        BasisConstants.basisTokenContract, minValue * 2 + feeValue,
         Array(ErgoValue.of(ownerPk), nextTree, ErgoValue.of(trackerNFTBytes)),
         Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, reserveTokenAmount - redeemAmount))
       )
 
       noException should be thrownBy {
-        createTx(Array(basisInput), Array(trackerDataInput), Array(goodBasisOutput, redemptionOutput),
+        createTx(Array(basisInput, funding), Array(trackerDataInput), Array(goodBasisOutput, redemptionOutput),
           fee = Some(feeValue), changeAddress, Array(receiverSecret.toString()), false)
       }
     }
@@ -1283,14 +1308,16 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       )
       val trackerDataInputAB = mkTrackerDataInput(trackerTreeAB.tree)
 
-      val basisOutputBob = createOut(BasisConstants.basisTokenContract, minValue,
+      // The reserve keeps its full ERG; only tokens move to the creditor (see ergFundingBox).
+      val basisOutputBob = createOut(BasisConstants.basisTokenContract, minValue * 2 + feeValue,
         Array(ErgoValue.of(ownerPk), nextTreeBob, ErgoValue.of(trackerNFTBytes)),
         Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, reserveTokenAmount - remainingDebtToBob))
       )
       val redemptionOutputBob = createOut(trueScript, minValue, Array(), Array(new ErgoToken(reserveTokenIdBytes, remainingDebtToBob)))
+      val funding = ergFundingBox(minValue + feeValue, fakeTxId3)
 
       noException should be thrownBy {
-        createTx(Array(basisInputBob), Array(trackerDataInputAB),
+        createTx(Array(basisInputBob, funding), Array(trackerDataInputAB),
           Array(basisOutputBob, redemptionOutputBob), fee = Some(feeValue), changeAddress,
           Array(receiverSecret.toString()), false)
       }
@@ -1413,7 +1440,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val redeem3 = 200000000L   // 0.2 token units third redemption (100M remaining)
       val reserveTokenAmount = 1000000000L
 
-      // Strictly increasing timestamps (contract enforces timestamp > storedTimestamp)
+      // Strictly increasing timestamps (contract enforces timestamp >= storedTimestamp)
       val t1 = 1000000000000L
       val t2 = t1 + 1
       val t3 = t2 + 1
@@ -1432,13 +1459,15 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
         minValue * 2, emptyTree, receiverPk, reserveSig1, totalDebt, proof1,
         trackerSig1, reserveTokenAmount, None, Some(tracker.lookupProofBytes), t1
       )
-      val basisOutput1 = createOut(BasisConstants.basisTokenContract, minValue,
+      // The reserve keeps its full ERG on every redemption; only tokens move (see ergFundingBox).
+      val basisOutput1 = createOut(BasisConstants.basisTokenContract, minValue * 2,
         Array(ErgoValue.of(ownerPk), tree1, ErgoValue.of(trackerNFTBytes)),
         Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, reserveTokenAmount - redeem1)))
       val redemption1 = createOut(trueScript, minValue, Array(),
         Array(new ErgoToken(reserveTokenIdBytes, redeem1)))
+      val fundingBox1 = ergFundingBox(minValue, fakeTxId2)
 
-      val tx1 = createTx(Array(basisInput1), Array(trackerInput),
+      val tx1 = createTx(Array(basisInput1, fundingBox1), Array(trackerInput),
         Array(basisOutput1, redemption1), fee = None, changeAddress,
         Array(receiverSecret.toString()), broadcast = false)
 
@@ -1474,7 +1503,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
         new ContextVar(8, ErgoValue.of(tracker.lookupProofBytes))
       )
 
-      val basisOutput2 = createOut(BasisConstants.basisTokenContract, minValue,
+      val basisOutput2 = createOut(BasisConstants.basisTokenContract, minValue * 2,
         Array(ErgoValue.of(ownerPk), tree2, ErgoValue.of(trackerNFTBytes)),
         Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, reserveTokenAmount - redeem1 - redeem2)))
       val redemption2 = createOut(trueScript, minValue, Array(),
@@ -1518,7 +1547,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
         new ContextVar(8, ErgoValue.of(tracker.lookupProofBytes))
       )
 
-      val basisOutput3 = createOut(BasisConstants.basisTokenContract, minValue,
+      val basisOutput3 = createOut(BasisConstants.basisTokenContract, minValue * 2,
         Array(ErgoValue.of(ownerPk), tree3, ErgoValue.of(trackerNFTBytes)),
         Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, reserveTokenAmount - redeem1 - redeem2 - redeem3)))
       val redemption3 = createOut(trueScript, minValue, Array(),

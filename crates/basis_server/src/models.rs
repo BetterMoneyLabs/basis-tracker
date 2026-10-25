@@ -52,6 +52,9 @@ pub struct CreateNoteRequest {
     pub timestamp: u64,
     pub signature: String,
     pub issuer_pubkey: String,
+    /// Tracker NFT ID the note is bound to (part of the signed message, issue #15 C3).
+    /// Must match this tracker's configured `ergo.tracker_nft_id`.
+    pub tracker_nft_id: String,
 }
 
 // Response structure for API responses
@@ -99,6 +102,8 @@ pub struct SerializableIouNote {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    /// Tracker NFT ID this note is bound to (part of the signed message, issue #15 C3).
+    pub tracker_nft_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<NoteConfirmationSummary>,
 }
@@ -112,6 +117,8 @@ pub struct SerializableIouNoteWithAge {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    /// Tracker NFT ID this note is bound to (part of the signed message, issue #15 C3).
+    pub tracker_nft_id: String,
     pub age_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<NoteConfirmationSummary>,
@@ -126,6 +133,7 @@ impl From<IouNote> for SerializableIouNote {
             amount_redeemed: note.amount_redeemed,
             timestamp: note.timestamp,
             signature: hex::encode(note.signature),
+            tracker_nft_id: hex::encode(note.tracker_nft_id),
             confirmation: None,
         }
     }
@@ -229,12 +237,20 @@ pub struct ProofResponse {
 
 // Request for tracker signature
 // Following specs/server/redemption_state_spec.md - POST /tracker/signature
+// Request for tracker signature
+// Following specs/server/redemption_state_spec.md - POST /tracker/signature
+//
+// The server signs only server-authoritative values (issue #15 S4): a stored note
+// for (issuer, recipient) must exist, and the message covers the stored
+// `amount_collected`/`timestamp`. `total_debt`/`timestamp` must match the stored
+// note; a mismatch is rejected with 409 Conflict.
 #[derive(Debug, Deserialize)]
 pub struct TrackerSignatureRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Must equal the stored note's total debt (rejected otherwise).
     pub total_debt: u64,
-    /// Payment timestamp in milliseconds since Unix epoch
+    /// Must equal the stored note's payment timestamp (rejected otherwise).
     pub timestamp: u64,
     #[serde(default)]
     pub emergency: bool,
@@ -257,8 +273,14 @@ pub struct TrackerSignatureResponse {
 pub struct RedemptionPreparationRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Intended redemption amount. Used only for the acceptance-policy check; the
+    /// signed message always covers the stored note's cumulative debt.
     pub amount: u64,
+    /// Must equal the stored note's payment timestamp (rejected with 409 otherwise).
     pub timestamp: u64,
+    /// Whether this is an emergency redemption (exempt from the acceptance-policy check)
+    #[serde(default)]
+    pub emergency: bool,
 }
 
 // Response for redemption preparation
@@ -380,7 +402,12 @@ pub struct CreateReserveRequest {
     pub token_id: String,
 }
 
-// Response for reserve creation - formatted for Ergo node's /wallet/payment/send API
+// Response for reserve creation - formatted for the Ergo node's /wallet/payment/send API.
+//
+// The OWNER submits this payload to their own node, which signs it with the owner's wallet.
+// The tracker's wallet is never involved: `change_address` is the owner's P2PK address derived
+// from `owner_pubkey`. (The old `POST /reserves/submit` route and its `submission_permit` were
+// removed because that route paid from the tracker's wallet, PR #16 B4.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReserveCreationResponse {
     pub requests: Vec<ReservePaymentRequest>,
@@ -401,17 +428,15 @@ pub struct Asset {
     pub token_id: String,
     pub amount: u64,
 }
-
-// Response for reserve submission via the tracker's Ergo node.
-#[derive(Debug, Clone, Serialize)]
-pub struct ReserveSubmissionResponse {
-    pub tx_id: String,
-}
 #[derive(Debug, Serialize)]
 pub struct TrackerBoxIdResponse {
     pub tracker_box_id: String,
     pub timestamp: u64,
     pub height: u64,
+    /// Tracker NFT ID (hex) that notes must bind to in their signed message (issue #15 C3).
+    /// Empty when not configured.
+    #[serde(default)]
+    pub tracker_nft_id: String,
 }
 
 // Reserve-token configuration exposed to clients so they can display and create

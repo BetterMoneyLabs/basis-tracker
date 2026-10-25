@@ -1094,10 +1094,37 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
                 .finalize()
                 .to_vec();
 
+            // The note's signed message is bound to this tracker's NFT ID (issue #15 C3).
+            let tracker_nft_id = match app.client.get_latest_tracker_box_id().await {
+                Ok(resp) if !resp.tracker_nft_id.is_empty() => resp.tracker_nft_id,
+                Ok(_) => {
+                    app.set_notification(
+                        "Tracker has no NFT ID configured; cannot create note".to_string(),
+                        true,
+                    );
+                    app.navigate_to(Screen::Notes);
+                    return Ok(());
+                }
+                Err(e) => {
+                    app.set_notification(format!("Failed to get tracker NFT ID: {}", e), true);
+                    app.navigate_to(Screen::Notes);
+                    return Ok(());
+                }
+            };
+            let tracker_nft_bytes = match hex::decode(&tracker_nft_id) {
+                Ok(b) if b.len() == 32 => b,
+                _ => {
+                    app.set_notification("Tracker returned an invalid NFT ID".to_string(), true);
+                    app.navigate_to(Screen::Notes);
+                    return Ok(());
+                }
+            };
+
             let mut message = Vec::new();
             message.extend_from_slice(&key_hash);
             message.extend_from_slice(&amount.to_be_bytes());
             message.extend_from_slice(&timestamp.to_be_bytes());
+            message.extend_from_slice(&tracker_nft_bytes);
 
             if let Some(ref acc) = app.current_account {
                 if let Some(account) = app.account_manager.get_account(&acc.name) {
@@ -1109,6 +1136,7 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
                                 amount,
                                 timestamp,
                                 signature: hex::encode(signature),
+                                tracker_nft_id,
                             };
 
                             match app.client.create_note(request).await {
@@ -1338,8 +1366,25 @@ async fn tracker_assisted_redeem(
         .map_err(|e| format!("tracker proof failed: {}", e))?
         .total_debt;
 
+    // The note's signed message is bound to this tracker's NFT ID (issue #15 C3); take it
+    // from the stored note so it always matches what the server will verify.
+    let tracker_nft_id: [u8; 32] = app
+        .client
+        .get_note(issuer, recipient)
+        .await
+        .map_err(|e| format!("note lookup failed: {}", e))?
+        .and_then(|n| hex::decode(n.tracker_nft_id).ok())
+        .and_then(|b| b.as_slice().try_into().ok())
+        .ok_or_else(|| "note has no valid tracker_nft_id".to_string())?;
+
     // Issuer (reserve owner) signs the redemption message.
-    let message = redemption_signing_message(&issuer_pk, &recipient_pk, total_debt, timestamp);
+    let message = redemption_signing_message(
+        &issuer_pk,
+        &recipient_pk,
+        total_debt,
+        timestamp,
+        &tracker_nft_id,
+    );
     let issuer_account = app
         .account_manager
         .accounts
@@ -1693,21 +1738,35 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                     }
                     println!();
 
-                    let submit = read_input("Submit to tracker node for broadcast? (y/n): ");
+                    let submit = read_input("Submit to your Ergo node for broadcast? (y/n): ");
                     if submit == "y" || submit == "Y" {
-                        match app.client.submit_reserve(response).await {
-                            Ok(submission) => {
-                                app.set_notification(
-                                    format!(
-                                        "Reserve submitted, tx {}",
-                                        &submission.tx_id[..16.min(submission.tx_id.len())]
-                                    ),
-                                    false,
-                                );
+                        match app.node_url.as_deref() {
+                            Some(node_url) => {
+                                match basis_cli_lib::api::submit_reserve_to_node(
+                                    node_url,
+                                    app.node_api_key.as_deref(),
+                                    &response,
+                                ) {
+                                    Ok(tx_id) => {
+                                        app.set_notification(
+                                            format!(
+                                                "Reserve submitted, tx {}",
+                                                &tx_id[..16.min(tx_id.len())]
+                                            ),
+                                            false,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        app.set_notification(
+                                            format!("Failed to submit reserve: {}", e),
+                                            true,
+                                        );
+                                    }
+                                }
                             }
-                            Err(e) => {
+                            None => {
                                 app.set_notification(
-                                    format!("Failed to submit reserve: {}", e),
+                                    "No node_url in cli.toml — submit the payload to your node's /wallet/payment/send manually".to_string(),
                                     true,
                                 );
                             }

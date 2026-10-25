@@ -25,6 +25,7 @@ mod tests {
             reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
             token_reserve_contract_p2s: None,
             reserve_token_id: None,
+            tracker_nft_id: None,
             node_url: "http://test-node:9053".to_string(),
             scan_name: Some("Test Reserve Scanner".to_string()),
             api_key: None,
@@ -57,6 +58,10 @@ mod tests {
                             .to_string(),
                     );
                     registers.insert(
+                        "R5".to_string(),
+                        crate::ergo_scanner::empty_reserve_tree_register(),
+                    );
+                    registers.insert(
                         "R6".to_string(),
                         "0e201af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304"
                             .to_string(),
@@ -76,8 +81,12 @@ mod tests {
                     // Use a valid hex-encoded compressed public key (33 bytes = 66 hex chars)
                     registers.insert(
                         "R4".to_string(),
-                        "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc"
+                        "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
                             .to_string(),
+                    );
+                    registers.insert(
+                        "R5".to_string(),
+                        crate::ergo_scanner::empty_reserve_tree_register(),
                     );
                     registers.insert(
                         "R6".to_string(),
@@ -194,7 +203,7 @@ mod tests {
         assert_eq!(reserve2.base_info.collateral_amount, 2000000000);
         assert_eq!(
             reserve2.owner_pubkey,
-            "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc"
+            "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
         );
         // Since tracker_nft_id is now a required field in base_info, we can't have it as None anymore
         // The test should check that it's not empty or has the expected value
@@ -280,6 +289,7 @@ mod tests {
             reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
             token_reserve_contract_p2s: None,
             reserve_token_id: None,
+            tracker_nft_id: None,
             node_url: "http://test:9053".to_string(),
             scan_name: Some("Test Scanner".to_string()),
             api_key: None,
@@ -316,14 +326,18 @@ mod tests {
                             "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb"
                         }
                         "owner_b" => {
-                            "037d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cc"
+                            "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
                         }
                         "owner_c" => {
-                            "028d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cd"
+                            "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
                         }
                         _ => "026d5e27e6b7d3def910b39a3e0559500b728b025a9a85c66542e4f3e061e8a8cb", // default
                     };
                     registers.insert("R4".to_string(), owner_key.to_string());
+                    registers.insert(
+                        "R5".to_string(),
+                        crate::ergo_scanner::empty_reserve_tree_register(),
+                    );
                     // Always include R6 register with a 32-byte tracker NFT ID (with Ergo Coll[Byte] prefix)
                     let tracker_nft_id = match nft {
                         Some(nft_val) => {

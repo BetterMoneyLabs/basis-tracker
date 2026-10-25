@@ -34,6 +34,9 @@ The tracker server supports three authentication modes, configured under
 `[server.auth]` in `config/basis.toml`:
 
 - **`none`** (default): anonymous requests; suitable for local development only.
+  Every request is granted `Admin` access, so the server refuses to start in
+  this mode unless `server.host` is a loopback address (`127.0.0.1`, `::1`,
+  or `localhost`).
 - **`api_key`**: clients send a shared secret in the `Authorization: Bearer <key>`
   or `X-API-Key: <key>` header. API-key clients are granted full (`Admin`) access.
 - **`signature`**: clients authenticate with per-request secp256k1 Schnorr
@@ -49,7 +52,7 @@ For each request the client provides:
 | `X-Signature-Pubkey` | 66-character compressed secp256k1 public key |
 | `X-Signature` | 130-character Schnorr signature |
 | `X-Signature-Timestamp` | Unix timestamp in milliseconds |
-| `X-Signature-Nonce` | Unique nonce (required for replay protection) |
+| `X-Signature-Nonce` | Unique nonce (required; requests without one are rejected) |
 
 The signature covers the canonical string:
 
@@ -68,7 +71,18 @@ When authentication is enabled, routes require the following roles:
 |------|--------|
 | `Read` | All `GET` endpoints plus read-only `POST` endpoints (`/notes/state`, `/acceptance/check`) |
 | `Write` | `Read` access plus note creation, redemption, and `/tracker/signature` |
-| `Admin` | `Write` access plus `/reserves/create`, `/reserves/submit`, and `/acceptance/policy` |
+| `Admin` | `Write` access plus `/reserves/create` and `/acceptance/policy` |
+
+### Authentication
+
+`server.auth.mode` accepts `"none"`, `"api_key"` or `"signature"`. **The server refuses to start with
+`mode = "none"` on a non-loopback bind address**, because in that mode every request is granted
+`Admin`. Set an authenticated mode, bind to `127.0.0.1`, or set
+`server.auth.allow_anonymous_non_loopback = true` to accept the exposure deliberately.
+
+When auth is enabled and `allowed_origins` is empty, **no CORS layer is installed** — browsers cannot
+call the tracker cross-origin. There is no wildcard origin. Add `allowed_origins` only for web clients
+you trust.
 
 All three official clients support authentication:
 `basis_cli` and `basis_app` (TUI) read `server_auth_mode` and credentials from
@@ -95,7 +109,7 @@ All endpoints return a standardized response envelope:
 
 ### Notes
 
-- `POST /notes` - Create a new IOU note
+- `POST /notes` - Create a new IOU note (requires `tracker_nft_id`, which must match this tracker's configured NFT id — see "Signing Message Format" below)
 - `GET /notes` - Get all IOU notes with age and confirmation state
 - `GET /notes/issuer/{pubkey}` - Get all notes issued by a public key
 - `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get a specific note
@@ -108,7 +122,20 @@ All endpoints return a standardized response envelope:
 - `GET /reserves/{box_id}` - Get a specific reserve by box ID
 - `GET /reserves/issuer/{pubkey}` - Get reserves for an issuer
 - `POST /reserves/create` - Build a reserve creation payment request
-- `POST /reserves/submit` - Submit a reserve creation payment request to the configured Ergo node
+
+`POST /reserves/create` only *builds* the payment request. To create the
+reserve on-chain, submit the returned `requests` array to your own Ergo
+node's wallet directly:
+
+```bash
+curl -X POST http://your-ergo-node:9053/wallet/payment/send \
+  -H "Content-Type: application/json" \
+  -H "api_key: <your-node-api-key>" \
+  -d '<the requests array from the /reserves/create response>'
+```
+
+The tracker no longer exposes an endpoint that forwards payments to its
+configured Ergo node wallet.
 
 ### Events
 
@@ -122,10 +149,10 @@ All endpoints return a standardized response envelope:
 ### Redemption
 
 - `POST /redeem` - Initiate redemption of an IOU note
-- `POST /redeem/complete` - Mark a redemption as completed locally
-- `POST /redemption/prepare` - Prepare a redemption (legacy tracker-signature + proof endpoint)
-- `POST /redemption/build` - Build an unsigned redemption transaction and sign fee inputs
-- `POST /redemption/submit` - Broadcast a fully-signed redemption transaction
+- `POST /redeem/complete` - Mark a redemption as completed locally (amounts are validated against the stored note state; a mismatch returns 400)
+- `POST /redemption/prepare` - Prepare a redemption (legacy tracker-signature + proof endpoint; the note must exist and the stored note's cumulative debt and timestamp are signed — the request's `timestamp` field is ignored)
+- `POST /redemption/build` - Build an unsigned redemption transaction and sign fee inputs (the tracker proof is generated against the last on-chain-confirmed tracker state; returns 400 if the note is not yet in the confirmed state)
+- `POST /redemption/submit` - Broadcast a fully-signed redemption transaction (note key and amounts are re-validated against stored state before broadcasting; a mismatch returns 400)
 
 ### Proofs
 
@@ -135,7 +162,7 @@ All endpoints return a standardized response envelope:
 
 ### Tracker
 
-- `POST /tracker/signature` - Request a tracker Schnorr signature for redemption
+- `POST /tracker/signature` - Request a tracker Schnorr signature for redemption (signs the stored note's `total_debt`/`timestamp`; the request fields of the same names are legacy and ignored; returns 404 if no note is stored for the pair)
 - `GET /tracker/state` - Get local/confirmed/pending tracker state digests
 - `GET /tracker/pending-tx` - Get the in-flight tracker update transaction
 - `GET /tracker/latest-box-id` - Get the latest on-chain tracker box ID
@@ -175,6 +202,7 @@ All public keys and signatures are hex-encoded strings:
   "amount_redeemed": 0,
   "timestamp": 1234567890,
   "signature": "030303...",
+  "tracker_nft_id": "a1b2c3d4...",
   "confirmation": {
     "status": "local_only",
     "confirmed_total_debt": null,
@@ -208,9 +236,15 @@ curl -X POST http://localhost:3048/notes \
     "amount": 1000,
     "timestamp": 1234567890,
     "signature": "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303",
-    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101"
+    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
+    "tracker_nft_id": "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
   }'
 ```
+
+The `tracker_nft_id` field (32 bytes, hex) is required. It is part of the signed message (appended
+after `key || totalDebt || timestamp`), binding the note to one tracker. The tracker validates it
+against its configured `ergo.tracker_nft_id`: a malformed hex string or wrong length returns
+`400`, and an id that does not match this tracker's NFT returns `409`.
 
 ### Get Notes by Issuer
 
@@ -285,6 +319,20 @@ curl -X POST http://localhost:3048/redemption/build \
   }'
 ```
 
+The request's optional `change_address` field is deprecated and ignored:
+change is always paid to the tracker's own wallet (derived from the selected
+fee input, falling back to the configured change address).
+
+The tracker AVL proof in the response is generated against the last
+on-chain-confirmed tracker state digest (not the live local tree), so it
+verifies against the digest stored in the tracker box. The request fails with
+400 if no tracker state has been confirmed on-chain yet or the note is not part
+of the confirmed state.
+
+The request's `timestamp` field is legacy and ignored: the stored note's
+payment timestamp is used for the tracker signature, context var #4, and the
+reserve tree value.
+
 ### Get Tracker Proof
 
 ```bash
@@ -310,6 +358,11 @@ curl -X POST http://localhost:3048/tracker/signature \
   }'
 ```
 
+The tracker always signs the stored note's cumulative `total_debt` and payment
+`timestamp`; the request fields of the same names are legacy and ignored. The
+acceptance policy is enforced for non-emergency requests before signing, and
+the endpoint returns 404 when no note is stored for the issuer/recipient pair.
+
 ### Create Reserve Payload
 
 ```bash
@@ -322,13 +375,12 @@ curl -X POST http://localhost:3048/reserves/create \
   }'
 ```
 
-### Submit Reserve Transaction
-
-```bash
-curl -X POST http://localhost:3048/reserves/submit \
-  -H "Content-Type: application/json" \
-  -d '@reserve_creation_response.json'
-```
+The tracker only **builds** the payload — there is no `/reserves/submit` endpoint. The
+reserve owner broadcasts it themselves by posting the returned `requests` array to their
+own Ergo node's `/wallet/payment/send`, so the tracker's wallet is never involved (PR #16
+B4). The owner's wallet must hold the reserve NFT and enough ERG for the value plus fee.
+`nft_id` must not be the tracker's own NFT, and amounts are bounded by the
+`server.reserve_creation_max_erg_nano` / `reserve_creation_max_token_amount` config caps.
 
 ### Get Tracker State
 
@@ -338,10 +390,10 @@ curl http://localhost:3048/tracker/state
 
 ## Signing Message Format
 
-The Schnorr signatures used in notes and redemptions sign the following 48-byte message:
+The Schnorr signatures used in notes and redemptions sign the following 80-byte message:
 
 ```
-key || totalDebt || timestamp
+key || totalDebt || timestamp || trackerNftId
 ```
 
 where:
@@ -349,6 +401,7 @@ where:
 - `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
 - `totalDebt` is the cumulative debt amount (8 bytes, big-endian)
 - `timestamp` is the note payment timestamp (8 bytes, big-endian)
+- `trackerNftId` is the tracker's NFT id (32 bytes), binding the signature to one specific tracker/contract — on-chain the contract reads it from the tracker box's `R6` register and appends it, so a signature made for one tracker cannot be replayed on another
 
 The same message format is used for both normal and emergency redemption. In an emergency redemption, the tracker signature is optional.
 
@@ -362,7 +415,7 @@ Redemption transactions use context extension variables to pass data to the Basi
 | **#1** | Receiver's public key (33 bytes) | From request |
 | **#2** | Reserve owner's Schnorr signature (65 bytes) | From issuer wallet |
 | **#3** | Total debt amount (8 bytes) | From tracker AVL proof |
-| **#4** | Note payment timestamp (8 bytes) | From request |
+| **#4** | Note payment timestamp (8 bytes) | From the stored note (server-authoritative) |
 | **#5** | Reserve insert proof | From `/reserve/proof` endpoint |
 | **#6** | Tracker's Schnorr signature (65 bytes) | From `/tracker/signature` endpoint |
 | **#7** | Reserve lookup proof (optional) | From `/reserve/proof` endpoint |

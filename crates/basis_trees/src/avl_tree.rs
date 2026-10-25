@@ -19,6 +19,11 @@ pub struct BasisAvlTree {
     /// In-memory cache for key-value lookups
     /// This mirrors the AVL tree state for efficient get() operations
     cache: HashMap<Vec<u8>, Vec<u8>>,
+    /// Insertion-order journal of every insert/update applied to the tree.
+    /// AVL+ tree shape depends on the order operations were applied, so
+    /// rebuilding a temporary prover (e.g. for `generate_insert_proof`) must
+    /// replay this journal rather than iterate the (unordered) cache.
+    journal: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 // Simple resolver function for AVL tree
@@ -54,6 +59,7 @@ impl BasisAvlTree {
             prover,
             current_state,
             cache: HashMap::new(),
+            journal: Vec::new(),
         })
     }
 
@@ -70,8 +76,9 @@ impl BasisAvlTree {
             .perform_one_operation(&operation)
             .map_err(|e| TreeError::StorageError(format!("AVL tree insert failed: {:?}", e)))?;
 
-        // Update cache
+        // Update cache and journal
         self.cache.insert(key.clone(), value.clone());
+        self.journal.push((key, value));
 
         // Update state
         self.update_state();
@@ -88,12 +95,7 @@ impl BasisAvlTree {
         });
 
         match self.prover.perform_one_operation(&update_op) {
-            Ok(_) => {
-                // Update cache
-                self.cache.insert(key.clone(), value.clone());
-                self.update_state();
-                Ok(())
-            }
+            Ok(_) => {}
             Err(_) => {
                 // Update failed, try insert instead
                 let insert_op = Operation::Insert(KeyValue {
@@ -104,13 +106,14 @@ impl BasisAvlTree {
                 self.prover.perform_one_operation(&insert_op).map_err(|e| {
                     TreeError::StorageError(format!("AVL tree operation failed: {:?}", e))
                 })?;
-
-                // Update cache
-                self.cache.insert(key.clone(), value.clone());
-                self.update_state();
-                Ok(())
             }
         }
+
+        // Update cache and journal
+        self.cache.insert(key.clone(), value.clone());
+        self.journal.push((key, value));
+        self.update_state();
+        Ok(())
     }
 
     /// Generate a proof for a lookup operation on the given key.
@@ -179,15 +182,17 @@ impl BasisAvlTree {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<(Vec<u8>, [u8; 33]), TreeError> {
-        // Rebuild a temporary tree from the in-memory cache. `AVLTree::clone()` is shallow
-        // (`Rc<RefCell<Node>>`), so operating on a clone would mutate the persistent tree's
-        // shared nodes and corrupt its state.
+        // Rebuild a temporary tree from the insertion-order journal. `AVLTree::clone()`
+        // is shallow (`Rc<RefCell<Node>>`), so operating on a clone would mutate the
+        // persistent tree's shared nodes and corrupt its state. The journal (not the
+        // unordered cache) must be replayed: AVL+ tree shape depends on insertion
+        // order, so iterating a HashMap could produce a different starting digest.
         let mut temp_prover = BatchAVLProver::new(AVLTree::new(tree_resolver, 32, None), true);
-        for (cached_key, cached_value) in &self.cache {
+        for (journaled_key, journaled_value) in &self.journal {
             temp_prover
                 .perform_one_operation(&Operation::Insert(KeyValue {
-                    key: cached_key.clone().into(),
-                    value: cached_value.clone().into(),
+                    key: journaled_key.clone().into(),
+                    value: journaled_value.clone().into(),
                 }))
                 .map_err(|e| {
                     TreeError::StorageError(format!("AVL tree rebuild failed: {:?}", e))
@@ -196,6 +201,20 @@ impl BasisAvlTree {
         // Commit the rebuild so the proof below covers only the single insert-or-update
         // operation against the committed starting digest.
         let _ = temp_prover.generate_proof();
+
+        // The rebuilt tree must reproduce the persistent tree's committed digest;
+        // otherwise the proof's starting digest would not match the on-chain state.
+        let expected_digest = self.root_digest();
+        let rebuilt_digest: [u8; 33] = temp_prover
+            .digest()
+            .and_then(|d| d.as_ref().try_into().ok())
+            .unwrap_or([0u8; 33]);
+        if rebuilt_digest != expected_digest {
+            return Err(TreeError::StorageError(format!(
+                "AVL tree journal replay digest mismatch: rebuilt {:?} != committed {:?}",
+                rebuilt_digest, expected_digest
+            )));
+        }
 
         // Match JVM scrypto `Insert` semantics used by the on-chain contract (`AvlTree.insert`
         // replays `Insert` on the verifier, which updates the value when the key already
@@ -256,6 +275,66 @@ impl BasisAvlTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for issue #15 S6: `generate_insert_proof` rebuilds a temporary
+    /// prover to avoid mutating persistent state. AVL+ shape depends on insertion
+    /// order, so the rebuild must replay the insertion-order journal — iterating the
+    /// (randomly ordered) HashMap cache could yield a different starting digest for
+    /// trees with more than one key, producing proofs that fail on-chain.
+    #[test]
+    fn generate_insert_proof_journal_rebuild_matches_committed_digest_with_many_keys() {
+        let mut tree = BasisAvlTree::new().unwrap();
+
+        // Insert enough keys that HashMap iteration order would almost certainly
+        // diverge from insertion order across hash seeds.
+        let keys: Vec<Vec<u8>> = (1u8..33).map(|i| vec![i; 32]).collect();
+        for (i, key) in keys.iter().enumerate() {
+            tree.update(key.clone(), vec![i as u8; 8]).unwrap();
+        }
+        // Mix in updates to existing keys so the journal contains both kinds.
+        for (i, key) in keys.iter().take(8).enumerate() {
+            tree.update(key.clone(), vec![i as u8 + 100; 8]).unwrap();
+        }
+
+        let committed_digest = tree.root_digest();
+
+        // The journal replay inside generate_insert_proof asserts digest equality
+        // internally; a mismatch would return Err here.
+        let new_key = vec![0x80u8; 32];
+        let (proof, digest_after) = tree
+            .generate_insert_proof(new_key.clone(), vec![7u8; 8])
+            .expect("journal replay must reproduce the committed digest");
+        assert!(!proof.is_empty());
+        assert_ne!(digest_after, committed_digest);
+        assert_eq!(tree.root_digest(), committed_digest);
+
+        // The insert proof must verify against the committed starting digest.
+        use bytes::Bytes;
+        use ergo_avltree_rust::{
+            batch_avl_verifier::BatchAVLVerifier,
+            batch_node::AVLTree,
+            operation::{KeyValue, Operation},
+        };
+        let avl_tree = AVLTree::new(tree_resolver, 32, None);
+        let mut verifier = BatchAVLVerifier::new(
+            &Bytes::copy_from_slice(&committed_digest),
+            &Bytes::copy_from_slice(&proof),
+            avl_tree,
+            Some(1),
+            Some(0),
+        )
+        .unwrap();
+        verifier
+            .perform_one_operation(&Operation::Insert(KeyValue {
+                key: new_key.into(),
+                value: vec![7u8; 8].into(),
+            }))
+            .unwrap();
+
+        // And the proof's resulting digest must match a real persistent insert.
+        tree.insert(vec![0x80u8; 32], vec![7u8; 8]).unwrap();
+        assert_eq!(tree.root_digest(), digest_after);
+    }
 
     #[test]
     fn generate_insert_proof_does_not_mutate_state() {
