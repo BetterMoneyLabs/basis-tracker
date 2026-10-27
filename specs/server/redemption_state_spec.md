@@ -28,7 +28,9 @@ pub struct RedemptionRequest {
     pub current_height: u64,
     /// Recipient's address for the redemption output
     pub recipient_address: String,
-    /// Change address for transaction outputs
+    /// Change address for transaction outputs (derived from the tracker pubkey if not
+    /// specified). Deprecated on server-built transactions: where the tracker builds the
+    /// transaction (`/redemption/build`) change always returns to the tracker.
     pub change_address: String,
     /// Issuer's 65-byte Schnorr signature (130 hex chars)
     pub issuer_signature: String,
@@ -44,6 +46,10 @@ pub struct RedemptionRequest {
     pub fee_input_total_value: u64,
     /// Refund initiation height from the reserve box's R7 register (0 if none)
     pub reserve_refund_initiation_height: u64,
+    /// ErgoTree (hex) of the reserve box being spent. The reserve output must carry
+    /// exactly this script; supplied by the server from the configured contract P2S
+    /// (never from a hardcoded constant, so contract changes cannot leave it stale).
+    pub reserve_ergo_tree: String,
 }
 ```
 
@@ -165,6 +171,12 @@ The redemption process begins when a recipient initiates a redemption request:
 
 9. **Request Signatures**
     - Build signing message: `message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
+    - The tracker signature covers the **stored** note's `amount_collected` / `timestamp` /
+      `tracker_nft_id`; any `amount`/`timestamp` values in the redemption request are ignored
+      for signing. A request for an unknown (issuer, recipient) pair is rejected with 404.
+    - Debt and timestamp are serialized as **signed** Longs (`longToByteArray`); values above
+      `i64::MAX` are rejected. Notes are also capped at creation time (`POST /notes` returns
+      HTTP 400, `NoteError::AmountExceedsContractRange`).
     - Emergency redemption uses the same message format; tracker signature verification is bypassed after 3 days
     - Request reserve owner's signature on message (generated locally by the redeemer's CLI using the issuer's secret key)
     - Request tracker's signature on message from the tracker server via its `/tracker/signature` API
@@ -274,7 +286,9 @@ After the unsigned redemption transaction is built:
 ## API Endpoints
 
 ### POST /redeem
-Initiates a redemption process for an IOU note.
+Initiates a redemption process for an IOU note. The tracker signature in the response covers the
+**stored** note's `amount_collected`/`timestamp`/`tracker_nft_id`; request `amount`/`timestamp`
+values are ignored for signing.
 
 **Request Body:**
 ```json
@@ -289,6 +303,9 @@ Initiates a redemption process for an IOU note.
 **Response:**
 - Success: `200 OK` with redemption details
 - Failure: `400 Bad Request` or `500 Internal Server Error` with error message
+- `404 Not Found`: no stored note for the (issuer, recipient) pair
+- `409 Conflict`: the issuer has more than one tracked reserve — the endpoint fails closed
+  rather than risk a signature being replayed against a different reserve (per-reserve replay)
 
 **Success Response:**
 ```json
@@ -328,7 +345,8 @@ Prepare a complete redemption with real AVL proofs and tracker signatures from E
   `500 Internal Server Error` with error message
 - `404 Not Found`: no stored note for the (issuer, recipient) pair; `409 Conflict`:
   the request's `total_debt`/`timestamp` do not match the stored note (the tracker
-  signs stored state only)
+  signs stored state only), or the issuer has more than one tracked reserve
+  (fail-closed against per-reserve replay)
 
 **Success Response:**
 ```json
@@ -403,7 +421,9 @@ Request tracker signature for redemption.
 - `409 Conflict`: the request's `total_debt`/`timestamp` do not match the stored note.
   The tracker signs its **stored** `(totalDebt, timestamp)` only and rejects mismatched
   requests rather than silently overwriting them, so a client working from stale state
-  gets a clear error instead of a signature for something it did not ask for.
+  gets a clear error instead of a signature for something it did not ask for. Also
+  returned when the issuer has more than one tracked reserve (fail-closed against
+  per-reserve replay).
 - `500 Internal Server Error`: internal failure
 
 For normal (non-emergency) requests the acceptance-policy check (see step 8 above) runs
@@ -416,7 +436,7 @@ before the signature is issued. `emergency: true` requests are not policy-checke
   "data": {
     "tracker_signature": "hex_encoded_65_byte_schnorr_signature",
     "tracker_pubkey": "hex_encoded_tracker_public_key",
-    "message_signed": "hex_encoded_48_byte_message_key_totalDebt_timestamp",
+    "message_signed": "hex_encoded_80_byte_message_key_totalDebt_timestamp_trackerNftId",
     "is_emergency": false
   },
   "error": null
@@ -463,6 +483,15 @@ tree entry; the on-chain contract only sees the spent reserve's tree.
 }
 ```
 
+**Signing semantics and errors:** the tracker signature (context var `#6`) covers the **stored**
+note's `amount_collected`/`timestamp`/`tracker_nft_id`; request `amount`/`timestamp` values are
+ignored for signing. The endpoint returns `404 Not Found` when there is no stored note for the
+(issuer, recipient) pair, `409 Conflict` when the issuer has more than one tracked reserve
+(fail-closed against per-reserve replay), and `429 Too Many Requests` when the per-(issuer,
+recipient) rate limit is exceeded — `server.redemption_build_max_per_pair_per_hour`, default 60
+per hour over a rolling window (the tracker funds the fee inputs, so unbounded building would
+drain its wallet).
+
 ### POST /redemption/submit
 
 Broadcasts the fully-signed transaction via the node and then **syncs local state**.
@@ -471,6 +500,7 @@ Broadcasts the fully-signed transaction via the node and then **syncs local stat
 ```json
 {
   "signed_tx": { "...": "fully-signed transaction JSON" },
+  "unsigned_tx": { "...": "the exact unsigned_tx value returned by /redemption/build (required)" },
   "issuer_pubkey": "hex_encoded_33_byte_key",
   "recipient_pubkey": "hex_encoded_33_byte_key",
   "redeemed_amount": 100000000,
@@ -478,11 +508,19 @@ Broadcasts the fully-signed transaction via the node and then **syncs local stat
 }
 ```
 
+**Build-binding (required):** the echoed `unsigned_tx` is hashed and must match a live, single-use
+pending entry recorded by `/redemption/build` (entries expire after 30 minutes). Unknown, expired,
+or already-used `unsigned_tx` → `409 Conflict`. The signed transaction's inputs must also contain
+the build's reserve box, and the reserve output's R5 must match the stored expected digest —
+otherwise `400 Bad Request`. The caller-supplied `issuer_pubkey` / `recipient_pubkey` /
+`redeemed_amount` / `new_already_redeemed` fields are accepted for backward compatibility but
+**ignored (deprecated)**: all state derives from the stored build entry.
+
 **State-sync contract (required):** after a successful broadcast the tracker MUST:
 
-1. Increment the note's `amount_redeemed` by `redeemed_amount` (note accounting;
+1. Increment the note's `amount_redeemed` by the build entry's redeemed amount (note accounting;
    cumulative redeemed against total debt), refreshing the note timestamp.
-2. Sync the reserve AVL tree entry to `new_already_redeemed` keyed with the note's
+2. Sync the reserve AVL tree entry to the build entry's `new_already_redeemed` keyed with the note's
    **pre-refresh** payment timestamp (the on-chain reserve tree value is
    `payment_timestamp || already_redeemed`). This value comes from the build response,
    not from the note record — the two diverge for fresh reserves or repaired state.
@@ -493,6 +531,9 @@ that skips this sync leaves the reserve tree stale, and the next `/redemption/bu
 will find no reserve whose on-chain R5 matches the local digest.
 
 ### POST /redeem/complete (manual completion / repair)
+
+Admin-only (see `specs/server/authentication_authorization.md`). A request with
+`redeemed_amount == 0` is rejected with `400 Bad Request`.
 
 The legacy completion endpoint accepts an optional `new_already_redeemed` field; when
 provided it is used as the reserve-tree value instead of the note's cumulative amount.
@@ -553,13 +594,16 @@ If the tracker becomes unavailable, emergency redemption is available after 3 da
 ### Conditions
 - **Time Lock**: `currentHeight - trackerCreationHeight > 3 * 720`
 - **Scope**: All debts associated with this tracker become eligible simultaneously
-- **Signature**: Tracker signature bytes must still be provided in context var #6, but verification is bypassed
+- **Signature**: Context var #6 must still be present, but carries an **empty `Coll[Byte]`**
+  on the emergency path (the contract branches on `size > 0`); verification is bypassed
 
 ### Message Format
 ```
-message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
 where key = blake2b256(ownerKeyBytes || receiverBytes)
 ```
+Same 80-byte format as normal redemption; the tracker NFT id (32 bytes) is read on-chain
+from `SELF.R6[Coll[Byte]]`.
 
 ### Process Changes
 1. Build message with timestamp (same as normal redemption)
@@ -570,7 +614,7 @@ where key = blake2b256(ownerKeyBytes || receiverBytes)
 ### Security Considerations
 - Emergency redemption is a last resort mechanism
 - All debts become eligible simultaneously (not per-debt)
-- Tracker signature still required in transaction (verification bypassed)
+- Context var #6 is still present in the transaction but is an empty `Coll[Byte]` (verification bypassed)
 - Designed for tracker unavailability scenarios
 
 ## Security Considerations
@@ -595,7 +639,7 @@ For redemption transactions:
 | #2 | Coll[Byte] | Reserve owner signature | Signature API |
 | #3 | Long | Total debt amount | Tracker AVL tree |
 | #5 | Coll[Byte] | Reserve insert/update proof | AVL proof generator |
-| #6 | Coll[Byte] | Tracker signature | Tracker server (`/tracker/signature`) |
+| #6 | Coll[Byte] | Tracker signature (empty on the emergency path; the contract branches on `size > 0`) | Tracker server (`/tracker/signature`) |
 | #7 | Coll[Byte] | Reserve lookup proof | AVL proof generator (optional) |
 | #8 | Coll[Byte] | Tracker lookup proof | AVL proof generator |
 

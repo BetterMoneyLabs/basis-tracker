@@ -31,6 +31,7 @@ pub fn create_test_note(amount: u64, timestamp: u64) -> IouNote {
         timestamp,
         &issuer_secret,
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .expect("Failed to create test note")
 }
@@ -73,6 +74,7 @@ pub fn create_test_note_with_keys(
         timestamp,
         issuer_secret,
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .expect("Failed to create test note with specific keys")
 }
@@ -127,7 +129,8 @@ pub fn create_test_redemption_request(
         fee_input_total_value: 0,
         reserve_refund_initiation_height: 0,
         reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
-    }
+                denomination: crate::DenomKey::Erg,
+        }
 }
 
 /// Create test reserve info
@@ -177,6 +180,7 @@ pub fn generate_performance_test_data(num_notes: usize) -> Vec<IouNote> {
             1234567890 + (i as u64 * 60),
             issuer_secret,
             &[0x42; 32],
+            crate::DenomKey::Erg,
         )
         .expect("Failed to create performance test note");
 
@@ -196,6 +200,7 @@ pub fn create_invalid_note() -> IouNote {
         0,         // zero timestamp
         [0u8; 65], // zero signature
         [0x42; 32],
+        crate::DenomKey::Erg,
     )
 }
 

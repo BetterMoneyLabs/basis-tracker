@@ -26,6 +26,7 @@ mod api_avl_integration_tests {
             timestamp,
             secret_key_bytes,
             &[0x42; 32],
+            basis_store::DenomKey::Erg,
         )
         .unwrap()
     }
@@ -151,7 +152,11 @@ mod api_avl_integration_tests {
         assert!(result.is_ok(), "Should be able to add note");
 
         // Retrieve the note back
-        let retrieved_note_result = tracker.lookup_note(&issuer_pubkey, &recipient_pubkey);
+        let retrieved_note_result = tracker.lookup_note(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &basis_store::DenomKey::Erg,
+        );
         assert!(
             retrieved_note_result.is_ok(),
             "Should be able to retrieve note"
@@ -258,7 +263,11 @@ mod api_avl_integration_tests {
         assert!(add_result.is_ok(), "Should be able to add note");
 
         // Generate a proof for this note
-        let proof_result = tracker.generate_proof(&issuer_pubkey, &recipient_pubkey);
+        let proof_result = tracker.generate_proof(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &basis_store::DenomKey::Erg,
+        );
         assert!(
             proof_result.is_ok(),
             "Should be able to generate proof for stored note"

@@ -18,7 +18,7 @@ mod property_tests {
         ) {
             // Test that signing and verification always works for valid inputs
             let (_, recipient_pubkey) = generate_keypair();
-            let note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret, &[0x42; 32]);
+            let note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret, &[0x42; 32], crate::DenomKey::Erg);
 
             // Note creation should succeed with valid inputs
             prop_assume!(note.is_ok());
@@ -45,8 +45,8 @@ mod property_tests {
             let (secret, _) = generate_keypair();
             let (_, recipient_pubkey) = generate_keypair();
 
-            let note1 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret, &[0x42; 32]).unwrap();
-            let note2 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret, &[0x42; 32]).unwrap();
+            let note1 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret, &[0x42; 32], crate::DenomKey::Erg).unwrap();
+            let note2 = IouNote::create_and_sign(recipient_pubkey, amount1, timestamp1, &secret, &[0x42; 32], crate::DenomKey::Erg).unwrap();
 
             // Same inputs should produce same note structure
             prop_assert_eq!(note1.recipient_pubkey, note2.recipient_pubkey);
@@ -54,7 +54,7 @@ mod property_tests {
             prop_assert_eq!(note1.timestamp, note2.timestamp);
 
             // Different inputs should produce different notes
-            let note3 = IouNote::create_and_sign(recipient_pubkey, amount2, timestamp2, &secret, &[0x42; 32]).unwrap();
+            let note3 = IouNote::create_and_sign(recipient_pubkey, amount2, timestamp2, &secret, &[0x42; 32], crate::DenomKey::Erg).unwrap();
             prop_assert_ne!(note1.amount_collected, note3.amount_collected);
         }
 
@@ -72,7 +72,8 @@ mod property_tests {
                 amount_redeemed,
                 1234567890,
                 [2u8; 65], [0x42; 32]
-            );
+            ,
+            crate::DenomKey::Erg,);
 
             let expected_debt = amount_collected - amount_redeemed;
             prop_assert_eq!(note.outstanding_debt(), expected_debt);
@@ -118,7 +119,7 @@ mod property_tests {
             // Test that note serialization preserves all fields
             let (secret, _) = generate_keypair();
             let (_, recipient_pubkey) = generate_keypair();
-            let original_note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret, &[0x42; 32]).unwrap();
+            let original_note = IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &secret, &[0x42; 32], crate::DenomKey::Erg).unwrap();
 
             // Simulate serialization by checking field access
             let reconstructed_note = IouNote::new(
@@ -127,7 +128,8 @@ mod property_tests {
                 original_note.amount_redeemed,
                 original_note.timestamp,
                 original_note.signature, [0x42; 32]
-            );
+            ,
+            crate::DenomKey::Erg,);
 
             prop_assert_eq!(original_note.recipient_pubkey, reconstructed_note.recipient_pubkey);
             prop_assert_eq!(original_note.amount_collected, reconstructed_note.amount_collected);
@@ -153,7 +155,8 @@ mod property_tests {
                 0,
                 note_timestamp,
                 [2u8; 65], [0x42; 32]
-            );
+            ,
+            crate::DenomKey::Erg,);
 
             // Verify note was created successfully
             prop_assert_eq!(note.timestamp, note_timestamp);
@@ -177,7 +180,8 @@ mod property_tests {
                 amount_redeemed,
                 1234567890,
                 [2u8; 65], [0x42; 32]
-            );
+            ,
+            crate::DenomKey::Erg,);
 
             // Outstanding debt should never be negative
             prop_assert!(note.outstanding_debt() <= amount_collected);
@@ -203,7 +207,8 @@ mod property_tests {
                 0,
                 1234567890,
                 signature_array, [0x42; 32]
-            );
+            ,
+            crate::DenomKey::Erg,);
 
             // Signature should always be 65 bytes
             prop_assert_eq!(note.signature.len(), 65);
@@ -254,6 +259,7 @@ mod property_tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+                    denomination: crate::DenomKey::Erg,
         };
 
             // Basic validation: amount should be positive
@@ -277,7 +283,7 @@ mod property_tests {
 
             // Create a note with sufficient outstanding debt
             let total_debt = redemption_amount + 1; // Ensure outstanding_debt >= redemption_amount
-            let note = IouNote::create_and_sign(recipient_pubkey, total_debt, 1234567890, &secret, &[0x42; 32]).unwrap();
+            let note = IouNote::create_and_sign(recipient_pubkey, total_debt, 1234567890, &secret, &[0x42; 32], crate::DenomKey::Erg).unwrap();
 
             prop_assume!(redemption_amount <= note.outstanding_debt());
 
@@ -327,7 +333,7 @@ mod property_tests {
             let (secret, issuer_pubkey) = generate_keypair();
             let (_, recipient_pubkey) = generate_keypair();
 
-            let note = IouNote::create_and_sign(recipient_pubkey, note_amount, 1234567890, &secret, &[0x42; 32]).unwrap();
+            let note = IouNote::create_and_sign(recipient_pubkey, note_amount, 1234567890, &secret, &[0x42; 32], crate::DenomKey::Erg).unwrap();
 
             let context = TxContext {
                 current_height: 1000,
@@ -382,7 +388,7 @@ mod property_tests {
             let (_, recipient_pubkey) = generate_keypair();
 
             // Create and add a note
-            let note = IouNote::create_and_sign(recipient_pubkey, initial_amount, 1234567890, &secret, &[0x42; 32]).unwrap();
+            let note = IouNote::create_and_sign(recipient_pubkey, initial_amount, 1234567890, &secret, &[0x42; 32], crate::DenomKey::Erg).unwrap();
             redemption_manager.tracker.add_note(&issuer_pubkey, &note).unwrap();
 
             let mut total_redeemed: u64 = 0;
@@ -414,6 +420,7 @@ mod property_tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+                    denomination: crate::DenomKey::Erg,
         };
 
                 // NOTE: this test previously used `if result.is_ok() { ... }`, which silently
@@ -453,7 +460,7 @@ mod property_tests {
                 prop_assert!(!data.transaction_bytes.is_empty());
                 total_redeemed += redeem_amount;
                 redemption_manager
-                    .complete_redemption(&issuer_pubkey, &recipient_pubkey, redeem_amount, None)
+                    .complete_redemption(&issuer_pubkey, &recipient_pubkey, &crate::DenomKey::Erg, redeem_amount, None)
                     .unwrap_or_else(|e| panic!("complete_redemption {} should succeed: {:?}", i, e));
             }
 
@@ -473,7 +480,7 @@ mod property_tests {
 
             let final_note = redemption_manager
                 .tracker
-                .lookup_note(&issuer_pubkey, &recipient_pubkey)
+                .lookup_note(&issuer_pubkey, &recipient_pubkey, &crate::DenomKey::Erg)
                 .unwrap();
 
             prop_assert_eq!(

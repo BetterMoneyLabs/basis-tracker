@@ -18,6 +18,7 @@ fn bench_note_creation(c: &mut Criterion) {
                 black_box(1234567890),
                 black_box(&secret),
                 &[0x42; 32],
+                basis_store::DenomKey::Erg,
             )
             .unwrap();
             black_box(note);
@@ -30,9 +31,15 @@ fn bench_signature_verification(c: &mut Criterion) {
         let (secret, issuer_pubkey) = generate_keypair();
         let recipient_pubkey = [2u8; 33];
 
-        let note =
-            IouNote::create_and_sign(recipient_pubkey, 1000, 1234567890, &secret, &[0x42; 32])
-                .unwrap();
+        let note = IouNote::create_and_sign(
+            recipient_pubkey,
+            1000,
+            1234567890,
+            &secret,
+            &[0x42; 32],
+            basis_store::DenomKey::Erg,
+        )
+        .unwrap();
 
         b.iter(|| {
             // verify_signature returns Result<(), _>; unwrapping keeps the verification
@@ -75,7 +82,15 @@ fn bench_schnorr_signature(c: &mut Criterion) {
 
 fn bench_note_serialization(c: &mut Criterion) {
     c.bench_function("note_field_access", |b| {
-        let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [2u8; 65], [0x42; 32]);
+        let note = IouNote::new(
+            [1u8; 33],
+            1000,
+            0,
+            1234567890,
+            [2u8; 65],
+            [0x42; 32],
+            basis_store::DenomKey::Erg,
+        );
 
         b.iter(|| {
             let recipient = black_box(note.recipient_pubkey);
@@ -91,7 +106,15 @@ fn bench_note_serialization(c: &mut Criterion) {
 
 fn bench_outstanding_debt_calculation(c: &mut Criterion) {
     c.bench_function("calculate_outstanding_debt", |b| {
-        let note = IouNote::new([1u8; 33], 1000, 250, 1234567890, [2u8; 65], [0x42; 32]);
+        let note = IouNote::new(
+            [1u8; 33],
+            1000,
+            250,
+            1234567890,
+            [2u8; 65],
+            [0x42; 32],
+            basis_store::DenomKey::Erg,
+        );
 
         b.iter(|| {
             let debt = black_box(note.outstanding_debt());
@@ -117,6 +140,7 @@ fn bench_bulk_note_operations(c: &mut Criterion) {
                         1234567890 + i as u64,
                         &secret,
                         &[0x42; 32],
+                        basis_store::DenomKey::Erg,
                     )
                     .unwrap();
                     notes.push(black_box(note));

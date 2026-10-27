@@ -26,6 +26,7 @@ mod avl_tree_integration_tests {
             timestamp,
             secret_key_bytes,
             &[0x42; 32],
+            basis_store::DenomKey::Erg,
         )
         .unwrap()
     }
@@ -112,7 +113,11 @@ mod avl_tree_integration_tests {
         assert!(result.is_ok(), "Should be able to add note to tracker");
 
         // Read the note back from the tracker
-        let retrieved_note = tracker.lookup_note(&issuer_pubkey, &recipient_pubkey);
+        let retrieved_note = tracker.lookup_note(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &basis_store::DenomKey::Erg,
+        );
         assert!(
             retrieved_note.is_ok(),
             "Should be able to retrieve note from tracker"
@@ -173,7 +178,11 @@ mod avl_tree_integration_tests {
 
         // Verify all notes can be retrieved
         for (i, recipient_pubkey) in recipients.iter().enumerate() {
-            let retrieved_note = tracker.lookup_note(&issuer_pubkey, recipient_pubkey);
+            let retrieved_note = tracker.lookup_note(
+                &issuer_pubkey,
+                recipient_pubkey,
+                &basis_store::DenomKey::Erg,
+            );
             assert!(
                 retrieved_note.is_ok(),
                 "Should be able to retrieve note {} from tracker",

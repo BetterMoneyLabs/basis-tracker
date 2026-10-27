@@ -109,12 +109,13 @@ All endpoints return a standardized response envelope:
 
 ### Notes
 
-- `POST /notes` - Create a new IOU note (requires `tracker_nft_id`, which must match this tracker's configured NFT id — see "Signing Message Format" below)
+- `POST /notes` - Create a new IOU note (requires `tracker_nft_id`, which must match this tracker's configured NFT id — see "Signing Message Format" below; optional `denomination` field, `"erg"` or `"token:<64-hex>"`, defaulting to the pair's existing note's denomination when unambiguous, else ERG)
+- `POST /notes/exchange` - Exchange debt between two denominations of one (issuer, recipient) pair (off-chain novation / triage; both parties sign both edges' new states — the recipient's signatures are the creditor consent required for a debt decrease)
 - `GET /notes` - Get all IOU notes with age and confirmation state
 - `GET /notes/issuer/{pubkey}` - Get all notes issued by a public key
-- `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get a specific note
+- `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get a specific note (optional `?denomination=` query parameter)
 - `GET /notes/recipient/{pubkey}` - Get all notes where the public key is the recipient
-- `POST /notes/state` - Get confirmation state for a single note
+- `POST /notes/state` - Get confirmation state for a single note (optional `denomination` field)
 
 ### Reserves
 
@@ -144,7 +145,7 @@ configured Ergo node wallet.
 
 ### Status
 
-- `GET /key-status/{pubkey}` - Get comprehensive key status information (debt, collateral, ratio)
+- `GET /key-status/{pubkey}` - Get key status as a per-denomination breakdown (`denominations[]`, each with debt/collateral/ratio in that denomination's units; debt and collateral are never summed across denominations)
 
 ### Redemption
 
@@ -177,6 +178,7 @@ configured Ergo node wallet.
 
 - `GET /config/reserve-contract-p2s` - Get the configured Basis reserve contract P2S address
 - `GET /config/reserve-token` - Get reserve token configuration (token-backed reserves)
+- `GET /config/reserve-collateral` - Get the reserve-collateral configuration: ERG and token reserve contract addresses plus the served-token table (symbol, decimals, per-token policy)
 
 ## Data Formats
 
@@ -203,6 +205,7 @@ All public keys and signatures are hex-encoded strings:
   "timestamp": 1234567890,
   "signature": "030303...",
   "tracker_nft_id": "a1b2c3d4...",
+  "denomination": "erg",
   "confirmation": {
     "status": "local_only",
     "confirmed_total_debt": null,
@@ -393,12 +396,12 @@ curl http://localhost:3048/tracker/state
 The Schnorr signatures used in notes and redemptions sign the following 80-byte message:
 
 ```
-key || totalDebt || timestamp || trackerNftId
+debtKey || totalDebt || timestamp || trackerNftId
 ```
 
 where:
 
-- `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
+- `debtKey = blake2b256(ownerKeyBytes || receiverKeyBytes)` for ERG, or `blake2b256(ownerKeyBytes || receiverKeyBytes || tokenId)` for token denominations (32 bytes)
 - `totalDebt` is the cumulative debt amount (8 bytes, big-endian)
 - `timestamp` is the note payment timestamp (8 bytes, big-endian)
 - `trackerNftId` is the tracker's NFT id (32 bytes), binding the signature to one specific tracker/contract — on-chain the contract reads it from the tracker box's `R6` register and appends it, so a signature made for one tracker cannot be replayed on another

@@ -158,7 +158,15 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
 
   // ========== HELPER METHODS - CRYPTO & TREES ==========
 
+  // Debt-tree key, domain-separated per denomination
+  // (specs/ergo/multi_collateral_reserves.md): blake2b256(owner ‖ receiver ‖ 0x01 ‖ tokenId).
+  // Used for the tracker debt tree (totalDebt lookup) and the signed message.
   def mkKey(ownerKey: GroupElement, receiverKey: GroupElement): Array[Byte] =
+    Blake2b256(ownerKey.getEncoded.toArray ++ receiverKey.getEncoded.toArray ++ reserveTokenIdBytes)
+
+  // Reserve redemption-history key: blake2b256(owner ‖ receiver), unchanged from the
+  // pre-denomination derivation. Used for the reserve box's own AVL tree (R5).
+  def mkReserveKey(ownerKey: GroupElement, receiverKey: GroupElement): Array[Byte] =
     Blake2b256(ownerKey.getEncoded.toArray ++ receiverKey.getEncoded.toArray)
 
   // Message for redemption: key || totalDebt || timestamp || tracker NFT id (the same bytes as the
@@ -335,12 +343,13 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val reserveTokenAmount = 1000000000L
 
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
       val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
 
       val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      val insertRes2 = plasmaMap.insertOrUpdate(key -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(newRedeemedDebt)))
+      val insertRes2 = plasmaMap.insertOrUpdate(reserveKey -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(newRedeemedDebt)))
       val insertProof = insertRes2.proof
       val outputTreeErgoValue = plasmaMap.ergoValue
 
@@ -696,12 +705,13 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val reserveTokenAmount = 1000000000L
 
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
       val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
 
       val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      val insertRes = plasmaMap.insertOrUpdate(key -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(redeemAmount)))
+      val insertRes = plasmaMap.insertOrUpdate(reserveKey -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(redeemAmount)))
       val insertProof = insertRes.proof
       val outputTreeErgoValue = plasmaMap.ergoValue
 
@@ -740,12 +750,13 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val reserveTokenAmount = 1000000000L
 
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
       val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
 
       val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      val insertRes = plasmaMap.insertOrUpdate(key -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(redeemAmount)))
+      val insertRes = plasmaMap.insertOrUpdate(reserveKey -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(redeemAmount)))
       val insertProof = insertRes.proof
       val outputTreeErgoValue = plasmaMap.ergoValue
 
@@ -815,12 +826,13 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val debtAmount = 500000000L
       val timestamp = System.currentTimeMillis()
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, debtAmount, timestamp)
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
       val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
 
       val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      val insertRes = plasmaMap.insertOrUpdate(key -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(0L)))
+      val insertRes = plasmaMap.insertOrUpdate(reserveKey -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(0L)))
       val insertProof = insertRes.proof
       val nextTreeErgoValue = plasmaMap.ergoValue
 
@@ -890,12 +902,13 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val totalDebt = 500000000L
       val timestamp = System.currentTimeMillis()
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
 
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
       val invalidTrackerSigBytes = corruptSig(mkSigBytes(SigUtils.sign(message, trackerSecret)))
 
-      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(key, totalDebt, timestamp)
+      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(reserveKey, totalDebt, timestamp)
       val TrackerTreeAndProof(trackerTree, trackerLookupProof) = mkTrackerTreeAndProof(key, totalDebt)
 
       val basisInput = mkBasisTokenInput(
@@ -919,17 +932,90 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
     }
   }
 
+  property("basis-token redemption should fail when the debt is namespaced under a different token") {
+    createMockedErgoClient(MockData(Nil, Nil)).execute { implicit ctx: BlockchainContext =>
+      // specs/ergo/multi_collateral_reserves.md invariant 3: a note redeems only
+      // against its own denomination. The tracker tree holds the debt under the
+      // WRONG token's debtKey; the reserve contract looks up its own
+      // blake2b256(owner ‖ receiver ‖ tokenId), so the lookup proof fails.
+      val totalDebt = 500000000L
+      val timestamp = System.currentTimeMillis()
+      val otherTokenIdBytes = Base16.decode("5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f").get
+      val wrongDebtKey = Blake2b256(ownerPk.getEncoded.toArray ++ receiverPk.getEncoded.toArray ++ otherTokenIdBytes)
+
+      val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
+      val message = mkMessage(key, totalDebt, timestamp)
+      val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
+      val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
+
+      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(reserveKey, totalDebt, timestamp)
+      // The tracker tree commits the debt under the other token's key only.
+      val TrackerTreeAndProof(trackerTree, trackerLookupProof) = mkTrackerTreeAndProof(wrongDebtKey, totalDebt)
+
+      val basisInput = mkBasisTokenInput(
+        minValue * 2 + feeValue, emptyTreeErgoValue,
+        receiverPk, reserveSigBytes, totalDebt, proofBytes, trackerSigBytes,
+        totalDebt, None, Some(trackerLookupProof), timestamp
+      )
+      val trackerDataInput = mkTrackerDataInput(trackerTree)
+
+      val basisOutput = createOut(
+        BasisConstants.basisTokenContract, minValue,
+        Array(ErgoValue.of(ownerPk), nextTree, ErgoValue.of(trackerNFTBytes)),
+        Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, totalDebt / 2))
+      )
+      val redemptionOutput = createOut(trueScript, minValue, Array(), Array(new ErgoToken(reserveTokenIdBytes, totalDebt / 2)))
+
+      assertTxFails(Array(basisInput), Array(trackerDataInput), Array(basisOutput, redemptionOutput), Array(receiverSecret.toString()))
+    }
+  }
+
+  property("basis-token redemption should fail with a legacy (unsuffixed) key in the message") {
+    createMockedErgoClient(MockData(Nil, Nil)).execute { implicit ctx: BlockchainContext =>
+      // Pre-denomination notes signed over blake2b256(owner ‖ receiver) must no
+      // longer verify: the message key is now the namespaced debtKey.
+      val totalDebt = 500000000L
+      val timestamp = System.currentTimeMillis()
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
+      val legacyMessage = mkMessage(reserveKey, totalDebt, timestamp) // WRONG: unsuffixed key
+      val reserveSigBytes = mkSigBytes(SigUtils.sign(legacyMessage, ownerSecret))
+      val trackerSigBytes = mkSigBytes(SigUtils.sign(legacyMessage, trackerSecret))
+
+      val key = mkKey(ownerPk, receiverPk)
+      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(reserveKey, totalDebt, timestamp)
+      val TrackerTreeAndProof(trackerTree, trackerLookupProof) = mkTrackerTreeAndProof(key, totalDebt)
+
+      val basisInput = mkBasisTokenInput(
+        minValue * 2 + feeValue, emptyTreeErgoValue,
+        receiverPk, reserveSigBytes, totalDebt, proofBytes, trackerSigBytes,
+        totalDebt, None, Some(trackerLookupProof), timestamp
+      )
+      val trackerDataInput = mkTrackerDataInput(trackerTree)
+
+      val basisOutput = createOut(
+        BasisConstants.basisTokenContract, minValue,
+        Array(ErgoValue.of(ownerPk), nextTree, ErgoValue.of(trackerNFTBytes)),
+        Array(new ErgoToken(reserveNFTBytes, 1), new ErgoToken(reserveTokenIdBytes, totalDebt / 2))
+      )
+      val redemptionOutput = createOut(trueScript, minValue, Array(), Array(new ErgoToken(reserveTokenIdBytes, totalDebt / 2)))
+
+      assertTxFails(Array(basisInput), Array(trackerDataInput), Array(basisOutput, redemptionOutput), Array(receiverSecret.toString()))
+    }
+  }
+
   property("basis-token redemption should fail with invalid reserve owner signature") {
     createMockedErgoClient(MockData(Nil, Nil)).execute { implicit ctx: BlockchainContext =>
       val totalDebt = 500000000L
       val timestamp = System.currentTimeMillis()
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
 
       val invalidReserveSigBytes = corruptSig(mkSigBytes(SigUtils.sign(message, ownerSecret)))
       val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
 
-      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(key, totalDebt, timestamp)
+      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(reserveKey, totalDebt, timestamp)
       val TrackerTreeAndProof(trackerTree, trackerLookupProof) = mkTrackerTreeAndProof(key, totalDebt)
 
       val basisInput = mkBasisTokenInput(
@@ -960,12 +1046,13 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val totalDebt = 500000000L
       val timestamp = System.currentTimeMillis()
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
 
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
       val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
 
-      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(key, totalDebt, timestamp)
+      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(reserveKey, totalDebt, timestamp)
       val TrackerTreeAndProof(trackerTree, trackerLookupProof) = mkTrackerTreeAndProof(key, totalDebt)
 
       // Input has wrong tracker NFT in R6
@@ -1011,6 +1098,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val totalDebt = 500000000L
       val timestamp = System.currentTimeMillis()
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
 
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
@@ -1022,7 +1110,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val wrongInsertRes = wrongPlasmaMap.insertOrUpdate((wrongKey, Longs.toByteArray(timestamp) ++ Longs.toByteArray(0L)))
       val invalidProof = wrongInsertRes.proof.bytes
 
-      val TreeAndProof(_, nextTree, _) = mkTreeAndProof(key, totalDebt, timestamp)
+      val TreeAndProof(_, nextTree, _) = mkTreeAndProof(reserveKey, totalDebt, timestamp)
       val TrackerTreeAndProof(trackerTree, trackerLookupProof) = mkTrackerTreeAndProof(key, totalDebt)
 
       val basisInput = mkBasisTokenInput(
@@ -1054,6 +1142,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val oldTimestamp = System.currentTimeMillis() - 10000L // 10 seconds old
       val newTimestamp = System.currentTimeMillis()
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
 
       // First, create a redemption with old timestamp (simulating prior redemption)
       val oldMessage = mkMessage(key, totalDebt, oldTimestamp)
@@ -1061,7 +1150,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val oldTrackerSigBytes = mkSigBytes(SigUtils.sign(oldMessage, trackerSecret))
 
       val oldPlasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      oldPlasmaMap.insertOrUpdate(key -> (Longs.toByteArray(oldTimestamp) ++ Longs.toByteArray(totalDebt)))
+      oldPlasmaMap.insertOrUpdate(reserveKey -> (Longs.toByteArray(oldTimestamp) ++ Longs.toByteArray(totalDebt)))
       val oldTree = oldPlasmaMap.ergoValue
 
       // Now try to redeem again with same old timestamp (should fail)
@@ -1069,7 +1158,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
       val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
 
-      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(key, totalDebt, oldTimestamp)
+      val TreeAndProof(_, nextTree, proofBytes) = mkTreeAndProof(reserveKey, totalDebt, oldTimestamp)
       val TrackerTreeAndProof(trackerTree, trackerLookupProof) = mkTrackerTreeAndProof(key, totalDebt)
 
       val basisInput = mkBasisTokenInput(
@@ -1101,6 +1190,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val redeemedDebt = 200000000L // Already redeemed some
       val timestamp = System.currentTimeMillis()
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
 
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
@@ -1108,10 +1198,10 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
 
       // Create tree with existing redeemed amount
       val plasmaMap = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      plasmaMap.insertOrUpdate(key -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(redeemedDebt)))
+      plasmaMap.insertOrUpdate(reserveKey -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(redeemedDebt)))
       val inputTree = plasmaMap.ergoValue
 
-      val insertRes = plasmaMap.insertOrUpdate(key -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(totalDebt)))
+      val insertRes = plasmaMap.insertOrUpdate(reserveKey -> (Longs.toByteArray(timestamp) ++ Longs.toByteArray(totalDebt)))
       val nextTree = plasmaMap.ergoValue
       val proofBytes = insertRes.proof.bytes
 
@@ -1150,11 +1240,12 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val reserveTokenAmount = totalDebt
 
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
       val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
 
-      val TreeAndProof(initialTree, nextTree, proofBytes) = mkTreeAndProof(key, newRedeemedDebt, timestamp)
+      val TreeAndProof(initialTree, nextTree, proofBytes) = mkTreeAndProof(reserveKey, newRedeemedDebt, timestamp)
       val TrackerTreeAndProof(trackerTree, trackerLookupProof) = mkTrackerTreeAndProof(key, totalDebt)
 
       val basisInput = mkBasisTokenInput(
@@ -1188,11 +1279,12 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val reserveTokenAmount = totalDebt
 
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val message = mkMessage(key, totalDebt, timestamp)
       val reserveSigBytes = mkSigBytes(SigUtils.sign(message, ownerSecret))
       val trackerSigBytes = mkSigBytes(SigUtils.sign(message, trackerSecret))
 
-      val TreeAndProof(initialTree, nextTree, proofBytes) = mkTreeAndProof(key, newRedeemedDebt, timestamp)
+      val TreeAndProof(initialTree, nextTree, proofBytes) = mkTreeAndProof(reserveKey, newRedeemedDebt, timestamp)
       val TrackerTreeAndProof(trackerTree, trackerLookupProof) = mkTrackerTreeAndProof(key, totalDebt)
 
       val basisInput =
@@ -1299,7 +1391,7 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
 
       val reserveSigBob = mkSigBytes(aliceSigBob)
       val trackerSigBobBytes = mkSigBytes(trackerSigBob)
-      val TreeAndProof(initialTreeBob, nextTreeBob, proofBob) = mkTreeAndProof(keyAliceBob, remainingDebtToBob, timestamp)
+      val TreeAndProof(initialTreeBob, nextTreeBob, proofBob) = mkTreeAndProof(mkReserveKey(aliceKey, bobKey), remainingDebtToBob, timestamp)
 
       val basisInputBob = mkBasisTokenInput(
         minValue * 2 + feeValue, initialTreeBob,
@@ -1446,11 +1538,12 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
       val t3 = t2 + 1
 
       val key = mkKey(ownerPk, receiverPk)
+      val reserveKey = mkReserveKey(ownerPk, receiverPk)
       val tracker = mkTrackerTreeAndProof(key, totalDebt)
       val trackerInput = mkTrackerDataInput(tracker.tree)
 
       // --- Redemption 1: empty reserve tree -> (t1, redeem1) ---
-      val TreeAndProof(emptyTree, tree1, proof1) = mkTreeAndProof(key, redeem1, t1)
+      val TreeAndProof(emptyTree, tree1, proof1) = mkTreeAndProof(reserveKey, redeem1, t1)
       val message1 = mkMessage(key, totalDebt, t1)
       val reserveSig1 = mkSigBytes(SigUtils.sign(message1, ownerSecret))
       val trackerSig1 = mkSigBytes(SigUtils.sign(message1, trackerSecret))
@@ -1473,12 +1566,12 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
 
       // --- Redemption 2: (t1, redeem1) -> (t2, redeem1+redeem2) ---
       val lookupMap2 = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      lookupMap2.insertOrUpdate(key -> (Longs.toByteArray(t1) ++ Longs.toByteArray(redeem1)))
-      val lookupProof2 = lookupMap2.lookUp(key).proof.bytes
+      lookupMap2.insertOrUpdate(reserveKey -> (Longs.toByteArray(t1) ++ Longs.toByteArray(redeem1)))
+      val lookupProof2 = lookupMap2.lookUp(reserveKey).proof.bytes
 
       val updateMap2 = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      updateMap2.insertOrUpdate(key -> (Longs.toByteArray(t1) ++ Longs.toByteArray(redeem1)))
-      val insertProof2 = updateMap2.insertOrUpdate(key -> (Longs.toByteArray(t2) ++ Longs.toByteArray(redeem1 + redeem2))).proof.bytes
+      updateMap2.insertOrUpdate(reserveKey -> (Longs.toByteArray(t1) ++ Longs.toByteArray(redeem1)))
+      val insertProof2 = updateMap2.insertOrUpdate(reserveKey -> (Longs.toByteArray(t2) ++ Longs.toByteArray(redeem1 + redeem2))).proof.bytes
       val tree2 = updateMap2.ergoValue
 
       val message2 = mkMessage(key, totalDebt, t2)
@@ -1515,14 +1608,14 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
 
       // --- Redemption 3: (t2, redeem1+redeem2) -> (t3, redeem1+redeem2+redeem3) ---
       val lookupMap3 = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      lookupMap3.insertOrUpdate(key -> (Longs.toByteArray(t1) ++ Longs.toByteArray(redeem1)))
-      lookupMap3.insertOrUpdate(key -> (Longs.toByteArray(t2) ++ Longs.toByteArray(redeem1 + redeem2)))
-      val lookupProof3 = lookupMap3.lookUp(key).proof.bytes
+      lookupMap3.insertOrUpdate(reserveKey -> (Longs.toByteArray(t1) ++ Longs.toByteArray(redeem1)))
+      lookupMap3.insertOrUpdate(reserveKey -> (Longs.toByteArray(t2) ++ Longs.toByteArray(redeem1 + redeem2)))
+      val lookupProof3 = lookupMap3.lookUp(reserveKey).proof.bytes
 
       val updateMap3 = new PlasmaMap[Array[Byte], Array[Byte]](basisReserveFlags, chainCashPlasmaParameters)
-      updateMap3.insertOrUpdate(key -> (Longs.toByteArray(t1) ++ Longs.toByteArray(redeem1)))
-      updateMap3.insertOrUpdate(key -> (Longs.toByteArray(t2) ++ Longs.toByteArray(redeem1 + redeem2)))
-      val insertProof3 = updateMap3.insertOrUpdate(key -> (Longs.toByteArray(t3) ++ Longs.toByteArray(redeem1 + redeem2 + redeem3))).proof.bytes
+      updateMap3.insertOrUpdate(reserveKey -> (Longs.toByteArray(t1) ++ Longs.toByteArray(redeem1)))
+      updateMap3.insertOrUpdate(reserveKey -> (Longs.toByteArray(t2) ++ Longs.toByteArray(redeem1 + redeem2)))
+      val insertProof3 = updateMap3.insertOrUpdate(reserveKey -> (Longs.toByteArray(t3) ++ Longs.toByteArray(redeem1 + redeem2 + redeem3))).proof.bytes
       val tree3 = updateMap3.ergoValue
 
       val message3 = mkMessage(key, totalDebt, t3)

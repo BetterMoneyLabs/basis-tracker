@@ -27,6 +27,10 @@ pub struct PredicateContext {
     /// `None` when the liability snapshot is unavailable; collateralization
     /// checks fail closed in that case.
     pub issuer_gross_debt: Option<u64>,
+    /// Denomination of the candidate note. Collateralization is evaluated per
+    /// denomination: the reserve and the liability snapshot must both belong to
+    /// it (specs/ergo/multi_collateral_reserves.md).
+    pub denomination: basis_store::DenomKey,
 }
 
 impl std::fmt::Debug for PredicateContext {
@@ -37,6 +41,7 @@ impl std::fmt::Debug for PredicateContext {
             .field("total_debt", &self.total_debt)
             .field("reserve_tracker", &self.reserve_tracker.is_some())
             .field("issuer_gross_debt", &self.issuer_gross_debt)
+            .field("denomination", &self.denomination)
             .finish()
     }
 }
@@ -166,7 +171,9 @@ impl NotePredicate for CollateralizationPredicate {
         // so with two reserves the same note redeems in full against EACH of them; any single
         // collateral figure would be a lie. `resolve_issuer_reserve` refuses the ambiguous
         // configuration instead of returning whichever entry the map yielded first.
-        let reserve = match tracker.resolve_issuer_reserve(&hex::encode(ctx.issuer_pubkey)) {
+        let reserve = match tracker
+            .resolve_issuer_reserve(&hex::encode(ctx.issuer_pubkey), &ctx.denomination)
+        {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -227,7 +234,9 @@ impl NotePredicate for NoPendingRefundPredicate {
 
         // Fail closed on ambiguous reserve configuration (more than one reserve for the
         // issuer), same rationale as the collateralization predicate above.
-        let reserve = match tracker.resolve_issuer_reserve(&hex::encode(ctx.issuer_pubkey)) {
+        let reserve = match tracker
+            .resolve_issuer_reserve(&hex::encode(ctx.issuer_pubkey), &ctx.denomination)
+        {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -390,6 +399,8 @@ mod tests {
             total_debt,
             reserve_tracker: None,
             issuer_gross_debt: None,
+
+            denomination: basis_store::DenomKey::Erg,
         }
     }
 
@@ -688,6 +699,8 @@ mod tests {
             total_debt: 100,
             reserve_tracker: None,
             issuer_gross_debt: None,
+
+            denomination: basis_store::DenomKey::Erg,
         };
         let cloned = ctx.clone();
         assert_eq!(ctx.issuer_pubkey, cloned.issuer_pubkey);
@@ -767,6 +780,8 @@ mod tests {
             total_debt: 100,
             reserve_tracker: Some(tracker),
             issuer_gross_debt: None,
+
+            denomination: basis_store::DenomKey::Erg,
         };
 
         assert!(pred.acceptable(&ctx));
@@ -810,6 +825,8 @@ mod tests {
             total_debt: 100,
             reserve_tracker: Some(tracker),
             issuer_gross_debt: None,
+
+            denomination: basis_store::DenomKey::Erg,
         };
 
         assert!(!pred.acceptable(&ctx));
@@ -829,6 +846,8 @@ mod tests {
             total_debt: 100,
             reserve_tracker: None,
             issuer_gross_debt: None,
+
+            denomination: basis_store::DenomKey::Erg,
         };
 
         assert!(!pred.acceptable(&ctx));
@@ -851,6 +870,8 @@ mod tests {
             total_debt: 100,
             reserve_tracker: Some(tracker),
             issuer_gross_debt: None,
+
+            denomination: basis_store::DenomKey::Erg,
         };
 
         assert!(!pred.acceptable(&ctx));

@@ -87,11 +87,14 @@ mod untested_handlers {
                     TrackerCommand::GetNoteByIssuerAndRecipient {
                         issuer_pubkey,
                         recipient_pubkey,
+                        denomination,
                         response_tx,
                     } => {
-                        let r = redemption_manager
-                            .tracker
-                            .get_note_optional(&issuer_pubkey, &recipient_pubkey);
+                        let r = redemption_manager.tracker.get_note_optional(
+                            &issuer_pubkey,
+                            &recipient_pubkey,
+                            &denomination,
+                        );
                         let _ = response_tx.send(r);
                     }
                     TrackerCommand::CompleteRedemption {
@@ -99,11 +102,13 @@ mod untested_handlers {
                         recipient_pubkey,
                         redeemed_amount,
                         new_already_redeemed,
+                        denomination,
                         response_tx,
                     } => {
                         let r = redemption_manager.complete_redemption(
                             &issuer_pubkey,
                             &recipient_pubkey,
+                            &basis_store::DenomKey::Erg,
                             redeemed_amount,
                             new_already_redeemed,
                         );
@@ -140,8 +145,7 @@ mod untested_handlers {
                 tracker_nft_id: Some(
                     "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
                 ),
-                reserve_token_id: None,
-                reserve_token_decimals: 0,
+                reserve_tokens: Default::default(),
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),
@@ -527,6 +531,7 @@ mod untested_handlers {
             redeemed_amount,
             redeemed_amount,
             vec![0x11; 33],
+            basis_store::DenomKey::Erg,
         );
         let fingerprint = unsigned_tx_fingerprint(&unsigned_tx).expect("fingerprint");
         assert!(
@@ -603,9 +608,15 @@ mod untested_handlers {
 
         let (secret, issuer) = generate_keypair();
         let (_, recipient) = generate_keypair();
-        let note =
-            IouNote::create_and_sign(recipient, 10_000, 1_700_000_000_000, &secret, &[0x42; 32])
-                .unwrap();
+        let note = IouNote::create_and_sign(
+            recipient,
+            10_000,
+            1_700_000_000_000,
+            &secret,
+            &[0x42; 32],
+            basis_store::DenomKey::Erg,
+        )
+        .unwrap();
         state
             .tx
             .send(TrackerCommand::AddNote {
@@ -638,6 +649,7 @@ mod untested_handlers {
         state
             .tx
             .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+                denomination: basis_store::DenomKey::Erg,
                 issuer_pubkey: issuer,
                 recipient_pubkey: recipient,
                 response_tx: tx,

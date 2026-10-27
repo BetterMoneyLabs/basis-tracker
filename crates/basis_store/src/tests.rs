@@ -27,7 +27,15 @@ fn test_iou_note_creation() -> Result<(), String> {
     let recipient_pubkey = [1u8; 33];
     let signature = [2u8; 65];
 
-    let note = IouNote::new(recipient_pubkey, 1000, 0, 1234567890, signature, [0x42; 32]);
+    let note = IouNote::new(
+        recipient_pubkey,
+        1000,
+        0,
+        1234567890,
+        signature,
+        [0x42; 32],
+        crate::DenomKey::Erg,
+    );
 
     if note.recipient_pubkey != recipient_pubkey {
         return Err("recipient_pubkey mismatch".to_string());
@@ -53,7 +61,15 @@ fn test_signing_message() -> Result<(), String> {
     let owner_pubkey = [1u8; 33];
     let receiver_pubkey = [2u8; 33];
     let timestamp = 1743379200000u64;
-    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [3u8; 65], [0x42; 32]);
+    let note = IouNote::new(
+        receiver_pubkey,
+        1000,
+        0,
+        timestamp,
+        [3u8; 65],
+        [0x42; 32],
+        crate::DenomKey::Erg,
+    );
 
     // Format: key (32) || totalDebt (8) || timestamp (8) || trackerNftId (32) = 80 bytes
     let message = note.signing_message(&owner_pubkey);
@@ -108,9 +124,15 @@ fn test_signature_verification() -> Result<(), String> {
     let timestamp = 1234567890u64;
 
     // Create a valid signature using our implementation
-    let note =
-        IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &[1u8; 32], &[0x42; 32])
-            .expect("Failed to create valid signature");
+    let note = IouNote::create_and_sign(
+        recipient_pubkey,
+        amount,
+        timestamp,
+        &[1u8; 32],
+        &[0x42; 32],
+        crate::DenomKey::Erg,
+    )
+    .expect("Failed to create valid signature");
 
     // Test valid signature (basic format validation)
     if note.verify_signature(&issuer_pubkey).is_err() {
@@ -125,6 +147,7 @@ fn test_signature_verification() -> Result<(), String> {
         timestamp,
         [0u8; 65],
         [0x42; 32],
+        crate::DenomKey::Erg,
     );
 
     if invalid_note.verify_signature(&issuer_pubkey).is_ok() {
@@ -176,6 +199,7 @@ fn test_roundtrip_signature() -> Result<(), String> {
         timestamp,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
 
@@ -219,6 +243,7 @@ fn test_signature_tampering() -> Result<(), String> {
         1234567890,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
 
@@ -235,6 +260,7 @@ fn test_signature_tampering() -> Result<(), String> {
         1234567890,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
     note2.recipient_pubkey[0] ^= 0x01;
@@ -249,6 +275,7 @@ fn test_signature_tampering() -> Result<(), String> {
         1234567890,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
     note3.amount_collected = 2000;
@@ -264,6 +291,7 @@ fn test_signature_tampering() -> Result<(), String> {
         1234567890,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
     if note4.verify_signature(&wrong_pubkey).is_ok() {
@@ -295,6 +323,7 @@ fn test_multiple_signatures() -> Result<(), String> {
         1234567890,
         &secret_key1.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
 
@@ -304,6 +333,7 @@ fn test_multiple_signatures() -> Result<(), String> {
         1234567891,
         &secret_key2.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create and sign note: {:?}", e))?;
 
@@ -344,6 +374,7 @@ fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
         9999999999999, // Far future timestamp in milliseconds
         [0u8; 65],
         [0x42; 32],
+        crate::DenomKey::Erg,
     );
 
     // Should fail with FutureTimestamp error
@@ -372,6 +403,7 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
         1000000,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
@@ -387,6 +419,7 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
         1000001,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
@@ -419,6 +452,7 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
         1000000,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
@@ -434,6 +468,7 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
         1000000,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
@@ -455,6 +490,7 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
         999999,
         &secret_key.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create third note: {:?}", e))?;
 
@@ -488,6 +524,7 @@ fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), S
         1000000,
         &secret_key1.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
@@ -503,6 +540,7 @@ fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), S
         1000000,
         &secret_key2.secret_bytes(),
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
@@ -605,7 +643,15 @@ mod confirmation_state_tests {
         amount: u64,
         timestamp: u64,
     ) -> IouNote {
-        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret, &[0x42; 32]).unwrap()
+        IouNote::create_and_sign(
+            *recipient,
+            amount,
+            timestamp,
+            issuer_secret,
+            &[0x42; 32],
+            crate::DenomKey::Erg,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -618,7 +664,9 @@ mod confirmation_state_tests {
 
         manager.add_note(&issuer, &note).unwrap();
 
-        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        let confirmation = manager
+            .get_confirmation(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
         assert_eq!(confirmation.confirmed_total_debt, None);
         assert_eq!(confirmation.pending_total_debt, None);
@@ -638,7 +686,9 @@ mod confirmation_state_tests {
         let count = manager.mark_notes_pending(digest, "tx123", 100).unwrap();
         assert_eq!(count, 1);
 
-        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        let confirmation = manager
+            .get_confirmation(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::Pending);
         assert_eq!(confirmation.pending_total_debt, Some(1000));
         assert_eq!(confirmation.pending_tx_id, Some("tx123".to_string()));
@@ -659,7 +709,9 @@ mod confirmation_state_tests {
             .confirm_pending_notes(digest, "box123", 200)
             .unwrap();
 
-        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        let confirmation = manager
+            .get_confirmation(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::Confirmed);
         assert_eq!(confirmation.confirmed_total_debt, Some(1000));
         assert_eq!(confirmation.confirmed_box_id, Some("box123".to_string()));
@@ -681,7 +733,9 @@ mod confirmation_state_tests {
         manager.mark_notes_pending(digest, "tx123", 100).unwrap();
         manager.revert_pending_notes().unwrap();
 
-        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        let confirmation = manager
+            .get_confirmation(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
         assert_eq!(confirmation.confirmed_total_debt, None);
         assert_eq!(confirmation.pending_total_debt, None);
@@ -703,7 +757,9 @@ mod confirmation_state_tests {
             .unwrap();
         assert_eq!(count, 1);
 
-        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        let confirmation = manager
+            .get_confirmation(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::Confirmed);
         assert_eq!(confirmation.confirmed_total_debt, Some(1000));
         assert_eq!(confirmation.confirmed_box_id, Some("box456".to_string()));
@@ -725,7 +781,9 @@ mod confirmation_state_tests {
             .unwrap();
         assert_eq!(count, 0);
 
-        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        let confirmation = manager
+            .get_confirmation(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
     }
 
@@ -743,7 +801,9 @@ mod confirmation_state_tests {
 
         manager.rebuild_confirmations();
 
-        let confirmation = manager.get_confirmation(&issuer, &recipient).unwrap();
+        let confirmation = manager
+            .get_confirmation(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(confirmation.status, NoteConfirmationStatus::LocalOnly);
         assert_eq!(confirmation.pending_total_debt, None);
         assert_eq!(confirmation.pending_tx_id, None);
@@ -780,7 +840,11 @@ mod confirmation_state_tests {
 
         manager.add_note(&issuer, &note).unwrap();
 
-        let result = manager.generate_committed_tracker_lookup_proof(&issuer, &recipient);
+        let result = manager.generate_committed_tracker_lookup_proof(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+        );
         assert!(
             matches!(result, Err(crate::NoteError::NoteNotConfirmed)),
             "expected NoteNotConfirmed, got {:?}",
@@ -810,7 +874,7 @@ mod confirmation_state_tests {
 
         // Committed proof for the confirmed note works and carries the confirmed value.
         let proof1 = manager
-            .generate_committed_tracker_lookup_proof(&issuer, &recipient1)
+            .generate_committed_tracker_lookup_proof(&issuer, &recipient1, &crate::DenomKey::Erg)
             .expect("committed proof for confirmed note");
         assert_eq!(proof1.value, 1000u64.to_be_bytes().to_vec());
 
@@ -823,7 +887,7 @@ mod confirmation_state_tests {
         // The committed proof for the first note still verifies against the
         // confirmed digest — redemption liveness is preserved.
         let proof1_after = manager
-            .generate_committed_tracker_lookup_proof(&issuer, &recipient1)
+            .generate_committed_tracker_lookup_proof(&issuer, &recipient1, &crate::DenomKey::Erg)
             .expect("committed proof must survive later unconfirmed notes");
         assert_eq!(proof1_after.value, 1000u64.to_be_bytes().to_vec());
         assert!(
@@ -837,7 +901,11 @@ mod confirmation_state_tests {
         );
 
         // The unconfirmed note itself cannot be redeemed yet.
-        let result = manager.generate_committed_tracker_lookup_proof(&issuer, &recipient2);
+        let result = manager.generate_committed_tracker_lookup_proof(
+            &issuer,
+            &recipient2,
+            &crate::DenomKey::Erg,
+        );
         assert!(
             matches!(result, Err(crate::NoteError::NoteNotConfirmed)),
             "expected NoteNotConfirmed, got {:?}",
@@ -867,7 +935,11 @@ mod confirmation_state_tests {
             .reconcile_with_confirmed_digest(&other_digest, "box2", 300)
             .unwrap();
 
-        let result = manager.generate_committed_tracker_lookup_proof(&issuer, &recipient);
+        let result = manager.generate_committed_tracker_lookup_proof(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+        );
         match result {
             Err(crate::NoteError::StorageError(msg)) => {
                 assert!(
@@ -902,7 +974,15 @@ mod debt_monotonicity_tests {
         amount: u64,
         timestamp: u64,
     ) -> IouNote {
-        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret, &[0x42; 32]).unwrap()
+        IouNote::create_and_sign(
+            *recipient,
+            amount,
+            timestamp,
+            issuer_secret,
+            &[0x42; 32],
+            crate::DenomKey::Erg,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -926,7 +1006,9 @@ mod debt_monotonicity_tests {
         );
 
         // The stored note keeps the original (higher) total.
-        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        let stored = manager
+            .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(stored.amount_collected, 1000);
     }
 
@@ -949,7 +1031,9 @@ mod debt_monotonicity_tests {
             result
         );
 
-        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        let stored = manager
+            .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(stored.amount_collected, 1000);
     }
 
@@ -976,7 +1060,9 @@ mod debt_monotonicity_tests {
             .update_note(&issuer, &create_note(&issuer_secret, &recipient, 2000, 4))
             .unwrap();
 
-        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        let stored = manager
+            .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(stored.amount_collected, 2000);
     }
 
@@ -997,15 +1083,21 @@ mod debt_monotonicity_tests {
         assert_eq!(replacement.amount_redeemed, 0);
         manager.add_note(&issuer, &replacement).unwrap();
 
-        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        let stored = manager
+            .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(stored.amount_collected, 1500);
         assert_eq!(stored.amount_redeemed, 400);
 
         // A later redemption (higher amount_redeemed) is recorded via record_redemption;
         // update_note always carries the existing amount_redeemed forward.
-        manager.record_redemption(&issuer, &recipient, 600).unwrap();
+        manager
+            .record_redemption(&issuer, &recipient, &crate::DenomKey::Erg, 600)
+            .unwrap();
 
-        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        let stored = manager
+            .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(stored.amount_collected, 1500);
         assert_eq!(stored.amount_redeemed, 600);
     }
@@ -1032,7 +1124,15 @@ mod contract_range_tests {
         amount: u64,
         timestamp: u64,
     ) -> IouNote {
-        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret, &[0x42; 32]).unwrap()
+        IouNote::create_and_sign(
+            *recipient,
+            amount,
+            timestamp,
+            issuer_secret,
+            &[0x42; 32],
+            crate::DenomKey::Erg,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1065,7 +1165,9 @@ mod contract_range_tests {
         manager
             .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 2))
             .unwrap();
-        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        let stored = manager
+            .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(stored.amount_collected, 1000);
     }
 
@@ -1101,7 +1203,9 @@ mod contract_range_tests {
         manager
             .update_note(&issuer, &create_note(&issuer_secret, &recipient, 2000, 3))
             .unwrap();
-        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        let stored = manager
+            .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(stored.amount_collected, 2000);
     }
 
@@ -1119,7 +1223,9 @@ mod contract_range_tests {
                 &create_note(&issuer_secret, &recipient, i64::MAX as u64, 1),
             )
             .unwrap();
-        let stored = manager.lookup_note(&issuer, &recipient).unwrap();
+        let stored = manager
+            .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap();
         assert_eq!(stored.amount_collected, i64::MAX as u64);
     }
 
@@ -1166,5 +1272,367 @@ mod contract_range_tests {
         manager
             .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
             .unwrap();
+    }
+}
+
+/// Multi-denomination acceptance tests for specs/ergo/multi_collateral_reserves.md:
+/// independent debt edges per (issuer, recipient, denomination), per-pair reserve
+/// trees, and journal-based restart rebuilds reproducing digests exactly.
+#[cfg(test)]
+mod multi_denomination_tests {
+    use crate::{DenomKey, IouNote, NoteError, TrackerStateManager};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    const NFT: [u8; 32] = [0x42; 32];
+    const TOKEN_A: [u8; 32] = [0xa5; 32];
+    const TOKEN_B: [u8; 32] = [0xe8; 32];
+
+    fn pubkey(secret_key: &[u8; 32]) -> [u8; 33] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(secret_key).expect("valid secret key");
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+    }
+
+    fn create_note(
+        issuer_secret: &[u8; 32],
+        recipient: &[u8; 33],
+        amount: u64,
+        timestamp: u64,
+        denomination: DenomKey,
+    ) -> IouNote {
+        IouNote::create_and_sign(
+            *recipient,
+            amount,
+            timestamp,
+            issuer_secret,
+            &NFT,
+            denomination,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn same_pair_independent_debt_per_denomination() {
+        let mut manager = TrackerStateManager::new_with_temp_storage();
+        let issuer_secret = [1u8; 32];
+        let issuer = pubkey(&issuer_secret);
+        let recipient = pubkey(&[2u8; 32]);
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+            )
+            .unwrap();
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret,
+                    &recipient,
+                    250,
+                    1001,
+                    DenomKey::Token(TOKEN_A),
+                ),
+            )
+            .unwrap();
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret,
+                    &recipient,
+                    2500,
+                    1002,
+                    DenomKey::Token(TOKEN_B),
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            250
+        );
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_B))
+                .unwrap(),
+            2500
+        );
+
+        // The three edges are distinct tree keys.
+        let k_erg = crate::NoteKey::from_assets(&issuer, &recipient, &DenomKey::Erg);
+        let k_a = crate::NoteKey::from_assets(&issuer, &recipient, &DenomKey::Token(TOKEN_A));
+        let k_b = crate::NoteKey::from_assets(&issuer, &recipient, &DenomKey::Token(TOKEN_B));
+        assert_ne!(k_erg, k_a);
+        assert_ne!(k_a, k_b);
+
+        // A note signed for one denomination is rejected under another: the
+        // denomination is part of the signed message's key.
+        let erg_note = create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg);
+        let mut wrong = erg_note.clone();
+        wrong.denomination = DenomKey::Token(TOKEN_A);
+        assert!(matches!(
+            wrong.verify_signature(&issuer),
+            Err(NoteError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn reserve_trees_are_per_issuer_and_denomination() {
+        let mut manager = TrackerStateManager::new_with_temp_storage();
+        let issuer = pubkey(&[1u8; 32]);
+        let recipient = pubkey(&[2u8; 32]);
+
+        manager
+            .update_already_redeemed(&issuer, &recipient, &DenomKey::Erg, 1000, 10)
+            .unwrap();
+        manager
+            .update_already_redeemed(&issuer, &recipient, &DenomKey::Token(TOKEN_A), 1001, 40)
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .get_already_redeemed(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            manager
+                .get_already_redeemed(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            40
+        );
+        // A denomination with no history is the empty tree / zero redeemed.
+        assert_eq!(
+            manager
+                .get_already_redeemed(&issuer, &recipient, &DenomKey::Token(TOKEN_B))
+                .unwrap(),
+            0
+        );
+        assert_ne!(
+            manager.reserve_state_digest(&issuer, &DenomKey::Erg),
+            manager.reserve_state_digest(&issuer, &DenomKey::Token(TOKEN_A)),
+        );
+    }
+
+    /// §10 exchange: consented cross-denomination debt movement is atomic and
+    /// signature-checked; non-consented or malformed exchanges are rejected.
+    #[test]
+    fn exchange_moves_debt_between_denominations() {
+        let mut manager = TrackerStateManager::new_with_temp_storage();
+        let issuer_secret = [1u8; 32];
+        let recipient_secret = [3u8; 32];
+        let issuer = pubkey(&issuer_secret);
+        let recipient = pubkey(&recipient_secret);
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+            )
+            .unwrap();
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret,
+                    &recipient,
+                    50,
+                    1001,
+                    DenomKey::Token(TOKEN_A),
+                ),
+            )
+            .unwrap();
+
+        // Exchange 30 ERG for 40 TOKEN_A at timestamp 2000.
+        let sign = |secret: &[u8; 32], denom: &DenomKey, total: u64, ts: u64| {
+            let pk = pubkey(secret);
+            let msg = crate::schnorr::signing_message(&issuer, &recipient, denom, total, ts, &NFT);
+            let _ = pk;
+            crate::schnorr::schnorr_sign(&msg, secret, &issuer).unwrap()
+        };
+        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
+        };
+        let ts = 2000u64;
+        let msg_from =
+            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
+        let msg_to = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &DenomKey::Token(TOKEN_A),
+            90,
+            ts,
+            &NFT,
+        );
+        let _ = sign;
+        let issuer_from = sign_as(&issuer_secret, &msg_from, &issuer);
+        let recipient_from = sign_as(&recipient_secret, &msg_from, &recipient);
+        let issuer_to = sign_as(&issuer_secret, &msg_to, &issuer);
+        let recipient_to = sign_as(&recipient_secret, &msg_to, &recipient);
+
+        manager
+            .exchange_debt(
+                &issuer,
+                &recipient,
+                &DenomKey::Erg,
+                30,
+                &DenomKey::Token(TOKEN_A),
+                40,
+                ts,
+                &issuer_from,
+                &recipient_from,
+                &issuer_to,
+                &recipient_to,
+            )
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            70
+        );
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            90
+        );
+        // The exchanged notes still verify under the new signatures.
+        let erg_note = manager
+            .lookup_note(&issuer, &recipient, &DenomKey::Erg)
+            .unwrap();
+        assert!(erg_note.verify_signature(&issuer).is_ok());
+        assert_eq!(erg_note.timestamp, ts);
+
+        // Creditor consent is required: a bad recipient signature is rejected and
+        // nothing moves.
+        let ts2 = 2001u64;
+        let msg_from2 =
+            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 60, ts2, &NFT);
+        let msg_to2 = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &DenomKey::Token(TOKEN_A),
+            100,
+            ts2,
+            &NFT,
+        );
+        let bad_recipient_from = sign_as(&issuer_secret, &msg_from2, &issuer); // signed by the wrong party
+        let result = manager.exchange_debt(
+            &issuer,
+            &recipient,
+            &DenomKey::Erg,
+            10,
+            &DenomKey::Token(TOKEN_A),
+            10,
+            ts2,
+            &sign_as(&issuer_secret, &msg_from2, &issuer),
+            &bad_recipient_from,
+            &sign_as(&issuer_secret, &msg_to2, &issuer),
+            &sign_as(&recipient_secret, &msg_to2, &recipient),
+        );
+        assert!(matches!(result, Err(NoteError::InvalidSignature)));
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            70
+        );
+
+        // Same-denomination exchange is rejected.
+        assert!(matches!(
+            manager.exchange_debt(
+                &issuer,
+                &recipient,
+                &DenomKey::Erg,
+                10,
+                &DenomKey::Erg,
+                10,
+                ts2,
+                &issuer_from,
+                &recipient_from,
+                &issuer_to,
+                &recipient_to,
+            ),
+            Err(NoteError::InvalidExchange(_))
+        ));
+    }
+
+    /// §7.4 restart-rebuild equality: notes and reserve trees survive a restart
+    /// bit-identically (journal replay + note store reload).
+    #[test]
+    fn restart_rebuild_reproduces_digests() {
+        let dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let issuer = pubkey(&issuer_secret);
+        let recipient = pubkey(&[2u8; 32]);
+
+        let (root_before, erg_digest_before, tok_digest_before) = {
+            let mut manager = TrackerStateManager::new(dir.path());
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+                )
+                .unwrap();
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(
+                        &issuer_secret,
+                        &recipient,
+                        250,
+                        1001,
+                        DenomKey::Token(TOKEN_A),
+                    ),
+                )
+                .unwrap();
+            manager
+                .update_already_redeemed(&issuer, &recipient, &DenomKey::Token(TOKEN_A), 1001, 40)
+                .unwrap();
+            (
+                manager.get_state().avl_root_digest,
+                manager.reserve_state_digest(&issuer, &DenomKey::Erg),
+                manager.reserve_state_digest(&issuer, &DenomKey::Token(TOKEN_A)),
+            )
+        };
+
+        let mut manager2 = TrackerStateManager::new(dir.path());
+        assert_eq!(manager2.get_state().avl_root_digest, root_before);
+        assert_eq!(
+            manager2.reserve_state_digest(&issuer, &DenomKey::Erg),
+            erg_digest_before
+        );
+        assert_eq!(
+            manager2.reserve_state_digest(&issuer, &DenomKey::Token(TOKEN_A)),
+            tok_digest_before
+        );
+        assert_eq!(
+            manager2
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            250
+        );
+        assert_eq!(
+            manager2
+                .get_already_redeemed(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            40
+        );
+        // Wrong-denomination lookups find nothing.
+        assert!(manager2
+            .lookup_note(&issuer, &recipient, &DenomKey::Token(TOKEN_B))
+            .is_err());
     }
 }

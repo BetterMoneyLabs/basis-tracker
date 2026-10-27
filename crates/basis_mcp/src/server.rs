@@ -141,6 +141,9 @@ pub struct NoteGetParams {
     pub issuer: String,
     /// Recipient public key (hex).
     pub recipient: String,
+    /// Denomination of the note: "erg" (default) or "token:<64-hex>".
+    #[serde(default)]
+    pub denomination: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -168,16 +171,22 @@ pub struct AccountImportParams {
 pub struct NoteCreateParams {
     /// Recipient public key (hex).
     pub recipient: String,
-    /// Amount in nanoERG.
+    /// Amount in nanoERG (or raw token units when `denomination` is a token).
     pub amount: u64,
+    /// Denomination of the debt: "erg" (default) or "token:<64-hex>".
+    #[serde(default)]
+    pub denomination: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NoteRedeemParams {
     /// Issuer public key (hex).
     pub issuer: String,
-    /// Amount to redeem in nanoERG.
+    /// Amount to redeem in nanoERG (or raw token units when `denomination` is a token).
     pub amount: u64,
+    /// Denomination of the note: "erg" (default) or "token:<64-hex>".
+    #[serde(default)]
+    pub denomination: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -374,7 +383,13 @@ impl BasisMcp {
     ) -> Result<CallToolResult, McpError> {
         let state = self.state.lock().await;
         json_result(
-            commands::note::get_note(&state.client, &params.issuer, &params.recipient).await,
+            commands::note::get_note(
+                &state.client,
+                &params.issuer,
+                &params.recipient,
+                params.denomination.as_deref(),
+            )
+            .await,
         )
     }
 
@@ -456,6 +471,7 @@ impl BasisMcp {
                 &state.client,
                 &params.recipient,
                 params.amount,
+                params.denomination.as_deref(),
             )
             .await,
         )
@@ -475,6 +491,7 @@ impl BasisMcp {
                 &params.issuer,
                 params.amount,
                 true, // server-side signing so the recipient can redeem without the issuer key
+                params.denomination.as_deref(),
             )
             .await,
         )

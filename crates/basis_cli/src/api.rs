@@ -81,6 +81,9 @@ pub struct CreateNoteRequest {
     pub timestamp: u64,
     pub signature: String,
     pub tracker_nft_id: String,
+    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +96,13 @@ pub struct SerializableIouNote {
     pub signature: String,
     #[serde(default)]
     pub tracker_nft_id: String,
+    /// Denomination of the debt: "erg" or "token:<64-hex>".
+    #[serde(default = "default_denomination_erg")]
+    pub denomination: String,
+}
+
+fn default_denomination_erg() -> String {
+    "erg".to_string()
 }
 
 impl SerializableIouNote {
@@ -107,17 +117,31 @@ impl SerializableIouNote {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyStatusResponse {
+pub struct KeyStatusDenomination {
+    /// "erg" or "token:<64-hex>"
+    pub denomination: String,
+    pub symbol: String,
+    pub decimals: u8,
     pub total_debt: u64,
     pub collateral: u64,
     pub collateralization_ratio: f64,
     pub note_count: usize,
-    pub last_updated: u64,
-    pub issuer_pubkey: String,
+    #[serde(default)]
+    pub reserve_box_id: Option<String>,
     #[serde(default)]
     pub has_pending_refund: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyStatusResponse {
+    pub issuer_pubkey: String,
+    /// Unit-free aggregate: total number of notes across all denominations.
+    pub note_count: usize,
+    pub last_updated: u64,
+    pub has_pending_refund: bool,
+    /// Per-denomination breakdown (debt/collateral are never summed across denominations).
     #[serde(default)]
-    pub reserve_token_id: Option<String>,
+    pub denominations: Vec<KeyStatusDenomination>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +176,9 @@ pub struct RedeemRequest {
     /// Tracker's Schnorr signature (optional - server will generate if not provided)
     #[serde(default)]
     pub tracker_signature: Option<String>,
+    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +199,9 @@ pub struct CompleteRedemptionRequest {
     /// Cumulative reserve-tree already_redeemed after this redemption.
     #[serde(default)]
     pub new_already_redeemed: Option<u64>,
+    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,6 +308,35 @@ pub struct ReserveTokenConfig {
     pub basis_token_reserve_contract_p2s: String,
 }
 
+/// One token the tracker serves as reserve collateral.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServedTokenInfo {
+    pub token_id: String,
+    pub symbol: String,
+    pub decimals: u8,
+    #[serde(default)]
+    pub min_collateralization_ratio: Option<f64>,
+}
+
+/// One denomination the tracker serves (ERG plus every served token).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServedDenomination {
+    pub id: String,
+    pub symbol: String,
+    pub decimals: u8,
+}
+
+/// Reserve-collateral configuration: contract addresses plus the served-token table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveCollateralConfig {
+    pub erg_contract_p2s: String,
+    pub token_contract_p2s: String,
+    #[serde(default)]
+    pub tokens: Vec<ServedTokenInfo>,
+    #[serde(default)]
+    pub denominations: Vec<ServedDenomination>,
+}
+
 // Tracker signature request/response for redemption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerSignatureRequest {
@@ -289,6 +348,9 @@ pub struct TrackerSignatureRequest {
     pub timestamp: u64,
     #[serde(default)]
     pub emergency: bool,
+    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +413,9 @@ pub struct CheckAcceptanceRequest {
     pub total_debt: u64,
     #[serde(default)]
     pub recipient_pubkey: Option<String>,
+    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 // Response for checking note acceptance
@@ -504,10 +569,23 @@ impl TrackerClient {
         issuer: &str,
         recipient: &str,
     ) -> Result<Option<SerializableIouNote>> {
-        let url = format!(
+        self.get_note_denominated(issuer, recipient, None).await
+    }
+
+    /// Get a note, optionally restricted to a denomination ("erg" or "token:<64-hex>").
+    pub async fn get_note_denominated(
+        &self,
+        issuer: &str,
+        recipient: &str,
+        denomination: Option<&str>,
+    ) -> Result<Option<SerializableIouNote>> {
+        let mut url = format!(
             "{}/notes/issuer/{}/recipient/{}",
             self.base_url, issuer, recipient
         );
+        if let Some(d) = denomination {
+            url = format!("{}?denomination={}", url, d);
+        }
         let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
@@ -630,6 +708,8 @@ impl TrackerClient {
             total_debt,
             timestamp,
             emergency,
+
+            denomination: String::new(),
         };
 
         let url = format!("{}/tracker/signature", self.base_url);
@@ -665,6 +745,9 @@ pub struct RedemptionPreparationRequest {
     /// Legacy field, ignored by the server: the stored note's payment
     /// timestamp is signed.
     pub timestamp: u64,
+    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -697,6 +780,9 @@ pub struct RedemptionBuildRequest {
     /// Deprecated: ignored by the tracker, which always pays change to its own wallet.
     #[serde(default)]
     pub change_address: Option<String>,
+    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -848,6 +934,8 @@ impl TrackerClient {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+
+            denomination: String::new(),
         };
 
         let url = format!("{}/redemption/prepare", self.base_url);
@@ -1023,6 +1111,27 @@ impl TrackerClient {
         }
     }
 
+    /// Fetch the tracker's reserve-collateral configuration (contract addresses plus
+    /// the served-token table).
+    pub async fn get_reserve_collateral_config(&self) -> Result<ReserveCollateralConfig> {
+        let url = format!("{}/config/reserve-collateral", self.base_url);
+        let response = self.get(&url)?.call()?;
+        if response.status() == 200 {
+            let api_response: ApiResponse<ReserveCollateralConfig> = response.into_json()?;
+            if api_response.success {
+                return api_response
+                    .data
+                    .ok_or_else(|| anyhow::anyhow!("missing data in reserve-collateral response"));
+            }
+            return Err(anyhow::anyhow!("API error: {:?}", api_response.error));
+        }
+        let error_text = response.into_string()?;
+        Err(anyhow::anyhow!(
+            "Failed to get reserve collateral config: {}",
+            error_text
+        ))
+    }
+
     /// Fetch the tracker's reserve-token configuration.
     pub async fn get_reserve_token_config(&self) -> Result<ReserveTokenConfig> {
         let url = format!("{}/config/reserve-token", self.base_url);
@@ -1100,6 +1209,8 @@ impl TrackerClient {
             issuer_pubkey: issuer_pubkey.to_string(),
             total_debt,
             recipient_pubkey: recipient_pubkey.map(|s| s.to_string()),
+
+            denomination: String::new(),
         };
 
         let url = format!("{}/acceptance/check", self.base_url);

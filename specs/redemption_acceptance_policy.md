@@ -26,6 +26,13 @@ that can produce a tracker signature:
   would let a caller bypass the check (by assembling the transaction from
   `/reserve/proof` + `/tracker/proof`) can never be issued.
 
+> **Scope.** The policy check and the FIFO fallback are tracker-side **policy**, not
+> contract invariants: the signed redemption message binds the note's `totalDebt` but not
+> the amount redeemed in a given transaction. On-chain the contract bounds every redemption
+> at `totalDebt - redeemedDebt`; the tracker only declines to *sign* redemptions that would
+> breach a policy. See `specs/client/offchain_redemption_signing.md` ("Scope of the tracker
+> signature").
+
 ## Simulated ratio math
 
 Let:

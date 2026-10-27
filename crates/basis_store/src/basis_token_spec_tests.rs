@@ -141,9 +141,18 @@ mod tests {
         let ergo_tree = address.script().expect("should extract script");
         let parsed_hex = hex::encode(ergo_tree.sigma_serialize_bytes().unwrap());
 
+        // The constant carries the Scala compiler's serialization, which can differ
+        // from ergo-lib's constant-table ordering; compare after ergo-lib
+        // normalization (parse + re-serialize) on both sides.
+        let constant_tree = ergo_lib::ergotree_ir::ergo_tree::ErgoTree::sigma_parse_bytes(
+            &hex::decode(&expected_tree).unwrap(),
+        )
+        .expect("hard-coded basis-token ErgoTree must parse");
+        let constant_normalized = hex::encode(constant_tree.sigma_serialize_bytes().unwrap());
+
         assert_eq!(
-            parsed_hex, expected_tree,
-            "parsed ErgoTree hex must match the hard-coded basis-token ErgoTree"
+            parsed_hex, constant_normalized,
+            "parsed ErgoTree must match the hard-coded basis-token ErgoTree after normalization"
         );
     }
 
@@ -326,6 +335,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -347,6 +357,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -373,6 +384,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -393,6 +405,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -434,6 +447,7 @@ mod tests {
         let msg_bob = core_signing_message(
             &alice_pk,
             &bob_pk,
+            &crate::DenomKey::Erg,
             remaining,
             TEST_TIMESTAMP,
             &tracker_nft_bytes(),
@@ -441,6 +455,7 @@ mod tests {
         let msg_carol = core_signing_message(
             &alice_pk,
             &carol_pk,
+            &crate::DenomKey::Erg,
             transferred,
             TEST_TIMESTAMP + 1,
             &tracker_nft_bytes(),
@@ -473,6 +488,7 @@ mod tests {
         let message = core_signing_message(
             &alice_pk,
             &carol_pk,
+            &crate::DenomKey::Erg,
             transfer_amount,
             TEST_TIMESTAMP,
             &tracker_nft_bytes(),
@@ -500,12 +516,13 @@ mod tests {
             TEST_TIMESTAMP,
             &issuer_secret,
             &[0x42; 32],
+            crate::DenomKey::Erg,
         )
         .unwrap();
         tracker.add_note(&issuer_pk, &note).unwrap();
 
         let proof = tracker
-            .generate_reserve_lookup_proof(&issuer_pk, &recipient_pk)
+            .generate_reserve_lookup_proof(&issuer_pk, &recipient_pk, &crate::DenomKey::Erg)
             .unwrap();
         assert_eq!(proof.value.len(), 16);
         assert_eq!(proof.value, vec![0u8; 16]);

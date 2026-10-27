@@ -55,6 +55,48 @@ pub struct CreateNoteRequest {
     /// Tracker NFT ID the note is bound to (part of the signed message, issue #15 C3).
     /// Must match this tracker's configured `ergo.tracker_nft_id`.
     pub tracker_nft_id: String,
+    /// Denomination of the debt ("erg" or "token:<64-hex>"); empty means default
+    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
+    #[serde(default)]
+    pub denomination: String,
+}
+
+/// Cross-denomination debt exchange request (off-chain novation / triage).
+///
+/// Moves `from_amount` of cumulative debt out of the (issuer, recipient,
+/// from_denomination) edge and `to_amount` into the (issuer, recipient,
+/// to_denomination) edge (specs/ergo/multi_collateral_reserves.md §10). All four
+/// signatures are over the respective edge's standard 80-byte note message at the
+/// NEW cumulative total and `timestamp`; the recipient's signatures are the
+/// creditor consent required by the S3 rule.
+#[derive(Debug, Deserialize)]
+pub struct ExchangeNotesRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub from_denomination: String,
+    pub from_amount: u64,
+    pub to_denomination: String,
+    pub to_amount: u64,
+    /// New timestamp for both edges; must be newer than both edges' current ones.
+    pub timestamp: u64,
+    /// Issuer signature over the from-edge's new note message (hex, 65 bytes)
+    pub issuer_from_signature: String,
+    /// Recipient signature over the from-edge's new note message (creditor consent)
+    pub recipient_from_signature: String,
+    /// Issuer signature over the to-edge's new note message (hex, 65 bytes)
+    pub issuer_to_signature: String,
+    /// Recipient signature over the to-edge's new note message (creditor acceptance)
+    pub recipient_to_signature: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExchangeNotesResponse {
+    pub exchanged: bool,
+    pub from_denomination: String,
+    pub to_denomination: String,
+    pub from_new_total: u64,
+    pub to_new_total: u64,
+    pub timestamp: u64,
 }
 
 // Response structure for API responses
@@ -104,6 +146,8 @@ pub struct SerializableIouNote {
     pub signature: String,
     /// Tracker NFT ID this note is bound to (part of the signed message, issue #15 C3).
     pub tracker_nft_id: String,
+    /// Denomination of the debt: "erg" or "token:<64-hex>".
+    pub denomination: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<NoteConfirmationSummary>,
 }
@@ -120,6 +164,8 @@ pub struct SerializableIouNoteWithAge {
     /// Tracker NFT ID this note is bound to (part of the signed message, issue #15 C3).
     pub tracker_nft_id: String,
     pub age_seconds: u64,
+    /// Denomination of the debt: "erg" or "token:<64-hex>".
+    pub denomination: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<NoteConfirmationSummary>,
 }
@@ -134,6 +180,7 @@ impl From<IouNote> for SerializableIouNote {
             timestamp: note.timestamp,
             signature: hex::encode(note.signature),
             tracker_nft_id: hex::encode(note.tracker_nft_id),
+            denomination: note.denomination.denomination_id(),
             confirmation: None,
         }
     }
@@ -142,16 +189,30 @@ impl From<IouNote> for SerializableIouNote {
 // Key status response
 #[derive(Debug, Serialize)]
 pub struct KeyStatusResponse {
+    pub issuer_pubkey: String,
+    /// Unit-free aggregate: total number of notes across all denominations.
+    pub note_count: usize,
+    pub last_updated: u64,
+    pub has_pending_refund: bool,
+    /// Per-denomination breakdown; debt and collateral are never summed across
+    /// denominations (specs/ergo/multi_collateral_reserves.md §11).
+    pub denominations: Vec<KeyStatusDenomination>,
+}
+
+/// Per-denomination debt/collateral status for an issuer.
+#[derive(Debug, Serialize)]
+pub struct KeyStatusDenomination {
+    /// "erg" or "token:<64-hex>"
+    pub denomination: String,
+    pub symbol: String,
+    pub decimals: u8,
     pub total_debt: u64,
     pub collateral: u64,
     pub collateralization_ratio: f64,
     pub note_count: usize,
-    pub last_updated: u64,
-    pub issuer_pubkey: String,
-    pub has_pending_refund: bool,
-    /// Reserve token ID (hex-encoded) when the issuer's reserve is token-backed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reserve_token_id: Option<String>,
+    pub reserve_box_id: Option<String>,
+    pub has_pending_refund: bool,
 }
 
 // Redemption request
@@ -172,6 +233,10 @@ pub struct RedeemRequest {
     /// Whether this is an emergency redemption
     #[serde(default)]
     pub emergency: bool,
+    /// Denomination of the debt ("erg" or "token:<64-hex>"); empty means default
+    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 // Redemption completion request
@@ -180,6 +245,10 @@ pub struct CompleteRedemptionRequest {
     pub redemption_id: String,
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Denomination of the debt ("erg" or "token:<64-hex>"); empty means default
+    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
+    #[serde(default)]
+    pub denomination: String,
     pub redeemed_amount: u64,
     /// Optional explicit cumulative reserve-tree value (from the on-chain build).
     /// When omitted, the note's cumulative redeemed amount is used.
@@ -254,6 +323,10 @@ pub struct TrackerSignatureRequest {
     pub timestamp: u64,
     #[serde(default)]
     pub emergency: bool,
+    /// Denomination of the debt ("erg" or "token:<64-hex>"); empty means default
+    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 // Response for tracker signature
@@ -281,6 +354,10 @@ pub struct RedemptionPreparationRequest {
     /// Whether this is an emergency redemption (exempt from the acceptance-policy check)
     #[serde(default)]
     pub emergency: bool,
+    /// Denomination of the debt ("erg" or "token:<64-hex>"); empty means default
+    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 // Response for redemption preparation
@@ -448,6 +525,34 @@ pub struct ReserveTokenConfigResponse {
     pub basis_token_reserve_contract_p2s: String,
 }
 
+/// One token the tracker serves as reserve collateral.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServedTokenInfo {
+    pub token_id: String,
+    pub symbol: String,
+    pub decimals: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_collateralization_ratio: Option<f64>,
+}
+
+/// One denomination the tracker serves (ERG plus every served token).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServedDenomination {
+    /// "erg" or "token:<64-hex>"
+    pub id: String,
+    pub symbol: String,
+    pub decimals: u8,
+}
+
+/// Reserve collateral configuration: contract addresses plus the served-token table.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReserveCollateralConfigResponse {
+    pub erg_contract_p2s: String,
+    pub token_contract_p2s: String,
+    pub tokens: Vec<ServedTokenInfo>,
+    pub denominations: Vec<ServedDenomination>,
+}
+
 // Tracker state response - shows local, confirmed and pending digests.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackerStateResponse {
@@ -474,6 +579,10 @@ pub struct PendingTxResponse {
 pub struct NoteStateRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
+    /// Denomination of the debt ("erg" or "token:<64-hex>"); empty means default
+    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 // Response for a single note's confirmation state.
@@ -500,6 +609,10 @@ pub struct CheckAcceptanceRequest {
     /// Optional hex-encoded recipient public key (33 bytes) for per-recipient policy lookup
     #[serde(default)]
     pub recipient_pubkey: Option<String>,
+    /// Denomination of the debt ("erg" or "token:<64-hex>"); empty means default
+    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 // Response for checking note acceptance

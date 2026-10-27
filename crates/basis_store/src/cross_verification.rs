@@ -39,7 +39,15 @@ fn test_basic_cryptography() -> Result<(), String> {
     let owner_pubkey = [1u8; 33];
     let receiver_pubkey = [2u8; 33];
     let timestamp = 1743379200000u64;
-    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65], [0x42; 32]);
+    let note = IouNote::new(
+        receiver_pubkey,
+        1000,
+        0,
+        timestamp,
+        [0u8; 65],
+        [0x42; 32],
+        crate::DenomKey::Erg,
+    );
 
     // Format: key (32) || totalDebt (8) || timestamp (8) || trackerNftId (32) = 80 bytes
     let message = note.signing_message(&owner_pubkey);
@@ -95,12 +103,21 @@ fn test_edge_cases() -> Result<(), String> {
         timestamp,
         [0x01u8; 65],
         [0x42; 32],
+        crate::DenomKey::Erg,
     );
     let message = note.signing_message(&owner_pubkey);
     assert_eq!(message.len(), 80);
 
     // Test 3: Zero values
-    let zero_note = IouNote::new([0u8; 33], 0, 0, 0, [0u8; 65], [0x42; 32]);
+    let zero_note = IouNote::new(
+        [0u8; 33],
+        0,
+        0,
+        0,
+        [0u8; 65],
+        [0x42; 32],
+        crate::DenomKey::Erg,
+    );
     let zero_message = zero_note.signing_message(&owner_pubkey);
     assert_eq!(zero_message.len(), 80);
 
@@ -116,7 +133,15 @@ fn test_message_format_compatibility() -> Result<(), String> {
     let owner_pubkey = [1u8; 33];
     let receiver_pubkey = [2u8; 33];
     let timestamp = 1743379200000u64;
-    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65], [0x42; 32]);
+    let note = IouNote::new(
+        receiver_pubkey,
+        1000,
+        0,
+        timestamp,
+        [0u8; 65],
+        [0x42; 32],
+        crate::DenomKey::Erg,
+    );
     let message = note.signing_message(&owner_pubkey);
 
     // Verify structure: key_hash (32) + total_debt (8) + timestamp (8) + tracker_nft_id (32)

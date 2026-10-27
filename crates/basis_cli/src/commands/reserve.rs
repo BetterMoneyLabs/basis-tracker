@@ -66,11 +66,20 @@ pub struct ReserveCreateResult {
 }
 
 /// Collateralization ratio and classification for an issuer.
-#[derive(Debug, Serialize)]
-pub struct CollateralizationResult {
-    pub issuer_pubkey: String,
+#[derive(Debug, serde::Serialize)]
+pub struct CollateralizationDenominationResult {
+    pub denomination: String,
+    pub symbol: String,
     pub ratio: f64,
     pub status: String,
+}
+
+/// Collateralization overview for an issuer, per denomination.
+#[derive(Debug, serde::Serialize)]
+pub struct CollateralizationResult {
+    pub issuer_pubkey: String,
+    /// Per-denomination ratios; never aggregated across units.
+    pub denominations: Vec<CollateralizationDenominationResult>,
 }
 
 /// Resolve the issuer/owner public key from an optional CLI argument or the current account.
@@ -189,8 +198,16 @@ pub async fn get_collateralization(
     let status = get_reserve_status(account_manager, client, issuer).await?;
     Ok(CollateralizationResult {
         issuer_pubkey: status.issuer_pubkey.clone(),
-        ratio: status.collateralization_ratio,
-        status: get_collateralization_status(status.collateralization_ratio).to_string(),
+        denominations: status
+            .denominations
+            .iter()
+            .map(|d| CollateralizationDenominationResult {
+                denomination: d.denomination.clone(),
+                symbol: d.symbol.clone(),
+                ratio: d.collateralization_ratio,
+                status: get_collateralization_status(d.collateralization_ratio).to_string(),
+            })
+            .collect(),
     })
 }
 
@@ -275,32 +292,35 @@ pub async fn handle_reserve_command(
             if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
-                let token_backed = status.reserve_token_id.is_some();
                 println!("Reserve Status for {}:", status.issuer_pubkey);
-                println!("  Total Debt: {} units", status.total_debt);
-                println!("  Collateral: {} units", status.collateral);
-                println!(
-                    "  Collateralization Ratio: {:.2}",
-                    status.collateralization_ratio
-                );
-                println!("  Note Count: {}", status.note_count);
-                println!("  Last Updated: {}", status.last_updated);
-                if token_backed {
+                if status.denominations.is_empty() {
+                    println!("  No notes or reserves");
+                }
+                for d in &status.denominations {
+                    let scale = 10f64.powi(d.decimals as i32);
+                    println!("  [{}]", d.denomination);
                     println!(
-                        "  Reserve Token ID: {}",
-                        status.reserve_token_id.as_ref().unwrap()
+                        "    Total Debt: {} raw ({:.prec$} {})",
+                        d.total_debt,
+                        d.total_debt as f64 / scale,
+                        d.symbol,
+                        prec = d.decimals as usize
                     );
+                    println!(
+                        "    Collateral: {} raw ({:.prec$} {})",
+                        d.collateral,
+                        d.collateral as f64 / scale,
+                        d.symbol,
+                        prec = d.decimals as usize
+                    );
+                    println!(
+                        "    Collateralization Ratio: {:.2}",
+                        d.collateralization_ratio
+                    );
+                    println!("    Note Count: {}", d.note_count);
                 }
-
-                if !token_backed {
-                    // Calculate ERG values
-                    let debt_erg = status.total_debt as f64 / 1_000_000_000.0;
-                    let collateral_erg = status.collateral as f64 / 1_000_000_000.0;
-
-                    println!("\nIn ERG:");
-                    println!("  Total Debt: {:.6} ERG", debt_erg);
-                    println!("  Collateral: {:.6} ERG", collateral_erg);
-                }
+                println!("  Note Count (all denominations): {}", status.note_count);
+                println!("  Last Updated: {}", status.last_updated);
             }
         }
         ReserveCommands::Collateralization { issuer } => {
@@ -309,13 +329,19 @@ pub async fn handle_reserve_command(
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 println!("Collateralization for {}:", result.issuer_pubkey);
-                println!("  Ratio: {:.4}", result.ratio);
-                println!("  Status: {}", result.status);
+                if result.denominations.is_empty() {
+                    println!("  No notes or reserves");
+                }
+                for d in &result.denominations {
+                    println!("  [{}]", d.denomination);
+                    println!("    Ratio: {:.4}", d.ratio);
+                    println!("    Status: {}", d.status);
 
-                if result.ratio < 1.0 {
-                    println!("⚠️  WARNING: Under-collateralized!");
-                } else if result.ratio < 1.5 {
-                    println!("⚠️  WARNING: Low collateralization");
+                    if d.ratio < 1.0 {
+                        println!("    ⚠️  WARNING: Under-collateralized!");
+                    } else if d.ratio < 1.5 {
+                        println!("    ⚠️  WARNING: Low collateralization");
+                    }
                 }
             }
         }

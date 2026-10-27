@@ -11,6 +11,7 @@ use crate::{NoteError, PubKey, Signature};
 pub fn signing_message(
     owner_key: &PubKey,
     receiver_key: &PubKey,
+    denomination: &crate::DenomKey,
     total_debt: u64,
     timestamp: u64,
     tracker_nft_id: &[u8; 32],
@@ -18,6 +19,7 @@ pub fn signing_message(
     basis_core::types::signing_message(
         owner_key,
         receiver_key,
+        denomination,
         total_debt,
         timestamp,
         tracker_nft_id,
@@ -183,6 +185,7 @@ mod tests {
         let message = signing_message(
             &owner_pubkey,
             &receiver_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -209,6 +212,7 @@ mod tests {
         let message = signing_message(
             &owner_pubkey,
             &receiver_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -225,6 +229,7 @@ mod tests {
         let wrong_message = signing_message(
             &owner_pubkey,
             &receiver_pubkey,
+            &crate::DenomKey::Erg,
             total_debt + 1,
             timestamp,
             &[0x42; 32],

@@ -255,11 +255,21 @@
 
       val ownerKeyBytes = ownerKey.getEncoded // Reserve owner's public key (from R4 register) bytes
 
-      // Create key for debt record: hash(ownerKey || receiverKey)
-      // This key is used in both:
-      // - tracker's AVL tree (R5) for totalDebt lookup
-      // - reserve's AVL tree (R5) for (timestamp, cumulative redeemed amount) lookup
-      val key = blake2b256(ownerKeyBytes ++ receiverBytes)
+0      // Debt record key, derived from the denomination so one tracker box can
+      // hold ERG, SigUSD, rsBTC, ... debt in a single AVL tree without collisions
+      // (specs/ergo/multi_collateral_reserves.md):
+      //   debtKey = blake2b256(ownerKey || receiverKey || tokenId)
+      // (the token id starts at a fixed offset: both keys are 33 bytes, so no tag
+      // byte is needed). Used for:
+      // - tracker's AVL tree (R5) totalDebt lookup
+      // - the signed message (so a signature commits to the denomination)
+      val debtKey = blake2b256(ownerKeyBytes ++ receiverBytes ++ tokenId1)
+
+      // Reserve redemption-history key keeps the unsuffixed derivation so the
+      // reserve tree's (timestamp, cumulativeRedeemed) counters are unaffected by
+      // the denomination namespacing. Used for:
+      // - reserve's AVL tree (R5) lookup and update
+      val reserveKey = blake2b256(ownerKeyBytes ++ receiverBytes)
 
       // Total debt amount and timestamp from context variables
       val totalDebt = getVar[Long](3).get
@@ -268,7 +278,7 @@
       // Verify totalDebt is committed in tracker's AVL tree using context variable #8
       // This ensures the tracker is attesting to a debt amount that exists in its on-chain commitment
       val trackerLookupProof = getVar[Coll[Byte]](8).get
-      val trackerDebtBytes = trackerTree.get(key, trackerLookupProof).get
+      val trackerDebtBytes = trackerTree.get(debtKey, trackerLookupProof).get
       val trackerTotalDebt = byteArrayToLong(trackerDebtBytes)
       val trackerDebtCorrect = trackerTotalDebt == totalDebt
 
@@ -279,13 +289,13 @@
       // Value format: timestamp (8 bytes) ++ redeemedAmount (8 bytes) = 16 bytes
       val lookupProofOpt = getVar[Coll[Byte]](7)
       val storedTimestamp = if (lookupProofOpt.isDefined) {
-        val valueBytes = SELF.R5[AvlTree].get.get(key, lookupProofOpt.get).get
+        val valueBytes = SELF.R5[AvlTree].get.get(reserveKey, lookupProofOpt.get).get
         byteArrayToLong(valueBytes.slice(0, 8))
       } else {
         0L
       }
       val redeemedDebt = if (lookupProofOpt.isDefined) {
-        val valueBytes = SELF.R5[AvlTree].get.get(key, lookupProofOpt.get).get
+        val valueBytes = SELF.R5[AvlTree].get.get(reserveKey, lookupProofOpt.get).get
         byteArrayToLong(valueBytes.slice(8, 16))
       } else {
         0L
@@ -306,10 +316,11 @@
       val trackerUpdateTime = tracker.creationInfo._1
       val enoughTimeSpent = (HEIGHT - trackerUpdateTime) > 3 * 720 // 3 days passed
 
-      // Message to verify signatures: key || totalDebt || timestamp || trackerNftId
-      // The tracker NFT ID (SELF.R6, 32 bytes) binds every signature to this tracker,
+      // Message to verify signatures: debtKey || totalDebt || timestamp || trackerNftId
+      // The denomination is inside debtKey, so a signature commits to it; the tracker
+      // NFT ID (SELF.R6, 32 bytes) additionally binds every signature to this tracker,
       // its reserve contract deployment and its chain (issue #15 C3).
-      val message = key ++ longToByteArray(totalDebt) ++ longToByteArray(timestamp) ++ SELF.R6[Coll[Byte]].get
+      val message = debtKey ++ longToByteArray(totalDebt) ++ longToByteArray(timestamp) ++ SELF.R6[Coll[Byte]].get
 
       // Tracker's signature (optional after emergency period)
       val trackerSigBytes = getVar[Coll[Byte]](6).get
@@ -374,7 +385,7 @@
       // Value format: timestamp (8 bytes) ++ newRedeemedAmount (8 bytes) = 16 bytes
       val newRedeemed = redeemedDebt + redeemed
       val treeValue = longToByteArray(timestamp) ++ longToByteArray(newRedeemed)
-      val redeemedKeyVal = (key, treeValue)  // key -> (timestamp, redeemed debt value)
+      val redeemedKeyVal = (reserveKey, treeValue)  // reserveKey -> (timestamp, redeemed debt value)
       val insertOrUpdateProof = getVar[Coll[Byte]](5).get // Merkle proof for the AVL update
       // SECURITY (replay protection): context var #7 stays optional, but omitting it no longer
       // means "never redeemed". Without #7 we use insert instead of insertOrUpdate, and sigma's

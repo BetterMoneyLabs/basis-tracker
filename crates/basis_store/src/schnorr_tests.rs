@@ -197,6 +197,7 @@ pub fn verify_all_test_vectors() -> Result<(), String> {
             vector.timestamp,
             vector.signature,
             [0x42; 32],
+            crate::DenomKey::Erg,
         );
 
         let result = note.verify_signature(&vector.issuer_pubkey);
@@ -249,9 +250,15 @@ fn get_test_vectors() -> Vec<SchnorrTestVector> {
     let timestamp = 1234567890u64;
 
     // Create a valid signature using our implementation
-    let valid_note =
-        IouNote::create_and_sign(recipient_pubkey, amount, timestamp, &[1u8; 32], &[0x42; 32])
-            .expect("Failed to create valid signature");
+    let valid_note = IouNote::create_and_sign(
+        recipient_pubkey,
+        amount,
+        timestamp,
+        &[1u8; 32],
+        &[0x42; 32],
+        crate::DenomKey::Erg,
+    )
+    .expect("Failed to create valid signature");
     let valid_signature = valid_note.signature;
 
     vec![
@@ -317,7 +324,15 @@ fn test_signing_message_format() {
     let owner_pubkey = [1u8; 33];
     let receiver_pubkey = [2u8; 33];
     let timestamp = 1743379200000u64;
-    let note = IouNote::new(receiver_pubkey, 1000, 0, timestamp, [0u8; 65], [0x42; 32]);
+    let note = IouNote::new(
+        receiver_pubkey,
+        1000,
+        0,
+        timestamp,
+        [0u8; 65],
+        [0x42; 32],
+        crate::DenomKey::Erg,
+    );
 
     // Format: key (32) || totalDebt (8) || timestamp (8) || trackerNftId (32) = 80 bytes
     let message = note.signing_message(&owner_pubkey);
@@ -371,6 +386,7 @@ pub fn run_schnorr_test_vectors() -> Result<(), String> {
             vector.timestamp,
             vector.signature,
             [0x42; 32],
+            crate::DenomKey::Erg,
         );
 
         let result = note.verify_signature(&vector.issuer_pubkey);
@@ -421,6 +437,7 @@ mod comprehensive_tests {
             let message = schnorr::signing_message(
                 &alice_pubkey,
                 &recipient_pubkey,
+                &crate::DenomKey::Erg,
                 amount,
                 timestamp,
                 &[0x42; 32],
@@ -438,6 +455,7 @@ mod comprehensive_tests {
             let wrong_message = schnorr::signing_message(
                 &alice_pubkey,
                 &recipient_pubkey,
+                &crate::DenomKey::Erg,
                 amount + 1,
                 timestamp,
                 &[0x42; 32],
@@ -450,6 +468,7 @@ mod comprehensive_tests {
         let message = schnorr::signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             1000,
             message_timestamp,
             &[0x42; 32],
@@ -515,8 +534,14 @@ mod comprehensive_tests {
         let amount = 1000u64;
         let timestamp = 1234567890u64;
 
-        let message =
-            schnorr::signing_message(&pubkey, &recipient_pubkey, amount, timestamp, &[0x42; 32]);
+        let message = schnorr::signing_message(
+            &pubkey,
+            &recipient_pubkey,
+            &crate::DenomKey::Erg,
+            amount,
+            timestamp,
+            &[0x42; 32],
+        );
 
         // Create two signatures with the same input
         // Note: Since we use random nonces, these will be different

@@ -86,6 +86,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -129,6 +130,7 @@ mod tests {
             timestamp,
             &owner_secret,
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .expect("Note creation should succeed");
 
@@ -158,6 +160,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -187,6 +190,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -231,6 +235,7 @@ mod tests {
         let msg_to_bob = core_signing_message(
             &alice_pk,
             &bob_pk,
+            &crate::DenomKey::Erg,
             remaining_debt_to_bob,
             timestamp,
             &tracker_nft_bytes(),
@@ -242,6 +247,7 @@ mod tests {
         let msg_to_carol = core_signing_message(
             &alice_pk,
             &carol_pk,
+            &crate::DenomKey::Erg,
             transfer_amount,
             timestamp2,
             &tracker_nft_bytes(),
@@ -284,6 +290,7 @@ mod tests {
             timestamp,
             &alice_secret.secret_bytes(),
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
         let note_to_carol = IouNote::create_and_sign(
@@ -292,6 +299,7 @@ mod tests {
             timestamp2,
             &alice_secret.secret_bytes(),
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
 
@@ -340,6 +348,7 @@ mod tests {
             base_timestamp,
             &alice_secret.secret_bytes(),
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
         let note_carol = IouNote::create_and_sign(
@@ -348,6 +357,7 @@ mod tests {
             base_timestamp + 1000,
             &alice_secret.secret_bytes(),
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
         let note_dave = IouNote::create_and_sign(
@@ -356,6 +366,7 @@ mod tests {
             base_timestamp + 2000,
             &alice_secret.secret_bytes(),
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
 
@@ -390,6 +401,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -423,6 +435,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -451,6 +464,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -483,6 +497,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -513,6 +528,7 @@ mod tests {
         let correct_message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -522,6 +538,7 @@ mod tests {
         let wrong_message = core_signing_message(
             &receiver_pk,
             &owner_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -570,6 +587,7 @@ mod tests {
         let message_to_carol = core_signing_message(
             &alice_pk,
             &carol_pk,
+            &crate::DenomKey::Erg,
             transfer_amount,
             timestamp,
             &tracker_nft_bytes(),
@@ -604,6 +622,7 @@ mod tests {
             timestamp1,
             &owner_secret,
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
 
@@ -617,6 +636,7 @@ mod tests {
             timestamp1,
             &owner_secret,
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
 
@@ -631,6 +651,7 @@ mod tests {
             timestamp2,
             &owner_secret,
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
 
@@ -661,6 +682,7 @@ mod tests {
             timestamp,
             &owner_secret,
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
 
@@ -685,6 +707,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -741,6 +764,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -766,6 +790,7 @@ mod tests {
         let msg = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -799,6 +824,7 @@ mod tests {
         let message = core_signing_message(
             &pubkey,
             &[0x03u8; 33],
+            &crate::DenomKey::Erg,
             1000,
             TEST_TIMESTAMP,
             &tracker_nft_bytes(),
@@ -825,6 +851,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             max_debt,
             timestamp,
             &tracker_nft_bytes(),
@@ -846,6 +873,7 @@ mod tests {
         let message = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             zero_debt,
             zero_timestamp,
             &tracker_nft_bytes(),
@@ -865,6 +893,7 @@ mod tests {
         let msg1 = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             1_000_000_000,
             timestamp,
             &tracker_nft_bytes(),
@@ -872,6 +901,7 @@ mod tests {
         let msg2 = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             2_000_000_000,
             timestamp,
             &tracker_nft_bytes(),
@@ -893,6 +923,7 @@ mod tests {
         let msg1 = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             TEST_TIMESTAMP,
             &tracker_nft_bytes(),
@@ -900,6 +931,7 @@ mod tests {
         let msg2 = core_signing_message(
             &owner_pk,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             total_debt,
             TEST_TIMESTAMP + 1,
             &tracker_nft_bytes(),
@@ -987,6 +1019,7 @@ mod tests {
             timestamp,
             &issuer_secret,
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
 
@@ -995,7 +1028,7 @@ mod tests {
 
         // Generate reserve lookup proof
         let lookup_proof = tracker
-            .generate_reserve_lookup_proof(&issuer_pk, &recipient_pk)
+            .generate_reserve_lookup_proof(&issuer_pk, &recipient_pk, &crate::DenomKey::Erg)
             .unwrap();
 
         // For first redemption, value should be 16 bytes: 0 timestamp || 0 redeemedAmount
@@ -1030,12 +1063,13 @@ mod tests {
             timestamp,
             &issuer_secret,
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
         tracker.add_note(&issuer_pk, &note).unwrap();
 
         let already_redeemed = tracker
-            .get_already_redeemed(&issuer_pk, &recipient_pk)
+            .get_already_redeemed(&issuer_pk, &recipient_pk, &crate::DenomKey::Erg)
             .unwrap();
         assert_eq!(
             already_redeemed, 0,
@@ -1060,12 +1094,13 @@ mod tests {
             timestamp,
             &issuer_secret,
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
         tracker.add_note(&issuer_pk, &note).unwrap();
 
         let lookup_proof = tracker
-            .generate_tracker_lookup_proof(&issuer_pk, &recipient_pk)
+            .generate_tracker_lookup_proof(&issuer_pk, &recipient_pk, &crate::DenomKey::Erg)
             .unwrap();
 
         // Tracker tree value should be 8 bytes (totalDebt as big-endian u64)
@@ -1103,8 +1138,14 @@ mod tests {
 
         for amount in amounts {
             for ts in &timestamps {
-                let msg =
-                    core_signing_message(&pubkey, &receiver_pk, amount, *ts, &tracker_nft_bytes());
+                let msg = core_signing_message(
+                    &pubkey,
+                    &receiver_pk,
+                    &crate::DenomKey::Erg,
+                    amount,
+                    *ts,
+                    &tracker_nft_bytes(),
+                );
                 let sig = schnorr_sign(&msg, &secret, &pubkey).unwrap();
                 assert_eq!(
                     sig.len(),
@@ -1135,6 +1176,7 @@ mod tests {
         let correct_msg = core_signing_message(
             &pubkey,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             amount,
             timestamp,
             &tracker_nft_bytes(),
@@ -1145,6 +1187,7 @@ mod tests {
         let wrong_amount_msg = core_signing_message(
             &pubkey,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             amount + 1,
             timestamp,
             &tracker_nft_bytes(),
@@ -1152,6 +1195,7 @@ mod tests {
         let wrong_ts_msg = core_signing_message(
             &pubkey,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             amount,
             timestamp + 1,
             &tracker_nft_bytes(),
@@ -1160,6 +1204,7 @@ mod tests {
         let wrong_receiver_msg = core_signing_message(
             &pubkey,
             &diff_receiver_pk,
+            &crate::DenomKey::Erg,
             amount,
             timestamp,
             &tracker_nft_bytes(),
@@ -1182,6 +1227,7 @@ mod tests {
         let msg = core_signing_message(
             &pubkey,
             &receiver_pk,
+            &crate::DenomKey::Erg,
             amount,
             timestamp,
             &tracker_nft_bytes(),
@@ -1213,6 +1259,7 @@ mod tests {
             TEST_TIMESTAMP,
             &secret,
             &tracker_nft_bytes(),
+            crate::DenomKey::Erg,
         )
         .unwrap();
         assert_eq!(note.outstanding_debt(), 5_000_000_000);
@@ -1225,6 +1272,7 @@ mod tests {
             TEST_TIMESTAMP,
             [0u8; 65],
             [0x42; 32],
+            crate::DenomKey::Erg,
         );
         note2.amount_collected = 5_000_000_000;
         note2.amount_redeemed = 5_000_000_000;
@@ -1238,6 +1286,7 @@ mod tests {
             TEST_TIMESTAMP,
             [0u8; 65],
             [0x42; 32],
+            crate::DenomKey::Erg,
         );
         note3.amount_collected = 10_000_000_000;
         note3.amount_redeemed = 3_000_000_000;

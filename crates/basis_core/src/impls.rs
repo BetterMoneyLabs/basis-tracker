@@ -237,6 +237,7 @@ mod tests {
         let message = crate::types::signing_message(
             &issuer_pubkey,
             &issuer_pubkey,
+            &crate::types::DenomKey::Erg,
             1_000_000_000,
             1743379200000,
             &TEST_TRACKER_NFT_ID,
@@ -267,6 +268,7 @@ mod tests {
         let message = crate::types::signing_message(
             &issuer_pubkey,
             &issuer_pubkey,
+            &crate::types::DenomKey::Erg,
             1_000_000_000,
             1743379200000,
             &TEST_TRACKER_NFT_ID,
@@ -303,6 +305,7 @@ mod tests {
         let message = crate::types::signing_message(
             &issuer_pubkey,
             &recipient_pubkey,
+            &crate::types::DenomKey::Erg,
             total_debt,
             timestamp,
             &TEST_TRACKER_NFT_ID,
@@ -340,6 +343,7 @@ mod tests {
         let message = crate::types::signing_message(
             &issuer_pubkey,
             &recipient_pubkey,
+            &crate::types::DenomKey::Erg,
             total_debt,
             timestamp,
             &TEST_TRACKER_NFT_ID,
@@ -379,6 +383,7 @@ mod tests {
         let message = crate::types::signing_message(
             &pubkey,
             &pubkey,
+            &crate::types::DenomKey::Erg,
             1_000_000_000u64,
             1743379200000u64,
             &TEST_TRACKER_NFT_ID,
@@ -428,6 +433,7 @@ mod tests {
             let message = crate::types::signing_message(
                 &pubkey,
                 &pubkey,
+                &crate::types::DenomKey::Erg,
                 1_000_000_000u64 + i,
                 1743379200000u64,
                 &TEST_TRACKER_NFT_ID,
@@ -468,6 +474,7 @@ mod tests {
         let message = crate::types::signing_message(
             &issuer,
             &recipient,
+            &crate::types::DenomKey::Erg,
             total_debt,
             timestamp,
             &TEST_TRACKER_NFT_ID,

@@ -76,6 +76,10 @@ pub struct RedemptionBuildRequest {
     /// caller-supplied address would let anyone drain tracker wallet boxes.
     #[serde(default)]
     pub change_address: Option<String>,
+    /// Denomination of the note being redeemed ("erg" or "token:<64-hex>"); default
+    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
+    #[serde(default)]
+    pub denomination: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -326,6 +330,8 @@ pub struct PendingRedemption {
     pub new_already_redeemed: u64,
     /// Reserve AVL tree root digest (33 bytes) the build placed in the reserve output's R5.
     pub reserve_r5_digest: Vec<u8>,
+    /// Denomination of the note being redeemed.
+    pub denomination: basis_store::DenomKey,
     issued_at: Instant,
 }
 
@@ -338,6 +344,7 @@ impl PendingRedemption {
         redeemed_amount: u64,
         new_already_redeemed: u64,
         reserve_r5_digest: Vec<u8>,
+        denomination: basis_store::DenomKey,
     ) -> Self {
         Self {
             reserve_box_id,
@@ -346,6 +353,7 @@ impl PendingRedemption {
             redeemed_amount,
             new_already_redeemed,
             reserve_r5_digest,
+            denomination,
             issued_at: Instant::now(),
         }
     }
@@ -592,6 +600,25 @@ async fn build_redemption_inner(
     let issuer_pubkey: basis_store::PubKey = issuer_pk;
     let recipient_pubkey: basis_store::PubKey = recipient_pk;
 
+    // Resolve the note denomination (default: the pair's existing note's
+    // denomination when unambiguous, else ERG).
+    let denomination = match crate::api::resolve_denomination(
+        state,
+        &issuer_pubkey,
+        &recipient_pubkey,
+        &payload.denomination,
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return api_err(
+                StatusCode::BAD_REQUEST,
+                format!("invalid denomination: {msg}"),
+            )
+        }
+    };
+
     // M1: bound the fee cost a pair can impose on the tracker wallet — the tracker pays the
     // fee inputs of every build, so an unbounded pair could drain it one fee at a time.
     if let Err(msg) = state.redemption_build_rate.check_and_record(
@@ -621,6 +648,7 @@ async fn build_redemption_inner(
             .send(TrackerCommand::GetNoteByIssuerAndRecipient {
                 issuer_pubkey,
                 recipient_pubkey,
+                denomination,
                 response_tx: tx,
             })
             .await
@@ -653,7 +681,8 @@ async fn build_redemption_inner(
     // A note is bound to `hash(owner || receiver)`, not to a reserve box, so with two reserves
     // the same note redeems in full against EACH of them; building against one would let the
     // creditor drain the others. Refuse until the owner consolidates to a single reserve.
-    if let Err(msg) = crate::api::ensure_single_issuer_reserve(state, &payload.issuer_pubkey).await
+    if let Err(msg) =
+        crate::api::ensure_single_issuer_reserve(state, &payload.issuer_pubkey, &denomination).await
     {
         return api_err(StatusCode::CONFLICT, msg);
     }
@@ -669,6 +698,7 @@ async fn build_redemption_inner(
                 .tx
                 .send(TrackerCommand::GetReserveStateDigest {
                     issuer_pubkey,
+                    denomination,
                     response_tx: tx,
                 })
                 .await
@@ -717,6 +747,11 @@ async fn build_redemption_inner(
                 reserve.owner_pubkey.clone()
             };
             if basis_store::normalize_public_key(&owner) != normalized_issuer {
+                continue;
+            }
+            // A note redeems only against a reserve of its own denomination
+            // (specs/ergo/multi_collateral_reserves.md §6 invariant 3).
+            if reserve.denomination().as_ref() != Some(&denomination) {
                 continue;
             }
             let collateral = reserve.base_info.collateral_amount;
@@ -899,6 +934,7 @@ async fn build_redemption_inner(
             .send(TrackerCommand::GetCommittedTrackerLookupProof {
                 issuer_pubkey,
                 recipient_pubkey,
+                denomination,
                 response_tx: tx,
             })
             .await
@@ -951,6 +987,7 @@ async fn build_redemption_inner(
             .send(TrackerCommand::GetReserveLookupProof {
                 issuer_pubkey,
                 recipient_pubkey,
+                denomination,
                 response_tx: tx,
             })
             .await
@@ -999,6 +1036,7 @@ async fn build_redemption_inner(
             .send(TrackerCommand::GetReserveInsertProof {
                 issuer_pubkey,
                 recipient_pubkey,
+                denomination,
                 timestamp: note.timestamp,
                 new_already_redeemed,
                 response_tx: itx,
@@ -1064,6 +1102,7 @@ async fn build_redemption_inner(
         let message = basis_store::schnorr::signing_message(
             &issuer_pk,
             &recipient_pk,
+            &basis_store::DenomKey::Erg,
             total_debt,
             note.timestamp,
             &note.tracker_nft_id,
@@ -1568,6 +1607,7 @@ async fn build_redemption_inner(
             payload.amount,
             new_already_redeemed,
             new_reserve_digest.clone(),
+            denomination,
         ),
     ) {
         return api_err(
@@ -1666,6 +1706,7 @@ pub async fn submit_redemption(
         .send(TrackerCommand::CompleteRedemption {
             issuer_pubkey,
             recipient_pubkey,
+            denomination: pending.denomination,
             redeemed_amount: pending.redeemed_amount,
             new_already_redeemed: Some(pending.new_already_redeemed),
             response_tx: tx,
@@ -1817,6 +1858,7 @@ mod tests {
             redeemed_amount: 1_000,
             new_already_redeemed: 2_000,
             reserve_r5_digest: vec![0x11; 33],
+            denomination: basis_store::DenomKey::Erg,
             issued_at: Instant::now(),
         }
     }

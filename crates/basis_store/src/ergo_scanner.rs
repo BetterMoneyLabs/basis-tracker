@@ -111,6 +111,25 @@ impl ScanType {
     }
 }
 
+/// Which reserve contract a scanned box was found at. Determines how collateral and
+/// denomination are derived (specs/ergo/multi_collateral_reserves.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveContractKind {
+    /// ERG-collateralized reserve (`contract/basis.es`)
+    Erg,
+    /// Token-collateralized reserve (`contract/basis-token.es`); the token id is
+    /// read per box from `tokens(1)`
+    Token,
+}
+
+/// A scanned reserve box tagged with the contract slot and address it was found at.
+pub struct TaggedScanBox {
+    pub scan_box: ScanBox,
+    pub kind: ReserveContractKind,
+    /// The reserve contract P2S address this box was found at (its contract address).
+    pub contract_address: String,
+}
+
 /// Configuration for scanner
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -118,12 +137,10 @@ pub struct NodeConfig {
     pub start_height: Option<u64>,
     /// Basis reserve contract P2S address (optional)
     pub reserve_contract_p2s: Option<String>,
-    /// Basis token reserve contract P2S address (optional).
-    /// When set alongside `reserve_token_id`, the scanner treats matching boxes as token-backed reserves.
+    /// Basis token reserve contract P2S address (optional). Reserves found at this
+    /// address are token-backed; the denomination is derived per box from `tokens(1)`
+    /// (specs/ergo/multi_collateral_reserves.md).
     pub token_reserve_contract_p2s: Option<String>,
-    /// Reserve token ID (hex-encoded, 32 bytes). When set, collateral for reserves holding
-    /// this token is taken from the token amount rather than the box ERG value.
-    pub reserve_token_id: Option<String>,
     /// This tracker's NFT ID (hex-encoded, 32 bytes). When set, reserve boxes whose R6
     /// register does not reference this NFT are rejected (C4 validation).
     pub tracker_nft_id: Option<String>,
@@ -357,31 +374,34 @@ impl ServerState {
         Ok(height)
     }
 
-    /// Get unspent reserve boxes via `POST /blockchain/box/unspent/byAddress`.
+    /// Get unspent reserve boxes via `POST /blockchain/box/unspent/byAddress`,
+    /// tagged with the contract slot and address they were found at.
     /// Queries both the ERG-backed and token-backed reserve contract addresses when
     /// configured, merging the results and removing duplicates.
-    pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ScanBox>, ScannerError> {
-        let mut addresses = Vec::new();
+    pub async fn get_unspent_reserve_boxes_tagged(
+        &self,
+    ) -> Result<Vec<TaggedScanBox>, ScannerError> {
+        let mut slots = Vec::new();
         if let Some(ref p2s) = self.config.reserve_contract_p2s {
             if !p2s.is_empty() {
-                addresses.push(p2s.clone());
+                slots.push((p2s.clone(), ReserveContractKind::Erg));
             }
         }
         if let Some(ref p2s) = self.config.token_reserve_contract_p2s {
             if !p2s.is_empty() {
-                addresses.push(p2s.clone());
+                slots.push((p2s.clone(), ReserveContractKind::Token));
             }
         }
 
-        if addresses.is_empty() {
+        if slots.is_empty() {
             warn!("No reserve contract P2S specified, scanner will have no boxes to fetch");
             return Ok(Vec::new());
         }
 
         let url = format!("{}/blockchain/box/unspent/byAddress", self.config.node_url);
-        let mut all_boxes: Vec<ScanBox> = Vec::new();
+        let mut all_boxes: Vec<TaggedScanBox> = Vec::new();
 
-        for address in addresses {
+        for (address, kind) in slots {
             info!("Fetching unspent reserve boxes for contract: {}", address);
 
             // The node applies a default limit of 5 boxes (newest first) when no
@@ -441,7 +461,11 @@ impl ServerState {
 
                 let page_len = parsed.len();
                 address_box_count += page_len;
-                all_boxes.extend(parsed.into_iter().map(Into::into));
+                all_boxes.extend(parsed.into_iter().map(|b| TaggedScanBox {
+                    scan_box: b.into(),
+                    kind,
+                    contract_address: address.clone(),
+                }));
 
                 if (page_len as u64) < RESERVE_BOX_PAGE_LIMIT {
                     break;
@@ -454,10 +478,20 @@ impl ServerState {
 
         // Deduplicate by box_id in case both contracts somehow return the same box.
         let mut seen = std::collections::HashSet::new();
-        all_boxes.retain(|b| seen.insert(b.box_id.clone()));
+        all_boxes.retain(|b| seen.insert(b.scan_box.box_id.clone()));
 
         info!("Total unique reserve boxes: {}", all_boxes.len());
         Ok(all_boxes)
+    }
+
+    /// Get unspent reserve boxes without contract-slot tags.
+    pub async fn get_unspent_reserve_boxes(&self) -> Result<Vec<ScanBox>, ScannerError> {
+        Ok(self
+            .get_unspent_reserve_boxes_tagged()
+            .await?
+            .into_iter()
+            .map(|t| t.scan_box)
+            .collect())
     }
 
     /// Check if scanner is active
@@ -503,14 +537,22 @@ impl ServerState {
     }
 
     /// Get unspent boxes from the blockchain via the reserve contract address.
-    pub async fn get_scan_boxes(&self) -> Result<Vec<ScanBox>, ScannerError> {
-        self.get_unspent_reserve_boxes().await
+    pub async fn get_scan_boxes(&self) -> Result<Vec<TaggedScanBox>, ScannerError> {
+        self.get_unspent_reserve_boxes_tagged().await
     }
 
-    /// Parse reserve box into ExtendedReserveInfo
+    /// Parse reserve box into ExtendedReserveInfo.
+    ///
+    /// Collateral and denomination are derived **per box** from the contract slot the
+    /// box was found at (specs/ergo/multi_collateral_reserves.md):
+    /// - Erg slot: collateral is the box ERG value.
+    /// - Token slot: the box must hold exactly two tokens (reserve NFT at #0, reserve
+    ///   token at #1); collateral is the #1 amount and the denomination is its id.
     pub fn parse_reserve_box(
         &self,
         scan_box: &ScanBox,
+        kind: ReserveContractKind,
+        contract_address: &str,
     ) -> Result<ExtendedReserveInfo, ScannerError> {
         let box_id = scan_box.box_id.clone();
         let value = scan_box.value;
@@ -625,14 +667,57 @@ impl ServerState {
         let refund_initiation_height =
             decode_ergo_long_register(scan_box.additional_registers.get("R7"));
 
+        // Derive collateral and denomination per box from the contract slot.
+        let (collateral_amount, reserve_token_id_bytes) = match kind {
+            ReserveContractKind::Erg => (value, None),
+            ReserveContractKind::Token => {
+                // The token reserve contract pins positions: tokens(0) is the reserve
+                // NFT (amount 1), tokens(1) is the collateral token. Anything else is
+                // malformed and cannot be redeemed on-chain.
+                if scan_box.assets.len() != 2 {
+                    return Err(ScannerError::InvalidReserveBox(format!(
+                        "Token reserve box {} must hold exactly 2 tokens (reserve NFT + collateral token), got {}",
+                        box_id,
+                        scan_box.assets.len()
+                    )));
+                }
+                let collateral_asset = &scan_box.assets[1];
+                let token_bytes = hex::decode(&collateral_asset.token_id).map_err(|_| {
+                    ScannerError::InvalidReserveBox(format!(
+                        "Invalid collateral token id hex in box {}",
+                        box_id
+                    ))
+                })?;
+                if token_bytes.len() != 32 {
+                    return Err(ScannerError::InvalidReserveBox(format!(
+                        "Collateral token id in box {} is not 32 bytes",
+                        box_id
+                    )));
+                }
+                (collateral_asset.amount, Some(token_bytes))
+            }
+        };
+
         // C4: validate setup only when the reserve is first seen. A reserve
         // created with a pending refund (R7 != 0) can be withdrawn immediately,
         // and a reserve created with a non-empty tree (R5) can block creditors
         // from ever redeeming, so neither must be counted as collateral.
+        // "First seen" is per (owner, denomination): an owner adding a reserve in
+        // a new denomination must not skip validation.
+        let denomination = match &reserve_token_id_bytes {
+            Some(id) => crate::DenomKey::Token(id.as_slice().try_into().map_err(|_| {
+                ScannerError::InvalidReserveBox(format!(
+                    "Collateral token id in box {} is not 32 bytes",
+                    box_id
+                ))
+            })?),
+            None => crate::DenomKey::Erg,
+        };
         let first_seen = self
             .reserve_tracker
-            .get_reserve_by_owner(&owner_pubkey)
-            .is_err();
+            .get_reserves_by_owner(&owner_pubkey)
+            .iter()
+            .all(|r| r.denomination().as_ref() != Some(&denomination));
         if first_seen {
             if refund_initiation_height != 0 {
                 return Err(ScannerError::InvalidReserveBox(format!(
@@ -652,32 +737,8 @@ impl ServerState {
             }
         }
 
-        // Determine collateral: if a reserve token is configured and the box holds it,
-        // use the token amount as collateral; otherwise fall back to the box ERG value.
-        let configured_reserve_token_id = self.config.reserve_token_id.as_deref();
-        let (collateral_amount, reserve_token_id_bytes) = if let Some(token_id) =
-            configured_reserve_token_id
-        {
-            let token_id_lower = token_id.to_ascii_lowercase();
-            scan_box
-                    .assets
-                    .iter()
-                    .find(|a| a.token_id.to_ascii_lowercase() == token_id_lower)
-                    .map(|a| (a.amount, Some(hex::decode(token_id).unwrap_or_default())))
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            "Reserve box {} does not contain configured reserve token {}; falling back to ERG value",
-                            box_id,
-                            token_id
-                        );
-                        (value, None)
-                    })
-        } else {
-            (value, None)
-        };
-
         let box_id_bytes = hex::decode(&box_id).unwrap_or_else(|_| box_id.as_bytes().to_vec());
-        let reserve_info = ExtendedReserveInfo::new(
+        let mut reserve_info = ExtendedReserveInfo::new(
             &box_id_bytes,
             &owner_pubkey_bytes,
             collateral_amount,
@@ -686,6 +747,9 @@ impl ServerState {
             refund_initiation_height,
             reserve_token_id_bytes.as_deref(),
         );
+        // The contract address is where the box was actually found, not a global
+        // config value (ERG and token reserves live at different addresses).
+        reserve_info.set_contract_address(contract_address.to_string());
 
         Ok(reserve_info)
     }
@@ -703,13 +767,14 @@ impl ServerState {
         // it must not block removal of OTHER genuinely-spent reserves.
         let mut quarantined_box_ids: Vec<String> = Vec::new();
 
-        for scan_box in &scan_boxes {
+        for tagged in &scan_boxes {
+            let scan_box = &tagged.scan_box;
             debug!(
                 "Processing scan box: ID={}, value={}, registers={:?}",
                 scan_box.box_id, scan_box.value, scan_box.additional_registers
             );
 
-            match self.parse_reserve_box(scan_box) {
+            match self.parse_reserve_box(scan_box, tagged.kind, &tagged.contract_address) {
                 Ok(reserve_info) => {
                     debug!(
                         "Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
@@ -890,7 +955,6 @@ impl Default for NodeConfig {
             start_height: None,
             reserve_contract_p2s: None,
             token_reserve_contract_p2s: None,
-            reserve_token_id: None,
             tracker_nft_id: None,
             node_url: "http://localhost:9053".to_string(), // Local Ergo node
             scan_name: Some("Basis Reserve Scanner".to_string()),
@@ -1039,6 +1103,92 @@ mod tests {
         );
     }
 
+    /// Phase 2 acceptance (specs/ergo/multi_collateral_reserves.md §13): mixed ERG and
+    /// token reserves parse per box, each with its own denomination and the contract
+    /// address of the slot it was found at.
+    #[test]
+    fn test_parse_mixed_denomination_boxes() {
+        let nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let token_a =
+            "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669".to_string();
+        let token_b = "b8".repeat(32);
+
+        let state = c4_test_state(NodeConfig::default());
+
+        // ERG reserve: one NFT, ERG value is the collateral.
+        let erg_box = c4_test_box();
+        let erg = state
+            .parse_reserve_box(&erg_box, ReserveContractKind::Erg, "erg_p2s")
+            .expect("ERG reserve parses");
+        assert_eq!(erg.base_info.collateral_amount, erg_box.value);
+        assert_eq!(erg.base_info.reserve_token_id, "");
+        assert_eq!(erg.denomination(), Some(crate::DenomKey::Erg));
+        assert_eq!(erg.base_info.contract_address, "erg_p2s");
+
+        // Token reserve A: collateral is tokens(1) amount, denomination is tokens(1) id.
+        let mut tok_a_box = c4_test_box();
+        tok_a_box.box_id = "token_box_a".to_string();
+        tok_a_box.assets = vec![
+            BoxAsset {
+                token_id: nft_id.to_string(),
+                amount: 1,
+            },
+            BoxAsset {
+                token_id: token_a.clone(),
+                amount: 5000,
+            },
+        ];
+        let tok_a = state
+            .parse_reserve_box(&tok_a_box, ReserveContractKind::Token, "token_p2s")
+            .expect("token reserve A parses");
+        assert_eq!(tok_a.base_info.collateral_amount, 5000);
+        assert_eq!(tok_a.base_info.reserve_token_id, token_a.clone());
+        assert_eq!(
+            tok_a.denomination(),
+            Some(crate::DenomKey::Token(
+                hex::decode(&token_a).unwrap().try_into().unwrap()
+            ))
+        );
+        assert_eq!(tok_a.base_info.contract_address, "token_p2s");
+
+        // A different token on the same contract address is a different denomination.
+        let mut tok_b_box = tok_a_box.clone();
+        tok_b_box.box_id = "token_box_b".to_string();
+        tok_b_box.assets[1] = BoxAsset {
+            token_id: token_b.to_string(),
+            amount: 700,
+        };
+        let tok_b = state
+            .parse_reserve_box(&tok_b_box, ReserveContractKind::Token, "token_p2s")
+            .expect("token reserve B parses");
+        assert_ne!(tok_a.denomination(), tok_b.denomination());
+
+        // Malformed token boxes are rejected, not misclassified.
+        let mut bad = c4_test_box();
+        bad.assets = vec![]; // token slot but no collateral token
+        assert!(state
+            .parse_reserve_box(&bad, ReserveContractKind::Token, "token_p2s")
+            .is_err());
+        let mut bad3 = c4_test_box();
+        bad3.assets = vec![
+            BoxAsset {
+                token_id: nft_id.to_string(),
+                amount: 1,
+            },
+            BoxAsset {
+                token_id: token_a.clone(),
+                amount: 5,
+            },
+            BoxAsset {
+                token_id: token_b.clone(),
+                amount: 5,
+            },
+        ];
+        assert!(state
+            .parse_reserve_box(&bad3, ReserveContractKind::Token, "token_p2s")
+            .is_err());
+    }
+
     #[test]
     fn test_parse_reserve_box_with_r6_register() {
         // Create a mock scan box with a public key that has the 0x07 prefix
@@ -1079,7 +1229,8 @@ mod tests {
             ServerState::new(config, &data_dir).expect("Failed to create server state");
 
         // Test the parse_reserve_box function
-        let result = server_state.parse_reserve_box(&scan_box);
+        let result =
+            server_state.parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s");
 
         match result {
             Ok(reserve_info) => {
@@ -1138,7 +1289,8 @@ mod tests {
             ServerState::new(config, &data_dir).expect("Failed to create server state");
 
         // Test the parse_reserve_box function - should return an error
-        let result = server_state.parse_reserve_box(&scan_box);
+        let result =
+            server_state.parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s");
 
         match result {
             Ok(_) => {
@@ -1191,7 +1343,8 @@ mod tests {
             ServerState::new(config, &data_dir).expect("Failed to create server state");
 
         // Test the parse_reserve_box function - should return an error
-        let result = server_state.parse_reserve_box(&scan_box);
+        let result =
+            server_state.parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s");
 
         match result {
             Ok(_) => {
@@ -1637,7 +1790,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_reserve_box_uses_token_collateral_when_configured() {
+    fn test_parse_reserve_box_uses_token_collateral_per_box() {
         let reserve_token_id =
             "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669".to_string();
         let nft_id = "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string();
@@ -1668,10 +1821,7 @@ mod tests {
             ],
         };
 
-        let config = NodeConfig {
-            reserve_token_id: Some(reserve_token_id.clone()),
-            ..Default::default()
-        };
+        let config = NodeConfig::default();
         let data_dir = std::env::temp_dir().join(format!(
             "basis_token_scanner_test_{}",
             std::time::SystemTime::now()
@@ -1684,7 +1834,7 @@ mod tests {
             ServerState::new(config, &data_dir).expect("Failed to create server state");
 
         let reserve_info = server_state
-            .parse_reserve_box(&scan_box)
+            .parse_reserve_box(&scan_box, ReserveContractKind::Token, "test_p2s")
             .expect("should parse token reserve box");
 
         assert_eq!(
@@ -1738,7 +1888,9 @@ mod tests {
             .additional_registers
             .insert("R7".to_string(), "0401".to_string()); // Int 1
         let state = c4_test_state(NodeConfig::default());
-        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        let err = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .unwrap_err();
         assert!(
             err.to_string().contains("not a Long"),
             "unexpected error: {}",
@@ -1754,7 +1906,9 @@ mod tests {
             .additional_registers
             .insert("R7".to_string(), "0502".to_string());
         let state = c4_test_state(NodeConfig::default());
-        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        let err = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .unwrap_err();
         assert!(
             err.to_string().contains("pending refund"),
             "unexpected error: {}",
@@ -1771,7 +1925,9 @@ mod tests {
                 .to_string(),
         );
         let state = c4_test_state(NodeConfig::default());
-        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        let err = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .unwrap_err();
         assert!(
             err.to_string().contains("non-empty AVL tree"),
             "unexpected error: {}",
@@ -1789,7 +1945,9 @@ mod tests {
             ..Default::default()
         };
         let state = c4_test_state(config);
-        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        let err = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .unwrap_err();
         assert!(
             err.to_string().contains("Tracker NFT ID mismatch"),
             "unexpected error: {}",
@@ -1808,7 +1966,7 @@ mod tests {
         };
         let state = c4_test_state(config);
         state
-            .parse_reserve_box(&scan_box)
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
             .expect("reserve bound to the configured tracker NFT should parse");
     }
 
@@ -1820,7 +1978,9 @@ mod tests {
             "07c5b4b2f6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4".to_string(),
         );
         let state = c4_test_state(NodeConfig::default());
-        let err = state.parse_reserve_box(&scan_box).unwrap_err();
+        let err = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .unwrap_err();
         assert!(
             err.to_string().contains("Invalid owner pubkey"),
             "unexpected error: {}",

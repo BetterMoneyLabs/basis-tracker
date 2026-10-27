@@ -227,33 +227,42 @@ impl ServerConfig {
     }
 }
 
+/// Display metadata and policy for one token the tracker serves as reserve
+/// collateral (specs/ergo/multi_collateral_reserves.md §8.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveTokenConfig {
+    /// Display symbol (e.g. "SigUSD")
+    pub symbol: String,
+    /// Token decimals, for display only; on-chain amounts are raw units.
+    #[serde(default)]
+    pub decimals: u8,
+    /// Optional per-token minimum collateralization ratio used by acceptance policy.
+    #[serde(default)]
+    pub min_collateralization_ratio: Option<f64>,
+}
+
 /// Ergo blockchain configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ErgoConfig {
     /// Ergo node configuration
     pub node: NodeConfig,
     /// Basis reserve contract P2S address (ERG-backed reserve)
     pub basis_reserve_contract_p2s: String,
-    /// Basis token reserve contract P2S address (custom-token-backed reserve)
+    /// Basis token reserve contract P2S address. Every token-backed reserve lives at
+    /// this address; the denomination is derived per box from `tokens(1)`.
     pub basis_token_reserve_contract_p2s: String,
     /// Tracker NFT ID (hex-encoded) - identifies the tracker server for reserve contracts
     pub tracker_nft_id: Option<String>,
-    /// Reserve token ID (hex-encoded, 32 bytes). When set, the tracker operates in
-    /// token-reserve mode and uses `basis_token_reserve_contract_p2s` for new reserves.
-    pub reserve_token_id: Option<String>,
-    /// Number of decimal places for the reserve token (e.g. 3 for USE/DexyUSD).
-    /// Used for display/conversion only; on-chain amounts are always raw token units.
-    #[serde(default = "default_reserve_token_decimals")]
-    pub reserve_token_decimals: u8,
+    /// Tokens this tracker serves as reserve collateral, keyed by token id
+    /// (64 hex chars). A token reserve can only be created for a token in this table.
+    #[serde(default)]
+    pub reserve_tokens: std::collections::HashMap<String, ReserveTokenConfig>,
     /// Tracker server's public key for the Ergo blockchain (hex-encoded, 33 bytes for compressed format)
     pub tracker_public_key: Option<String>,
     /// Tracker server's secret key for local signing (hex-encoded, 32 bytes)
     /// If provided, the server will sign redemption transactions locally instead of using the Ergo node API
     pub tracker_secret_key: Option<String>,
-}
-
-fn default_reserve_token_decimals() -> u8 {
-    0
 }
 
 /// Transaction configuration
@@ -352,8 +361,6 @@ impl AppConfig {
             .set_default("transaction.fee", 1000000)? // 0.001 ERG
             // Token reserve configuration defaults
             .set_default("ergo.basis_token_reserve_contract_p2s", "")?
-            .set_default("ergo.reserve_token_id", "")?
-            .set_default("ergo.reserve_token_decimals", 0)?
             // Tracker public key (optional)
             .set_default("ergo.tracker_public_key", "")?
             // Tracker secret key (optional - for local signing)
@@ -481,7 +488,6 @@ impl AppConfig {
         config.reserve_contract_p2s = Some(self.ergo.basis_reserve_contract_p2s.clone());
         config.token_reserve_contract_p2s =
             Some(self.ergo.basis_token_reserve_contract_p2s.clone());
-        config.reserve_token_id = self.ergo.reserve_token_id.clone();
         config.tracker_nft_id = self.ergo.tracker_nft_id.clone();
         config
     }
@@ -496,20 +502,41 @@ impl AppConfig {
         &self.ergo.basis_token_reserve_contract_p2s
     }
 
-    /// Returns true when the tracker is configured to back reserves with a custom token.
-    pub fn is_token_reserve_mode(&self) -> bool {
+    /// Look up the config entry for a served reserve token (case-insensitive id match).
+    pub fn served_token(&self, token_id: &str) -> Option<&ReserveTokenConfig> {
+        let needle = token_id.to_ascii_lowercase();
         self.ergo
-            .reserve_token_id
-            .as_ref()
-            .map(|id| !id.is_empty())
-            .unwrap_or(false)
+            .reserve_tokens
+            .iter()
+            .find(|(id, _)| id.to_ascii_lowercase() == needle)
+            .map(|(_, cfg)| cfg)
     }
 
-    /// Get the configured reserve token ID bytes, if any.
-    pub fn reserve_token_bytes(&self) -> Result<Option<Vec<u8>>, hex::FromHexError> {
-        match &self.ergo.reserve_token_id {
-            Some(id) if !id.is_empty() => hex::decode(id).map(Some),
-            _ => Ok(None),
+    /// Parse and validate a denomination id (`"erg"` or `"token:<64-hex>"`).
+    /// Token denominations must be served (present in `ergo.reserve_tokens`).
+    pub fn parse_served_denomination(&self, s: &str) -> Result<basis_store::DenomKey, String> {
+        let key = basis_store::DenomKey::parse(s).map_err(|e| e.to_string())?;
+        if let basis_store::DenomKey::Token(id) = &key {
+            let hex_id = hex::encode(id);
+            if self.served_token(&hex_id).is_none() {
+                return Err(format!(
+                    "denomination {} is not served by this tracker (not in ergo.reserve_tokens)",
+                    key.denomination_id()
+                ));
+            }
+        }
+        Ok(key)
+    }
+
+    /// Display metadata for a denomination: (symbol, decimals). ERG is ("ERG", 9);
+    /// unserved tokens get a generic label.
+    pub fn denomination_display(&self, key: &basis_store::DenomKey) -> (String, u8) {
+        match key {
+            basis_store::DenomKey::Erg => ("ERG".to_string(), 9),
+            basis_store::DenomKey::Token(id) => self
+                .served_token(&hex::encode(id))
+                .map(|c| (c.symbol.clone(), c.decimals))
+                .unwrap_or_else(|| ("token".to_string(), 0)),
         }
     }
 
@@ -709,6 +736,94 @@ impl AppConfig {
 mod tests {
     use super::*;
 
+    fn minimal_config() -> AppConfig {
+        AppConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 3000,
+                data_dir: Some("test_data".to_string()),
+                database_url: Some("sqlite:test.db".to_string()),
+                tls_cert_path: None,
+                tls_key_path: None,
+                auth: AuthConfig::default(),
+                reserve_creation_max_erg_nano: default_reserve_creation_max_erg_nano(),
+                reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
+                redemption_build_max_per_pair_per_hour:
+                    default_redemption_build_max_per_pair_per_hour(),
+            },
+            ergo: ErgoConfig {
+                node: NodeConfig {
+                    start_height: None,
+                    reserve_contract_p2s: None,
+                    token_reserve_contract_p2s: None,
+                    tracker_nft_id: None,
+                    node_url: "http://localhost:9053".to_string(),
+                    scan_name: None,
+                    api_key: Some("test".to_string()),
+                },
+                basis_reserve_contract_p2s: "test".to_string(),
+                basis_token_reserve_contract_p2s: "test_token".to_string(),
+                tracker_nft_id: None,
+                reserve_tokens: Default::default(),
+                tracker_public_key: Some(
+                    "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
+                        .to_string(),
+                ),
+                tracker_secret_key: None,
+            },
+            transaction: TransactionConfig {
+                fee: 1000000,
+                change_address: None,
+            },
+            acceptance: AcceptanceConfig::empty(),
+            redemption: RedemptionConfig::default(),
+            confirmation: ConfirmationConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_served_denomination_parsing() {
+        let token_id = "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669";
+        let mut config = minimal_config();
+
+        // ERG is always served; unknown tokens are rejected.
+        assert_eq!(
+            config.parse_served_denomination("erg").unwrap(),
+            basis_store::DenomKey::Erg
+        );
+        assert!(config
+            .parse_served_denomination(&format!("token:{}", token_id))
+            .is_err());
+        assert!(config.parse_served_denomination("usd").is_err());
+        assert!(config.parse_served_denomination("token:zz").is_err());
+
+        // Once listed in reserve_tokens, the token is served (case-insensitive id).
+        config.ergo.reserve_tokens.insert(
+            token_id.to_ascii_uppercase(),
+            ReserveTokenConfig {
+                symbol: "USE".to_string(),
+                decimals: 3,
+                min_collateralization_ratio: Some(1.1),
+            },
+        );
+        assert_eq!(
+            config
+                .parse_served_denomination(&format!("token:{}", token_id))
+                .unwrap(),
+            basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap())
+        );
+        assert_eq!(
+            config.denomination_display(&basis_store::DenomKey::Erg),
+            ("ERG".to_string(), 9)
+        );
+        assert_eq!(
+            config.denomination_display(&basis_store::DenomKey::Token(
+                hex::decode(token_id).unwrap().try_into().unwrap()
+            )),
+            ("USE".to_string(), 3)
+        );
+    }
+
     #[test]
     fn test_tracker_public_key_hex_format() {
         let config = AppConfig {
@@ -730,7 +845,6 @@ mod tests {
                     start_height: None,
                     reserve_contract_p2s: None,
                     token_reserve_contract_p2s: None,
-                    reserve_token_id: None,
                     tracker_nft_id: None,
                     node_url: "http://localhost:9053".to_string(),
                     scan_name: None,
@@ -739,8 +853,7 @@ mod tests {
                 basis_reserve_contract_p2s: "test".to_string(),
                 basis_token_reserve_contract_p2s: "test_token".to_string(),
                 tracker_nft_id: None,
-                reserve_token_id: None,
-                reserve_token_decimals: 0,
+                reserve_tokens: Default::default(),
                 tracker_public_key: Some(
                     "02dada811a888cd0dc7a0a41739a3ad9b0f427741fe6ca19700cf1a51200c96bf7"
                         .to_string(),
@@ -860,8 +973,7 @@ mod tests {
                 basis_reserve_contract_p2s: "test".to_string(),
                 basis_token_reserve_contract_p2s: "test_token".to_string(),
                 tracker_nft_id: None,
-                reserve_token_id: None,
-                reserve_token_decimals: 0,
+                reserve_tokens: Default::default(),
                 tracker_public_key: None,
                 tracker_secret_key: None,
             },

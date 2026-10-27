@@ -4,11 +4,20 @@
 //! for fast lookups by issuer, recipient, and timestamp without full partition scans.
 
 use crate::{
-    reserve_tracker::ExtendedReserveInfo, IouNote, NoteConfirmation, NoteError, NoteKey, PubKey,
-    TrackerBoxInfo,
+    reserve_tracker::ExtendedReserveInfo, DenomKey, IouNote, NoteConfirmation, NoteError, NoteKey,
+    PubKey, TrackerBoxInfo,
 };
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
+
+/// Fixed-width note record length: issuer(33) ‖ collected(8) ‖ redeemed(8) ‖
+/// timestamp(8) ‖ signature(65) ‖ recipient(33) ‖ tracker_nft_id(32) ‖
+/// denomination(33) = 220 bytes.
+const NOTE_VALUE_LEN: usize = 220;
+
+/// Fixed-width reserve journal value length: timestamp(8) ‖ already_redeemed(8) ‖
+/// denomination(33) = 49 bytes.
+const JOURNAL_VALUE_LEN: usize = 49;
 
 /// Database storage for IOU notes with extra indices for efficient querying
 ///
@@ -213,6 +222,50 @@ impl NoteStorage {
         bytes
     }
 
+    /// Serialize a note record: issuer(33) ‖ collected(8) ‖ redeemed(8) ‖
+    /// timestamp(8) ‖ signature(65) ‖ recipient(33) ‖ tracker_nft_id(32) ‖
+    /// denomination(33) = 220 bytes. Fixed-width, hand-rolled (no serde).
+    fn serialize_note_value(issuer_pubkey: &PubKey, note: &IouNote) -> Vec<u8> {
+        let mut value_bytes = Vec::with_capacity(NOTE_VALUE_LEN);
+        value_bytes.extend_from_slice(issuer_pubkey);
+        value_bytes.extend_from_slice(&note.amount_collected.to_be_bytes());
+        value_bytes.extend_from_slice(&note.amount_redeemed.to_be_bytes());
+        value_bytes.extend_from_slice(&note.timestamp.to_be_bytes());
+        value_bytes.extend_from_slice(&note.signature);
+        value_bytes.extend_from_slice(&note.recipient_pubkey);
+        value_bytes.extend_from_slice(&note.tracker_nft_id);
+        value_bytes.extend_from_slice(&note.denomination.encode33());
+        value_bytes
+    }
+
+    /// Deserialize a note record written by `serialize_note_value`.
+    /// Returns `None` for malformed (wrong-length or bad denomination byte) records.
+    fn deserialize_note_value(value_bytes: &[u8]) -> Option<(PubKey, IouNote)> {
+        if value_bytes.len() != NOTE_VALUE_LEN {
+            return None;
+        }
+        let issuer_pubkey: PubKey = value_bytes[0..33].try_into().ok()?;
+        let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().ok()?);
+        let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().ok()?);
+        let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().ok()?);
+        let signature: [u8; 65] = value_bytes[57..122].try_into().ok()?;
+        let recipient_pubkey: PubKey = value_bytes[122..155].try_into().ok()?;
+        let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().ok()?;
+        let denomination = DenomKey::decode33(value_bytes[187..220].try_into().ok()?).ok()?;
+        Some((
+            issuer_pubkey,
+            IouNote {
+                recipient_pubkey,
+                amount_collected,
+                amount_redeemed,
+                timestamp,
+                signature,
+                tracker_nft_id,
+                denomination,
+            },
+        ))
+    }
+
     /// Deserialize a list of note keys from bytes
     fn deserialize_note_keys(bytes: &[u8]) -> Result<Vec<NoteKey>, NoteError> {
         if bytes.len() < 4 {
@@ -299,18 +352,10 @@ impl NoteStorage {
 
     /// Store an IOU note with its issuer public key
     pub fn store_note(&self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
+        let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
 
-        // Manual serialization to avoid serde issues with arrays
-        let mut value_bytes = Vec::new();
-        value_bytes.extend_from_slice(issuer_pubkey);
-        value_bytes.extend_from_slice(&note.amount_collected.to_be_bytes());
-        value_bytes.extend_from_slice(&note.amount_redeemed.to_be_bytes());
-        value_bytes.extend_from_slice(&note.timestamp.to_be_bytes());
-        value_bytes.extend_from_slice(&note.signature);
-        value_bytes.extend_from_slice(&note.recipient_pubkey);
-        value_bytes.extend_from_slice(&note.tracker_nft_id);
+        let value_bytes = Self::serialize_note_value(issuer_pubkey, note);
 
         self.notes_partition
             .insert(&key_bytes, &value_bytes)
@@ -323,58 +368,22 @@ impl NoteStorage {
         Ok(())
     }
 
-    /// Retrieve an IOU note by issuer and recipient public keys
+    /// Retrieve an IOU note by issuer, recipient and denomination
     pub fn get_note(
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<Option<IouNote>, NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
         let key_bytes = key.to_bytes();
 
         match self.notes_partition.get(&key_bytes) {
             Ok(Some(value_bytes)) => {
-                // Manual deserialization
-                if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
-                    return Err(NoteError::StorageError(
-                        "Invalid stored note format".to_string(),
-                    ));
-                }
-
-                let mut offset = 0;
-                let _stored_issuer_pubkey: PubKey =
-                    value_bytes[offset..offset + 33].try_into().unwrap();
-                offset += 33;
-
-                let amount_collected =
-                    u64::from_be_bytes(value_bytes[offset..offset + 8].try_into().unwrap());
-                offset += 8;
-
-                let amount_redeemed =
-                    u64::from_be_bytes(value_bytes[offset..offset + 8].try_into().unwrap());
-                offset += 8;
-
-                let timestamp =
-                    u64::from_be_bytes(value_bytes[offset..offset + 8].try_into().unwrap());
-                offset += 8;
-
-                let signature: [u8; 65] = value_bytes[offset..offset + 65].try_into().unwrap();
-                offset += 65;
-
-                let recipient_pubkey: PubKey = value_bytes[offset..offset + 33].try_into().unwrap();
-                offset += 33;
-
-                let tracker_nft_id: [u8; 32] = value_bytes[offset..offset + 32].try_into().unwrap();
-
-                let note = IouNote {
-                    recipient_pubkey,
-                    amount_collected,
-                    amount_redeemed,
-                    timestamp,
-                    signature,
-                    tracker_nft_id,
-                };
-
+                let (_issuer, note) =
+                    Self::deserialize_note_value(&value_bytes).ok_or_else(|| {
+                        NoteError::StorageError("Invalid stored note format".to_string())
+                    })?;
                 Ok(Some(note))
             }
             Ok(None) => Ok(None),
@@ -446,31 +455,10 @@ impl NoteStorage {
         let mut notes = Vec::new();
         for key in keys {
             let key_bytes = key.to_bytes();
-            match self.notes_partition.get(&key_bytes) {
-                Ok(Some(value_bytes)) => {
-                    if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
-                        continue; // Skip invalid entries
-                    }
-                    let amount_collected =
-                        u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                    let amount_redeemed =
-                        u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-                    let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
-                    let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
-                    let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
-                    let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
-
-                    notes.push(IouNote {
-                        recipient_pubkey,
-                        amount_collected,
-                        amount_redeemed,
-                        timestamp,
-                        signature,
-                        tracker_nft_id,
-                    });
+            if let Ok(Some(value_bytes)) = self.notes_partition.get(&key_bytes) {
+                if let Some((_issuer, note)) = Self::deserialize_note_value(&value_bytes) {
+                    notes.push(note);
                 }
-                Ok(None) => {}
-                Err(_) => {}
             }
         }
         Ok(notes)
@@ -483,35 +471,10 @@ impl NoteStorage {
         let mut notes = Vec::new();
         for key in keys {
             let key_bytes = key.to_bytes();
-            match self.notes_partition.get(&key_bytes) {
-                Ok(Some(value_bytes)) => {
-                    if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
-                        continue; // Skip invalid entries
-                    }
-                    let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
-                    let amount_collected =
-                        u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                    let amount_redeemed =
-                        u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-                    let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
-                    let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
-                    let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
-                    let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
-
-                    notes.push((
-                        issuer_pubkey,
-                        IouNote {
-                            recipient_pubkey,
-                            amount_collected,
-                            amount_redeemed,
-                            timestamp,
-                            signature,
-                            tracker_nft_id,
-                        },
-                    ));
+            if let Ok(Some(value_bytes)) = self.notes_partition.get(&key_bytes) {
+                if let Some(pair) = Self::deserialize_note_value(&value_bytes) {
+                    notes.push(pair);
                 }
-                Ok(None) => {}
-                Err(_) => {}
             }
         }
         Ok(notes)
@@ -610,25 +573,21 @@ impl NoteStorage {
                 NoteError::StorageError(format!("Failed to iterate partition: {}", e))
             })?;
 
-            // Manual deserialization to extract issuer and recipient
-            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
+            let Some((issuer_pubkey, note)) = Self::deserialize_note_value(&value_bytes) else {
                 continue; // Skip invalid entries
-            }
-
-            let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
-            let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
+            };
 
             // Reconstruct the note key from the stored key bytes
             let note_key = if key_bytes.len() == 32 {
                 NoteKey::from_bytes(&key_bytes.as_ref().try_into().unwrap())
             } else {
-                // Fallback: compute from pubkeys
-                NoteKey::from_keys(&issuer_pubkey, &recipient_pubkey)
+                // Fallback: compute from pubkeys and denomination
+                NoteKey::from_assets(&issuer_pubkey, &note.recipient_pubkey, &note.denomination)
             };
 
             // Rebuild indices
             Self::add_to_index(&self.issuer_index, &issuer_pubkey, &note_key)?;
-            Self::add_to_index(&self.recipient_index, &recipient_pubkey, &note_key)?;
+            Self::add_to_index(&self.recipient_index, &note.recipient_pubkey, &note_key)?;
             count += 1;
         }
 
@@ -645,29 +604,9 @@ impl NoteStorage {
                 NoteError::StorageError(format!("Failed to iterate partition: {}", e))
             })?;
 
-            // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
-                continue; // Skip invalid entries
+            if let Some((_issuer, note)) = Self::deserialize_note_value(&value_bytes) {
+                notes.push(note);
             }
-
-            let _stored_issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
-            let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-            let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-            let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
-            let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
-            let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
-            let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
-
-            let note = IouNote {
-                recipient_pubkey,
-                amount_collected,
-                amount_redeemed,
-                timestamp,
-                signature,
-                tracker_nft_id,
-            };
-
-            notes.push(note);
         }
 
         Ok(notes)
@@ -682,29 +621,9 @@ impl NoteStorage {
                 NoteError::StorageError(format!("Failed to iterate partition: {}", e))
             })?;
 
-            // Manual deserialization
-            if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
-                continue; // Skip invalid entries
+            if let Some(pair) = Self::deserialize_note_value(&value_bytes) {
+                notes_with_issuer.push(pair);
             }
-
-            let issuer_pubkey: PubKey = value_bytes[0..33].try_into().unwrap();
-            let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-            let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-            let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
-            let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
-            let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
-            let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
-
-            let note = IouNote {
-                recipient_pubkey,
-                amount_collected,
-                amount_redeemed,
-                timestamp,
-                signature,
-                tracker_nft_id,
-            };
-
-            notes_with_issuer.push((issuer_pubkey, note));
         }
 
         Ok(notes_with_issuer)
@@ -716,27 +635,11 @@ impl NoteStorage {
 
         match self.notes_partition.get(&key_bytes) {
             Ok(Some(value_bytes)) => {
-                if value_bytes.len() != 33 + 8 + 8 + 8 + 65 + 33 + 32 {
-                    return Err(NoteError::StorageError(
-                        "Invalid stored note format".to_string(),
-                    ));
-                }
-
-                let amount_collected = u64::from_be_bytes(value_bytes[33..41].try_into().unwrap());
-                let amount_redeemed = u64::from_be_bytes(value_bytes[41..49].try_into().unwrap());
-                let timestamp = u64::from_be_bytes(value_bytes[49..57].try_into().unwrap());
-                let signature: [u8; 65] = value_bytes[57..122].try_into().unwrap();
-                let recipient_pubkey: PubKey = value_bytes[122..155].try_into().unwrap();
-                let tracker_nft_id: [u8; 32] = value_bytes[155..187].try_into().unwrap();
-
-                Ok(Some(IouNote {
-                    recipient_pubkey,
-                    amount_collected,
-                    amount_redeemed,
-                    timestamp,
-                    signature,
-                    tracker_nft_id,
-                }))
+                let (_issuer, note) =
+                    Self::deserialize_note_value(&value_bytes).ok_or_else(|| {
+                        NoteError::StorageError("Invalid stored note format".to_string())
+                    })?;
+                Ok(Some(note))
             }
             Ok(None) => Ok(None),
             Err(e) => Err(NoteError::StorageError(format!(
@@ -751,8 +654,9 @@ impl NoteStorage {
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<(), NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
         let key_bytes = key.to_bytes();
 
         // Remove from main storage
@@ -775,10 +679,11 @@ impl NoteStorage {
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
         timestamp: u64,
         already_redeemed: u64,
     ) -> Result<(), NoteError> {
-        let note_key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let note_key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
 
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -790,9 +695,10 @@ impl NoteStorage {
         key.extend_from_slice(issuer_pubkey);
         key.extend_from_slice(&note_key.to_bytes());
 
-        let mut value = Vec::with_capacity(16);
+        let mut value = Vec::with_capacity(JOURNAL_VALUE_LEN);
         value.extend_from_slice(&timestamp.to_be_bytes());
         value.extend_from_slice(&already_redeemed.to_be_bytes());
+        value.extend_from_slice(&denomination.encode33());
 
         self.reserve_avl_journal_partition
             .insert(&key, &value)
@@ -808,8 +714,11 @@ impl NoteStorage {
 
     /// Iterate the reserve AVL journal in operation order.
     ///
-    /// Returns a vector of (issuer_pubkey, note_key, timestamp, already_redeemed) tuples.
-    pub fn iter_reserve_avl_updates(&self) -> Result<Vec<(PubKey, NoteKey, u64, u64)>, NoteError> {
+    /// Returns a vector of (issuer_pubkey, note_key, denomination, timestamp,
+    /// already_redeemed) tuples.
+    pub fn iter_reserve_avl_updates(
+        &self,
+    ) -> Result<Vec<(PubKey, NoteKey, DenomKey, u64, u64)>, NoteError> {
         let mut updates = Vec::new();
 
         for item in self.reserve_avl_journal_partition.iter() {
@@ -817,7 +726,7 @@ impl NoteStorage {
                 NoteError::StorageError(format!("Failed to iterate reserve AVL journal: {}", e))
             })?;
 
-            if key.len() != 16 + 33 + 32 || value.len() != 16 {
+            if key.len() != 16 + 33 + 32 || value.len() != JOURNAL_VALUE_LEN {
                 tracing::warn!(
                     "Skipping malformed reserve AVL journal entry: key_len={}, value_len={}",
                     key.len(),
@@ -834,8 +743,21 @@ impl NoteStorage {
 
             let timestamp = u64::from_be_bytes(value[0..8].try_into().unwrap());
             let already_redeemed = u64::from_be_bytes(value[8..16].try_into().unwrap());
+            let denomination =
+                DenomKey::decode33(&value[16..49].try_into().unwrap()).map_err(|e| {
+                    NoteError::StorageError(format!(
+                        "Invalid denomination in reserve AVL journal: {}",
+                        e
+                    ))
+                })?;
 
-            updates.push((issuer_pubkey, note_key, timestamp, already_redeemed));
+            updates.push((
+                issuer_pubkey,
+                note_key,
+                denomination,
+                timestamp,
+                already_redeemed,
+            ));
         }
 
         Ok(updates)

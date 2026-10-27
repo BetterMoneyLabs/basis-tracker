@@ -160,6 +160,21 @@ pub const SCHNORR_TEST_VECTORS: &[SchnorrTestVector] = &[
         signature_hex: "02001d67f568ace3b32c68bd9cfdd3795d5df0f5057b4d837935578697675c8e334668c7b923ae13df8dd9725ac66c63a4ca6f05cc2e7d1c3d23abdcb750dea923",
         should_verify: true,
     },
+    // Token-denominated note: the message key is the namespaced debt key
+    // blake2b256(issuer ‖ recipient ‖ tokenId) with token id
+    // a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669 (USE).
+    // See specs/ergo/multi_collateral_reserves.md.
+    SchnorrTestVector {
+        id: "TV012",
+        description: "Token-denominated note (namespaced debtKey)",
+        issuer_pubkey_hex: "02fc84de78d191f6b47b6ba97bf1eb5ba3b541c8ca247461f41dafdd6db11bc063",
+        recipient_pubkey_hex: "023bc6f9ff8a2af3992d23c145de5a868bae6b80a3dd3b24a1de4c6486472e9dbd",
+        amount: 1000000000u64,
+        timestamp: 1743379200000u64,
+        message_hex: "967d7eb07055cb7ab02e6a8956d3e3213715a945050d236d983972bad5c60565000000003b9aca0000000195e97f78004242424242424242424242424242424242424242424242424242424242424242",
+        signature_hex: "03f0f0df97d7c1cc78cd9f3fa98c944bcc32c04c4827d3ac0488d9b19cc30549783023efc493827d880225ebabda4553cbdd7c1e872891e6ddfc9f7713efe76971",
+        should_verify: true,
+    },
 ];
 
 #[cfg(test)]
@@ -189,5 +204,54 @@ mod tests {
                 vector.id, vector.description, vector.should_verify, verified
             );
         }
+    }
+
+    /// TV012 cross-validation: the Rust signing message for a token denomination must
+    /// reproduce the Scala-generated message byte-for-byte (namespaced debt key).
+    #[test]
+    fn test_token_denomination_message_matches_scala_vector() {
+        let vector = SCHNORR_TEST_VECTORS
+            .iter()
+            .find(|v| v.id == "TV012")
+            .expect("TV012 present");
+        let issuer: crate::PubKey = hex::decode(vector.issuer_pubkey_hex)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let recipient: crate::PubKey = hex::decode(vector.recipient_pubkey_hex)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let token_id: [u8; 32] =
+            hex::decode("a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let tracker_nft_id = [0x42u8; 32];
+
+        let message = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Token(token_id),
+            vector.amount,
+            vector.timestamp,
+            &tracker_nft_id,
+        );
+        assert_eq!(
+            hex::encode(&message),
+            vector.message_hex,
+            "token-denominated signing message must match the Scala vector"
+        );
+
+        // The ERG message for the same pair is different (different debt key).
+        let erg_message = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            vector.amount,
+            vector.timestamp,
+            &tracker_nft_id,
+        );
+        assert_ne!(message, erg_message);
     }
 }

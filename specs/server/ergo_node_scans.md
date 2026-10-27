@@ -86,7 +86,7 @@ Each box retrieved from the scan is processed as follows:
    - R6: Contains the NFT ID of the tracker server (bytes) - identifies which tracker server this reserve is linked to
    - Box value: The collateral amount
 3. **State Updates**: Update both in-memory tracker and persistent storage with the new reserve information
-4. **Spent Box Detection**: Compare current scan results with previously known reserves to identify spent boxes
+4. **Spent Box Detection**: Compare current scan results with previously known reserves to identify spent boxes. The `/blockchain/box/unspent/byAddress` queries used for this comparison are paginated (`limit=1000`, looping with `offset` until a short page comes back), because the node applies a default limit of 5 boxes (newest first) that would otherwise silently hide older reserves. A box that fails to parse is **quarantined** — skipped with a warning and excluded from the comparison set — rather than disabling spent-reserve removal globally.
 
 ## Tracker Scanner
 

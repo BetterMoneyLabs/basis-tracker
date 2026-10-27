@@ -16,7 +16,7 @@ The server is configured under `[server.auth]` with `mode` set to one of:
 | `api_key` | Shared secret sent in `Authorization: Bearer <key>` or `X-API-Key: <key>`. | Server-to-server or MCP clients. |
 | `signature` | Per-client secp256k1 Schnorr request signatures. | High-security production deployments. |
 
-When auth is enabled, the server also logs a warning if TLS is not configured, because credentials and signatures would travel over plaintext.
+When auth is enabled, the server also logs a warning if TLS is not configured, because credentials and signatures would travel over plaintext. On a **non-loopback** bind it goes further and **refuses to start** when auth (`api_key` or `signature`) would run over plain HTTP, unless `server.auth.allow_insecure_http_non_loopback = true` is set explicitly (default `false`).
 
 ### Default Mode
 
@@ -48,6 +48,10 @@ tls_key_path = "server.key"
 mode = "signature"          # RECOMMENDED. The built-in default is "none".
 # Shared secret used only when mode = "api_key".
 # api_key = "change-me"
+# Optional separate key for Admin-only routes (/reserves/create,
+# /acceptance/policy, /redeem/complete). When set, api_key above grants only
+# Write. When unset, api_key keeps full Admin and a startup warning is logged.
+# admin_api_key = "..."
 
 # Authorized public keys used when mode = "signature".
 [[server.auth.authorized_clients]]
@@ -111,11 +115,20 @@ Verification uses `basis_offchain::schnorr::schnorr_verify` and the challenge `e
 
 ### Replay Protection
 
-The server keeps an in-memory cache of seen `(pubkey_lowercase, timestamp_ms, nonce)` combinations, keyed on the *parsed* timestamp and the nonce. The nonce header is mandatory: requests without one are rejected with 401. A pair is inserted into the cache only **after** the signature has been verified, so a forged request cannot burn a legitimate client's nonce. Entries are pruned after twice the configured timestamp tolerance.
+The server keeps an in-memory cache of seen `(pubkey_lowercase, timestamp_ms, nonce)` combinations, keyed on the *parsed* timestamp and the nonce. The nonce header is mandatory: requests without one are rejected with 401. A pair is inserted into the cache only **after** the signature has been verified, so a forged request cannot burn a legitimate client's nonce. Entries are pruned after **three times** the configured timestamp tolerance. The extra margin closes a replay window: cache expiry is measured from insertion (monotonic clock) while the timestamp-freshness check uses wall-clock time, so with a 2× TTL a request dated at the very end of its tolerance window could be replayed in the final instants after its cache entry had already expired.
 
 ### Timestamp Tolerance
 
 Signatures whose timestamp is older than `signature_timestamp_tolerance_ms` or more than that far in the future are rejected. The default is 30 seconds.
+
+### Validation Order, Body Cap, and Timeout
+
+In signature mode the middleware validates **all headers before reading the body**: pubkey
+(hex, exactly 33 bytes), signature (hex, exactly 65 bytes), `Authorization`, timestamp (parses
+and is inside the tolerance window), and nonce (present and non-empty). A request that fails any
+of these is rejected with 401 without the body ever being buffered. The body is then read with a
+hard cap of 256 KiB (`auth_middleware::MAX_BODY_BYTES`, shared with the router's
+`DefaultBodyLimit`; oversized bodies get 413), and a 30 s `TimeoutLayer` wraps the whole router.
 
 ## Role-Based Access Control
 
@@ -127,7 +140,7 @@ Every authenticated request receives an effective role. Routes require the follo
 | `GET` endpoints | `GET` | `Read` |
 | `/notes` | `POST` | `Write` |
 | `/redeem` | `POST` | `Write` |
-| `/redeem/complete` | `POST` | `Write` |
+| `/redeem/complete` | `POST` | `Admin` |
 | `/redemption/prepare` | `POST` | `Write` |
 | `/redemption/build` | `POST` | `Write` |
 | `/redemption/submit` | `POST` | `Write` |
@@ -143,7 +156,12 @@ Role hierarchy: `Admin` > `Write` > `Read`. A higher role can access endpoints r
 ### Role Assignment
 
 - `anonymous` / `none` mode: every request gets `Admin`.
-- `api_key` mode: every request gets `Admin`.
+- `api_key` mode: by default the shared `api_key` gets `Admin`. When
+  `server.auth.admin_api_key` is configured, the shared `api_key` grants only `Write` and
+  `admin_api_key` grants `Admin` — the key handed to ordinary clients then cannot reach
+  operator-only routes (`/reserves/create`, `/acceptance/policy`, `/redeem/complete`). When
+  `admin_api_key` is unset the server keeps the full-`Admin` behavior for backward
+  compatibility and logs a startup warning recommending it be set.
 - `signature` mode: role is taken from the matching `authorized_clients` entry.
 
 ## Client Configuration
@@ -190,12 +208,18 @@ The TUI wallet uses the same `~/.basis/cli.toml` auth settings as `basis_cli`. I
 When auth is enabled, the server restricts CORS origins to `allowed_origins`. If `allowed_origins`
 is empty while auth is enabled, **no CORS layer is installed at all**, so browsers refuse
 cross-origin requests while non-browser clients (curl, the CLI, the MCP server) are unaffected.
-There is no wildcard-origin branch any more.
+In `none` mode the CORS layer is restricted to **loopback origins only**. There is no
+wildcard-origin branch anywhere.
 
 This changed after PR #14 (S1). The previous behaviour fell through to `allow_origin(Any)` whenever
 auth was enabled but `allowed_origins` was empty, which is the default — so any web page the operator
 had open in their browser could call the tracker API. In `none` mode every such request is `Admin`.
-A wildcard origin is now used only when auth is disabled, where there is no credential to steal.
+
+As a second layer of defence against DNS rebinding, in `none` mode the server also validates the
+`Host` header of every request and rejects (HTTP 403) any request whose `Host` (after stripping
+the port) is not a loopback address. A page on `evil.com` that rebinds its DNS to `127.0.0.1`
+would arrive with `Host: evil.com` and be refused, even though a browser always sends a `Host`
+header. With auth enabled the request is authenticated regardless of `Host`, so no guard is needed.
 
 ### Mandatory authentication off loopback
 
@@ -203,6 +227,12 @@ A wildcard origin is now used only when auth is disabled, where there is no cred
 start** when `mode = "none"` is combined with a non-loopback bind address, unless
 `server.auth.allow_anonymous_non_loopback = true` is set explicitly (default `false`). Loopback is
 recognised as `127.0.0.0/8`, `::1`, and the name `localhost`.
+
+Startup validation (`validate_startup`) additionally refuses to boot when:
+
+- `mode = "api_key"` is configured with the example placeholder key (`"change-me"`).
+- Auth (`api_key` or `signature`) is enabled over plain HTTP on a non-loopback bind, unless
+  `server.auth.allow_insecure_http_non_loopback = true` is set explicitly (default `false`).
 
 Two related changes from the same review:
 
@@ -214,12 +244,17 @@ Two related changes from the same review:
   written first, so a forged request could burn a client's nonce) and is keyed on the **parsed**
   timestamp rather than the raw header, which otherwise allowed unlimited replay by sending
   `X-Signature-Timestamp: 0<ts>` (leading zeros parse to the same integer but produced a fresh cache
-  key). The request body is also capped.
+  key). The request body is also capped (currently 256 KiB; see "Validation Order, Body Cap, and
+  Timeout" above).
 
 ## Security Checklist
 
 - **Set an explicit `mode` before exposing the server.** The default is `none`, which grants
   `Admin` to every unauthenticated request. Do not rely on the default.
+- In `api_key` mode, **configure `server.auth.admin_api_key`** so the key shared with ordinary
+  clients grants only `Write` and operator-only routes (`/reserves/create`,
+  `/acceptance/policy`, `/redeem/complete`) require the separate admin key. Never use the
+  example placeholder key — the server refuses to start with it.
 - Never run `mode = "none"` or `api_key` over plaintext in production; configure TLS.
 - Keep `signature_timestamp_tolerance_ms` small (default 30 s) to limit replay windows.
 - Always provide a unique `X-Signature-Nonce` per request in signature mode.

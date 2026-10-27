@@ -75,9 +75,12 @@ pub struct RedemptionRequest {
     /// Change address for transaction outputs (derived from tracker pubkey if not specified)
     pub change_address: String,
     /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    /// Signs: key || totalDebt || timestamp || trackerNftId (80 bytes)
-    /// where key = blake2b256(ownerKey || receiverKey)
+    /// Signs: debtKey || totalDebt || timestamp || trackerNftId (80 bytes)
+    /// where debtKey is the denomination-derived debt-tree key
     pub issuer_signature: String,
+    /// Denomination of the debt being redeemed (default: ERG)
+    #[serde(default)]
+    pub denomination: crate::DenomKey,
     /// Whether this is an emergency redemption (after 3 days tracker unavailability)
     #[serde(default)]
     pub emergency: bool,
@@ -147,7 +150,7 @@ impl RedemptionManager {
         // Lookup the note
         let note = self
             .tracker
-            .lookup_note(&issuer_pubkey, &recipient_pubkey)
+            .lookup_note(&issuer_pubkey, &recipient_pubkey, &request.denomination)
             .map_err(|_| RedemptionError::NoteNotFound)?;
 
         // Verify note signature
@@ -159,7 +162,7 @@ impl RedemptionManager {
         let avl_root_digest = self.tracker.get_state().avl_root_digest;
         let avl_proof = self
             .tracker
-            .generate_proof(&issuer_pubkey, &recipient_pubkey)
+            .generate_proof(&issuer_pubkey, &recipient_pubkey, &request.denomination)
             .map_err(|e| {
                 RedemptionError::StorageError(format!("Proof generation failed: {:?}", e))
             })?;
@@ -241,7 +244,11 @@ impl RedemptionManager {
         // For first redemption, this will return None proof
         let reserve_lookup_proof = self
             .tracker
-            .generate_reserve_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
+            .generate_reserve_lookup_proof(
+                &issuer_pubkey_bytes,
+                &recipient_pubkey_bytes,
+                &note.denomination,
+            )
             .map_err(|e| {
                 RedemptionError::TransactionError(format!(
                     "Failed to generate reserve lookup proof: {:?}",
@@ -264,6 +271,7 @@ impl RedemptionManager {
             .generate_reserve_insert_proof(
                 &issuer_pubkey_bytes,
                 &recipient_pubkey_bytes,
+                &note.denomination,
                 note.timestamp,
                 new_already_redeemed,
             )
@@ -277,7 +285,11 @@ impl RedemptionManager {
         // Generate tracker lookup proof (for totalDebt)
         let tracker_lookup_proof = self
             .tracker
-            .generate_tracker_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
+            .generate_tracker_lookup_proof(
+                &issuer_pubkey_bytes,
+                &recipient_pubkey_bytes,
+                &note.denomination,
+            )
             .map_err(|e| {
                 RedemptionError::TransactionError(format!(
                     "Failed to generate tracker lookup proof: {:?}",
@@ -370,13 +382,14 @@ impl RedemptionManager {
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &crate::DenomKey,
         redeemed_amount: u64,
         new_already_redeemed: Option<u64>,
     ) -> Result<(), RedemptionError> {
         // Get the current note
         let mut note = self
             .tracker
-            .lookup_note(issuer_pubkey, recipient_pubkey)
+            .lookup_note(issuer_pubkey, recipient_pubkey, denomination)
             .map_err(|_| RedemptionError::NoteNotFound)?;
 
         // SECURITY (PR #14 S4): the note's timestamp is PART OF THE SIGNED MESSAGE
@@ -441,7 +454,12 @@ impl RedemptionManager {
         // must not require a strictly newer timestamp, must not re-verify an issuer signature that
         // did not change, and must not rewrite the committed `amount_collected`.
         self.tracker
-            .record_redemption(issuer_pubkey, recipient_pubkey, note.amount_redeemed)
+            .record_redemption(
+                issuer_pubkey,
+                recipient_pubkey,
+                denomination,
+                note.amount_redeemed,
+            )
             .map_err(RedemptionError::from)?;
 
         // Keep the reserve AVL tree in sync with the cumulative redeemed amount so subsequent
@@ -453,6 +471,7 @@ impl RedemptionManager {
             .update_already_redeemed(
                 issuer_pubkey,
                 recipient_pubkey,
+                denomination,
                 payment_timestamp,
                 tree_value,
             )
@@ -568,6 +587,7 @@ mod tests {
             timestamp: 1672531200,
             signature: [0u8; 65], // dummy signature,
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
 
         let request = RedemptionRequest {
@@ -589,6 +609,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let proof = crate::NoteProof {
@@ -641,6 +662,7 @@ mod tests {
             timestamp: 1672531200,
             signature: [0u8; 65],
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
 
         let request = RedemptionRequest {
@@ -662,6 +684,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let proof = crate::NoteProof {
@@ -714,6 +737,7 @@ mod tests {
             timestamp: 1672531200,
             signature: [0u8; 65],
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
 
         let request = RedemptionRequest {
@@ -735,6 +759,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let proof = crate::NoteProof {
@@ -786,6 +811,7 @@ mod tests {
             timestamp: 1672531200,
             signature: [0u8; 65],
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
 
         let request = RedemptionRequest {
@@ -807,6 +833,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let proof = crate::NoteProof {
@@ -858,6 +885,7 @@ mod tests {
             timestamp: 1672531200,
             signature: [0u8; 65],
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
 
         let request = RedemptionRequest {
@@ -879,6 +907,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let proof = crate::NoteProof {
@@ -930,6 +959,7 @@ mod tests {
             timestamp: 1672531200,
             signature: [0u8; 65],
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
 
         let request = RedemptionRequest {
@@ -951,6 +981,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let proof = crate::NoteProof {
@@ -1002,6 +1033,7 @@ mod tests {
             timestamp: 1672531200,
             signature: [0u8; 65],
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
 
         let request = RedemptionRequest {
@@ -1023,6 +1055,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let proof = crate::NoteProof {
@@ -1081,6 +1114,7 @@ mod tests {
         let message = crate::schnorr::signing_message(
             &issuer_pubkey,
             &recipient_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             payment_timestamp,
             &[0x42; 32],
@@ -1096,6 +1130,7 @@ mod tests {
             timestamp: payment_timestamp,
             signature,
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
         redemption_manager
             .tracker
@@ -1104,13 +1139,19 @@ mod tests {
 
         let redeemed: u64 = 100_000_000;
         redemption_manager
-            .complete_redemption(&issuer_pubkey, &recipient_pubkey, redeemed, None)
+            .complete_redemption(
+                &issuer_pubkey,
+                &recipient_pubkey,
+                &crate::DenomKey::Erg,
+                redeemed,
+                None,
+            )
             .expect("complete redemption");
 
         // Note state updated.
         let updated = redemption_manager
             .tracker
-            .lookup_note(&issuer_pubkey, &recipient_pubkey)
+            .lookup_note(&issuer_pubkey, &recipient_pubkey, &crate::DenomKey::Erg)
             .expect("lookup note");
         assert_eq!(updated.amount_redeemed, redeemed);
         // SECURITY (PR #14 S4): the timestamp is part of the signed message
@@ -1132,6 +1173,7 @@ mod tests {
             .update_already_redeemed(
                 &issuer_pubkey,
                 &recipient_pubkey,
+                &crate::DenomKey::Erg,
                 payment_timestamp,
                 redeemed,
             )
@@ -1139,8 +1181,8 @@ mod tests {
         assert_eq!(
             redemption_manager
                 .tracker
-                .reserve_state_digest(&issuer_pubkey),
-            reference.reserve_state_digest(&issuer_pubkey),
+                .reserve_state_digest(&issuer_pubkey, &crate::DenomKey::Erg),
+            reference.reserve_state_digest(&issuer_pubkey, &crate::DenomKey::Erg),
             "reserve tree must use pre-refresh timestamp and cumulative amount"
         );
 
@@ -1148,13 +1190,20 @@ mod tests {
         // timestamp the note carried after the first completion (captured before the second).
         let first_refresh_ts = updated.timestamp;
         redemption_manager
-            .complete_redemption(&issuer_pubkey, &recipient_pubkey, 50_000_000, None)
+            .complete_redemption(
+                &issuer_pubkey,
+                &recipient_pubkey,
+                &crate::DenomKey::Erg,
+                50_000_000,
+                None,
+            )
             .expect("second completion");
         let mut reference2 = TrackerStateManager::new_with_temp_storage();
         reference2
             .update_already_redeemed(
                 &issuer_pubkey,
                 &recipient_pubkey,
+                &crate::DenomKey::Erg,
                 first_refresh_ts,
                 redeemed + 50_000_000,
             )
@@ -1162,8 +1211,8 @@ mod tests {
         assert_eq!(
             redemption_manager
                 .tracker
-                .reserve_state_digest(&issuer_pubkey),
-            reference2.reserve_state_digest(&issuer_pubkey),
+                .reserve_state_digest(&issuer_pubkey, &crate::DenomKey::Erg),
+            reference2.reserve_state_digest(&issuer_pubkey, &crate::DenomKey::Erg),
             "second redemption must accumulate with the note's pre-second-refresh timestamp"
         );
     }
@@ -1190,6 +1239,7 @@ mod tests {
         let message = crate::schnorr::signing_message(
             &issuer_pubkey,
             &recipient_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             payment_timestamp,
             &[0x42; 32],
@@ -1206,6 +1256,7 @@ mod tests {
             timestamp: payment_timestamp,
             signature,
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
         redemption_manager
             .tracker
@@ -1216,6 +1267,7 @@ mod tests {
         let result = redemption_manager.complete_redemption(
             &issuer_pubkey,
             &recipient_pubkey,
+            &crate::DenomKey::Erg,
             100_000_000,
             Some(100_000_000),
         );
@@ -1228,7 +1280,7 @@ mod tests {
         // The note state is unchanged after the rejected completion.
         let unchanged = redemption_manager
             .tracker
-            .lookup_note(&issuer_pubkey, &recipient_pubkey)
+            .lookup_note(&issuer_pubkey, &recipient_pubkey, &crate::DenomKey::Erg)
             .expect("lookup note");
         assert_eq!(unchanged.amount_redeemed, 100_000_000);
 
@@ -1237,6 +1289,7 @@ mod tests {
             .complete_redemption(
                 &issuer_pubkey,
                 &recipient_pubkey,
+                &crate::DenomKey::Erg,
                 100_000_000,
                 Some(200_000_000),
             )
@@ -1244,7 +1297,7 @@ mod tests {
 
         let updated = redemption_manager
             .tracker
-            .lookup_note(&issuer_pubkey, &recipient_pubkey)
+            .lookup_note(&issuer_pubkey, &recipient_pubkey, &crate::DenomKey::Erg)
             .expect("lookup note");
         assert_eq!(
             updated.amount_redeemed, 200_000_000,
@@ -1256,6 +1309,7 @@ mod tests {
             .update_already_redeemed(
                 &issuer_pubkey,
                 &recipient_pubkey,
+                &crate::DenomKey::Erg,
                 payment_timestamp,
                 200_000_000,
             )
@@ -1263,8 +1317,8 @@ mod tests {
         assert_eq!(
             redemption_manager
                 .tracker
-                .reserve_state_digest(&issuer_pubkey),
-            reference.reserve_state_digest(&issuer_pubkey),
+                .reserve_state_digest(&issuer_pubkey, &crate::DenomKey::Erg),
+            reference.reserve_state_digest(&issuer_pubkey, &crate::DenomKey::Erg),
             "reserve tree must use the validated cumulative value"
         );
     }
@@ -1290,6 +1344,7 @@ mod tests {
         let message = crate::schnorr::signing_message(
             &issuer_pubkey,
             &recipient_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             payment_timestamp,
             &[0x42; 32],
@@ -1305,6 +1360,7 @@ mod tests {
             timestamp: payment_timestamp,
             signature,
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
         redemption_manager
             .tracker
@@ -1312,8 +1368,13 @@ mod tests {
             .expect("add note");
 
         // Zero amount is rejected.
-        let result =
-            redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, 0, None);
+        let result = redemption_manager.complete_redemption(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &crate::DenomKey::Erg,
+            0,
+            None,
+        );
         assert!(
             matches!(result, Err(RedemptionError::InvalidAmount(_))),
             "expected InvalidAmount for zero amount, got {:?}",
@@ -1324,6 +1385,7 @@ mod tests {
         let result = redemption_manager.complete_redemption(
             &issuer_pubkey,
             &recipient_pubkey,
+            &crate::DenomKey::Erg,
             total_debt + 1,
             None,
         );
@@ -1337,10 +1399,21 @@ mod tests {
         // of wrapping. Craft a note with amount_redeemed near u64::MAX by redeeming
         // the full debt first, then attempting another redemption.
         redemption_manager
-            .complete_redemption(&issuer_pubkey, &recipient_pubkey, total_debt, None)
+            .complete_redemption(
+                &issuer_pubkey,
+                &recipient_pubkey,
+                &crate::DenomKey::Erg,
+                total_debt,
+                None,
+            )
             .expect("full redemption");
-        let result =
-            redemption_manager.complete_redemption(&issuer_pubkey, &recipient_pubkey, 1, None);
+        let result = redemption_manager.complete_redemption(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &crate::DenomKey::Erg,
+            1,
+            None,
+        );
         assert!(
             matches!(result, Err(RedemptionError::InvalidAmount(_))),
             "expected InvalidAmount after full redemption, got {:?}",
@@ -1368,6 +1441,7 @@ mod tests {
         let message = crate::schnorr::signing_message(
             &issuer_pubkey,
             &recipient_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             payment_timestamp,
             &[0x42; 32],
@@ -1383,6 +1457,7 @@ mod tests {
             timestamp: payment_timestamp,
             signature,
             tracker_nft_id: [0x42; 32],
+            denomination: crate::DenomKey::Erg,
         };
 
         // Create a manager with on-disk storage so we can reopen it.
@@ -1405,6 +1480,7 @@ mod tests {
                 .update_already_redeemed(
                     &issuer_pubkey,
                     &recipient_pubkey,
+                    &crate::DenomKey::Erg,
                     payment_timestamp,
                     100_000_000,
                 )
@@ -1415,13 +1491,18 @@ mod tests {
                 .update_already_redeemed(
                     &issuer_pubkey,
                     &recipient_pubkey,
+                    &crate::DenomKey::Erg,
                     payment_timestamp + 1,
                     200_000_000,
                 )
                 .expect("second update");
 
             let proof = manager
-                .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey)
+                .generate_reserve_lookup_proof(
+                    &issuer_pubkey,
+                    &recipient_pubkey,
+                    &crate::DenomKey::Erg,
+                )
                 .expect("lookup proof before restart");
             let already_before = u64::from_be_bytes(proof.value[8..16].try_into().unwrap());
             assert_eq!(already_before, 200_000_000);
@@ -1430,7 +1511,7 @@ mod tests {
         // Reopen storage with a fresh manager (simulating server restart).
         let mut restarted = TrackerStateManager::new(&storage_path);
         let proof = restarted
-            .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey)
+            .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey, &crate::DenomKey::Erg)
             .expect("lookup proof after restart");
         let already_after = u64::from_be_bytes(proof.value[8..16].try_into().unwrap());
         assert_eq!(
@@ -1480,6 +1561,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let var6 = |emergency: bool, tracker_signature: Option<String>| {
@@ -1490,6 +1572,7 @@ mod tests {
                 1672531200,
                 &issuer_secret,
                 &[0x42; 32],
+                crate::DenomKey::Erg,
             )
             .expect("sign note");
             tracker.add_note(&issuer_pubkey, &note).expect("add note");
@@ -1608,7 +1691,11 @@ fn build_redemption_transaction(
     // Generate reserve lookup proof FIRST (before inserting, for old state)
     // For first redemption, this will return None proof
     let reserve_lookup_proof = tracker
-        .generate_reserve_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
+        .generate_reserve_lookup_proof(
+            &issuer_pubkey_bytes,
+            &recipient_pubkey_bytes,
+            &note.denomination,
+        )
         .map_err(|e| {
             RedemptionError::TransactionError(format!(
                 "Failed to generate reserve lookup proof: {:?}",
@@ -1623,6 +1710,7 @@ fn build_redemption_transaction(
         .generate_reserve_insert_proof(
             &issuer_pubkey_bytes,
             &recipient_pubkey_bytes,
+            &note.denomination,
             note.timestamp,
             new_already_redeemed,
         )
@@ -1635,7 +1723,11 @@ fn build_redemption_transaction(
 
     // Generate tracker lookup proof (for totalDebt)
     let tracker_lookup_proof = tracker
-        .generate_tracker_lookup_proof(&issuer_pubkey_bytes, &recipient_pubkey_bytes)
+        .generate_tracker_lookup_proof(
+            &issuer_pubkey_bytes,
+            &recipient_pubkey_bytes,
+            &note.denomination,
+        )
         .map_err(|e| {
             RedemptionError::TransactionError(format!(
                 "Failed to generate tracker lookup proof: {:?}",

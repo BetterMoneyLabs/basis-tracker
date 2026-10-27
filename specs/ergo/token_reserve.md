@@ -1,5 +1,13 @@
 # Token-Backed Basis Reserves
 
+> **Superseded by `specs/ergo/multi_collateral_reserves.md`.** The
+> mutually-exclusive single-token mode described below no longer exists: a tracker
+> now serves ERG plus any number of configured tokens simultaneously, debt records
+> are keyed per denomination, and the token contract's debt-tree key carries the
+> token id. This document is kept for historical reference; the configuration and
+> API it describes (`reserve_token_id`, `reserve_token_decimals`,
+> `is_token_reserve_mode`) were removed.
+
 A Basis tracker instance can be configured to back reserves with a single custom
 Ergo token instead of ERG. This is a per-tracker, mutually-exclusive setting:
 one tracker operates either in ERG-reserve mode or in token-reserve mode, never

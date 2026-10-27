@@ -352,7 +352,7 @@ message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || tra
 
 **Emergency Redemption:**
 - Uses the same 80-byte message format as normal redemption
-- Tracker signature bytes must still be provided in context var #6, but verification is bypassed after 3 days (3*720 blocks)
+- Context var #6 must still be present, but carries an **empty `Coll[Byte]`** (the contract branches on `size > 0`); tracker signature verification is bypassed after 3 days (3*720 blocks)
 - Reserve owner signature is always required
 - The contract checks `enoughTimeSpent` flag to bypass tracker signature verification
 
@@ -460,15 +460,17 @@ All context extension variables (#0-#8), AVL proofs, and signature requirements 
 ### Conditions
 - Emergency redemption is available after 3 days (3 * 720 blocks) from tracker creation
 - All debts associated with the tracker become eligible simultaneously
-- Tracker signature bytes must still be provided in context var #6, but verification is bypassed
+- Context var #6 must still be present, but carries an **empty `Coll[Byte]`**; tracker signature verification is bypassed
 
 ### Message Format
 ```
-message = key || longToByteArray(totalDebt) || longToByteArray(timestamp)
+key = blake2b256(ownerKeyBytes || receiverBytes)
+message = key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
 ```
+Same 80-byte format as normal redemption (the tracker NFT id is read on-chain from `SELF.R6[Coll[Byte]]`).
 
 ### Transaction Format Changes
-- Context var #6 (trackerSig) still required but may be invalid
+- Context var #6 (trackerSig) still required but empty (`Coll[Byte]` of size 0)
 - Same context extension structure as normal redemption
 - Contract checks `enoughTimeSpent` flag to bypass tracker signature verification
 

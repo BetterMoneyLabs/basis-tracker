@@ -765,79 +765,68 @@ async fn draw_reserves(app: &mut App) -> Result<()> {
     println!("{}  MY RESERVES{}", BOLD, RESET);
     println!("{}  ───────────{}\n", CYAN, RESET);
 
-    if let Some(ref reserve) = app.reserve_status {
-        let ratio_color = ratio_color(reserve.ratio);
-        let status = ratio_status(reserve.ratio);
-        let d = decimals(app);
+    if !app.reserve_statuses.is_empty() {
+        for reserve in app.reserve_statuses.clone() {
+            let ratio_color = ratio_color(reserve.ratio);
+            let status = ratio_status(reserve.ratio);
+            let d = reserve.decimals;
+            let label = reserve.symbol.as_str();
+            let scale = 10f64.powi(d as i32);
 
-        println!("  {}Issuer:{}", BOLD, RESET);
-        println!(
-            "  {}...{}\n",
-            &reserve.issuer[..20],
-            &reserve.issuer[46..56]
-        );
-
-        if let Some(ref token_id) = reserve.reserve_token_id {
-            println!("  {}Reserve Token ID:{} {}", BOLD, RESET, token_id);
+            println!("  {}Denomination:{} {}", BOLD, RESET, reserve.denomination);
+            println!("  {}Issuer:{}", BOLD, RESET);
             println!(
-                "  {}Total Liabilities:{}     {} units ({} {})",
+                "  {}...{}\n",
+                &reserve.issuer[..20.min(reserve.issuer.len())],
+                &reserve.issuer[reserve.issuer.len().saturating_sub(10)..]
+            );
+
+            println!(
+                "  {}Total Liabilities:{}     {} raw ({:.prec$} {})",
                 BOLD,
                 RESET,
                 reserve.total_debt,
-                format_units(reserve.total_debt, d),
-                asset_label(app)
+                reserve.total_debt as f64 / scale,
+                label,
+                prec = d as usize
             );
             println!(
-                "  {}Collateral:{}     {} units ({} {})",
+                "  {}Collateral:{}     {} raw ({:.prec$} {})",
                 BOLD,
                 RESET,
                 reserve.collateral,
-                format_units(reserve.collateral, d),
-                asset_label(app)
+                reserve.collateral as f64 / scale,
+                label,
+                prec = d as usize
             );
-        } else {
-            println!(
-                "  {}Total Liabilities:{}     {} nanoERG ({:.6} ERG)",
-                BOLD,
-                RESET,
-                reserve.total_debt,
-                reserve.total_debt as f64 / 1_000_000_000.0
-            );
-            println!(
-                "  {}Collateral:{}     {} nanoERG ({:.6} ERG)",
-                BOLD,
-                RESET,
-                reserve.collateral,
-                reserve.collateral as f64 / 1_000_000_000.0
-            );
-        }
 
-        println!(
-            "  {}Ratio:{}          {}{}{}",
-            BOLD, RESET, ratio_color, reserve.ratio, RESET
-        );
-        println!(
-            "  {}Status:{}         {}{}{}",
-            BOLD, RESET, ratio_color, status, RESET
-        );
-        if reserve.has_pending_refund {
             println!(
-                "  {}⚠ Warning:{} Refund initiated for at least one reserve",
-                YELLOW, RESET
+                "  {}Ratio:{}          {}{}{}",
+                BOLD, RESET, ratio_color, reserve.ratio, RESET
             );
-        }
-        println!(
-            "  {}Note Count:{}     {}\n",
-            BOLD, RESET, reserve.note_count
-        );
+            println!(
+                "  {}Status:{}         {}{}{}",
+                BOLD, RESET, ratio_color, status, RESET
+            );
+            if reserve.has_pending_refund {
+                println!(
+                    "  {}⚠ Warning:{} Refund initiated for this reserve",
+                    YELLOW, RESET
+                );
+            }
+            println!(
+                "  {}Note Count:{}     {}\n",
+                BOLD, RESET, reserve.note_count
+            );
 
-        // Visual bar
-        let bar_width = 40;
-        let filled = ((reserve.ratio / 3.0).min(1.0) * bar_width as f64) as usize;
-        let bar: String = std::iter::repeat_n("█", filled)
-            .chain(std::iter::repeat_n("░", bar_width - filled))
-            .collect();
-        println!("  [{}{}{}]\n", ratio_color, bar, RESET);
+            // Visual bar
+            let bar_width = 40;
+            let filled = ((reserve.ratio / 3.0).min(1.0) * bar_width as f64) as usize;
+            let bar: String = std::iter::repeat_n("█", filled)
+                .chain(std::iter::repeat_n("░", bar_width - filled))
+                .collect();
+            println!("  [{}{}{}]\n", ratio_color, bar, RESET);
+        }
     } else {
         println!("  {}No reserve data available.{}\n", GRAY, RESET);
         if let Some(ref config) = app.reserve_token_config {
@@ -1137,6 +1126,8 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
                                 timestamp,
                                 signature: hex::encode(signature),
                                 tracker_nft_id,
+
+                                denomination: String::new(),
                             };
 
                             match app.client.create_note(request).await {
@@ -1368,19 +1359,28 @@ async fn tracker_assisted_redeem(
 
     // The note's signed message is bound to this tracker's NFT ID (issue #15 C3); take it
     // from the stored note so it always matches what the server will verify.
-    let tracker_nft_id: [u8; 32] = app
+    // The note carries its denomination and tracker binding; both go into the signed
+    // message (multi_collateral_reserves.md §4.2, issue #15 C3).
+    let note = app
         .client
         .get_note(issuer, recipient)
         .await
-        .map_err(|e| format!("note lookup failed: {}", e))?
-        .and_then(|n| hex::decode(n.tracker_nft_id).ok())
+        .map_err(|e| format!("note lookup failed: {}", e))?;
+    let tracker_nft_id: [u8; 32] = note
+        .as_ref()
+        .and_then(|n| hex::decode(&n.tracker_nft_id).ok())
         .and_then(|b| b.as_slice().try_into().ok())
         .ok_or_else(|| "note has no valid tracker_nft_id".to_string())?;
+    let denomination = note
+        .as_ref()
+        .and_then(|n| basis_store::DenomKey::parse(&n.denomination).ok())
+        .unwrap_or(basis_store::DenomKey::Erg);
 
     // Issuer (reserve owner) signs the redemption message.
     let message = redemption_signing_message(
         &issuer_pk,
         &recipient_pk,
+        &denomination,
         total_debt,
         timestamp,
         &tracker_nft_id,
@@ -1425,6 +1425,8 @@ async fn tracker_assisted_redeem(
             emergency,
             tracker_box_id: None,
             change_address: None,
+
+            denomination: String::new(),
         })
         .await
         .map_err(|e| format!("tracker build failed: {}", e))?;

@@ -25,6 +25,11 @@ const TOKEN_RECIPIENT_MIN_VALUE_NANOERG: u64 = 1_000_000;
 
 /// Encode an unsigned integer using Ergo's VLQ (Variable-Length Quantity) encoding.
 /// Bytes are emitted least-significant group first (little-endian VLQ).
+/// Parse the denomination recorded on a stored note (defaults to ERG when absent).
+fn note_denom(note: &crate::api::SerializableIouNote) -> basis_store::DenomKey {
+    basis_store::DenomKey::parse(&note.denomination).unwrap_or(basis_store::DenomKey::Erg)
+}
+
 fn vlq_encode(mut value: usize) -> Vec<u8> {
     if value == 0 {
         return vec![0];
@@ -875,6 +880,7 @@ pub async fn execute_local_redemption(
     let message = redemption_signing_message(
         &issuer_pk,
         &recipient_pk,
+        &note_denom(&note),
         total_debt,
         note.timestamp,
         &tracker_nft_id,
@@ -937,6 +943,8 @@ pub async fn execute_local_redemption(
             recipient_pubkey: recipient_pubkey.to_string(),
             redeemed_amount: amount,
             new_already_redeemed: Some(new_already_redeemed),
+
+            denomination: String::new(),
         })
         .await
     {
@@ -1033,6 +1041,7 @@ pub async fn generate_redemption_transaction(
     let message = redemption_signing_message(
         &issuer_pk,
         &recipient_pk,
+        &note_denom(&note),
         note.amount_collected,
         note.timestamp,
         &tracker_nft_id,
@@ -1194,6 +1203,7 @@ pub async fn redeem_tracker_assisted(
     let message = redemption_signing_message(
         &issuer_pk,
         &recipient_pk,
+        &note_denom(&note),
         total_debt,
         timestamp,
         &tracker_nft_id,
@@ -1213,6 +1223,8 @@ pub async fn redeem_tracker_assisted(
             emergency: false,
             tracker_box_id: None,
             change_address: None,
+
+            denomination: String::new(),
         })
         .await
         .map_err(|e| anyhow::anyhow!("tracker build failed: {}", e))?;

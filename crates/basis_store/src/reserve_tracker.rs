@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
-use crate::ReserveInfo;
+use crate::{DenomKey, ReserveInfo};
 
 #[derive(Error, Debug)]
 pub enum ReserveTrackerError {
@@ -16,22 +16,24 @@ pub enum ReserveTrackerError {
     ReserveNotFound(String),
     #[error("Insufficient collateral: {0} < {1}")]
     InsufficientCollateral(u64, u64),
-    /// More than one reserve is tracked for the same owner.
+    /// More than one reserve is tracked for the same owner and denomination.
     ///
     /// SECURITY (PR #14 C3): the reserve contract tracks cumulative redeemed debt **per box** (each
     /// reserve has its own R5), while a note's signed message is only
-    /// `hash(owner || receiver) || totalDebt || timestamp`. Nothing binds the two, so with two
-    /// reserves under the same owner and tracker the SAME note redeems in full from EACH of them.
-    /// That overpays the creditor and dilutes the owner's other creditors. It cannot be fixed in the
-    /// contract without changing the signed message format, so the tracker refuses to operate in
-    /// that configuration instead: see `ReserveTracker::resolve_issuer_reserve`.
+    /// `debtKey || totalDebt || timestamp || trackerNftId`. Nothing binds the two, so with two
+    /// reserves of the same denomination under the same owner and tracker the SAME note redeems in
+    /// full from EACH of them. That overpays the creditor and dilutes the owner's other creditors.
+    /// It cannot be fixed in the contract without changing the signed message format, so the
+    /// tracker refuses to operate in that configuration instead: see
+    /// `ReserveTracker::resolve_issuer_reserve`.
     #[error(
-        "multiple reserves for owner {owner}: {count} tracked ({boxes}). A debt note is not bound \
-         to a specific reserve, so it would redeem in full from each one. Close or point the tracker \
-         at a single reserve per owner."
+        "multiple reserves for owner {owner} in denomination {denomination}: {count} tracked \
+         ({boxes}). A debt note is not bound to a specific reserve, so it would redeem in full \
+         from each one. Close or point the tracker at a single reserve per owner and denomination."
     )]
-    MultipleReservesForOwner {
+    MultipleReservesForDenomination {
         owner: String,
+        denomination: String,
         count: usize,
         boxes: String,
     },
@@ -81,6 +83,20 @@ impl ExtendedReserveInfo {
     /// Check if a refund is pending (R7 is set)
     pub fn is_refund_pending(&self) -> bool {
         self.base_info.refund_initiation_height > 0
+    }
+
+    /// The denomination of this reserve, derived from the recorded reserve token id:
+    /// empty `reserve_token_id` means ERG, otherwise the token at that id.
+    /// Returns `None` when the stored token id is malformed (such a reserve must be
+    /// skipped rather than misclassified as ERG).
+    pub fn denomination(&self) -> Option<DenomKey> {
+        let token_id = self.base_info.reserve_token_id.trim();
+        if token_id.is_empty() {
+            return Some(DenomKey::Erg);
+        }
+        let bytes = hex::decode(token_id).ok()?;
+        let id: [u8; 32] = bytes.as_slice().try_into().ok()?;
+        Some(DenomKey::Token(id))
     }
 }
 
@@ -146,31 +162,41 @@ impl ReserveTracker {
         found
     }
 
-    /// Resolve the single reserve backing `owner_pubkey`, or fail closed.
+    /// Resolve the single reserve backing `owner_pubkey` in the given denomination,
+    /// or fail closed.
     ///
     /// SECURITY (PR #14 C3): the contract keeps cumulative redeemed debt per reserve box, while a
-    /// note's signature covers only `hash(owner || receiver) || totalDebt || timestamp`. A note is
-    /// therefore not bound to a reserve, and with two or more reserves under the same owner and
-    /// tracker it redeems in full against each one -- the creditor is paid twice and the owner's
-    /// other reserves are drained to make it happen.
+    /// note's signature covers only `debtKey || totalDebt || timestamp || trackerNftId`. A note is
+    /// therefore not bound to a reserve, and with two or more reserves of the same denomination
+    /// under the same owner and tracker it redeems in full against each one -- the creditor is
+    /// paid twice and the owner's other reserves are drained to make it happen.
     ///
     /// Off-chain, the mitigation is to refuse the ambiguous configuration rather than guess which
-    /// reserve was meant. Callers that need one reserve per owner per tracker use this instead of
-    /// `get_reserve_by_owner`, which silently returned whichever entry the HashMap yielded first.
+    /// reserve was meant. Callers that need one reserve per (owner, denomination) use this instead
+    /// of `get_reserve_by_owner`, which silently returned whichever entry the HashMap yielded first.
     ///
     /// Note this is tracker policy, not a contract invariant: it holds only while this tracker is
     /// the one redeeming. The underlying per-box redemption state remains a protocol limitation.
     pub fn resolve_issuer_reserve(
         &self,
         owner_pubkey: &str,
+        denomination: &DenomKey,
     ) -> Result<ExtendedReserveInfo, ReserveTrackerError> {
-        match self.get_reserves_by_owner(owner_pubkey).as_slice() {
-            [] => Err(ReserveTrackerError::ReserveNotFound(
-                owner_pubkey.to_string(),
-            )),
+        let matching: Vec<ExtendedReserveInfo> = self
+            .get_reserves_by_owner(owner_pubkey)
+            .into_iter()
+            .filter(|r| r.denomination().as_ref() == Some(denomination))
+            .collect();
+        match matching.as_slice() {
+            [] => Err(ReserveTrackerError::ReserveNotFound(format!(
+                "{} (denomination {})",
+                owner_pubkey,
+                denomination.denomination_id()
+            ))),
             [only] => Ok(only.clone()),
-            many => Err(ReserveTrackerError::MultipleReservesForOwner {
+            many => Err(ReserveTrackerError::MultipleReservesForDenomination {
                 owner: owner_pubkey.to_string(),
+                denomination: denomination.denomination_id(),
                 count: many.len(),
                 boxes: many
                     .iter()

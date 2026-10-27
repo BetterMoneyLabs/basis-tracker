@@ -68,7 +68,8 @@ fn required_role(path: &str, method: &str) -> ClientRole {
             | "/redemption/prepare"
             | "/redemption/build"
             | "/redemption/submit"
-            | "/tracker/signature" => ClientRole::Write,
+            | "/tracker/signature"
+            | "/notes/exchange" => ClientRole::Write,
             // Read-like POSTs: querying state without mutation.
             "/notes/state" | "/acceptance/check" => ClientRole::Read,
             // Unknown POSTs default to Admin for safety.

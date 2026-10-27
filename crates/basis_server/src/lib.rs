@@ -86,6 +86,7 @@ pub enum TrackerCommand {
     GetNoteByIssuerAndRecipient {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
         response_tx: tokio::sync::oneshot::Sender<
             Result<Option<basis_store::IouNote>, basis_store::NoteError>,
         >,
@@ -94,6 +95,23 @@ pub enum TrackerCommand {
         response_tx: tokio::sync::oneshot::Sender<
             Result<Vec<(basis_store::PubKey, basis_store::IouNote)>, basis_store::NoteError>,
         >,
+    },
+    /// Atomic cross-denomination debt exchange (triage/novation,
+    /// specs/ergo/multi_collateral_reserves.md §10). All four signatures were
+    /// verified by the API layer; the store re-verifies them before mutating.
+    ExchangeNotes {
+        issuer_pubkey: basis_store::PubKey,
+        recipient_pubkey: basis_store::PubKey,
+        from_denomination: basis_store::DenomKey,
+        from_amount: u64,
+        to_denomination: basis_store::DenomKey,
+        to_amount: u64,
+        timestamp: u64,
+        issuer_from_signature: basis_store::Signature,
+        recipient_from_signature: basis_store::Signature,
+        issuer_to_signature: basis_store::Signature,
+        recipient_to_signature: basis_store::Signature,
+        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
     },
     InitiateRedemption {
         request: basis_store::RedemptionRequest,
@@ -104,6 +122,7 @@ pub enum TrackerCommand {
     CompleteRedemption {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
         redeemed_amount: u64,
         /// Explicit cumulative reserve-tree value to sync (from the on-chain build).
         /// Falls back to the note's cumulative redeemed amount when `None`.
@@ -113,12 +132,14 @@ pub enum TrackerCommand {
     GenerateProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
         response_tx:
             tokio::sync::oneshot::Sender<Result<basis_store::NoteProof, basis_store::NoteError>>,
     },
     GetTrackerLookupProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
         response_tx: tokio::sync::oneshot::Sender<
             Result<basis_store::TrackerLookupProof, basis_store::NoteError>,
         >,
@@ -131,6 +152,7 @@ pub enum TrackerCommand {
     GetCommittedTrackerLookupProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
         response_tx: tokio::sync::oneshot::Sender<
             Result<basis_store::TrackerLookupProof, basis_store::NoteError>,
         >,
@@ -138,6 +160,7 @@ pub enum TrackerCommand {
     GetReserveLookupProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
         response_tx: tokio::sync::oneshot::Sender<
             Result<basis_store::ReserveLookupProof, basis_store::NoteError>,
         >,
@@ -145,20 +168,24 @@ pub enum TrackerCommand {
     GetReserveInsertProof {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
         timestamp: u64,
         new_already_redeemed: u64,
         response_tx:
             tokio::sync::oneshot::Sender<Result<(Vec<u8>, Vec<u8>), basis_store::NoteError>>,
     },
-    /// Get the current reserve AVL tree root digest (33 bytes) for the given issuer.
+    /// Get the current reserve AVL tree root digest (33 bytes) for the given
+    /// (issuer, denomination) pair.
     GetReserveStateDigest {
         issuer_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
         response_tx: tokio::sync::oneshot::Sender<Vec<u8>>,
     },
     /// Get the confirmation record for a single note.
     GetConfirmation {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
         response_tx: tokio::sync::oneshot::Sender<
             Result<Option<basis_store::NoteConfirmation>, basis_store::NoteError>,
         >,

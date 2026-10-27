@@ -8,8 +8,6 @@
 //! Neither caller reorders the reserve-input context extension: the tracker emits it in Scala
 //! `ContextExtension` order, and both ends sign the identical `bytes_to_sign`.
 
-use blake2::{Blake2b, Digest};
-use generic_array::typenum::U32;
 use thiserror::Error;
 
 use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
@@ -41,18 +39,17 @@ pub enum SigningError {
     NotDlogSecret,
 }
 
-/// Redemption signing message: `blake2b256(issuer || receiver) || totalDebt(8 BE) || timestamp(8 BE) || trackerNftId(32)`.
+/// Redemption signing message: `debtKey || totalDebt(8 BE) || timestamp(8 BE) || trackerNftId(32)`,
+/// where `debtKey` is the denomination-derived debt-tree key (see `basis_core::types::DenomKey`).
 pub fn redemption_signing_message(
     issuer_pk: &[u8; 33],
     receiver_pk: &[u8; 33],
+    denomination: &basis_core::types::DenomKey,
     total_debt: u64,
     timestamp: u64,
     tracker_nft_id: &[u8; 32],
 ) -> [u8; 80] {
-    let mut h = Blake2b::<U32>::new();
-    h.update(issuer_pk);
-    h.update(receiver_pk);
-    let key = h.finalize();
+    let key = denomination.debt_key(issuer_pk, receiver_pk);
     let mut msg = [0u8; 80];
     msg[..32].copy_from_slice(&key);
     msg[32..40].copy_from_slice(&total_debt.to_be_bytes());
@@ -259,7 +256,14 @@ mod tests {
     fn redemption_signing_message_is_80_bytes() {
         let issuer = [0x02u8; 33];
         let receiver = [0x03u8; 33];
-        let msg = redemption_signing_message(&issuer, &receiver, 123, 456, &TEST_TRACKER_NFT_ID);
+        let msg = redemption_signing_message(
+            &issuer,
+            &receiver,
+            &basis_core::types::DenomKey::Erg,
+            123,
+            456,
+            &TEST_TRACKER_NFT_ID,
+        );
         assert_eq!(msg.len(), 80);
         assert_eq!(&msg[32..40], &123u64.to_be_bytes());
         assert_eq!(&msg[40..48], &456u64.to_be_bytes());
@@ -286,6 +290,7 @@ mod tests {
         let msg = redemption_signing_message(
             &issuer,
             &receiver,
+            &basis_core::types::DenomKey::Erg,
             1_000_000_000,
             1_743_379_200_000,
             &TEST_TRACKER_NFT_ID,

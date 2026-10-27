@@ -33,6 +33,15 @@ that tracker so it cannot be replayed on another. The signatures are independent
 transaction. Only the two `proveDlog` proofs are computed over the transaction itself, which is
 where off-chain signing must be byte-exact.
 
+> **Scope of the tracker signature.** The signed message binds the note's `totalDebt` (and
+> timestamp / tracker NFT id), but **not** the amount being redeemed in a given transaction.
+> The acceptance policy and the FIFO ("oldest note first") ordering are therefore tracker-side
+> **policy**, enforced by the tracker only when it agrees to issue its signature — they are not
+> contract invariants. On-chain, the contract bounds every redemption at
+> `totalDebt - redeemedDebt` for the spent reserve; a client that assembles the transaction
+> itself (e.g. from `/tracker/proof` + `/reserve/proof` with an already-obtained signature) is
+> constrained by that bound alone.
+
 ## ergo-lib Version Requirement
 
 The deployed Basis reserve contract (`contract/basis.es`) uses the `Modulo`, `Exponentiate` and

@@ -7,7 +7,15 @@ mod cli_tests {
     #[test]
     fn test_note_validation() {
         // Test that note validation works correctly
-        let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [2u8; 65], [0x42; 32]);
+        let note = IouNote::new(
+            [1u8; 33],
+            1000,
+            0,
+            1234567890,
+            [2u8; 65],
+            [0x42; 32],
+            basis_store::DenomKey::Erg,
+        );
 
         assert_eq!(note.amount_collected, 1000);
         assert_eq!(note.amount_redeemed, 0);
@@ -37,6 +45,7 @@ mod cli_tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: "00".to_string(),
+                    denomination: basis_store::DenomKey::Erg,
         };
 
         // Test field validation
@@ -142,6 +151,7 @@ mod cli_tests {
             0,         // zero timestamp
             [0u8; 65], // zero signature
             [0x42; 32],
+            basis_store::DenomKey::Erg,
         );
 
         // Verify that invalid data is handled

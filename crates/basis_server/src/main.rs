@@ -103,7 +103,6 @@ async fn main() {
     scanner_config.reserve_contract_p2s = Some(config.ergo.basis_reserve_contract_p2s.clone());
     scanner_config.token_reserve_contract_p2s =
         Some(config.ergo.basis_token_reserve_contract_p2s.clone());
-    scanner_config.reserve_token_id = config.ergo.reserve_token_id.clone();
     scanner_config.tracker_nft_id = config.ergo.tracker_nft_id.clone();
 
     // Create real scanner state with configured node URL and contract template
@@ -341,11 +340,51 @@ async fn main() {
                 TrackerCommand::GetNoteByIssuerAndRecipient {
                     issuer_pubkey,
                     recipient_pubkey,
+                    denomination,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .get_note_optional(&issuer_pubkey, &recipient_pubkey);
+                    let result = redemption_manager.tracker.get_note_optional(
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        &denomination,
+                    );
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::ExchangeNotes {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    from_denomination,
+                    from_amount,
+                    to_denomination,
+                    to_amount,
+                    timestamp,
+                    issuer_from_signature,
+                    recipient_from_signature,
+                    issuer_to_signature,
+                    recipient_to_signature,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.exchange_debt(
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        &from_denomination,
+                        from_amount,
+                        &to_denomination,
+                        to_amount,
+                        timestamp,
+                        &issuer_from_signature,
+                        &recipient_from_signature,
+                        &issuer_to_signature,
+                        &recipient_to_signature,
+                    );
+
+                    // Keep the shared digest in sync so the tracker box updater
+                    // commits the exchanged state.
+                    if result.is_ok() {
+                        let current_root = redemption_manager.tracker.get_state().avl_root_digest;
+                        shared_state_for_tracker.set_avl_root_digest(current_root);
+                    }
+
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::InitiateRedemption {
@@ -358,6 +397,7 @@ async fn main() {
                 TrackerCommand::CompleteRedemption {
                     issuer_pubkey,
                     recipient_pubkey,
+                    denomination,
                     redeemed_amount,
                     new_already_redeemed,
                     response_tx,
@@ -365,6 +405,7 @@ async fn main() {
                     let result = redemption_manager.complete_redemption(
                         &issuer_pubkey,
                         &recipient_pubkey,
+                        &denomination,
                         redeemed_amount,
                         new_already_redeemed,
                     );
@@ -385,46 +426,61 @@ async fn main() {
                 TrackerCommand::GenerateProof {
                     issuer_pubkey,
                     recipient_pubkey,
+                    denomination,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .generate_proof(&issuer_pubkey, &recipient_pubkey);
+                    let result = redemption_manager.tracker.generate_proof(
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        &denomination,
+                    );
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetTrackerLookupProof {
                     issuer_pubkey,
                     recipient_pubkey,
+                    denomination,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .generate_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                    let result = redemption_manager.tracker.generate_tracker_lookup_proof(
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        &denomination,
+                    );
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetCommittedTrackerLookupProof {
                     issuer_pubkey,
                     recipient_pubkey,
+                    denomination,
                     response_tx,
                 } => {
                     let result = redemption_manager
                         .tracker
-                        .generate_committed_tracker_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                        .generate_committed_tracker_lookup_proof(
+                            &issuer_pubkey,
+                            &recipient_pubkey,
+                            &denomination,
+                        );
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveLookupProof {
                     issuer_pubkey,
                     recipient_pubkey,
+                    denomination,
                     response_tx,
                 } => {
-                    let result = redemption_manager
-                        .tracker
-                        .generate_reserve_lookup_proof(&issuer_pubkey, &recipient_pubkey);
+                    let result = redemption_manager.tracker.generate_reserve_lookup_proof(
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        &denomination,
+                    );
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetReserveInsertProof {
                     issuer_pubkey,
                     recipient_pubkey,
+                    denomination,
                     timestamp,
                     new_already_redeemed,
                     response_tx,
@@ -432,6 +488,7 @@ async fn main() {
                     let result = redemption_manager.tracker.generate_reserve_insert_proof(
                         &issuer_pubkey,
                         &recipient_pubkey,
+                        &denomination,
                         timestamp,
                         new_already_redeemed,
                     );
@@ -439,21 +496,25 @@ async fn main() {
                 }
                 TrackerCommand::GetReserveStateDigest {
                     issuer_pubkey,
+                    denomination,
                     response_tx,
                 } => {
                     let digest = redemption_manager
                         .tracker
-                        .reserve_state_digest(&issuer_pubkey);
+                        .reserve_state_digest(&issuer_pubkey, &denomination);
                     let _ = response_tx.send(digest);
                 }
                 TrackerCommand::GetConfirmation {
                     issuer_pubkey,
                     recipient_pubkey,
+                    denomination,
                     response_tx,
                 } => {
-                    let result = Ok(redemption_manager
-                        .tracker
-                        .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                    let result = Ok(redemption_manager.tracker.get_confirmation(
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        &denomination,
+                    ));
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::GetAllConfirmations { response_tx } => {
@@ -816,6 +877,10 @@ async fn main() {
         .route("/events/paginated", get(get_events_paginated))
         .route("/notes", post(create_note).options(handle_options))
         .route(
+            "/notes/exchange",
+            post(exchange_notes).options(handle_options),
+        )
+        .route(
             "/acceptance/check",
             post(check_acceptance).options(handle_options),
         )
@@ -877,6 +942,10 @@ async fn main() {
             get(get_basis_reserve_contract_p2s),
         )
         .route("/config/reserve-token", get(get_reserve_token_config))
+        .route(
+            "/config/reserve-collateral",
+            get(get_reserve_collateral_config),
+        )
         .with_state(app_state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         // Authorization runs after auth so an AuthContext is always present.
@@ -1019,6 +1088,7 @@ async fn serve_tls(listener: std::net::TcpListener, app: Router, server_config: 
 /// Background task that continuously scans the blockchain for reserve events
 #[allow(dead_code)]
 async fn background_scanner_task(state: AppState, config: AppConfig) {
+    let _ = &config;
     tracing::info!("Starting background blockchain scanner task");
 
     loop {
@@ -1047,7 +1117,7 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
         }
 
         // Update reserve tracker with current unspent boxes
-        match scanner.get_unspent_reserve_boxes().await {
+        match scanner.get_unspent_reserve_boxes_tagged().await {
             Ok(boxes) => {
                 let tracker = match state.reserve_tracker.try_lock() {
                     Ok(tracker) => tracker,
@@ -1057,93 +1127,22 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
                     }
                 };
 
-                for scan_box in &boxes {
-                    // Extract owner pubkey from box registers (R4 register)
-                    let owner_pubkey = match scan_box.additional_registers.get("R4") {
-                        Some(pubkey_hex) => {
-                            // Parse hex-encoded public key from register
-                            match hex::decode(pubkey_hex) {
-                                Ok(bytes) => bytes,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Invalid R4 register hex for box {}: {}",
-                                        scan_box.box_id,
-                                        e
-                                    );
-                                    continue; // Skip this box
-                                }
-                            }
-                        }
-                        None => {
-                            tracing::warn!("Box {} missing R4 register, skipping", scan_box.box_id);
-                            continue; // Skip boxes without owner pubkey
-                        }
-                    };
-
-                    let tracker_nft_bytes_option = match config.tracker_nft_bytes() {
-                        Ok(bytes) => Some(bytes),
-                        Err(_) => {
-                            tracing::error!("Tracker NFT ID is not properly configured");
-                            continue; // Skip this box update
-                        }
-                    };
-
-                    let refund_initiation_height =
-                        basis_store::ergo_scanner::decode_ergo_long_register(
-                            scan_box.additional_registers.get("R7"),
-                        );
-
-                    let (collateral_amount, reserve_token_bytes) = if let Some(token_id) =
-                        config.ergo.reserve_token_id.as_ref()
+                for tagged in &boxes {
+                    let scan_box = &tagged.scan_box;
+                    // Collateral, denomination, tracker NFT and contract address are
+                    // derived per box by the scanner (never stamped from config).
+                    if let Ok(reserve_info) =
+                        scanner.parse_reserve_box(scan_box, tagged.kind, &tagged.contract_address)
                     {
-                        let token_id_lower = token_id.to_ascii_lowercase();
-                        scan_box
-                                .assets
-                                .iter()
-                                .find(|a| a.token_id.to_ascii_lowercase() == token_id_lower)
-                                .map(|a| {
-                                    (
-                                        a.amount,
-                                        Some(hex::decode(token_id).unwrap_or_default()),
-                                    )
-                                })
-                                .unwrap_or_else(|| {
-                                    tracing::warn!(
-                                        "Reserve box {} missing configured reserve token {}; using ERG value",
-                                        scan_box.box_id,
-                                        token_id
-                                    );
-                                    (scan_box.value, None)
-                                })
-                    } else {
-                        (scan_box.value, None)
-                    };
-
-                    let mut reserve_info = basis_store::ExtendedReserveInfo::new(
-                        scan_box.box_id.as_bytes(),
-                        &owner_pubkey,
-                        collateral_amount,
-                        tracker_nft_bytes_option.as_deref(),
-                        scanner.last_scanned_height().await,
-                        refund_initiation_height,
-                        reserve_token_bytes.as_deref(),
-                    );
-
-                    // Set contract address from configuration
-                    let contract_address = if config.is_token_reserve_mode() {
-                        config.basis_token_reserve_contract_p2s()
-                    } else {
-                        config.basis_reserve_contract_p2s()
-                    };
-                    reserve_info.set_contract_address(contract_address.to_string());
-
-                    if let Err(e) = tracker.update_reserve(reserve_info) {
-                        tracing::warn!(
-                            "Failed to update reserve info for {}: {}",
-                            scan_box.box_id,
-                            e
-                        );
+                        if let Err(e) = tracker.update_reserve(reserve_info) {
+                            tracing::warn!(
+                                "Failed to update reserve info for {}: {}",
+                                scan_box.box_id,
+                                e
+                            );
+                        }
                     }
+                    continue;
                 }
 
                 tracing::debug!("Updated reserve tracker with {} unspent boxes", boxes.len());
@@ -1203,22 +1202,17 @@ async fn process_reserve_event(
                     return Err("Invalid owner public key format".into());
                 }
             };
-            let reserve_token_bytes = config.reserve_token_bytes().ok().flatten();
-            let mut reserve_info = basis_store::ExtendedReserveInfo::new(
+            // Reserve events do not carry the contract slot; the scanner's tagged
+            // per-box parsing is the authoritative path (this handler is unused).
+            let reserve_info = basis_store::ExtendedReserveInfo::new(
                 box_id.as_bytes(),
                 &owner_pubkey_bytes,
                 collateral_amount,
                 tracker_nft_bytes_option.as_deref(),
                 height,
                 0, // Newly created reserves have no pending refund
-                reserve_token_bytes.as_deref(),
+                None,
             );
-            let contract_address = if config.is_token_reserve_mode() {
-                config.basis_token_reserve_contract_p2s()
-            } else {
-                config.basis_reserve_contract_p2s()
-            };
-            reserve_info.set_contract_address(contract_address.to_string());
             tracker.update_reserve(reserve_info)?;
 
             TrackerEvent {

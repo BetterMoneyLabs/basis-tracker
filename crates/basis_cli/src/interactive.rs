@@ -152,6 +152,7 @@ impl InteractiveMode {
 
                             if let (Some(recipient), Some(amount)) = (recipient, amount) {
                                 let cmd = note::NoteCommands::Create {
+                                    denomination: None,
                                     recipient: Some(recipient.to_string()),
                                     amount,
                                     demo: false,

@@ -63,7 +63,7 @@ The `schnorr` module implements Schnorr signature operations following the Ergo 
   - `totalDebt`: 8-byte big-endian representation of total cumulative debt
   - `timestamp`: 8-byte big-endian representation of payment timestamp in milliseconds since Unix epoch
   - `trackerNftId`: 32-byte tracker NFT id, binding the signature to one specific tracker/contract
-  - Emergency redemption uses the **same** message format; only the tracker signature requirement becomes optional after 3 days
+  - Emergency redemption uses the **same** message format; after 3 days the tracker signature is no longer verified (context var #6 is sent as an empty `Coll[Byte]`)
 - **`generate_keypair`**: Generates new key pairs for testing/development
 - **`validate_signature_format`**: Ensures signature has correct 65-byte format
 - **`validate_public_key`**: Validates compressed secp256k1 public keys
@@ -107,7 +107,7 @@ The crate defines comprehensive error types:
 
 - If tracker becomes unavailable, emergency redemption is possible after 3 days (3 * 720 blocks) from tracker creation
 - Emergency redemption uses the **same** message format: `key || totalDebt || timestamp || trackerNftId`
-- The tracker signature becomes optional after the timeout; the reserve owner signature is always required
+- The tracker signature is not verified after the timeout — context var #6 is sent as an **empty** `Coll[Byte]` (the contract branches on `trackerSigBytes.size > 0`); the reserve owner signature is always required
 - **NOTE**: All debts associated with this tracker become eligible for emergency redemption simultaneously after 3 days
 
 ### Time Lock Validation

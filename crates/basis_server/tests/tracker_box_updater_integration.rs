@@ -70,6 +70,7 @@ mod integration_tests {
             1234567890, // timestamp
             &secret_key.secret_bytes(),
             &[0x42; 32],
+            basis_store::DenomKey::Erg,
         )
         .expect("Should be able to create a valid signed note");
 

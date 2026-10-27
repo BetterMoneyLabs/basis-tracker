@@ -23,8 +23,12 @@ The contract uses TWO separate AVL trees:
 
 #### Tracker Tree (in tracker box R5)
 - **Purpose**: Commits to off-chain debt state
-- **Key**: `Blake2b256(payer_pubkey || payee_pubkey)` (32 bytes)
-- **Value**: `total_debt` as Long (8 bytes LE)
+- **Key**: the denomination-derived debt key (32 bytes):
+  `Blake2b256(payer_pubkey || payee_pubkey)` for ERG, or
+  `Blake2b256(payer_pubkey || payee_pubkey || 0x01 || token_id)` for a token
+  denomination (`contract/basis-token.es`; see specs/ergo/multi_collateral_reserves.md).
+  One tracker tree holds an independent debt per (payer, payee, denomination).
+- **Value**: `total_debt` as Long (8 bytes BE)
 - **Flags**: InsertOnly (0x01)
 - **Plasma Parameters**: `(key_length=32, value_length=None)`
 
@@ -33,19 +37,21 @@ The contract uses TWO separate AVL trees:
 All signatures (both payer and tracker) use the SAME message format:
 
 ```
-message = blake2b256(payer_key || payee_key) || total_debt_u64_le || timestamp_i64_le || tracker_nft_id
+message = debtKey || total_debt_u64_be || timestamp_i64_be || tracker_nft_id
 ```
+
+where `debtKey` is the denomination-derived debt key from the tracker tree section above.
 
 **Total length**: 32 + 8 + 8 + 32 = **80 bytes**
 
 The trailing `tracker_nft_id` (32 bytes) is the tracker's NFT id, read on-chain from
-`SELF.R6[Coll[Byte]]` and appended by the contract to the 48-byte payload the signers produce.
-It binds every signature to one specific tracker/contract, so a signature for one tracker
-cannot be replayed on another (issue #15, finding C3).
+`SELF.R6[Coll[Byte]]` and appended by the contract; off-chain signers include the same id to
+produce the identical 80-byte message. It binds every signature to one specific tracker/contract,
+so a signature for one tracker cannot be replayed on another (issue #15, finding C3).
 
 **IMPORTANT**: 
 - Timestamp is in **milliseconds** since Unix epoch (Java/JavaScript format)
-- Use little-endian encoding for numbers (Rust: `to_le_bytes()`)
+- Numbers are big-endian, matching ErgoScript's `longToByteArray` (Rust: `to_be_bytes()`)
 - The blake2b256 hash is of the raw compressed public keys (33 bytes each for compressed points)
 
 ### 3. Schnorr Signature Format

@@ -98,6 +98,7 @@ impl MockContractValidator {
         let message = signing_message(
             owner_pubkey,
             receiver_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -147,21 +148,16 @@ impl MockContractValidator {
 // ============================================================================
 
 /// Generate the 80-byte signing message following Basis protocol spec
-/// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
+/// message = debtKey || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
 pub fn signing_message(
     owner_key: &PubKey,
     receiver_key: &PubKey,
+    denomination: &crate::DenomKey,
     total_debt: u64,
     timestamp: u64,
     tracker_nft_id: &[u8; 32],
 ) -> Vec<u8> {
-    let mut key_hash_input = Vec::with_capacity(66);
-    key_hash_input.extend_from_slice(owner_key);
-    key_hash_input.extend_from_slice(receiver_key);
-
-    let mut hasher = Blake2b::<U32>::new();
-    hasher.update(&key_hash_input);
-    let key_hash = hasher.finalize();
+    let key_hash = denomination.debt_key(owner_key, receiver_key);
 
     let mut message = Vec::with_capacity(80);
     message.extend_from_slice(&key_hash);
@@ -237,6 +233,7 @@ mod tests {
             timestamp,
             &alice_secret,
             &[0x42; 32],
+            crate::DenomKey::Erg,
         )
         .expect("Failed to create note");
 
@@ -249,11 +246,11 @@ mod tests {
         // Verify note was stored
         let _stored_note = redemption_manager
             .tracker
-            .lookup_note(&alice_pubkey, &bob_pubkey)
+            .lookup_note(&alice_pubkey, &bob_pubkey, &crate::DenomKey::Erg)
             .expect("Note not found");
         let stored_note = redemption_manager
             .tracker
-            .lookup_note(&alice_pubkey, &bob_pubkey)
+            .lookup_note(&alice_pubkey, &bob_pubkey, &crate::DenomKey::Erg)
             .expect("Note not found");
         assert_eq!(stored_note.amount_collected, total_debt);
         assert_eq!(stored_note.amount_redeemed, 0);
@@ -263,6 +260,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -331,6 +329,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         // Initiate redemption through manager
@@ -354,13 +353,19 @@ mod tests {
 
         // Complete redemption
         redemption_manager
-            .complete_redemption(&alice_pubkey, &bob_pubkey, total_debt, None)
+            .complete_redemption(
+                &alice_pubkey,
+                &bob_pubkey,
+                &crate::DenomKey::Erg,
+                total_debt,
+                None,
+            )
             .expect("Failed to complete redemption");
 
         // Verify note is fully redeemed
         let final_note = redemption_manager
             .tracker
-            .lookup_note(&alice_pubkey, &bob_pubkey)
+            .lookup_note(&alice_pubkey, &bob_pubkey, &crate::DenomKey::Erg)
             .expect("Note not found after redemption");
         assert_eq!(final_note.amount_redeemed, total_debt);
         assert_eq!(final_note.outstanding_debt(), 0);
@@ -385,6 +390,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -436,6 +442,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -487,6 +494,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -538,6 +546,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -594,6 +603,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -650,6 +660,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -710,6 +721,7 @@ mod tests {
             timestamp,
             &alice_secret,
             &[0x42; 32],
+            crate::DenomKey::Erg,
         )
         .expect("Failed to create note");
 
@@ -722,6 +734,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -750,6 +763,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         // Initiate redemption
@@ -897,6 +911,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -935,6 +950,7 @@ mod tests {
             timestamp,
             &alice_secret,
             &[0x42; 32],
+            crate::DenomKey::Erg,
         )
         .expect("Failed to create note");
         let note_message = note.signing_message(&alice_pubkey);
@@ -966,6 +982,7 @@ mod tests {
         let message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -1019,6 +1036,7 @@ mod tests {
             payment_timestamp,
             &alice_secret,
             &[0x42; 32],
+            crate::DenomKey::Erg,
         )
         .expect("Failed to create note");
         redemption_manager
@@ -1038,6 +1056,7 @@ mod tests {
         let first_message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             payment_timestamp,
             &[0x42; 32],
@@ -1084,6 +1103,7 @@ mod tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let first_data = redemption_manager
@@ -1132,6 +1152,7 @@ mod tests {
             .complete_redemption(
                 &alice_pubkey,
                 &bob_pubkey,
+                &crate::DenomKey::Erg,
                 redeem_amount,
                 Some(redeem_amount),
             )
@@ -1146,13 +1167,14 @@ mod tests {
         // -------------------------------------------------------------------------
         let updated_note = redemption_manager
             .tracker
-            .lookup_note(&alice_pubkey, &bob_pubkey)
+            .lookup_note(&alice_pubkey, &bob_pubkey, &crate::DenomKey::Erg)
             .expect("Note should exist after first redemption");
         let second_timestamp = updated_note.timestamp;
 
         let second_message = signing_message(
             &alice_pubkey,
             &bob_pubkey,
+            &crate::DenomKey::Erg,
             total_debt,
             second_timestamp,
             &[0x42; 32],
@@ -1198,6 +1220,7 @@ mod tests {
             fee_input_total_value: 1_000_000,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: crate::contract_compiler::get_basis_reserve_ergo_tree_hex().unwrap(),
+            denomination: crate::DenomKey::Erg,
         };
 
         let second_proof = crate::NoteProof {
@@ -1264,6 +1287,7 @@ mod tests {
             .complete_redemption(
                 &alice_pubkey,
                 &bob_pubkey,
+                &crate::DenomKey::Erg,
                 redeem_amount,
                 Some(2 * redeem_amount),
             )
@@ -1271,7 +1295,7 @@ mod tests {
 
         let final_note = redemption_manager
             .tracker
-            .lookup_note(&alice_pubkey, &bob_pubkey)
+            .lookup_note(&alice_pubkey, &bob_pubkey, &crate::DenomKey::Erg)
             .expect("Final note should exist");
         assert_eq!(
             final_note.amount_redeemed, total_debt,

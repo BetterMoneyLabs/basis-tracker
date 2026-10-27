@@ -388,6 +388,7 @@ mod tests {
             timestamp,
             signature: [0u8; 65],
             tracker_nft_id: [0x42; 32],
+            denomination: basis_store::DenomKey::Erg,
         }
     }
 

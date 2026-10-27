@@ -80,11 +80,14 @@ mod http_api_tests {
                     TrackerCommand::GetNoteByIssuerAndRecipient {
                         issuer_pubkey,
                         recipient_pubkey,
+                        denomination,
                         response_tx,
                     } => {
-                        let result = redemption_manager
-                            .tracker
-                            .get_note_optional(&issuer_pubkey, &recipient_pubkey);
+                        let result = redemption_manager.tracker.get_note_optional(
+                            &issuer_pubkey,
+                            &recipient_pubkey,
+                            &denomination,
+                        );
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::InitiateRedemption {
@@ -99,11 +102,13 @@ mod http_api_tests {
                         recipient_pubkey,
                         redeemed_amount,
                         new_already_redeemed,
+                        denomination,
                         response_tx,
                     } => {
                         let result = redemption_manager.complete_redemption(
                             &issuer_pubkey,
                             &recipient_pubkey,
+                            &basis_store::DenomKey::Erg,
                             redeemed_amount,
                             new_already_redeemed,
                         );
@@ -117,12 +122,19 @@ mod http_api_tests {
                     TrackerCommand::GenerateProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
+                        denomination,
                         response_tx,
                     } => {
                         // For testing purposes, return a mock proof
                         let mock_proof = basis_store::NoteProof {
                             note: basis_store::IouNote::new(
-                                [0u8; 33], 0, 0, 0, [0u8; 65], [0x42; 32],
+                                [0u8; 33],
+                                0,
+                                0,
+                                0,
+                                [0u8; 65],
+                                [0x42; 32],
+                                basis_store::DenomKey::Erg,
                             ),
                             avl_proof: vec![1, 2, 3, 4], // Mock proof data
                             operations: vec![],
@@ -133,6 +145,7 @@ mod http_api_tests {
                     TrackerCommand::GetTrackerLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
+                        denomination,
                         response_tx,
                     } => {
                         // Mock tracker lookup proof
@@ -146,6 +159,7 @@ mod http_api_tests {
                     TrackerCommand::GetCommittedTrackerLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
+                        denomination,
                         response_tx,
                     } => {
                         // Mock committed tracker lookup proof
@@ -159,6 +173,7 @@ mod http_api_tests {
                     TrackerCommand::GetReserveLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
+                        denomination,
                         response_tx,
                     } => {
                         // Mock reserve lookup proof
@@ -174,6 +189,7 @@ mod http_api_tests {
                         recipient_pubkey: _,
                         timestamp: _,
                         new_already_redeemed: _,
+                        denomination,
                         response_tx,
                     } => {
                         // Mock reserve insert proof
@@ -189,11 +205,14 @@ mod http_api_tests {
                     TrackerCommand::GetConfirmation {
                         issuer_pubkey,
                         recipient_pubkey,
+                        denomination,
                         response_tx,
                     } => {
-                        let result = Ok(redemption_manager
-                            .tracker
-                            .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                        let result = Ok(redemption_manager.tracker.get_confirmation(
+                            &issuer_pubkey,
+                            &recipient_pubkey,
+                            &basis_store::DenomKey::Erg,
+                        ));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
@@ -238,13 +257,15 @@ mod http_api_tests {
                             .reconcile_with_confirmed_digest(&digest, &box_id, height);
                         let _ = response_tx.send(result);
                     }
+                    TrackerCommand::ExchangeNotes { .. } => {}
                     TrackerCommand::GetReserveStateDigest {
                         issuer_pubkey,
+                        denomination,
                         response_tx,
                     } => {
                         let digest = redemption_manager
                             .tracker
-                            .reserve_state_digest(&issuer_pubkey);
+                            .reserve_state_digest(&issuer_pubkey, &denomination);
                         let _ = response_tx.send(digest);
                     }
                 }
@@ -275,8 +296,7 @@ mod http_api_tests {
                 tracker_nft_id: Some(
                     "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
                 ),
-                reserve_token_id: None,
-                reserve_token_decimals: 0,
+                reserve_tokens: Default::default(),
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),
@@ -511,6 +531,7 @@ mod http_api_tests {
             timestamp,
             &issuer_secret,
             &[0x42; 32],
+            basis_store::DenomKey::Erg,
         )
         .unwrap();
         (issuer, note)
@@ -562,6 +583,8 @@ mod http_api_tests {
                 .to_string(),
             recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
                 .to_string(),
+
+            denomination: String::new(),
         };
 
         let response =
@@ -592,6 +615,8 @@ mod http_api_tests {
         let request = basis_server::models::NoteStateRequest {
             issuer_pubkey: hex::encode(issuer),
             recipient_pubkey: hex::encode(recipient),
+
+            denomination: String::new(),
         };
 
         let response =

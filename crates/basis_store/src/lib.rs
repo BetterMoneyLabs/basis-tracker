@@ -71,6 +71,10 @@ pub struct IouNote {
     /// Tracker NFT ID this note is bound to (32 bytes). Part of the signed message,
     /// so the note is only redeemable under this tracker (issue #15 C3).
     pub tracker_nft_id: [u8; 32],
+    /// Denomination of the debt (ERG or a specific token). Part of the debt-tree
+    /// key derivation, so one (issuer, recipient) pair can hold an independent
+    /// debt per denomination (specs/ergo/multi_collateral_reserves.md).
+    pub denomination: DenomKey,
 }
 
 /// Tracker state commitment
@@ -240,22 +244,29 @@ pub struct ReserveLookupProof {
     pub proof: Option<Vec<u8>>,
 }
 
-/// Key for note lookup: blake2b256(issuer_pubkey || recipient_pubkey)
+/// Key for note lookup: the denomination-derived debt-tree key
+/// (blake2b256(issuer ‖ receiver) for ERG, blake2b256(issuer ‖ receiver ‖ tokenId)
+/// for token denominations)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NoteKey {
-    /// blake2b256(issuer_pubkey || recipient_pubkey)
+    /// Denomination-derived debt-tree key hash (32 bytes)
     pub key_hash: [u8; 32],
 }
 
 impl NoteKey {
-    /// Create a note key from issuer and recipient public keys
-    pub fn from_keys(issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Self {
-        let mut data = Vec::with_capacity(66);
-        data.extend_from_slice(issuer_pubkey);
-        data.extend_from_slice(recipient_pubkey);
-        let key_hash = blake2b256_hash(&data);
-
+    /// Create a note key from issuer and recipient public keys and the denomination
+    pub fn from_assets(
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
+    ) -> Self {
+        let key_hash = denomination.debt_key(issuer_pubkey, recipient_pubkey);
         Self { key_hash }
+    }
+
+    /// Create an ERG-denominated note key (blake2b256(issuer ‖ receiver)).
+    pub fn from_keys(issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> Self {
+        Self::from_assets(issuer_pubkey, recipient_pubkey, &DenomKey::Erg)
     }
 
     /// Convert note key to bytes for AVL tree
@@ -310,6 +321,9 @@ pub enum NoteError {
     /// The note is not committed in the latest confirmed on-chain tracker box,
     /// so no committed-state proof can be generated for it yet.
     NoteNotConfirmed,
+    /// A cross-denomination exchange request was malformed (same denominations,
+    /// zero amounts, or it would push an edge below its already-redeemed amount).
+    InvalidExchange(String),
     /// The note is bound to a different tracker NFT ID than this tracker's.
     /// Accepting it would pin debt that can never redeem against this tracker's
     /// reserves (issue #15 C3).
@@ -331,21 +345,25 @@ pub struct TrackerStateManager {
     avl_state: basis_trees::BasisAvlTree,
     current_state: TrackerState,
     storage: persistence::NoteStorage,
-    /// Per-issuer reserve AVL trees tracking hash(ownerKey || receiverKey) ->
-    /// (timestamp, already_redeemed) (16 bytes BE). Each issuer has its own tree so that
-    /// a fresh reserve for a new issuer starts from the empty tree digest and first
-    /// redemptions succeed even if other issuers have redemption history.
+    /// Per-(issuer, denomination) reserve AVL trees tracking
+    /// hash(ownerKey || receiverKey) -> (timestamp, already_redeemed) (16 bytes BE).
+    /// Each (issuer, denomination) pair has its own tree so that a fresh reserve
+    /// starts from the empty tree digest and first redemptions succeed even if other
+    /// issuers or denominations have redemption history.
     ///
-    /// NOTE: Each on-chain reserve box has its own R5 digest, so this design assumes ONE reserve per
-    /// issuer. That assumption is load-bearing, not cosmetic: a note's signed message is only
-    /// `hash(owner || receiver) || totalDebt || timestamp` and is not bound to a reserve box, so with two
-    /// reserves under the same owner and tracker the SAME note redeems in full against EACH of them --
-    /// overpaying the creditor and draining the owner's other reserves to do it.
+    /// NOTE: Each on-chain reserve box has its own R5 digest, so this design assumes ONE
+    /// active reserve per (issuer, denomination). That assumption is load-bearing, not
+    /// cosmetic: a note's signed message is only
+    /// `debtKey || totalDebt || timestamp || trackerNftId` and is not bound to a reserve box,
+    /// so with two reserves of the same denomination under the same owner and tracker the
+    /// SAME note redeems in full against EACH of them -- overpaying the creditor and
+    /// draining the owner's other reserves to do it.
     ///
-    /// This cannot be fixed here (the redemption state lives in the contract's per-box R5), so the
-    /// tracker fails closed instead: see `ReserveTracker::resolve_issuer_reserve` and the collateral
-    /// endpoint, both of which return an error for a multi-reserve issuer. See specs/pr14_triage.md (C3).
-    reserve_avl_states: std::collections::HashMap<PubKey, basis_trees::BasisAvlTree>,
+    /// This cannot be fixed here (the redemption state lives in the contract's per-box R5),
+    /// so the tracker fails closed instead: see `ReserveTracker::resolve_issuer_reserve`,
+    /// which returns an error for a multi-reserve (issuer, denomination) pair.
+    /// See specs/pr14_triage.md (C3) and specs/ergo/multi_collateral_reserves.md.
+    reserve_avl_states: std::collections::HashMap<(PubKey, DenomKey), basis_trees::BasisAvlTree>,
     /// Per-note confirmation records, keyed by note key (32 bytes).
     confirmations: std::collections::HashMap<NoteKeyBytes, NoteConfirmation>,
     /// AVL root digest of the latest confirmed on-chain tracker box (R5).
@@ -459,7 +477,8 @@ impl TrackerStateManager {
         );
 
         for (issuer_pubkey, note) in &notes_with_issuer {
-            let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
+            let key =
+                NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
             let key_bytes = key.to_bytes();
             let value_bytes = note.amount_collected.to_be_bytes().to_vec();
 
@@ -635,7 +654,7 @@ impl TrackerStateManager {
         // Only `NotFound` means "first note for this pair": a storage or decode
         // error must propagate, not silently skip the timestamp and
         // debt-monotonicity checks below.
-        match self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
+        match self.lookup_note(issuer_pubkey, &note.recipient_pubkey, &note.denomination) {
             Ok(existing_note) => {
                 if note.timestamp <= existing_note.timestamp {
                     return Err(NoteError::PastTimestamp);
@@ -671,8 +690,8 @@ impl TrackerStateManager {
             NoteError::InvalidSignature
         })?;
 
-        // Prepare AVL tree key: hash(issuer_pubkey || receiver_pubkey)
-        let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
+        // Prepare AVL tree key: the denomination-derived debt key
+        let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
 
         // Value is just the totalDebt (amount_collected) as 8-byte big-endian
@@ -703,9 +722,13 @@ impl TrackerStateManager {
         }
     }
 
-    /// Convert an issuer/recipient pair into the fixed-size confirmation key.
-    fn confirmation_key(issuer_pubkey: &PubKey, recipient_pubkey: &PubKey) -> NoteKeyBytes {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+    /// Convert an issuer/recipient/denomination triple into the fixed-size confirmation key.
+    fn confirmation_key(
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
+    ) -> NoteKeyBytes {
+        let key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
         let bytes = key.to_bytes();
         let mut out = [0u8; 32];
         out.copy_from_slice(&bytes);
@@ -756,7 +779,8 @@ impl TrackerStateManager {
             stored.into_iter().collect();
 
         for (issuer_pubkey, note) in &notes {
-            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let key =
+                Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
             let mut record = stored_map.get(&key).cloned().unwrap_or_default();
 
             // Pending state does not survive a restart.
@@ -784,8 +808,9 @@ impl TrackerStateManager {
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Option<NoteConfirmation> {
-        let key = Self::confirmation_key(issuer_pubkey, recipient_pubkey);
+        let key = Self::confirmation_key(issuer_pubkey, recipient_pubkey, denomination);
         self.confirmations.get(&key).cloned()
     }
 
@@ -808,7 +833,8 @@ impl TrackerStateManager {
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
-            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let key =
+                Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
             let local_value = note.amount_collected;
             let entry = self
                 .confirmations
@@ -887,7 +913,8 @@ impl TrackerStateManager {
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
-            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let key =
+                Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
             let is_pending = self
                 .confirmations
                 .get(&key)
@@ -936,7 +963,8 @@ impl TrackerStateManager {
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
-            let key = Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey);
+            let key =
+                Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
             let local_value = note.amount_collected;
             let entry = self
                 .confirmations
@@ -1000,7 +1028,7 @@ impl TrackerStateManager {
         // Only `NotFound` means "first note for this pair": a storage or decode
         // error must propagate, not silently skip the timestamp and
         // debt-monotonicity checks below.
-        match self.lookup_note(issuer_pubkey, &note.recipient_pubkey) {
+        match self.lookup_note(issuer_pubkey, &note.recipient_pubkey, &note.denomination) {
             Ok(existing_note) => {
                 if note.timestamp <= existing_note.timestamp {
                     return Err(NoteError::PastTimestamp);
@@ -1030,8 +1058,8 @@ impl TrackerStateManager {
             Err(e) => return Err(e),
         }
 
-        // Prepare AVL tree key: hash(issuer_pubkey || receiver_pubkey)
-        let key = NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
+        // Prepare AVL tree key: the denomination-derived debt key
+        let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
 
         // Value is just the totalDebt (amount_collected) as 8-byte big-endian
@@ -1053,6 +1081,172 @@ impl TrackerStateManager {
         }
     }
 
+    /// Atomically move debt between two denominations of the same (issuer, recipient)
+    /// pair: decrease the `from` edge by `from_amount` and increase the `to` edge by
+    /// `to_amount`. This is the off-chain novation used for cross-denomination
+    /// exchange (specs/ergo/multi_collateral_reserves.md §10).
+    ///
+    /// Both edges live in the single tracker tree, so the whole exchange is one
+    /// logical state change: both AVL updates land together and the next tracker box
+    /// commit covers both.
+    ///
+    /// SECURITY: decreasing an edge is the S3 operation — it is only permitted here
+    /// because the creditor consented, proven by the recipient's signature over the
+    /// from-edge's new message. All four signatures (issuer and recipient over each
+    /// edge's 80-byte message) are verified BEFORE any state changes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn exchange_debt(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        from_denomination: &DenomKey,
+        from_amount: u64,
+        to_denomination: &DenomKey,
+        to_amount: u64,
+        timestamp: u64,
+        issuer_from_signature: &Signature,
+        recipient_from_signature: &Signature,
+        issuer_to_signature: &Signature,
+        recipient_to_signature: &Signature,
+    ) -> Result<(), NoteError> {
+        if from_denomination == to_denomination {
+            return Err(NoteError::InvalidExchange(
+                "from and to denominations must differ".to_string(),
+            ));
+        }
+        if from_amount == 0 || to_amount == 0 {
+            return Err(NoteError::InvalidExchange(
+                "exchange amounts must be positive".to_string(),
+            ));
+        }
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
+            .as_millis() as u64;
+        if timestamp > current_time {
+            return Err(NoteError::FutureTimestamp);
+        }
+
+        // Resolve both edges.
+        let from_note = self.lookup_note(issuer_pubkey, recipient_pubkey, from_denomination)?;
+        let to_note_opt =
+            self.get_note_optional(issuer_pubkey, recipient_pubkey, to_denomination)?;
+
+        let from_new_total = from_note
+            .amount_collected
+            .checked_sub(from_amount)
+            .ok_or(NoteError::AmountOverflow)?;
+        // The edge cannot drop below what was already redeemed from it.
+        if from_new_total < from_note.amount_redeemed {
+            return Err(NoteError::InvalidExchange(format!(
+                "exchange would lower the from-edge total ({}) below its already-redeemed amount ({})",
+                from_new_total, from_note.amount_redeemed
+            )));
+        }
+        let to_new_total = to_note_opt
+            .as_ref()
+            .map(|n| n.amount_collected)
+            .unwrap_or(0)
+            .checked_add(to_amount)
+            .ok_or(NoteError::AmountOverflow)?;
+
+        // The exchange must move both edges forward in time.
+        if timestamp <= from_note.timestamp
+            || to_note_opt
+                .as_ref()
+                .map(|n| timestamp <= n.timestamp)
+                .unwrap_or(false)
+        {
+            return Err(NoteError::PastTimestamp);
+        }
+
+        // The tracker NFT binding must agree across both edges.
+        let tracker_nft_id = from_note.tracker_nft_id;
+        if let Some(to_note) = &to_note_opt {
+            if to_note.tracker_nft_id != tracker_nft_id {
+                return Err(NoteError::TrackerIdMismatch);
+            }
+        }
+
+        // Contract range (B2): ErgoScript reads both amounts with signed
+        // byteArrayToLong, so they must fit in i64.
+        for (field, value) in [
+            ("from_new_total", from_new_total),
+            ("to_new_total", to_new_total),
+        ] {
+            if value > i64::MAX as u64 {
+                return Err(NoteError::AmountExceedsContractRange { field, value });
+            }
+        }
+
+        // Verify all four signatures BEFORE mutating anything.
+        let msg_from = schnorr::signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denomination,
+            from_new_total,
+            timestamp,
+            &tracker_nft_id,
+        );
+        let msg_to = schnorr::signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            to_denomination,
+            to_new_total,
+            timestamp,
+            &tracker_nft_id,
+        );
+        let verifier = SchnorrVerifier;
+        for (sig, msg, key) in [
+            (issuer_from_signature, &msg_from, issuer_pubkey),
+            (recipient_from_signature, &msg_from, recipient_pubkey),
+            (issuer_to_signature, &msg_to, issuer_pubkey),
+            (recipient_to_signature, &msg_to, recipient_pubkey),
+        ] {
+            if verifier.verify_signature(sig, msg, key).is_err() {
+                return Err(NoteError::InvalidSignature);
+            }
+        }
+
+        // Apply the from-edge update.
+        let from_note_new = IouNote {
+            recipient_pubkey: *recipient_pubkey,
+            amount_collected: from_new_total,
+            amount_redeemed: from_note.amount_redeemed,
+            timestamp,
+            signature: *issuer_from_signature,
+            tracker_nft_id,
+            denomination: *from_denomination,
+        };
+        let from_key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, from_denomination);
+        self.avl_state
+            .update(from_key.to_bytes(), from_new_total.to_be_bytes().to_vec())
+            .map_err(|e| NoteError::StorageError(e.to_string()))?;
+        self.storage.store_note(issuer_pubkey, &from_note_new)?;
+        self.recompute_confirmation_status(&from_key.key_hash, from_new_total);
+
+        // Apply the to-edge update.
+        let to_note_new = IouNote {
+            recipient_pubkey: *recipient_pubkey,
+            amount_collected: to_new_total,
+            amount_redeemed: to_note_opt.map(|n| n.amount_redeemed).unwrap_or(0),
+            timestamp,
+            signature: *issuer_to_signature,
+            tracker_nft_id,
+            denomination: *to_denomination,
+        };
+        let to_key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, to_denomination);
+        self.avl_state
+            .update(to_key.to_bytes(), to_new_total.to_be_bytes().to_vec())
+            .map_err(|e| NoteError::StorageError(e.to_string()))?;
+        self.storage.store_note(issuer_pubkey, &to_note_new)?;
+        self.recompute_confirmation_status(&to_key.key_hash, to_new_total);
+
+        self.update_state();
+        Ok(())
+    }
+
     /// Record that `amount_redeemed` was redeemed against an existing note.
     ///
     /// This is redemption accounting, NOT a debt update, so it deliberately bypasses
@@ -1072,10 +1266,11 @@ impl TrackerStateManager {
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
         new_amount_redeemed: u64,
     ) -> Result<(), NoteError> {
         let mut note = self
-            .lookup_note(issuer_pubkey, recipient_pubkey)
+            .lookup_note(issuer_pubkey, recipient_pubkey, denomination)
             .map_err(|_| NoteError::StorageError("note not found".to_string()))?;
 
         if new_amount_redeemed < note.amount_redeemed {
@@ -1097,14 +1292,16 @@ impl TrackerStateManager {
         self.storage.store_note(issuer_pubkey, &note)
     }
 
-    /// Get the total debt for a specific (issuer, receiver) pair from the AVL tree
+    /// Get the total debt for a specific (issuer, receiver, denomination) triple
+    /// from the AVL tree.
     /// Returns the cumulative debt amount (totalDebt) stored in the tracker's AVL tree
     pub fn get_total_debt(
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<u64, NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
         let key_bytes = key.to_bytes();
 
         // Lookup value in AVL tree
@@ -1136,12 +1333,13 @@ impl TrackerStateManager {
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<TrackerLookupProof, NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
         let key_bytes = key.to_bytes();
 
         // Get the total debt value
-        let total_debt = self.get_total_debt(issuer_pubkey, recipient_pubkey)?;
+        let total_debt = self.get_total_debt(issuer_pubkey, recipient_pubkey, denomination)?;
 
         // Generate AVL proof for the lookup of this specific key
         let (avl_proof, _returned_value) = self.avl_state.generate_lookup_proof(key_bytes.to_vec());
@@ -1177,13 +1375,14 @@ impl TrackerStateManager {
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<TrackerLookupProof, NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
         let key_bytes = key.to_bytes();
 
         // The note being redeemed must be committed on-chain with a known value.
         let confirmed_total_debt = self
-            .get_confirmation(issuer_pubkey, recipient_pubkey)
+            .get_confirmation(issuer_pubkey, recipient_pubkey, denomination)
             .and_then(|c| {
                 if c.status == NoteConfirmationStatus::Confirmed {
                     c.confirmed_total_debt
@@ -1221,7 +1420,8 @@ impl TrackerStateManager {
             NoteError::StorageError(format!("Failed to create committed AVL tree: {:?}", e))
         })?;
         for (issuer, note) in &notes_with_issuer {
-            let note_key = Self::confirmation_key(issuer, &note.recipient_pubkey);
+            let note_key =
+                Self::confirmation_key(issuer, &note.recipient_pubkey, &note.denomination);
             let confirmed_value = self
                 .confirmations
                 .get(&note_key)
@@ -1259,13 +1459,18 @@ impl TrackerStateManager {
         })
     }
 
-    /// Get or create the mutable reserve AVL tree for an issuer. Trees are created lazily so a
-    /// fresh issuer starts from the empty tree digest, matching a newly created reserve's R5.
+    /// Get or create the mutable reserve AVL tree for an (issuer, denomination) pair.
+    /// Trees are created lazily so a fresh pair starts from the empty tree digest,
+    /// matching a newly created reserve's R5.
     fn reserve_tree_mut(
         &mut self,
         issuer_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<&mut basis_trees::BasisAvlTree, NoteError> {
-        match self.reserve_avl_states.entry(*issuer_pubkey) {
+        match self
+            .reserve_avl_states
+            .entry((*issuer_pubkey, *denomination))
+        {
             std::collections::hash_map::Entry::Occupied(e) => Ok(e.into_mut()),
             std::collections::hash_map::Entry::Vacant(e) => {
                 let tree = basis_trees::BasisAvlTree::new().map_err(|e| {
@@ -1279,19 +1484,24 @@ impl TrackerStateManager {
         }
     }
 
-    /// Get the already_redeemed amount for a specific (issuer, receiver) pair from the reserve AVL tree
+    /// Get the already_redeemed amount for a specific (issuer, receiver) edge from the
+    /// reserve AVL tree of the given denomination.
     /// Returns the cumulative redeemed amount stored in the reserve's AVL tree
     pub fn get_already_redeemed(
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<u64, NoteError> {
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
-        let reserve_tree = match self.reserve_avl_states.get(issuer_pubkey) {
+        let reserve_tree = match self
+            .reserve_avl_states
+            .get(&(*issuer_pubkey, *denomination))
+        {
             Some(tree) => tree,
-            None => return Ok(0u64), // Fresh issuer: no reserve tree yet, first redemption.
+            None => return Ok(0u64), // Fresh pair: no reserve tree yet, first redemption.
         };
 
         // Lookup value in issuer's reserve AVL tree
@@ -1320,12 +1530,16 @@ impl TrackerStateManager {
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<ReserveLookupProof, NoteError> {
+        // Reserve-tree content keys are denomination-free (blake2b256(owner ‖ receiver))
+        // in both contracts; only which tree is chosen is namespaced.
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
 
         // Get the already_redeemed value
-        let already_redeemed = self.get_already_redeemed(issuer_pubkey, recipient_pubkey)?;
+        let already_redeemed =
+            self.get_already_redeemed(issuer_pubkey, recipient_pubkey, denomination)?;
 
         // For first redemption, no lookup proof is needed (per spec)
         let is_first_redemption = already_redeemed == 0;
@@ -1334,7 +1548,10 @@ impl TrackerStateManager {
         let mut value_bytes = Vec::with_capacity(16);
         // For lookup, use the stored timestamp if available; otherwise 0 for first redemption.
         // The persistent tree stores timestamp || already_redeemed, so retrieve the actual value.
-        let reserve_tree = match self.reserve_avl_states.get(issuer_pubkey) {
+        let reserve_tree = match self
+            .reserve_avl_states
+            .get(&(*issuer_pubkey, *denomination))
+        {
             Some(tree) => tree,
             None => {
                 // Fresh issuer: value is 0 || already_redeemed.
@@ -1367,8 +1584,11 @@ impl TrackerStateManager {
                 proof: None, // Omitted for first redemption
             })
         } else {
-            // Generate AVL proof for the lookup of this specific key from the issuer's tree
-            let reserve_tree = match self.reserve_avl_states.get_mut(issuer_pubkey) {
+            // Generate AVL proof for the lookup of this specific key from the pair's tree
+            let reserve_tree = match self
+                .reserve_avl_states
+                .get_mut(&(*issuer_pubkey, *denomination))
+            {
                 Some(tree) => tree,
                 None => {
                     // No tree means no prior redemptions; this should have been a first redemption.
@@ -1405,6 +1625,7 @@ impl TrackerStateManager {
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
         timestamp: u64,
         new_already_redeemed: u64,
     ) -> Result<(Vec<u8>, Vec<u8>), NoteError> {
@@ -1415,9 +1636,13 @@ impl TrackerStateManager {
         value_bytes.extend_from_slice(&timestamp.to_be_bytes());
         value_bytes.extend_from_slice(&new_already_redeemed.to_be_bytes());
 
-        // Use the issuer's reserve tree (or an empty one if this is the first redemption for
-        // the issuer). The proof's starting digest must match the on-chain reserve R5.
-        let reserve_tree = match self.reserve_avl_states.get(issuer_pubkey) {
+        // Use the (issuer, denomination) reserve tree (or an empty one if this is the
+        // first redemption for the pair). The proof's starting digest must match the
+        // on-chain reserve R5.
+        let reserve_tree = match self
+            .reserve_avl_states
+            .get(&(*issuer_pubkey, *denomination))
+        {
             Some(tree) => tree,
             None => {
                 // Fresh issuer: generate proof against an empty tree.
@@ -1449,10 +1674,14 @@ impl TrackerStateManager {
         Ok((insert_proof, updated_digest.to_vec()))
     }
 
-    /// Current reserve AVL tree root digest (33 bytes) for the given issuer. The on-chain reserve
-    /// box being spent must have exactly this R5 digest for the insert proof to verify on-chain.
-    pub fn reserve_state_digest(&self, issuer_pubkey: &PubKey) -> Vec<u8> {
-        match self.reserve_avl_states.get(issuer_pubkey) {
+    /// Current reserve AVL tree root digest (33 bytes) for the given (issuer, denomination)
+    /// pair. The on-chain reserve box being spent must have exactly this R5 digest for the
+    /// insert proof to verify on-chain.
+    pub fn reserve_state_digest(&self, issuer_pubkey: &PubKey, denomination: &DenomKey) -> Vec<u8> {
+        match self
+            .reserve_avl_states
+            .get(&(*issuer_pubkey, *denomination))
+        {
             Some(tree) => tree.root_digest().to_vec(),
             None => {
                 // Fresh issuer: return the empty-tree digest.
@@ -1469,10 +1698,11 @@ impl TrackerStateManager {
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
         timestamp: u64,
         already_redeemed: u64,
     ) -> Result<(), NoteError> {
-        let reserve_tree = self.reserve_tree_mut(issuer_pubkey)?;
+        let reserve_tree = self.reserve_tree_mut(issuer_pubkey, denomination)?;
         let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
         let key_bytes = key.to_bytes();
         let mut value_bytes = Vec::with_capacity(16);
@@ -1484,7 +1714,7 @@ impl TrackerStateManager {
             .map_err(|e| NoteError::StorageError(format!("Reserve AVL tree update failed: {}", e)))
     }
 
-    /// Rebuild per-issuer reserve AVL trees from the persisted journal.
+    /// Rebuild per-(issuer, denomination) reserve AVL trees from the persisted journal.
     /// This must be called after `rebuild_avl_tree` so the note keys exist, but
     /// it only operates on the reserve trees, not the note tracker tree.
     pub fn rebuild_reserve_avl_trees(&mut self) -> Result<(), NoteError> {
@@ -1501,10 +1731,10 @@ impl TrackerStateManager {
 
         tracing::info!("Replaying {} reserve AVL journal entries...", updates.len());
 
-        for (issuer_pubkey, note_key, timestamp, already_redeemed) in updates {
-            // Reconstruct recipient pubkey from the note key. The note key is
-            // blake2b256(issuer_pubkey || recipient_pubkey), so we look up the
-            // stored note to obtain the recipient pubkey.
+        for (issuer_pubkey, note_key, denomination, timestamp, already_redeemed) in updates {
+            // Reconstruct recipient pubkey from the note key. The note key is the
+            // denomination-derived debt key, so we look up the stored note to obtain
+            // the recipient pubkey.
             let note = match self.storage.get_note_by_key(&note_key)? {
                 Some(note) => note,
                 None => {
@@ -1519,6 +1749,7 @@ impl TrackerStateManager {
             if let Err(e) = self.apply_reserve_avl_update(
                 &issuer_pubkey,
                 &note.recipient_pubkey,
+                &denomination,
                 timestamp,
                 already_redeemed,
             ) {
@@ -1534,19 +1765,21 @@ impl TrackerStateManager {
         Ok(())
     }
 
-    /// Update the already_redeemed amount in the issuer's reserve AVL tree.
+    /// Update the already_redeemed amount in the (issuer, denomination) reserve AVL tree.
     /// Called after a successful redemption to prevent double-spending.
     /// Value format: timestamp (8 bytes BE) || already_redeemed (8 bytes BE) = 16 bytes total
     pub fn update_already_redeemed(
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
         timestamp: u64,
         already_redeemed: u64,
     ) -> Result<(), NoteError> {
         self.apply_reserve_avl_update(
             issuer_pubkey,
             recipient_pubkey,
+            denomination,
             timestamp,
             already_redeemed,
         )?;
@@ -1555,6 +1788,7 @@ impl TrackerStateManager {
         self.storage.append_reserve_avl_update(
             issuer_pubkey,
             recipient_pubkey,
+            denomination,
             timestamp,
             already_redeemed,
         )
@@ -1565,8 +1799,9 @@ impl TrackerStateManager {
         &mut self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<NoteProof, NoteError> {
-        let key = NoteKey::from_keys(issuer_pubkey, recipient_pubkey);
+        let key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
         let key_bytes = key.to_bytes();
 
         // Generate a lookup proof for the key in the AVL tree
@@ -1574,7 +1809,7 @@ impl TrackerStateManager {
         let (avl_proof, _value) = self.avl_state.generate_lookup_proof(key_bytes.to_vec());
 
         // Lookup the note to include in proof
-        let note = self.lookup_note(issuer_pubkey, recipient_pubkey)?;
+        let note = self.lookup_note(issuer_pubkey, recipient_pubkey, denomination)?;
 
         Ok(NoteProof {
             note,
@@ -1583,25 +1818,28 @@ impl TrackerStateManager {
         })
     }
 
-    /// Lookup a note by issuer and recipient
+    /// Lookup a note by issuer, recipient and denomination
     pub fn lookup_note(
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<IouNote, NoteError> {
         self.storage
-            .get_note(issuer_pubkey, recipient_pubkey)?
+            .get_note(issuer_pubkey, recipient_pubkey, denomination)?
             .ok_or(NoteError::NotFound)
     }
 
-    /// Look up a note by issuer and recipient, returning `Ok(None)` when it does
-    /// not exist (unlike `lookup_note`, which errors on missing notes).
+    /// Look up a note by issuer, recipient and denomination, returning `Ok(None)`
+    /// when it does not exist (unlike `lookup_note`, which errors on missing notes).
     pub fn get_note_optional(
         &self,
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
     ) -> Result<Option<IouNote>, NoteError> {
-        self.storage.get_note(issuer_pubkey, recipient_pubkey)
+        self.storage
+            .get_note(issuer_pubkey, recipient_pubkey, denomination)
     }
 
     /// Get all notes for a specific issuer
@@ -1653,10 +1891,11 @@ impl TrackerStateManager {
 }
 
 impl TrackerStateManager {
-    /// Find the reserve box ID for an issuer using key matching
+    /// Find the reserve box ID for an issuer and denomination using key matching
     pub fn find_reserve_box_id_for_issuer(
         &self,
         issuer_pubkey_hex: &str,
+        denomination: &DenomKey,
         reserve_tracker: &ReserveTracker,
     ) -> Result<String, NoteError> {
         // Get all reserves from the reserve tracker
@@ -1665,9 +1904,10 @@ impl TrackerStateManager {
         // Since we now strip the 0x07 prefix when reading from registers,
         // we can do a direct match (with normalization for any remaining edge cases)
         for reserve in all_reserves {
-            if issuer_pubkey_hex == reserve.owner_pubkey
+            if (issuer_pubkey_hex == reserve.owner_pubkey
                 || normalize_public_key(issuer_pubkey_hex)
-                    == normalize_public_key(&reserve.owner_pubkey)
+                    == normalize_public_key(&reserve.owner_pubkey))
+                && reserve.denomination().as_ref() == Some(denomination)
             {
                 return Ok(reserve.box_id);
             }
@@ -1675,8 +1915,9 @@ impl TrackerStateManager {
 
         // If no matching reserve is found, return an error
         Err(NoteError::StorageError(format!(
-            "No reserve found for issuer: {}",
-            issuer_pubkey_hex
+            "No reserve found for issuer {} in denomination {}",
+            issuer_pubkey_hex,
+            denomination.denomination_id()
         )))
     }
 }
@@ -1690,6 +1931,7 @@ impl IouNote {
         timestamp: u64,
         signature: Signature,
         tracker_nft_id: [u8; 32],
+        denomination: DenomKey,
     ) -> Self {
         Self {
             recipient_pubkey,
@@ -1698,6 +1940,7 @@ impl IouNote {
             timestamp,
             signature,
             tracker_nft_id,
+            denomination,
         }
     }
 
@@ -1713,14 +1956,15 @@ impl IouNote {
 
     /// Create and sign a new IOU note
     ///
-    /// Message format: key || totalDebt || timestamp || trackerNftId (80 bytes)
-    /// where key = blake2b256(ownerKeyBytes || receiverKeyBytes)
+    /// Message format: debtKey || totalDebt || timestamp || trackerNftId (80 bytes)
+    /// where debtKey is the denomination-derived debt-tree key (`DenomKey::debt_key`)
     pub fn create_and_sign(
         recipient_pubkey: PubKey,
         amount_collected: u64,
         _timestamp: u64, // Kept for API compatibility but not used in signing message
         issuer_secret_key: &[u8; 32],
         tracker_nft_id: &[u8; 32],
+        denomination: DenomKey,
     ) -> Result<Self, NoteError> {
         use secp256k1::{Secp256k1, SecretKey};
 
@@ -1734,10 +1978,11 @@ impl IouNote {
         let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let issuer_pubkey = public_key.serialize();
 
-        // Generate the signing message: key || totalDebt || timestamp || trackerNftId
+        // Generate the signing message: debtKey || totalDebt || timestamp || trackerNftId
         let message = schnorr::signing_message(
             &issuer_pubkey,
             &recipient_pubkey,
+            &denomination,
             amount_collected,
             _timestamp,
             tracker_nft_id,
@@ -1754,12 +1999,13 @@ impl IouNote {
             timestamp: _timestamp,
             signature,
             tracker_nft_id: *tracker_nft_id,
+            denomination,
         })
     }
 
     /// Generate the message that should be signed following the Basis protocol specification.
     ///
-    /// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
+    /// message = debtKey || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
     ///
     /// Total: 80 bytes
     ///
@@ -1769,6 +2015,7 @@ impl IouNote {
         crate::schnorr::signing_message(
             owner_pubkey,
             &self.recipient_pubkey,
+            &self.denomination,
             self.amount_collected,
             self.timestamp,
             &self.tracker_nft_id,
@@ -1848,6 +2095,9 @@ pub fn normalize_public_key(pubkey_hex: &str) -> String {
 
 // Re-export reserve tracker types
 pub use reserve_tracker::{ExtendedReserveInfo, ReserveTracker, ReserveTrackerError};
+
+// Re-export denomination types
+pub use basis_core::types::{debt_tree_key, DenomKey, DenomKeyParseError};
 
 // Re-export ergo scanner types
 pub use ergo_scanner::{

@@ -64,9 +64,12 @@
 ### Signature Format
 - **Public keys**: 33 bytes compressed secp256k1 (66 hex chars)
 - **Signatures**: 65 bytes (130 hex chars) - 33-byte a + 32-byte z (Schnorr format)
-- **Signing message**: `key || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
+- **Signing message**: `debtKey || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId` (80 bytes)
   - Same format for both normal and emergency redemption
-  - Where `key = blake2b256(ownerKeyBytes || receiverKeyBytes)` (32 bytes)
+  - Where `debtKey = blake2b256(ownerKeyBytes || receiverKeyBytes)` for ERG, or
+    `blake2b256(ownerKeyBytes || receiverKeyBytes || tokenId)` for token denominations
+    (32 bytes). One tracker tree holds an independent debt per (owner, receiver, denomination);
+    see `specs/ergo/multi_collateral_reserves.md`
   - `ownerKey`: Reserve owner's public key (issuer of the IOU note)
   - `receiverKey`: Recipient's public key (creditor)
   - `totalDebt`: Total cumulative debt amount (8 bytes big-endian)

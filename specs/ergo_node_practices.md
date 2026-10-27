@@ -150,11 +150,10 @@ curl -s -X POST http://127.0.0.1:9053/wallet/payment/send \
 3. Save the returned transaction ID and wait for confirmation.
 
 ### Change Address Warning
-The server response may contain a `change_address` derived from the server
-configuration (e.g. the tracker public key). If that address is **not** controlled by
-your Ergo node wallet, the change output will become unspendable. For test wallets,
-verify that the wallet owns the change address, or override the payload to use the
-wallet's own change address.
+The server's `change_address` is the owner's P2PK address derived from the request's
+`owner_pubkey`. If that key is **not** controlled by your Ergo node wallet, the change
+output will become unspendable. Verify that the wallet owns the change address, or
+override the payload to use the wallet's own change address.
 
 ## 6. Mempool Monitoring and Confirmation
 

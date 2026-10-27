@@ -122,11 +122,14 @@ mod redemption_api_tests {
                     TrackerCommand::GetNoteByIssuerAndRecipient {
                         issuer_pubkey,
                         recipient_pubkey,
+                        denomination,
                         response_tx,
                     } => {
-                        let result = redemption_manager
-                            .tracker
-                            .get_note_optional(&issuer_pubkey, &recipient_pubkey);
+                        let result = redemption_manager.tracker.get_note_optional(
+                            &issuer_pubkey,
+                            &recipient_pubkey,
+                            &denomination,
+                        );
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::InitiateRedemption {
@@ -141,11 +144,13 @@ mod redemption_api_tests {
                         recipient_pubkey,
                         redeemed_amount,
                         new_already_redeemed,
+                        denomination: _,
                         response_tx,
                     } => {
                         let result = redemption_manager.complete_redemption(
                             &issuer_pubkey,
                             &recipient_pubkey,
+                            &basis_store::DenomKey::Erg,
                             redeemed_amount,
                             new_already_redeemed,
                         );
@@ -158,11 +163,18 @@ mod redemption_api_tests {
                     TrackerCommand::GenerateProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
+                        denomination: _,
                         response_tx,
                     } => {
                         let mock_proof = basis_store::NoteProof {
                             note: basis_store::IouNote::new(
-                                [0u8; 33], 0, 0, 0, [0u8; 65], [0x42; 32],
+                                [0u8; 33],
+                                0,
+                                0,
+                                0,
+                                [0u8; 65],
+                                [0x42; 32],
+                                basis_store::DenomKey::Erg,
                             ),
                             avl_proof: vec![1, 2, 3, 4],
                             operations: vec![],
@@ -173,6 +185,7 @@ mod redemption_api_tests {
                     TrackerCommand::GetTrackerLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
+                        denomination: _,
                         response_tx,
                     } => {
                         let mock_proof = basis_store::TrackerLookupProof {
@@ -185,6 +198,7 @@ mod redemption_api_tests {
                     TrackerCommand::GetCommittedTrackerLookupProof {
                         issuer_pubkey,
                         recipient_pubkey,
+                        denomination: _,
                         response_tx,
                     } => {
                         // Use the real committed-state proof path so tests exercise
@@ -194,12 +208,14 @@ mod redemption_api_tests {
                             .generate_committed_tracker_lookup_proof(
                                 &issuer_pubkey,
                                 &recipient_pubkey,
+                                &basis_store::DenomKey::Erg,
                             );
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetReserveLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
+                        denomination: _,
                         response_tx,
                     } => {
                         let mock_proof = basis_store::ReserveLookupProof {
@@ -214,6 +230,7 @@ mod redemption_api_tests {
                         recipient_pubkey: _,
                         timestamp: _,
                         new_already_redeemed: _,
+                        denomination: _,
                         response_tx,
                     } => {
                         let _ = response_tx.send(Ok((vec![1, 2, 3, 4], vec![5, 6, 7, 8])));
@@ -227,11 +244,14 @@ mod redemption_api_tests {
                     TrackerCommand::GetConfirmation {
                         issuer_pubkey,
                         recipient_pubkey,
+                        denomination: _,
                         response_tx,
                     } => {
-                        let result = Ok(redemption_manager
-                            .tracker
-                            .get_confirmation(&issuer_pubkey, &recipient_pubkey));
+                        let result = Ok(redemption_manager.tracker.get_confirmation(
+                            &issuer_pubkey,
+                            &recipient_pubkey,
+                            &basis_store::DenomKey::Erg,
+                        ));
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
@@ -267,11 +287,12 @@ mod redemption_api_tests {
                     }
                     TrackerCommand::GetReserveStateDigest {
                         issuer_pubkey,
+                        denomination,
                         response_tx,
                     } => {
                         let digest = redemption_manager
                             .tracker
-                            .reserve_state_digest(&issuer_pubkey);
+                            .reserve_state_digest(&issuer_pubkey, &denomination);
                         let _ = response_tx.send(digest);
                     }
                     TrackerCommand::ReconcileWithConfirmedDigest {
@@ -283,6 +304,35 @@ mod redemption_api_tests {
                         let result = redemption_manager
                             .tracker
                             .reconcile_with_confirmed_digest(&digest, &box_id, height);
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ExchangeNotes {
+                        issuer_pubkey,
+                        recipient_pubkey,
+                        from_denomination,
+                        from_amount,
+                        to_denomination,
+                        to_amount,
+                        timestamp,
+                        issuer_from_signature,
+                        recipient_from_signature,
+                        issuer_to_signature,
+                        recipient_to_signature,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.exchange_debt(
+                            &issuer_pubkey,
+                            &recipient_pubkey,
+                            &from_denomination,
+                            from_amount,
+                            &to_denomination,
+                            to_amount,
+                            timestamp,
+                            &issuer_from_signature,
+                            &recipient_from_signature,
+                            &issuer_to_signature,
+                            &recipient_to_signature,
+                        );
                         let _ = response_tx.send(result);
                     }
                 }
@@ -313,8 +363,7 @@ mod redemption_api_tests {
                 tracker_nft_id: Some(
                     "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
                 ),
-                reserve_token_id: None,
-                reserve_token_decimals: 0,
+                reserve_tokens: Default::default(),
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),
@@ -390,6 +439,7 @@ mod redemption_api_tests {
             timestamp,
             issuer_secret,
             &[0x42; 32],
+            basis_store::DenomKey::Erg,
         )
         .unwrap();
 
@@ -476,7 +526,7 @@ mod redemption_api_tests {
     fn reserve_r5_matching_tracker() -> String {
         let digest = hex::encode(
             basis_store::TrackerStateManager::new_with_temp_storage()
-                .reserve_state_digest(&[1u8; 33]),
+                .reserve_state_digest(&[1u8; 33], &basis_store::DenomKey::Erg),
         );
         format!("64{}00", digest)
     }
@@ -513,6 +563,8 @@ mod redemption_api_tests {
             recipient_address: "".to_string(),
             issuer_signature: "01".repeat(65),
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -543,6 +595,8 @@ mod redemption_api_tests {
             recipient_address: "".to_string(),
             issuer_signature: "01".repeat(65),
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -592,6 +646,8 @@ mod redemption_api_tests {
             recipient_address: "".to_string(),
             issuer_signature: "01".repeat(65),
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -648,6 +704,8 @@ mod redemption_api_tests {
             recipient_address: "".to_string(),
             issuer_signature: "01".repeat(65),
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -714,6 +772,8 @@ mod redemption_api_tests {
             recipient_address: "".to_string(),
             issuer_signature: "01".repeat(65),
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -786,6 +846,8 @@ mod redemption_api_tests {
             emergency: false,
             tracker_box_id: None,
             change_address: None,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -854,6 +916,8 @@ mod redemption_api_tests {
             emergency: false,
             tracker_box_id: None,
             change_address: None,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -934,6 +998,8 @@ mod redemption_api_tests {
             issuer_pubkey: issuer_hex.clone(),
             total_debt: 100,
             recipient_pubkey: Some(candidate_hex.clone()),
+
+            denomination: String::new(),
         };
         let response = check_acceptance(
             axum::extract::State(state.clone()),
@@ -953,6 +1019,8 @@ mod redemption_api_tests {
             issuer_pubkey: issuer_hex,
             total_debt: 300,
             recipient_pubkey: Some(candidate_hex),
+
+            denomination: String::new(),
         };
         let response = check_acceptance(
             axum::extract::State(state),
@@ -984,6 +1052,8 @@ mod redemption_api_tests {
             recipient_address: "".to_string(),
             issuer_signature: "01".repeat(65),
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1012,6 +1082,8 @@ mod redemption_api_tests {
             recipient_address: "".to_string(),
             issuer_signature: "01".repeat(65),
             emergency: true, // Emergency flag set
+
+            denomination: String::new(),
         };
 
         // This will fail at the reserve lookup stage (no reserve in DB),
@@ -1050,6 +1122,8 @@ mod redemption_api_tests {
                 .to_string(),
             redeemed_amount: 1000,
             new_already_redeemed: None,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1076,6 +1150,8 @@ mod redemption_api_tests {
                 .to_string(),
             redeemed_amount: 1000,
             new_already_redeemed: None,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1100,6 +1176,8 @@ mod redemption_api_tests {
                 .to_string(),
             redeemed_amount: 1000,
             new_already_redeemed: None,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1178,6 +1256,8 @@ mod redemption_api_tests {
             total_debt: 1000,
             timestamp: 1234567890,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1205,6 +1285,8 @@ mod redemption_api_tests {
             total_debt: 1000,
             timestamp: 1234567890,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1243,6 +1325,8 @@ mod redemption_api_tests {
             total_debt: 1000,
             timestamp: 1234567890,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1291,6 +1375,8 @@ mod redemption_api_tests {
             total_debt: 1000,
             timestamp: 1234567890,
             emergency: true, // Emergency flag
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1329,6 +1415,8 @@ mod redemption_api_tests {
             total_debt: 999_999_999, // caller-chosen value, must never be signed
             timestamp: 1234567890,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1357,6 +1445,8 @@ mod redemption_api_tests {
             amount: 1000,
             timestamp: 1234567890,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1383,6 +1473,8 @@ mod redemption_api_tests {
             amount: 1000,
             timestamp: 1234567890,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1429,6 +1521,8 @@ mod redemption_api_tests {
             amount: 1000,
             timestamp: 1234567890,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1466,6 +1560,8 @@ mod redemption_api_tests {
             amount: 999_999_999, // caller-chosen value, must never be signed
             timestamp: 1234567890,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1507,6 +1603,8 @@ mod redemption_api_tests {
             amount: 1000,
             timestamp: 0,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         // Must return a 400 rather than panicking.
@@ -1537,6 +1635,8 @@ mod redemption_api_tests {
             amount: 1000,
             timestamp: 0,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         // The issuer key is valid, so only the recipient length is at fault: expect the
@@ -1566,6 +1666,8 @@ mod redemption_api_tests {
             amount: 1000,
             timestamp: 0,
             emergency: false,
+
+            denomination: String::new(),
         };
 
         let response =
@@ -1702,5 +1804,141 @@ mod redemption_api_tests {
         assert_eq!(request.recipient_address, "");
         assert_eq!(request.emergency, false);
         assert_eq!(request.issuer_signature, "01");
+    }
+
+    // ------------------------------------------------------------------
+    // POST /notes/exchange: cross-denomination triage
+    // ------------------------------------------------------------------
+
+    /// The exchange endpoint moves debt between two denominations of one
+    /// (issuer, recipient) pair when both parties sign both edges
+    /// (specs/ergo/multi_collateral_reserves.md §10).
+    #[tokio::test]
+    async fn test_exchange_notes_happy_path_and_consent_required() {
+        let token_id = "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669";
+        let mut state = create_mock_app_state().await;
+        let mut config = (*state.config).clone();
+        config.ergo.reserve_tokens.insert(
+            token_id.to_string(),
+            basis_server::config::ReserveTokenConfig {
+                symbol: "USE".to_string(),
+                decimals: 3,
+                min_collateralization_ratio: None,
+            },
+        );
+        state.config = std::sync::Arc::new(config);
+
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let (recipient_secret, recipient_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let recipient_hex = hex::encode(recipient_pubkey);
+        let nft = [0x42u8; 32];
+
+        // Add an ERG note (100) and a USE note (50) for the pair.
+        let add_note = |denom: basis_store::DenomKey, amount: u64, ts: u64| {
+            let state = state.clone();
+            let issuer_secret = issuer_secret;
+            async move {
+                let note = basis_store::IouNote::create_and_sign(
+                    recipient_pubkey,
+                    amount,
+                    ts,
+                    &issuer_secret,
+                    &nft,
+                    denom,
+                )
+                .unwrap();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                state
+                    .tx
+                    .send(TrackerCommand::AddNote {
+                        issuer_pubkey,
+                        note,
+                        response_tx: tx,
+                    })
+                    .await
+                    .unwrap();
+                rx.await.unwrap().unwrap();
+            }
+        };
+        add_note(basis_store::DenomKey::Erg, 100, 1000).await;
+        add_note(
+            basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap()),
+            50,
+            1001,
+        )
+        .await;
+
+        // Exchange 30 ERG -> 90 USE at ts 2000. Both parties sign both edges' new
+        // messages: from-edge new total 70 ERG, to-edge new total 140 USE.
+        let ts = 2000u64;
+        let erg = basis_store::DenomKey::Erg;
+        let tok = basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap());
+        let msg_from = basis_store::schnorr::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &erg,
+            70,
+            ts,
+            &nft,
+        );
+        let msg_to = basis_store::schnorr::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &tok,
+            140,
+            ts,
+            &nft,
+        );
+        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
+        };
+        let request = basis_server::models::ExchangeNotesRequest {
+            issuer_pubkey: issuer_hex.clone(),
+            recipient_pubkey: recipient_hex.clone(),
+            from_denomination: "erg".to_string(),
+            from_amount: 30,
+            to_denomination: format!("token:{}", token_id),
+            to_amount: 90,
+            timestamp: ts,
+            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
+            recipient_from_signature: sign(&recipient_secret, &msg_from, &recipient_pubkey),
+            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
+            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
+        };
+
+        let (status, body) = basis_server::api::exchange_notes(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "exchange failed: {:?}", body.error);
+        let data = body.data.as_ref().expect("response data");
+        assert!(data.exchanged);
+        assert_eq!(data.from_new_total, 70);
+        assert_eq!(data.to_new_total, 140);
+
+        // Creditor consent is required: reuse the same request with the recipient's
+        // from-edge signature replaced by an issuer-signed one.
+        let bad_request = basis_server::models::ExchangeNotesRequest {
+            issuer_pubkey: issuer_hex,
+            recipient_pubkey: recipient_hex,
+            from_denomination: "erg".to_string(),
+            from_amount: 10,
+            to_denomination: format!("token:{}", token_id),
+            to_amount: 10,
+            timestamp: ts + 1,
+            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
+            recipient_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey), // wrong signer
+            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
+            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
+        };
+        let (status, body) = basis_server::api::exchange_notes(
+            axum::extract::State(state),
+            axum::extract::Json(bad_request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.success);
     }
 }

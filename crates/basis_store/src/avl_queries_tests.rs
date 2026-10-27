@@ -24,6 +24,7 @@ fn manager_with_note(amount: u64) -> (TrackerStateManager, [u8; 32], [u8; 33], [
         1_700_000_000_000,
         &secret,
         &[0x42; 32],
+        crate::DenomKey::Erg,
     )
     .expect("create_and_sign should succeed");
     manager
@@ -42,7 +43,7 @@ fn test_get_total_debt_returns_note_amount() {
     let (manager, _, issuer, recipient) = manager_with_note(5_000_000);
 
     let debt = manager
-        .get_total_debt(&issuer, &recipient)
+        .get_total_debt(&issuer, &recipient, &crate::DenomKey::Erg)
         .expect("note was just added, so the AVL tree should contain it");
 
     assert_eq!(
@@ -58,7 +59,7 @@ fn test_get_total_debt_unknown_pair_is_error_not_zero() {
     let (_, recipient) = generate_keypair();
 
     let err = manager
-        .get_total_debt(&issuer, &recipient)
+        .get_total_debt(&issuer, &recipient, &crate::DenomKey::Erg)
         .expect_err("an unknown (issuer, recipient) pair must not silently read as zero debt");
 
     // A zero return here would be dangerous: callers use this value to build the signing
@@ -80,19 +81,29 @@ fn test_get_total_debt_is_per_pair() {
     let (mut manager, secret, issuer, recipient_a) = manager_with_note(1_000);
     let (_, recipient_b) = generate_keypair();
 
-    let note_b =
-        IouNote::create_and_sign(recipient_b, 7_000, 1_700_000_001_000, &secret, &[0x42; 32])
-            .expect("create_and_sign should succeed");
+    let note_b = IouNote::create_and_sign(
+        recipient_b,
+        7_000,
+        1_700_000_001_000,
+        &secret,
+        &[0x42; 32],
+        crate::DenomKey::Erg,
+    )
+    .expect("create_and_sign should succeed");
     manager
         .add_note(&issuer, &note_b)
         .expect("add_note should succeed");
 
     assert_eq!(
-        manager.get_total_debt(&issuer, &recipient_a).unwrap(),
+        manager
+            .get_total_debt(&issuer, &recipient_a, &crate::DenomKey::Erg)
+            .unwrap(),
         1_000
     );
     assert_eq!(
-        manager.get_total_debt(&issuer, &recipient_b).unwrap(),
+        manager
+            .get_total_debt(&issuer, &recipient_b, &crate::DenomKey::Erg)
+            .unwrap(),
         7_000
     );
     // The two lookups must not have clobbered each other in the shared tree.
@@ -106,11 +117,17 @@ fn test_get_total_debt_is_per_pair() {
 fn test_update_already_redeemed_changes_reserve_state_digest() {
     let (mut manager, _, issuer, recipient) = manager_with_note(1_000);
 
-    let before = manager.reserve_state_digest(&issuer);
+    let before = manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg);
     manager
-        .update_already_redeemed(&issuer, &recipient, 1_700_000_000_000, 4_000)
+        .update_already_redeemed(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            4_000,
+        )
         .expect("first reserve AVL update should succeed");
-    let after_first = manager.reserve_state_digest(&issuer);
+    let after_first = manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg);
 
     assert_ne!(
         before, after_first,
@@ -118,9 +135,15 @@ fn test_update_already_redeemed_changes_reserve_state_digest() {
     );
 
     manager
-        .update_already_redeemed(&issuer, &recipient, 1_700_000_002_000, 9_000)
+        .update_already_redeemed(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_002_000,
+            9_000,
+        )
         .expect("second reserve AVL update should succeed");
-    let after_second = manager.reserve_state_digest(&issuer);
+    let after_second = manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg);
 
     assert_ne!(
         after_first, after_second,
@@ -133,14 +156,26 @@ fn test_update_already_redeemed_is_idempotent_for_same_value() {
     let (mut manager, _, issuer, recipient) = manager_with_note(1_000);
 
     manager
-        .update_already_redeemed(&issuer, &recipient, 1_700_000_000_000, 4_000)
+        .update_already_redeemed(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            4_000,
+        )
         .unwrap();
-    let first = manager.reserve_state_digest(&issuer);
+    let first = manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg);
 
     manager
-        .update_already_redeemed(&issuer, &recipient, 1_700_000_000_000, 4_000)
+        .update_already_redeemed(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            4_000,
+        )
         .unwrap();
-    let second = manager.reserve_state_digest(&issuer);
+    let second = manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg);
 
     assert_eq!(
         first, second,
@@ -157,10 +192,16 @@ fn test_update_already_redeemed_creates_tree_for_unknown_issuer() {
     let (_, recipient) = generate_keypair();
 
     manager
-        .update_already_redeemed(&issuer, &recipient, 1_700_000_000_000, 1)
+        .update_already_redeemed(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            1,
+        )
         .expect("a fresh issuer should get a tree created on demand");
 
-    let digest = manager.reserve_state_digest(&issuer);
+    let digest = manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg);
     assert_eq!(
         digest.len(),
         33,
@@ -178,7 +219,13 @@ fn test_generate_reserve_insert_proof_for_fresh_issuer() {
     let (manager, _, issuer, recipient) = manager_with_note(1_000);
 
     let (proof, updated_digest) = manager
-        .generate_reserve_insert_proof(&issuer, &recipient, 1_700_000_000_000, 0)
+        .generate_reserve_insert_proof(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            0,
+        )
         .expect("insert proof against an empty tree should succeed");
 
     assert!(
@@ -193,7 +240,7 @@ fn test_generate_reserve_insert_proof_for_fresh_issuer() {
     );
     assert_ne!(
         updated_digest,
-        manager.reserve_state_digest(&issuer),
+        manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg),
         "for a fresh issuer the current root is the empty-tree digest, so the post-insert \
          digest predicted by the proof must differ from it"
     );
@@ -208,16 +255,28 @@ fn test_reserve_insert_proof_predicts_persisted_state() {
     let (mut manager, _, issuer, recipient) = manager_with_note(1_000);
 
     let (_, predicted) = manager
-        .generate_reserve_insert_proof(&issuer, &recipient, 1_700_000_000_000, 6_500)
+        .generate_reserve_insert_proof(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            6_500,
+        )
         .expect("insert proof should succeed");
 
     manager
-        .update_already_redeemed(&issuer, &recipient, 1_700_000_000_000, 6_500)
+        .update_already_redeemed(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            6_500,
+        )
         .expect("persisting the same update should succeed");
 
     assert_eq!(
         predicted,
-        manager.reserve_state_digest(&issuer),
+        manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg),
         "the digest predicted by generate_reserve_insert_proof must equal the root after the \
          same update is persisted"
     );
@@ -230,10 +289,22 @@ fn test_generate_reserve_insert_proof_is_deterministic() {
     let (manager, _, issuer, recipient) = manager_with_note(1_000);
 
     let first = manager
-        .generate_reserve_insert_proof(&issuer, &recipient, 1_700_000_000_000, 2_500)
+        .generate_reserve_insert_proof(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            2_500,
+        )
         .unwrap();
     let second = manager
-        .generate_reserve_insert_proof(&issuer, &recipient, 1_700_000_000_000, 2_500)
+        .generate_reserve_insert_proof(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            2_500,
+        )
         .unwrap();
 
     assert_eq!(first.0, second.0, "insert proof must be deterministic");
@@ -245,10 +316,22 @@ fn test_generate_reserve_insert_proof_digest_tracks_value() {
     let (manager, _, issuer, recipient) = manager_with_note(1_000);
 
     let (_, digest_a) = manager
-        .generate_reserve_insert_proof(&issuer, &recipient, 1_700_000_000_000, 1_000)
+        .generate_reserve_insert_proof(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            1_000,
+        )
         .unwrap();
     let (_, digest_b) = manager
-        .generate_reserve_insert_proof(&issuer, &recipient, 1_700_000_000_000, 2_000)
+        .generate_reserve_insert_proof(
+            &issuer,
+            &recipient,
+            &crate::DenomKey::Erg,
+            1_700_000_000_000,
+            2_000,
+        )
         .unwrap();
 
     assert_ne!(

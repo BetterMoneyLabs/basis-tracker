@@ -114,8 +114,12 @@ pub struct App {
     /// Set when a default account was auto-created on first run; the intro
     /// screen displays its public key to the user before the main menu.
     pub intro_account: Option<AccountInfo>,
-    pub reserve_status: Option<ReserveInfo>,
+    /// Per-denomination reserve/debt status (one entry per denomination the
+    /// account has notes or reserves in). Never aggregate across denominations.
+    pub reserve_statuses: Vec<ReserveInfo>,
     pub reserve_token_config: Option<ReserveTokenConfig>,
+    /// Reserve-collateral configuration (contract addresses + served tokens).
+    pub collateral_config: Option<basis_cli_lib::api::ReserveCollateralConfig>,
     pub issued_notes: Vec<NoteInfo>,
     pub received_notes: Vec<NoteInfo>,
     pub notification: Option<(String, bool)>,
@@ -187,6 +191,10 @@ pub struct ReserveInfo {
     pub _last_updated: u64,
     pub has_pending_refund: bool,
     pub reserve_token_id: Option<String>,
+    /// Denomination of this debt/collateral pair: "erg" or "token:<64-hex>".
+    pub denomination: String,
+    pub symbol: String,
+    pub decimals: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,11 +235,13 @@ pub fn compute_wallet_stats(
 
 impl App {
     pub fn compute_stats(&self) -> WalletStats {
-        compute_wallet_stats(
-            &self.issued_notes,
-            &self.received_notes,
-            self.reserve_status.as_ref(),
-        )
+        // The headline coverage ratio uses the ERG entry when present, else the first.
+        let reserve = self
+            .reserve_statuses
+            .iter()
+            .find(|r| r.denomination == "erg")
+            .or_else(|| self.reserve_statuses.first());
+        compute_wallet_stats(&self.issued_notes, &self.received_notes, reserve)
     }
 
     pub async fn new() -> Result<Self> {
@@ -282,8 +292,9 @@ impl App {
             server_url,
             current_account,
             intro_account,
-            reserve_status: None,
+            reserve_statuses: Vec::new(),
             reserve_token_config: None,
+            collateral_config: None,
             issued_notes: Vec::new(),
             received_notes: Vec::new(),
             notification: None,
@@ -306,20 +317,28 @@ impl App {
 
         // Refresh reserve-token configuration from the tracker
         self.reserve_token_config = self.client.get_reserve_token_config().await.ok();
+        self.collateral_config = self.client.get_reserve_collateral_config().await.ok();
 
-        // Refresh reserve status
+        // Refresh reserve status (per denomination)
         if let Some(ref acc) = self.current_account {
             if let Ok(status) = self.client.get_reserve_status(&acc.pubkey).await {
-                self.reserve_status = Some(ReserveInfo {
-                    issuer: status.issuer_pubkey,
-                    total_debt: status.total_debt,
-                    collateral: status.collateral,
-                    ratio: status.collateralization_ratio,
-                    note_count: status.note_count,
-                    _last_updated: status.last_updated,
-                    has_pending_refund: status.has_pending_refund,
-                    reserve_token_id: status.reserve_token_id,
-                });
+                self.reserve_statuses = status
+                    .denominations
+                    .iter()
+                    .map(|d| ReserveInfo {
+                        issuer: status.issuer_pubkey.clone(),
+                        total_debt: d.total_debt,
+                        collateral: d.collateral,
+                        ratio: d.collateralization_ratio,
+                        note_count: d.note_count,
+                        _last_updated: status.last_updated,
+                        has_pending_refund: d.has_pending_refund,
+                        reserve_token_id: None,
+                        denomination: d.denomination.clone(),
+                        symbol: d.symbol.clone(),
+                        decimals: d.decimals,
+                    })
+                    .collect();
             }
 
             // Refresh notes
@@ -390,6 +409,9 @@ mod tests {
             _last_updated: 0,
             has_pending_refund: false,
             reserve_token_id: None,
+            denomination: "erg".to_string(),
+            symbol: "ERG".to_string(),
+            decimals: 9,
         }
     }
 

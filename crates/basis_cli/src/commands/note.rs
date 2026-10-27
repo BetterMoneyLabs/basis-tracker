@@ -93,9 +93,12 @@ pub enum NoteCommands {
         /// Recipient public key (hex)
         #[arg(long)]
         recipient: Option<String>,
-        /// Amount in nanoERG
+        /// Amount in nanoERG (or raw token units with --denomination)
         #[arg(long)]
         amount: u64,
+        /// Denomination of the debt: "erg" (default) or "token:<64-hex>"
+        #[arg(long)]
+        denomination: Option<String>,
         /// Use demo mode (Alice → Bob with tracker signature)
         #[arg(long, default_value = "false")]
         demo: bool,
@@ -120,12 +123,18 @@ pub enum NoteCommands {
         /// Recipient public key (hex)
         #[arg(long)]
         recipient: String,
+        /// Denomination of the note: "erg" (default) or "token:<64-hex>"
+        #[arg(long)]
+        denomination: Option<String>,
     },
     /// Redeem a note
     Redeem {
         /// Issuer public key (hex)
         #[arg(long)]
         issuer: String,
+        /// Denomination of the note: "erg" (default) or "token:<64-hex>"
+        #[arg(long)]
+        denomination: Option<String>,
         /// Amount to redeem in nanoERG
         #[arg(long)]
         amount: u64,
@@ -145,6 +154,7 @@ pub async fn handle_note_command(
         NoteCommands::Create {
             recipient,
             amount,
+            denomination,
             demo,
             output,
         } => {
@@ -159,8 +169,14 @@ pub async fn handle_note_command(
                 let recipient = recipient
                     .ok_or_else(|| anyhow::anyhow!("--recipient required in non-demo mode"))?;
 
-                let result =
-                    create_normal_note(account_manager, client, &recipient, amount).await?;
+                let result = create_normal_note(
+                    account_manager,
+                    client,
+                    &recipient,
+                    amount,
+                    denomination.as_deref(),
+                )
+                .await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 } else {
@@ -218,8 +234,12 @@ pub async fn handle_note_command(
                 }
             }
         }
-        NoteCommands::Get { issuer, recipient } => {
-            let note = get_note(client, &issuer, &recipient).await?;
+        NoteCommands::Get {
+            issuer,
+            recipient,
+            denomination,
+        } => {
+            let note = get_note(client, &issuer, &recipient, denomination.as_deref()).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&note)?);
             } else if let Some(note) = note {
@@ -240,9 +260,18 @@ pub async fn handle_note_command(
         NoteCommands::Redeem {
             issuer,
             amount,
+            denomination,
             server_sign,
         } => {
-            let result = redeem_note(account_manager, client, &issuer, amount, server_sign).await?;
+            let result = redeem_note(
+                account_manager,
+                client,
+                &issuer,
+                amount,
+                server_sign,
+                denomination.as_deref(),
+            )
+            .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else if let Some(tx_id) = result.tx_id {
@@ -377,6 +406,7 @@ pub async fn create_normal_note(
     client: &TrackerClient,
     recipient: &str,
     amount: u64,
+    denomination: Option<&str>,
 ) -> Result<NoteCreatedResult> {
     let current_account = account_manager
         .get_current()
@@ -410,11 +440,22 @@ pub async fn create_normal_note(
     let recipient_bytes = hex::decode(recipient)?;
     let issuer_bytes = hex::decode(&issuer_pubkey)?;
 
-    // Compute key = blake2b256(ownerKey || receiverKey)
-    let mut key_hash_input = Vec::new();
-    key_hash_input.extend_from_slice(&issuer_bytes);
-    key_hash_input.extend_from_slice(&recipient_bytes);
-    let key_hash = blake2b256_hash(&key_hash_input);
+    // Compute the denomination-derived debt key (blake2b256(owner ‖ receiver) for
+    // ERG; blake2b256(owner ‖ receiver ‖ tokenId) for a token).
+    let issuer_arr: [u8; 33] = issuer_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("issuer pubkey must be 33 bytes"))?;
+    let recipient_arr: [u8; 33] = recipient_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("recipient pubkey must be 33 bytes"))?;
+    let denom_key = match denomination {
+        Some(d) => basis_store::DenomKey::parse(d)
+            .map_err(|e| anyhow::anyhow!("invalid denomination: {}", e))?,
+        None => basis_store::DenomKey::Erg,
+    };
+    let key_hash = denom_key.debt_key(&issuer_arr, &recipient_arr);
 
     // Build message: key || totalDebt || timestamp || trackerNftId (80 bytes)
     let mut message = Vec::new();
@@ -433,6 +474,7 @@ pub async fn create_normal_note(
         timestamp,
         signature: signature_hex.clone(),
         tracker_nft_id,
+        denomination: denom_key.denomination_id(),
     };
 
     client.create_note(request).await?;
@@ -500,8 +542,11 @@ pub async fn get_note(
     client: &TrackerClient,
     issuer: &str,
     recipient: &str,
+    denomination: Option<&str>,
 ) -> Result<Option<SerializableIouNote>> {
-    client.get_note(issuer, recipient).await
+    client
+        .get_note_denominated(issuer, recipient, denomination)
+        .await
 }
 
 /// Redeem a note, either via server-side signing or (default) local signing.
@@ -511,6 +556,7 @@ pub async fn redeem_note(
     issuer: &str,
     amount: u64,
     server_sign: bool,
+    denomination: Option<&str>,
 ) -> Result<NoteRedeemResult> {
     let current_account = account_manager
         .get_current()
@@ -521,7 +567,7 @@ pub async fn redeem_note(
 
     // First, get the note to retrieve its original timestamp and validate debt
     let note = client
-        .get_note(issuer, &recipient_pubkey)
+        .get_note_denominated(issuer, &recipient_pubkey, denomination)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -560,6 +606,8 @@ pub async fn redeem_note(
             issuer_signature: note.signature.clone(),
             emergency: false,
             tracker_signature: None, // Server will generate tracker signature
+
+            denomination: String::new(),
         };
 
         let response = client.initiate_redemption(redeem_request).await?;
@@ -575,6 +623,8 @@ pub async fn redeem_note(
             recipient_pubkey,
             redeemed_amount: amount,
             new_already_redeemed: Some(new_already_redeemed),
+
+            denomination: String::new(),
         };
 
         client.complete_redemption(complete_request).await?;
@@ -617,32 +667,46 @@ pub async fn redeem_note(
 }
 
 fn print_reserve_status(status: &KeyStatusResponse) {
-    progress!(
-        "  Total Debt: {} nanoERG ({:.6} ERG)",
-        status.total_debt,
-        status.total_debt as f64 / 1_000_000_000.0
-    );
-    progress!(
-        "  Collateral: {} nanoERG ({:.6} ERG)",
-        status.collateral,
-        status.collateral as f64 / 1_000_000_000.0
-    );
-    progress!(
-        "  Collateralization Ratio: {:.4}",
-        status.collateralization_ratio
-    );
-    progress!("  Note Count: {}", status.note_count);
+    if status.denominations.is_empty() {
+        progress!("  No notes or reserves");
+        progress!("  Note Count: {}", status.note_count);
+        progress!("  Last Updated: {}", status.last_updated);
+        return;
+    }
+    for d in &status.denominations {
+        let unit = d.symbol.as_str();
+        let scale = 10f64.powi(d.decimals as i32);
+        progress!("  [{}]", d.denomination);
+        progress!(
+            "    Total Debt: {} raw ({:.prec$} {})",
+            d.total_debt,
+            d.total_debt as f64 / scale,
+            unit,
+            prec = d.decimals as usize
+        );
+        progress!(
+            "    Collateral: {} raw ({:.prec$} {})",
+            d.collateral,
+            d.collateral as f64 / scale,
+            unit,
+            prec = d.decimals as usize
+        );
+        progress!(
+            "    Collateralization Ratio: {:.4}",
+            d.collateralization_ratio
+        );
+        progress!("    Note Count: {}", d.note_count);
+        let status_text = match d.collateralization_ratio {
+            r if r < 1.0 => "UNDER-COLLATERALIZED ⚠️",
+            r if r < 1.5 => "LOW ⚠️",
+            r if r < 2.0 => "ADEQUATE",
+            r if r < 3.0 => "GOOD",
+            _ => "EXCELLENT",
+        };
+        progress!("    Status: {}", status_text);
+    }
+    progress!("  Note Count (all denominations): {}", status.note_count);
     progress!("  Last Updated: {}", status.last_updated);
-
-    // Show collateralization status
-    let status_text = match status.collateralization_ratio {
-        r if r < 1.0 => "UNDER-COLLATERALIZED ⚠️",
-        r if r < 1.5 => "LOW ⚠️",
-        r if r < 2.0 => "ADEQUATE",
-        r if r < 3.0 => "GOOD",
-        _ => "EXCELLENT",
-    };
-    progress!("  Status: {}", status_text);
 }
 
 /// Blake2b256 hash function for creating signing message keys

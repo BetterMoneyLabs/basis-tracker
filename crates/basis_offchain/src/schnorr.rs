@@ -21,13 +21,14 @@ pub type Signature = [u8; 65];
 
 /// Generate the signing message following the Basis protocol specification.
 ///
-/// message = blake2b256(ownerKeyBytes || receiverKeyBytes) || longToByteArray(totalDebt) || longToByteArray(timestamp)
+/// message = debtKey || longToByteArray(totalDebt) || longToByteArray(timestamp) || trackerNftId
 ///
-/// Where key = blake2b256(ownerKeyBytes || receiverKeyBytes)
+/// Where debtKey is the denomination-derived debt-tree key (`DenomKey::debt_key`).
 /// Total: 80 bytes (32 + 8 + 8 + 32)
 pub fn signing_message(
     owner_key: &PubKey,
     receiver_key: &PubKey,
+    denomination: &basis_core::types::DenomKey,
     total_debt: u64,
     timestamp: u64,
     tracker_nft_id: &[u8; 32],
@@ -35,6 +36,7 @@ pub fn signing_message(
     basis_core::types::signing_message(
         owner_key,
         receiver_key,
+        denomination,
         total_debt,
         timestamp,
         tracker_nft_id,
@@ -123,6 +125,7 @@ mod tests {
         let message = signing_message(
             &owner_pubkey,
             &receiver_pubkey,
+            &basis_core::types::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -149,6 +152,7 @@ mod tests {
         let message = signing_message(
             &owner_pubkey,
             &receiver_pubkey,
+            &basis_core::types::DenomKey::Erg,
             total_debt,
             timestamp,
             &[0x42; 32],
@@ -169,6 +173,7 @@ mod tests {
         let wrong_message = signing_message(
             &owner_pubkey,
             &receiver_pubkey,
+            &basis_core::types::DenomKey::Erg,
             total_debt + 1,
             timestamp,
             &[0x42; 32],

@@ -105,6 +105,16 @@ object BasisPrinter extends App {
   println("Basis p2s address: " + BasisConstants.basisAddress)
   println("Basis-token p2s address: " + BasisConstants.basisTokenAddress)
 
+  // Normalized ErgoTree hex (constant-table normalization as applied by the node and
+  // ergo-lib on address parse) — this is the form contract_compiler.rs must carry.
+  def normalizedHex(tree: sigma.ast.ErgoTree): String = {
+    val addr = BasisConstants.ergoAddressEncoder.fromProposition(tree).get
+    val parsed = BasisConstants.ergoAddressEncoder.fromString(addr.toString).get
+    scorex.util.encode.Base16.encode(parsed.script.bytes)
+  }
+  println("Basis ergoTree hex: " + normalizedHex(BasisConstants.basisErgoTree))
+  println("Basis-token ergoTree hex: " + normalizedHex(BasisConstants.basisTokenErgoTree))
+
   println("\nTo deploy Basis reserve:")
   println("1. Run BasisDeployer.main() for deployment requests")
   println("2. Use createBasisDeploymentRequest() with actual values")

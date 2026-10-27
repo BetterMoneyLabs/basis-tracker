@@ -106,6 +106,45 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
+  /notes/exchange:
+    post:
+      summary: Exchange debt between denominations (off-chain novation / triage)
+      description: >-
+        Atomically moves cumulative debt between two denominations of one
+        (issuer, recipient) pair: the from-denomination edge decreases by
+        from_amount, the to-denomination edge increases by to_amount. Both parties
+        sign both edges' new states; the recipient's signatures are the creditor
+        consent required for a debt decrease (S3 rule). The tracker takes no view of
+        the exchange rate — it is bilaterally agreed. Both edges commit in one
+        tracker state update.
+      operationId: exchangeNotes
+      tags:
+        - Notes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExchangeNotesRequest'
+      responses:
+        '200':
+          description: Exchange applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseExchangeNotes'
+        '400':
+          description: Invalid request, unserved denomination, missing creditor consent, or acceptance-policy rejection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
   /notes/issuer/{pubkey}:
     get:
       summary: Get notes by issuer
@@ -166,6 +205,13 @@ paths:
             type: string
             pattern: '^[0-9a-fA-F]{66}$'
             example: "020202020202020202020202020202020202020202020202020202020202020202"
+        - name: denomination
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Denomination of the note: erg or token:<64-hex>. Defaults to the pair's existing note denomination when unambiguous, else erg."
+
       responses:
         '200':
           description: Successfully retrieved note
@@ -593,6 +639,13 @@ paths:
             type: integer
             format: uint64
             example: 500000000
+        - name: denomination
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Denomination of the note: erg or token:<64-hex>. Defaults to the pair's existing note denomination when unambiguous, else erg."
+
       responses:
         '200':
           description: Successfully generated proof
@@ -639,6 +692,13 @@ paths:
             type: string
             pattern: '^[0-9a-fA-F]{66}$'
             example: "020202020202020202020202020202020202020202020202020202020202020202"
+        - name: denomination
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Denomination of the note: erg or token:<64-hex>. Defaults to the pair's existing note denomination when unambiguous, else erg."
+
       responses:
         '200':
           description: Successfully generated tracker proof
@@ -686,6 +746,13 @@ paths:
             type: string
             pattern: '^[0-9a-fA-F]{66}$'
             example: "020202020202020202020202020202020202020202020202020202020202020202"
+        - name: denomination
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Denomination of the note: erg or token:<64-hex>. Defaults to the pair's existing note denomination when unambiguous, else erg."
+
       responses:
         '200':
           description: Successfully generated reserve proof
@@ -1093,6 +1160,30 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
+  /config/reserve-collateral:
+    get:
+      summary: Get reserve collateral configuration
+      description: >-
+        Returns the reserve contract addresses (ERG and token) plus the table of
+        tokens this tracker serves as reserve collateral, and the full list of
+        denominations available for notes and reserves
+        (specs/ergo/multi_collateral_reserves.md).
+      operationId: getReserveCollateralConfig
+      tags:
+        - Config
+      responses:
+        '200':
+          description: Successfully retrieved reserve collateral configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserveCollateralConfig'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -1111,6 +1202,163 @@ components:
         `X-Signature-Pubkey`, `X-Signature-Timestamp`, and `X-Signature-Nonce`.
 
   schemas:
+    ExchangeNotesRequest:
+      type: object
+      description: >-
+        Cross-denomination debt exchange request. All four signatures are over the
+        respective edge's standard 80-byte note message (debtKey ‖ totalDebt ‖
+        timestamp ‖ trackerNftId) at the NEW cumulative total and timestamp.
+      required:
+        - issuer_pubkey
+        - recipient_pubkey
+        - from_denomination
+        - from_amount
+        - to_denomination
+        - to_amount
+        - timestamp
+        - issuer_from_signature
+        - recipient_from_signature
+        - issuer_to_signature
+        - recipient_to_signature
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+        recipient_pubkey:
+          type: string
+          description: Hex-encoded recipient public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+        from_denomination:
+          type: string
+          description: Denomination of the edge being decreased ("erg" or "token:<64-hex>")
+          example: "erg"
+        from_amount:
+          type: integer
+          format: uint64
+          description: Amount by which the from-edge's cumulative debt decreases
+        to_denomination:
+          type: string
+          description: Denomination of the edge being increased
+          example: "token:a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
+        to_amount:
+          type: integer
+          format: uint64
+          description: Amount by which the to-edge's cumulative debt increases
+        timestamp:
+          type: integer
+          format: uint64
+          description: New timestamp for both edges (must be newer than both current ones)
+        issuer_from_signature:
+          type: string
+          description: Issuer signature over the from-edge's new message (hex, 130 chars)
+        recipient_from_signature:
+          type: string
+          description: Recipient signature over the from-edge's new message (creditor consent)
+        issuer_to_signature:
+          type: string
+          description: Issuer signature over the to-edge's new message
+        recipient_to_signature:
+          type: string
+          description: Recipient signature over the to-edge's new message (creditor acceptance)
+
+    ExchangeNotesResponse:
+      type: object
+      properties:
+        exchanged:
+          type: boolean
+          example: true
+        from_denomination:
+          type: string
+          example: "erg"
+        to_denomination:
+          type: string
+          example: "token:a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
+        from_new_total:
+          type: integer
+          format: uint64
+        to_new_total:
+          type: integer
+          format: uint64
+        timestamp:
+          type: integer
+          format: uint64
+
+    ApiResponseExchangeNotes:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/ExchangeNotesResponse'
+        error:
+          type: string
+          nullable: true
+
+    ServedTokenInfo:
+      type: object
+      properties:
+        token_id:
+          type: string
+          description: Token ID (64 hex chars)
+          example: "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
+        symbol:
+          type: string
+          example: "USE"
+        decimals:
+          type: integer
+          example: 3
+        min_collateralization_ratio:
+          type: number
+          format: float
+          nullable: true
+          example: 1.1
+
+    ServedDenomination:
+      type: object
+      properties:
+        id:
+          type: string
+          description: '"erg" or "token:<64-hex>"'
+          example: "erg"
+        symbol:
+          type: string
+          example: "ERG"
+        decimals:
+          type: integer
+          example: 9
+
+    ReserveCollateralConfigResponse:
+      type: object
+      properties:
+        erg_contract_p2s:
+          type: string
+          description: ERG reserve contract P2S address
+        token_contract_p2s:
+          type: string
+          description: Token reserve contract P2S address (serves every served token)
+        tokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServedTokenInfo'
+        denominations:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServedDenomination'
+
+    ApiResponseReserveCollateralConfig:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/ReserveCollateralConfigResponse'
+        error:
+          type: string
+          nullable: true
+
     # API Response Wrappers
     ApiResponse:
       type: object
@@ -1203,6 +1451,11 @@ components:
           description: Hex-encoded tracker NFT ID (64 characters = 32 bytes) this note is bound to; part of the signed message
           pattern: '^[0-9a-fA-F]{64}$'
           example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+        denomination:
+          type: string
+          description: "Denomination of the debt: erg or token:<64-hex>."
+          example: "erg"
+
         confirmation:
           $ref: '#/components/schemas/NoteConfirmationSummary'
 
@@ -1245,6 +1498,11 @@ components:
           description: Hex-encoded tracker NFT ID (64 characters = 32 bytes) this note is bound to; part of the signed message
           pattern: '^[0-9a-fA-F]{64}$'
           example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+        denomination:
+          type: string
+          description: "Denomination of the debt: erg or token:<64-hex>."
+          example: "erg"
+
         age_seconds:
           type: integer
           format: uint64
@@ -1346,6 +1604,12 @@ components:
             ergo.tracker_nft_id.
           pattern: '^[0-9a-fA-F]{64}$'
           example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
+        denomination:
+          type: string
+          description: >-
+            Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
+            resolves to the pair's existing note's denomination when unambiguous, else "erg".
+          example: "erg"
 
     NoteStateRequest:
       type: object
@@ -1365,6 +1629,13 @@ components:
           pattern: '^[0-9a-fA-F]{66}$'
           example: "020202020202020202020202020202020202020202020202020202020202020202"
 
+
+        denomination:
+          type: string
+          description: >-
+            Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
+            resolves to the pair's existing note's denomination when unambiguous, else "erg".
+          example: "erg"
     NoteStateResponse:
       type: object
       description: Response for a single note's confirmation state
@@ -1607,6 +1878,13 @@ components:
           description: Whether this is an emergency redemption
           example: false
 
+
+        denomination:
+          type: string
+          description: >-
+            Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
+            resolves to the pair's existing note's denomination when unambiguous, else "erg".
+          example: "erg"
     CompleteRedemptionRequest:
       type: object
       description: Request body for completing a redemption
@@ -1640,6 +1918,13 @@ components:
           description: Optional explicit cumulative reserve-tree value
           example: 500000000
 
+
+        denomination:
+          type: string
+          description: >-
+            Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
+            resolves to the pair's existing note's denomination when unambiguous, else "erg".
+          example: "erg"
     RedeemResponse:
       type: object
       description: Redemption response
@@ -1755,6 +2040,13 @@ components:
           description: Whether this is an emergency redemption
           example: false
 
+
+        denomination:
+          type: string
+          description: >-
+            Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
+            resolves to the pair's existing note's denomination when unambiguous, else "erg".
+          example: "erg"
     TrackerSignatureResponse:
       type: object
       description: Tracker signature response
@@ -1910,6 +2202,13 @@ components:
           description: Whether this is an emergency redemption (exempt from the acceptance-policy check)
           example: false
 
+
+        denomination:
+          type: string
+          description: >-
+            Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
+            resolves to the pair's existing note's denomination when unambiguous, else "erg".
+          example: "erg"
     RedemptionPreparationResponse:
       type: object
       description: Legacy redemption preparation response
@@ -1991,6 +2290,11 @@ components:
           description: Deprecated and ignored. Change always goes to the owner of the tracker's selected fee box (falling back to the configured change address); a caller-supplied address is never used.
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
 
+
+        denomination:
+          type: string
+          description: "Denomination of the debt: erg or token:<64-hex>."
+          example: "erg"
     RedemptionBuildResponse:
       type: object
       description: Response for a built redemption transaction
@@ -2111,48 +2415,70 @@ components:
           example: "a1b2c3d4e5f67788990011223344556677889900112233445566778899001122"
 
     # Status / Tracker Schemas
-    KeyStatusResponse:
+    KeyStatusDenomination:
       type: object
-      description: Key status information
+      description: Per-denomination debt/collateral status (never summed across denominations)
       properties:
+        denomination:
+          type: string
+          description: '"erg" or "token:<64-hex>"'
+          example: "erg"
+        symbol:
+          type: string
+          example: "ERG"
+        decimals:
+          type: integer
+          example: 9
         total_debt:
           type: integer
           format: uint64
-          description: Total debt issued by this key
+          description: Outstanding debt in this denomination (raw units)
           example: 1500000000
         collateral:
           type: integer
           format: uint64
-          description: Total collateral backing the debt
+          description: Collateral backing this denomination (raw units)
           example: 3000000000
         collateralization_ratio:
           type: number
           format: float
-          description: Current collateralization ratio
           example: 2.0
         note_count:
           type: integer
-          description: Number of outstanding notes
           example: 5
-        last_updated:
-          type: integer
-          format: uint64
-          description: Last update timestamp
-          example: 1672531200
+        reserve_box_id:
+          type: string
+          nullable: true
+          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        has_pending_refund:
+          type: boolean
+          example: false
+
+    KeyStatusResponse:
+      type: object
+      description: >-
+        Key status information, broken down per denomination. Debt and collateral
+        are never summed across denominations (specs/ergo/multi_collateral_reserves.md).
+      properties:
         issuer_pubkey:
           type: string
           description: Hex-encoded issuer public key
           example: "010101010101010101010101010101010101010101010101010101010101010101"
+        note_count:
+          type: integer
+          description: Total number of notes across all denominations
+          example: 5
+        last_updated:
+          type: integer
+          format: uint64
+          example: 1672531200
         has_pending_refund:
           type: boolean
-          description: Whether the reserve has a pending refund
           example: false
-        reserve_token_id:
-          type: string
-          nullable: true
-          description: Reserve token ID (hex-encoded) when the issuer's reserve is token-backed
-          example: "b1c2d3e4f5061728394051627384950617283940516273849506172839405162"
-
+        denominations:
+          type: array
+          items:
+            $ref: '#/components/schemas/KeyStatusDenomination'
     TrackerBoxIdResponse:
       type: object
       description: Latest confirmed tracker box ID
@@ -2264,6 +2590,13 @@ components:
           pattern: '^[0-9a-fA-F]{66}$'
           example: "020202020202020202020202020202020202020202020202020202020202020202"
 
+
+        denomination:
+          type: string
+          description: >-
+            Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
+            resolves to the pair's existing note's denomination when unambiguous, else "erg".
+          example: "erg"
     CheckAcceptanceResponse:
       type: object
       description: Response for checking note acceptance

@@ -24,7 +24,6 @@ mod tests {
             start_height: Some(0),
             reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
             token_reserve_contract_p2s: None,
-            reserve_token_id: None,
             tracker_nft_id: None,
             node_url: "http://test-node:9053".to_string(),
             scan_name: Some("Test Reserve Scanner".to_string()),
@@ -102,7 +101,11 @@ mod tests {
         println!("Testing reserve box parsing...");
 
         for scan_box in &test_scan_boxes {
-            match state.parse_reserve_box(scan_box) {
+            match state.parse_reserve_box(
+                scan_box,
+                crate::ergo_scanner::ReserveContractKind::Erg,
+                "test_p2s",
+            ) {
                 Ok(reserve_info) => {
                     println!("Successfully parsed reserve box: {}", scan_box.box_id);
                     println!("  - Owner pubkey: {}", reserve_info.owner_pubkey);
@@ -151,7 +154,11 @@ mod tests {
 
         let mut current_box_ids = Vec::new();
         for scan_box in &test_scan_boxes {
-            match state.parse_reserve_box(scan_box) {
+            match state.parse_reserve_box(
+                scan_box,
+                crate::ergo_scanner::ReserveContractKind::Erg,
+                "test_p2s",
+            ) {
                 Ok(reserve_info) => {
                     current_box_ids.push(reserve_info.box_id.clone());
                     state
@@ -288,7 +295,6 @@ mod tests {
             start_height: Some(0),
             reserve_contract_p2s: Some("test_reserve_contract_p2s".to_string()),
             token_reserve_contract_p2s: None,
-            reserve_token_id: None,
             tracker_nft_id: None,
             node_url: "http://test:9053".to_string(),
             scan_name: Some("Test Scanner".to_string()),
@@ -358,7 +364,13 @@ mod tests {
                 },
             };
 
-            let reserve_info = state.parse_reserve_box(&scan_box).unwrap();
+            let reserve_info = state
+                .parse_reserve_box(
+                    &scan_box,
+                    crate::ergo_scanner::ReserveContractKind::Erg,
+                    "test_p2s",
+                )
+                .unwrap();
             state.reserve_tracker.update_reserve(reserve_info).unwrap();
         }
 
@@ -382,5 +394,93 @@ mod tests {
         assert_eq!(total_debt_after, 200000000);
 
         println!("Comprehensive reserve tracking test completed successfully!");
+    }
+
+    /// Phase 4 acceptance (specs/ergo/multi_collateral_reserves.md §6 invariant 2):
+    /// reserve resolution is per (owner, denomination).
+    #[test]
+    fn test_resolve_issuer_reserve_per_denomination() {
+        use crate::DenomKey;
+        let tracker = ReserveTracker::new();
+
+        let owner = "aa".repeat(33);
+        let erg_box = "11".repeat(32);
+        let sigusd_box = "22".repeat(32);
+        let sigusd_id = "e8".repeat(32);
+
+        // ERG reserve for the owner
+        let erg_reserve = ExtendedReserveInfo::new(
+            &hex::decode(&erg_box).unwrap(),
+            &hex::decode(&owner).unwrap(),
+            1_000_000_000,
+            Some(b"nft"),
+            1000,
+            0,
+            None,
+        );
+        // Token reserve for the same owner
+        let tok_reserve = ExtendedReserveInfo::new(
+            &hex::decode(&sigusd_box).unwrap(),
+            &hex::decode(&owner).unwrap(),
+            5000,
+            Some(b"nft"),
+            1000,
+            0,
+            Some(&hex::decode(&sigusd_id).unwrap()),
+        );
+        tracker.update_reserve(erg_reserve).unwrap();
+        tracker.update_reserve(tok_reserve).unwrap();
+
+        // Each denomination resolves to its own reserve — the owner is no longer
+        // locked out for holding both.
+        let erg = tracker
+            .resolve_issuer_reserve(&owner, &DenomKey::Erg)
+            .unwrap();
+        assert_eq!(erg.box_id, erg_box);
+        let tok = tracker
+            .resolve_issuer_reserve(
+                &owner,
+                &DenomKey::Token(hex::decode(&sigusd_id).unwrap().try_into().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(tok.box_id, sigusd_box);
+
+        // An unknown denomination fails closed.
+        let other_token = DenomKey::Token([0x99u8; 32]);
+        assert!(tracker
+            .resolve_issuer_reserve(&owner, &other_token)
+            .is_err());
+
+        // A second reserve in the SAME denomination is refused (per-reserve replay
+        // protection, C3).
+        let dup_box = "33".repeat(32);
+        let dup_reserve = ExtendedReserveInfo::new(
+            &hex::decode(&dup_box).unwrap(),
+            &hex::decode(&owner).unwrap(),
+            7000,
+            Some(b"nft"),
+            1001,
+            0,
+            Some(&hex::decode(&sigusd_id).unwrap()),
+        );
+        tracker.update_reserve(dup_reserve).unwrap();
+        let err = tracker
+            .resolve_issuer_reserve(
+                &owner,
+                &DenomKey::Token(hex::decode(&sigusd_id).unwrap().try_into().unwrap()),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::ReserveTrackerError::MultipleReservesForDenomination { .. }
+            ),
+            "expected MultipleReservesForDenomination, got {:?}",
+            err
+        );
+        // ...while ERG still resolves unambiguously.
+        assert!(tracker
+            .resolve_issuer_reserve(&owner, &DenomKey::Erg)
+            .is_ok());
     }
 }

@@ -7,7 +7,15 @@ mod api_tests {
     #[test]
     fn test_note_creation_validation() {
         // Test that note creation validates required fields
-        let note = IouNote::new([1u8; 33], 1000, 0, 1234567890, [2u8; 65], [0x42; 32]);
+        let note = IouNote::new(
+            [1u8; 33],
+            1000,
+            0,
+            1234567890,
+            [2u8; 65],
+            [0x42; 32],
+            basis_store::DenomKey::Erg,
+        );
 
         assert_eq!(note.amount_collected, 1000);
         assert_eq!(note.amount_redeemed, 0);
@@ -37,6 +45,7 @@ mod api_tests {
             fee_input_total_value: 0,
             reserve_refund_initiation_height: 0,
             reserve_ergo_tree: "test_reserve_ergo_tree".to_string(),
+                    denomination: basis_store::DenomKey::Erg,
         };
 
         assert!(!request.issuer_pubkey.is_empty());
@@ -47,13 +56,29 @@ mod api_tests {
 
     #[test]
     fn test_outstanding_debt_calculation() {
-        let note = IouNote::new([1u8; 33], 1000, 250, 1234567890, [2u8; 65], [0x42; 32]);
+        let note = IouNote::new(
+            [1u8; 33],
+            1000,
+            250,
+            1234567890,
+            [2u8; 65],
+            [0x42; 32],
+            basis_store::DenomKey::Erg,
+        );
 
         assert_eq!(note.outstanding_debt(), 750);
         assert!(!note.is_fully_redeemed());
 
         // Test fully redeemed case
-        let fully_redeemed = IouNote::new([1u8; 33], 1000, 1000, 1234567890, [2u8; 65], [0x42; 32]);
+        let fully_redeemed = IouNote::new(
+            [1u8; 33],
+            1000,
+            1000,
+            1234567890,
+            [2u8; 65],
+            [0x42; 32],
+            basis_store::DenomKey::Erg,
+        );
 
         assert_eq!(fully_redeemed.outstanding_debt(), 0);
         assert!(fully_redeemed.is_fully_redeemed());
@@ -62,13 +87,29 @@ mod api_tests {
     #[test]
     fn test_note_validation_edge_cases() {
         // Test zero amount
-        let zero_note = IouNote::new([1u8; 33], 0, 0, 1234567890, [2u8; 65], [0x42; 32]);
+        let zero_note = IouNote::new(
+            [1u8; 33],
+            0,
+            0,
+            1234567890,
+            [2u8; 65],
+            [0x42; 32],
+            basis_store::DenomKey::Erg,
+        );
 
         assert_eq!(zero_note.outstanding_debt(), 0);
         assert!(zero_note.is_fully_redeemed());
 
         // Test redemption exceeds collection
-        let over_redeemed = IouNote::new([1u8; 33], 1000, 1500, 1234567890, [2u8; 65], [0x42; 32]);
+        let over_redeemed = IouNote::new(
+            [1u8; 33],
+            1000,
+            1500,
+            1234567890,
+            [2u8; 65],
+            [0x42; 32],
+            basis_store::DenomKey::Erg,
+        );
 
         // Should handle overflow gracefully
         assert_eq!(over_redeemed.outstanding_debt(), 0);

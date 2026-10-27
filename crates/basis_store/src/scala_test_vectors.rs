@@ -216,6 +216,7 @@ mod tests {
             let rust_message = crate::schnorr::signing_message(
                 &issuer_pubkey,
                 &recipient_pubkey,
+                &vector_denomination(vector),
                 vector.amount,
                 vector.timestamp,
                 &TEST_TRACKER_NFT_ID,
@@ -240,6 +241,21 @@ mod tests {
         }
     }
 
+    /// The denomination a vector's message was constructed with. TV012 is the
+    /// token-denominated (namespaced debt key) vector; everything else is ERG.
+    fn vector_denomination(vector: &SchnorrTestVector) -> crate::DenomKey {
+        if vector.id == "TV012" {
+            let id: [u8; 32] =
+                hex::decode("a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669")
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+            crate::DenomKey::Token(id)
+        } else {
+            crate::DenomKey::Erg
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Test 3: Key hash matches blake2b256(ownerKey || receiverKey)
     // Note: TV003 uses a different issuer key, TV008 uses wrong recipient key.
@@ -255,9 +271,8 @@ mod tests {
             let issuer_pubkey = decode_pubkey(vector.issuer_pubkey_hex);
             let recipient_pubkey = decode_pubkey(vector.recipient_pubkey_hex);
 
-            let expected_key_hash = crate::blake2b256_hash(
-                &[issuer_pubkey.as_slice(), recipient_pubkey.as_slice()].concat(),
-            );
+            let expected_key_hash =
+                vector_denomination(vector).debt_key(&issuer_pubkey, &recipient_pubkey);
 
             let message = hex::decode(vector.message_hex).expect("Invalid message hex");
             let key_hash_from_message = &message[0..32];
@@ -335,6 +350,7 @@ mod tests {
             let reconstructed = crate::schnorr::signing_message(
                 &issuer_pubkey,
                 &recipient_pubkey,
+                &vector_denomination(vector),
                 vector.amount,
                 vector.timestamp,
                 &TEST_TRACKER_NFT_ID,

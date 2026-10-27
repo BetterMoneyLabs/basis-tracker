@@ -146,7 +146,8 @@ For the `GET /notes` endpoint (all notes), additional fields are included:
 The `/tracker/signature` endpoint accepts requests with the following structure:
 - `issuer_pubkey`: Public key of the note issuer (hex-encoded, 33 bytes)
 - `recipient_pubkey`: Public key of the note recipient (hex-encoded, 33 bytes)
-- `total_debt`: Total cumulative debt amount in nanoERG
+- `total_debt`: Total cumulative debt amount in nanoERG — must equal the stored note's total debt (rejected with 409 otherwise)
+- `timestamp`: Payment timestamp of the note — must equal the stored note's timestamp (rejected with 409 otherwise)
 - `emergency`: Boolean indicating if this is an emergency redemption (tracker signature optional after 3 days)
 
 ### Tracker Signature Response Structure
@@ -234,6 +235,12 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
   - `owner_pubkey`: String - the 33-byte compressed public key (hex-encoded) of the reserve owner
   - `erg_amount`: u64 - the amount of ERG to lock in the reserve (in nanoERG)
 
+- Validation rejections (HTTP 400):
+  - `nft_id` equal to the configured tracker NFT id
+  - `erg_amount` above `server.reserve_creation_max_erg_nano` (default 10 ERG)
+  - in token mode, `token_amount` above `server.reserve_creation_max_token_amount` (default 1e9)
+  - an `owner_pubkey` that is not a valid secp256k1 curve point
+
 - Returns a JSON response compatible with Ergo's `/wallet/payment/send` API:
   - `requests`: Array of payment requests
     - `address`: Reserve contract P2S address (hardcoded in configuration)
@@ -285,10 +292,18 @@ Key configuration includes:
   When both are set, the server listens on HTTPS. Strongly recommended whenever auth is enabled.
 - **`server.auth`**: Authentication and authorization settings:
   - `mode`: `none`, `api_key`, or `signature`.
-  - `api_key`: shared secret used when `mode = "api_key"`.
+  - `api_key`: shared secret used when `mode = "api_key"`. Grants `Admin` by default; when
+    `admin_api_key` is set it grants only `Write`.
+  - `admin_api_key`: optional separate key that grants `Admin` on the operator-only routes
+    (`/reserves/create`, `/acceptance/policy`, `/redeem/complete`) when `mode = "api_key"`.
   - `authorized_clients`: list of `{ pubkey, role }` entries used when `mode = "signature"`.
   - `allowed_origins`: CORS origin allow-list. Empty (default) disables CORS entirely; wildcard origins are never used.
   - `signature_timestamp_tolerance_ms`: maximum age of a request signature in milliseconds (default 30 s).
+- **`server.reserve_creation_max_erg_nano`** / **`server.reserve_creation_max_token_amount`**:
+  caps on the collateral a single `/reserves/create` payload may lock (defaults 10 ERG and 1e9
+  tokens); larger requests are rejected with HTTP 400.
+- **`server.redemption_build_max_per_pair_per_hour`**: per-(issuer, recipient) rate limit on
+  `POST /redemption/build` (default 60/hour, rolling window); excess requests get HTTP 429.
 - **Ergo node connection details**: `ergo.node.node_url` defaults to `http://127.0.0.1:9053`; point it at your Ergo node for real deployments
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)
@@ -404,7 +419,6 @@ The basis_server crate is a fully functional HTTP API server that:
 - Supports redemption-specific proof generation (`/proof/redemption`)
 - Integrates with shared tracker state for consistent AVL tree root commitments
 - Uses secure remote signing via Ergo node API to protect private keys
-- Supports debt transfer (novation) for triangular trade
 - Handles emergency redemption after 3-day timeout
 
 This crate serves as the central hub for the Basis Tracker system, connecting the blockchain layer with client applications through a well-defined HTTP interface with real cryptographic operations while maintaining security through remote signing.

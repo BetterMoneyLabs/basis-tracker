@@ -79,8 +79,7 @@ mod create_reserve_tests {
                 tracker_nft_id: Some(
                     "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b".to_string(),
                 ),
-                reserve_token_id: None,
-                reserve_token_decimals: 0,
+                reserve_tokens: Default::default(),
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),
@@ -148,9 +147,14 @@ mod create_reserve_tests {
     fn create_token_test_app_state() -> AppState {
         let mut state = create_test_app_state();
         let mut config = (*state.config).clone();
-        config.ergo.reserve_token_id =
-            Some("a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669".to_string());
-        config.ergo.reserve_token_decimals = 6;
+        config.ergo.reserve_tokens.insert(
+            "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669".to_string(),
+            crate::config::ReserveTokenConfig {
+                symbol: "USE".to_string(),
+                decimals: 6,
+                min_collateralization_ratio: None,
+            },
+        );
         state.config = std::sync::Arc::new(config);
         state
     }
@@ -378,7 +382,7 @@ mod create_reserve_tests {
             .error
             .clone()
             .unwrap()
-            .contains("must match configured"));
+            .contains("not served by this tracker"));
     }
 
     #[tokio::test]

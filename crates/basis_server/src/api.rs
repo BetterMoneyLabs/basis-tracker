@@ -5,12 +5,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::{
     models::{
         ApiResponse, Asset, CheckAcceptanceRequest, CheckAcceptanceResponse,
-        CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, KeyStatusResponse,
-        NoteConfirmationSummary, NoteStateRequest, NoteStateResponse, PendingTxResponse,
-        ProofResponse, RedeemRequest, RedeemResponse, RedemptionPreparationRequest,
-        RedemptionPreparationResponse, ReserveCreationResponse, ReservePaymentRequest,
-        ReserveTokenConfigResponse, SerializableIouNote, TrackerEvent, TrackerSignatureRequest,
-        TrackerSignatureResponse, TrackerStateResponse, UploadPolicyRequest, UploadPolicyResponse,
+        CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, ExchangeNotesRequest,
+        ExchangeNotesResponse, KeyStatusDenomination, KeyStatusResponse, NoteConfirmationSummary,
+        NoteStateRequest, NoteStateResponse, PendingTxResponse, ProofResponse, RedeemRequest,
+        RedeemResponse, RedemptionPreparationRequest, RedemptionPreparationResponse,
+        ReserveCollateralConfigResponse, ReserveCreationResponse, ReservePaymentRequest,
+        ReserveTokenConfigResponse, SerializableIouNote, ServedDenomination, ServedTokenInfo,
+        TrackerEvent, TrackerSignatureRequest, TrackerSignatureResponse, TrackerStateResponse,
+        UploadPolicyRequest, UploadPolicyResponse,
     },
     AppState, TrackerCommand,
 };
@@ -273,6 +275,30 @@ pub async fn create_note(
         }
     }
 
+    // Resolve and validate the note denomination. An explicit value must be one this
+    // tracker serves; the signature below then commits to it through the debt key.
+    // A signature created over a different denomination's key fails verification at
+    // the store layer, so a mismatched claim is rejected structurally.
+    let denomination = match resolve_denomination(
+        &state,
+        &issuer_pubkey,
+        &recipient_pubkey,
+        &payload.denomination,
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "invalid denomination: {}",
+                    msg
+                ))),
+            );
+        }
+    };
+
     // Create the IOU note
     let note = IouNote::new(
         recipient_pubkey,
@@ -281,6 +307,7 @@ pub async fn create_note(
         payload.timestamp,
         signature,
         tracker_nft_bytes,
+        denomination,
     );
 
     // Send command to tracker thread
@@ -367,6 +394,7 @@ pub async fn create_note(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
+                NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -386,6 +414,286 @@ pub async fn create_note(
 }
 
 // Get notes by issuer public key
+/// Exchange debt between two denominations of one (issuer, recipient) pair
+/// (off-chain novation / triage, specs/ergo/multi_collateral_reserves.md §10).
+///
+/// Both parties sign both edges' new states; the tracker never takes a view of the
+/// exchange rate — it is bilaterally agreed. Both edges live in the single tracker
+/// tree, so the exchange is one atomic state change committed in one R5 publication.
+#[axum::debug_handler]
+pub async fn exchange_notes(
+    State(state): State<AppState>,
+    Json(payload): Json<ExchangeNotesRequest>,
+) -> (StatusCode, Json<ApiResponse<ExchangeNotesResponse>>) {
+    tracing::debug!("Exchange request: {:?}", payload.issuer_pubkey);
+
+    let issuer_pubkey: PubKey = match parse_pubkey(&payload.issuer_pubkey) {
+        Ok(pk) => pk,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(msg)),
+            )
+        }
+    };
+    let recipient_pubkey: PubKey = match parse_pubkey(&payload.recipient_pubkey) {
+        Ok(pk) => pk,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(msg)),
+            )
+        }
+    };
+
+    // Both denominations must be served by this tracker.
+    let from_denomination = match state
+        .config
+        .parse_served_denomination(&payload.from_denomination)
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "invalid from_denomination: {}",
+                    msg
+                ))),
+            );
+        }
+    };
+    let to_denomination = match state
+        .config
+        .parse_served_denomination(&payload.to_denomination)
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "invalid to_denomination: {}",
+                    msg
+                ))),
+            );
+        }
+    };
+    if from_denomination == to_denomination {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(
+                "from_denomination and to_denomination must differ".to_string(),
+            )),
+        );
+    }
+
+    // Decode the four signatures.
+    let decode_sig =
+        |name: &str,
+         hex_str: &str|
+         -> Result<Signature, (StatusCode, Json<ApiResponse<ExchangeNotesResponse>>)> {
+            let bytes = hex::decode(hex_str).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(format!(
+                        "{} must be hex-encoded",
+                        name
+                    ))),
+                )
+            })?;
+            bytes.try_into().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(format!(
+                        "{} must be 65 bytes",
+                        name
+                    ))),
+                )
+            })
+        };
+    let issuer_from_signature =
+        match decode_sig("issuer_from_signature", &payload.issuer_from_signature) {
+            Ok(s) => s,
+            Err(r) => return r,
+        };
+    let recipient_from_signature = match decode_sig(
+        "recipient_from_signature",
+        &payload.recipient_from_signature,
+    ) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let issuer_to_signature = match decode_sig("issuer_to_signature", &payload.issuer_to_signature)
+    {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let recipient_to_signature =
+        match decode_sig("recipient_to_signature", &payload.recipient_to_signature) {
+            Ok(s) => s,
+            Err(r) => return r,
+        };
+
+    // The to-edge's new total (for the response and the acceptance re-evaluation).
+    let to_new_total = {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if state
+            .tx
+            .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+                issuer_pubkey,
+                recipient_pubkey,
+                denomination: to_denomination,
+                response_tx: tx,
+            })
+            .await
+            .is_err()
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Tracker thread unavailable".to_string(),
+                )),
+            );
+        }
+        let existing = match rx.await {
+            Ok(Ok(note)) => note.map(|n| n.amount_collected).unwrap_or(0),
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(format!(
+                        "tracker error: {:?}",
+                        e
+                    ))),
+                );
+            }
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(crate::models::error_response(
+                        "Tracker thread did not respond".to_string(),
+                    )),
+                );
+            }
+        };
+        match existing.checked_add(payload.to_amount) {
+            Some(t) => t,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(
+                        "to_amount overflows the to-edge total".to_string(),
+                    )),
+                );
+            }
+        }
+    };
+
+    // Acceptance policy re-evaluated in the TARGET denomination: moving liability
+    // into a denomination with no (or an under-collateralized) reserve is rejected.
+    if let Some(predicate) = &state.acceptance_predicate {
+        let reserve_tracker = state.reserve_tracker.lock().await.clone();
+        let issuer_gross_debt = load_issuer_gross_debt(
+            &state,
+            &issuer_pubkey,
+            &recipient_pubkey,
+            to_new_total,
+            &to_denomination,
+        )
+        .await;
+        let ctx = crate::acceptance::PredicateContext {
+            issuer_pubkey,
+            recipient_pubkey,
+            total_debt: to_new_total,
+            reserve_tracker: Some(reserve_tracker),
+            issuer_gross_debt,
+            denomination: to_denomination,
+        };
+        if !predicate.acceptable(&ctx) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "Exchange rejected by acceptance policy '{}' in the target denomination",
+                    predicate.name()
+                ))),
+            );
+        }
+    }
+
+    // Send the exchange to the tracker thread (it re-verifies all four signatures).
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(TrackerCommand::ExchangeNotes {
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denomination,
+            from_amount: payload.from_amount,
+            to_denomination,
+            to_amount: payload.to_amount,
+            timestamp: payload.timestamp,
+            issuer_from_signature,
+            recipient_from_signature,
+            issuer_to_signature,
+            recipient_to_signature,
+            response_tx,
+        })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+
+    match response_rx.await {
+        Ok(Ok(())) => {
+            let from_new_total = {
+                // from-edge new total: current minus from_amount (store validated it).
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = state
+                    .tx
+                    .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+                        issuer_pubkey,
+                        recipient_pubkey,
+                        denomination: from_denomination,
+                        response_tx: tx,
+                    })
+                    .await;
+                match rx.await {
+                    Ok(Ok(Some(note))) => note.amount_collected,
+                    _ => 0,
+                }
+            };
+            (
+                StatusCode::OK,
+                Json(crate::models::success_response(ExchangeNotesResponse {
+                    exchanged: true,
+                    from_denomination: from_denomination.denomination_id(),
+                    to_denomination: to_denomination.denomination_id(),
+                    from_new_total,
+                    to_new_total,
+                    timestamp: payload.timestamp,
+                })),
+            )
+        }
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(format!(
+                "Exchange rejected: {:?}",
+                e
+            ))),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread did not respond".to_string(),
+            )),
+        ),
+    }
+}
+
 #[axum::debug_handler]
 pub async fn get_notes_by_issuer(
     State(state): State<AppState>,
@@ -469,6 +777,7 @@ pub async fn get_notes_by_issuer(
                     &state.tx,
                     issuer_pubkey,
                     note.recipient_pubkey,
+                    note.denomination,
                     note.amount_redeemed,
                 )
                 .await;
@@ -508,6 +817,7 @@ pub async fn get_notes_by_issuer(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
+                NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -596,6 +906,7 @@ pub async fn get_notes_by_recipient(
                     &state.tx,
                     issuer_pubkey,
                     note.recipient_pubkey,
+                    note.denomination,
                     note.amount_redeemed,
                 )
                 .await;
@@ -635,6 +946,7 @@ pub async fn get_notes_by_recipient(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
+                NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -661,6 +973,7 @@ pub async fn get_note_by_issuer_and_recipient(
         String,
         String,
     )>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, Json<ApiResponse<Option<SerializableIouNote>>>) {
     tracing::debug!(
         "Getting note for issuer: {} and recipient: {}",
@@ -718,6 +1031,29 @@ pub async fn get_note_by_issuer_and_recipient(
         }
     };
 
+    // Resolve the denomination (query param `denomination`, default per §9)
+    let empty_string = String::new();
+    let requested_denom = params.get("denomination").unwrap_or(&empty_string);
+    let denomination = match resolve_denomination(
+        &state,
+        &issuer_pubkey,
+        &recipient_pubkey,
+        requested_denom,
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "invalid denomination: {}",
+                    msg
+                ))),
+            );
+        }
+    };
+
     // Send command to tracker thread
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -726,6 +1062,7 @@ pub async fn get_note_by_issuer_and_recipient(
         .send(crate::TrackerCommand::GetNoteByIssuerAndRecipient {
             issuer_pubkey,
             recipient_pubkey,
+            denomination,
             response_tx,
         })
         .await
@@ -752,6 +1089,7 @@ pub async fn get_note_by_issuer_and_recipient(
                 &state.tx,
                 issuer_pubkey,
                 note.recipient_pubkey,
+                note.denomination,
                 note.amount_redeemed,
             )
             .await;
@@ -800,6 +1138,7 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
+                NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -863,6 +1202,7 @@ pub async fn get_all_notes(
                     &state.tx,
                     issuer_pubkey,
                     note.recipient_pubkey,
+                    note.denomination,
                     note.amount_redeemed,
                 )
                 .await;
@@ -875,6 +1215,7 @@ pub async fn get_all_notes(
                     signature: hex::encode(note.signature),
                     tracker_nft_id: hex::encode(note.tracker_nft_id),
                     age_seconds,
+                    denomination: note.denomination.denomination_id(),
                     confirmation,
                 });
             }
@@ -910,6 +1251,7 @@ pub async fn get_all_notes(
                 NoteError::InsufficientCollateral => "Insufficient collateral".to_string(),
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
+                NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -943,6 +1285,7 @@ async fn load_issuer_gross_debt(
     issuer_pubkey: &PubKey,
     candidate_recipient: &PubKey,
     candidate_total_debt: u64,
+    denomination: &basis_store::DenomKey,
 ) -> Option<u64> {
     let (notes_tx, notes_rx) = tokio::sync::oneshot::channel();
     state
@@ -968,8 +1311,13 @@ async fn load_issuer_gross_debt(
     let mut total: u64 = 0;
     let mut candidate_edge_replaced = false;
     for note in &notes {
+        // Liabilities are per denomination: a SigUSD reserve backs SigUSD debt only.
+        if &note.denomination != denomination {
+            continue;
+        }
         let mut edge = note.amount_collected;
-        let key = basis_store::NoteKey::from_keys(issuer_pubkey, &note.recipient_pubkey);
+        let key =
+            basis_store::NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, denomination);
         if let Some(conf) = confirmations.get(&key.key_hash) {
             if let Some(confirmed) = conf.confirmed_total_debt {
                 edge = edge.max(confirmed);
@@ -1054,6 +1402,39 @@ pub async fn check_acceptance(
         [0u8; 33] // Default: no specific recipient
     };
 
+    // Resolve the denomination for the candidate note (served-set checked). This
+    // endpoint is advisory: when no explicit denomination is given and the tracker
+    // is unreachable, fall back to ERG rather than failing the policy check.
+    let denomination = if payload.denomination.trim().is_empty() {
+        if payload.recipient_pubkey.is_some() {
+            match resolve_denomination(&state, &issuer_pubkey, &recipient_pubkey, "").await {
+                Ok(d) => d,
+                Err(msg) => {
+                    tracing::warn!("denomination resolution failed, defaulting to ERG: {}", msg);
+                    basis_store::DenomKey::Erg
+                }
+            }
+        } else {
+            basis_store::DenomKey::Erg
+        }
+    } else {
+        match state
+            .config
+            .parse_served_denomination(&payload.denomination)
+        {
+            Ok(d) => d,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(format!(
+                        "invalid denomination: {}",
+                        msg
+                    ))),
+                );
+            }
+        }
+    };
+
     // Try to find per-recipient policy first
     let result = match state.policy_storage.get_policy(&recipient_pubkey) {
         Ok(Some(stored_policy)) => {
@@ -1080,6 +1461,7 @@ pub async fn check_acceptance(
                                     &issuer_pubkey,
                                     &recipient_pubkey,
                                     payload.total_debt,
+                                    &denomination,
                                 )
                                 .await
                             } else {
@@ -1093,6 +1475,7 @@ pub async fn check_acceptance(
                                 total_debt: payload.total_debt,
                                 reserve_tracker: Some(reserve_tracker),
                                 issuer_gross_debt,
+                                denomination: basis_store::DenomKey::Erg,
                             };
 
                             let acceptable = predicate.acceptable(&ctx);
@@ -1152,6 +1535,7 @@ pub async fn check_acceptance(
                         &issuer_pubkey,
                         &recipient_pubkey,
                         payload.total_debt,
+                        &denomination,
                     )
                     .await
                 } else {
@@ -1165,6 +1549,7 @@ pub async fn check_acceptance(
                     total_debt: payload.total_debt,
                     reserve_tracker: Some(reserve_tracker),
                     issuer_gross_debt,
+                    denomination: basis_store::DenomKey::Erg,
                 };
 
                 let acceptable = predicate.acceptable(&ctx);
@@ -1201,6 +1586,7 @@ pub async fn check_acceptance(
                         &issuer_pubkey,
                         &recipient_pubkey,
                         payload.total_debt,
+                        &denomination,
                     )
                     .await
                 } else {
@@ -1212,6 +1598,7 @@ pub async fn check_acceptance(
                     total_debt: payload.total_debt,
                     reserve_tracker: Some(reserve_tracker),
                     issuer_gross_debt,
+                    denomination: basis_store::DenomKey::Erg,
                 };
                 let acceptable = predicate.acceptable(&ctx);
                 let reason = if acceptable {
@@ -1651,10 +2038,6 @@ pub async fn get_key_status(
         }
     };
 
-    // Calculate total debt and note count
-    let total_debt: u64 = notes.iter().map(|note| note.outstanding_debt()).sum();
-    let note_count = notes.len();
-
     // Get collateral from reserve tracker
     let tracker = state.reserve_tracker.lock().await;
     let all_reserves = tracker.get_all_reserves();
@@ -1669,11 +2052,6 @@ pub async fn get_key_status(
             let normalized_reserve_key = basis_store::normalize_public_key(&reserve.owner_pubkey);
             let original_reserve_key = &reserve.owner_pubkey;
 
-            // Check multiple matching possibilities to ensure comprehensive key correlation:
-            // 1. Direct match between normalized keys (main case)
-            // 2. Match between original pubkey and normalized reserve key
-            // 3. Match between original pubkey and original reserve key (backup)
-            // 4. Special case: original pubkey matches the part of reserve key after '07' prefix
             normalized_pubkey == normalized_reserve_key
                 || pubkey_hex == normalized_reserve_key
                 || pubkey_hex == *original_reserve_key
@@ -1687,80 +2065,91 @@ pub async fn get_key_status(
         .iter()
         .any(|reserve| reserve.is_refund_pending());
 
-    // SECURITY (PR #14 C3): fail closed when the issuer has more than one reserve.
-    //
-    // `matching_reserves.first()` used to pick whichever entry the HashMap happened to yield, which
-    // reported a confident-looking ratio for an ambiguous situation. A debt note is bound to
-    // `hash(owner || receiver)`, not to a reserve box, so with two reserves under the same owner the
-    // same note redeems in full from EACH of them. Summing the collateral would report a healthy
-    // ratio for collateral that cannot actually back the debt twice over, so refuse instead and say
-    // why. See `ReserveTracker::resolve_issuer_reserve`.
-    if matching_reserves.len() > 1 {
-        let boxes: Vec<&str> = matching_reserves
+    // Per-denomination breakdown (specs/ergo/multi_collateral_reserves.md §11):
+    // debt and collateral are never summed across denominations — units differ.
+    let mut denom_ids: Vec<basis_store::DenomKey> = notes
+        .iter()
+        .map(|n| n.denomination)
+        .chain(matching_reserves.iter().filter_map(|r| r.denomination()))
+        .collect();
+    denom_ids.sort();
+    denom_ids.dedup();
+
+    let mut breakdown: Vec<KeyStatusDenomination> = Vec::new();
+    for denom in denom_ids {
+        let denom_notes: Vec<_> = notes.iter().filter(|n| n.denomination == denom).collect();
+        let total_debt: u64 = denom_notes.iter().map(|n| n.outstanding_debt()).sum();
+
+        let denom_reserves: Vec<_> = matching_reserves
             .iter()
-            .map(|r| r.box_id.as_str())
+            .filter(|r| r.denomination().as_ref() == Some(&denom))
             .collect();
-        tracing::warn!(
-            "issuer {} has {} reserves ({}); refusing to report a single collateralization ratio",
-            pubkey_hex,
-            matching_reserves.len(),
-            boxes.join(", ")
-        );
-        return (
-            StatusCode::CONFLICT,
-            Json(crate::models::error_response(format!(
-                "issuer {} has {} tracked reserves ({}). A debt note is not bound to a specific \
-                 reserve, so it would redeem in full against each of them. Close the extra \
-                 reserves or point the tracker at a single reserve per owner before issuing debt.",
+
+        // SECURITY (PR #14 C3): fail closed when the issuer has more than one reserve
+        // in this denomination — a note redeems in full against each of them.
+        if denom_reserves.len() > 1 {
+            let boxes: Vec<&str> = denom_reserves.iter().map(|r| r.box_id.as_str()).collect();
+            tracing::warn!(
+                "issuer {} has {} reserves in denomination {} ({}); refusing to report a ratio",
                 pubkey_hex,
-                matching_reserves.len(),
+                denom_reserves.len(),
+                denom.denomination_id(),
                 boxes.join(", ")
-            ))),
-        );
+            );
+            return (
+                StatusCode::CONFLICT,
+                Json(crate::models::error_response(format!(
+                    "issuer {} has {} tracked reserves in denomination {} ({}). A debt note is \
+                     not bound to a specific reserve, so it would redeem in full against each of \
+                     them. Close the extra reserves before issuing debt.",
+                    pubkey_hex,
+                    denom_reserves.len(),
+                    denom.denomination_id(),
+                    boxes.join(", ")
+                ))),
+            );
+        }
+
+        let (collateral, collateralization_ratio, reserve_box_id) =
+            if let Some(reserve) = denom_reserves.first() {
+                let collateral = reserve.base_info.collateral_amount;
+                let ratio = if total_debt > 0 {
+                    collateral as f64 / total_debt as f64
+                } else {
+                    999999.0
+                };
+                (collateral, ratio, Some(reserve.box_id.clone()))
+            } else {
+                (0, if total_debt > 0 { 0.0 } else { 999999.0 }, None)
+            };
+
+        let (symbol, decimals) = state.config.denomination_display(&denom);
+        breakdown.push(KeyStatusDenomination {
+            denomination: denom.denomination_id(),
+            symbol,
+            decimals,
+            total_debt,
+            collateral,
+            collateralization_ratio,
+            note_count: denom_notes.len(),
+            reserve_box_id,
+            has_pending_refund: denom_reserves.iter().any(|r| r.is_refund_pending()),
+        });
     }
 
-    let (collateral, collateralization_ratio, last_updated) =
-        if let Some(reserve) = matching_reserves.first() {
-            let collateral = reserve.base_info.collateral_amount;
-            let ratio = if total_debt > 0 {
-                collateral as f64 / total_debt as f64
-            } else {
-                // Use a very high ratio when there's no debt
-                999999.0
-            };
-            (collateral, ratio, reserve.last_updated_timestamp)
-        } else {
-            // No reserve found - use zero collateral
-            (0, if total_debt > 0 { 0.0 } else { 999999.0 }, 0)
-        };
-
-    let reserve_token_id = matching_reserves.first().and_then(|reserve| {
-        let id = &reserve.base_info.reserve_token_id;
-        if id.is_empty() {
-            None
-        } else {
-            Some(id.clone())
-        }
-    });
+    let last_updated = matching_reserves
+        .iter()
+        .map(|r| r.last_updated_timestamp)
+        .max()
+        .unwrap_or(0);
 
     let status = KeyStatusResponse {
-        total_debt,
-        collateral,
-        collateralization_ratio,
-        note_count,
-        last_updated,
         issuer_pubkey: pubkey_hex.clone(),
+        note_count: notes.len(),
+        last_updated,
         has_pending_refund,
-        reserve_token_id,
+        denominations: breakdown,
     };
-
-    tracing::info!(
-        "Returning real key status for {}: debt={}, collateral={}, ratio={:.2}",
-        pubkey_hex,
-        total_debt,
-        collateral,
-        collateralization_ratio
-    );
 
     (
         StatusCode::OK,
@@ -1820,6 +2209,42 @@ pub async fn initiate_redemption(
         }
     };
 
+    // Resolve the note denomination: an explicit request value is validated against
+    // the served set; otherwise the pair's existing note's denomination is used when
+    // unambiguous, else ERG (specs/ergo/multi_collateral_reserves.md §9).
+    let denomination = {
+        let issuer_pk = match parse_pubkey(&payload.issuer_pubkey) {
+            Ok(pk) => pk,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(msg)),
+                );
+            }
+        };
+        let recipient_pk = match parse_pubkey(&payload.recipient_pubkey) {
+            Ok(pk) => pk,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(msg)),
+                );
+            }
+        };
+        match resolve_denomination(&state, &issuer_pk, &recipient_pk, &payload.denomination).await {
+            Ok(d) => d,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(format!(
+                        "invalid denomination: {}",
+                        msg
+                    ))),
+                );
+            }
+        }
+    };
+
     // Find the reserve box ID and value for the issuer using normalized key matching
     let (reserve_box_id, reserve_box_value, reserve_refund_initiation_height) = {
         // Read reserves directly from database (not in-memory tracker) to avoid
@@ -1844,12 +2269,17 @@ pub async fn initiate_redemption(
         // Normalize the issuer public key
         let normalized_issuer_key = basis_store::normalize_public_key(&payload.issuer_pubkey);
 
-        // Find ALL reserves owned by the issuer (considering normalized key forms).
+        // Find ALL reserves owned by the issuer IN THE NOTE'S DENOMINATION
+        // (considering normalized key forms). A note redeems only against a reserve
+        // of its own denomination (specs/ergo/multi_collateral_reserves.md §6).
         // Fail closed when there is more than one: cumulative redeemed debt is tracked
         // per reserve box, so picking one of several silently would enable per-reserve
         // replay (see specs/pr14_triage.md C3 remainder and PR #16 H2).
         let mut matching_reserves: Vec<(String, u64, u64)> = Vec::new();
         for reserve in &all_reserves {
+            if reserve.denomination().as_ref() != Some(&denomination) {
+                continue;
+            }
             // Handle the case where the owner key might be double-encoded
             // The database might store the hex string as ASCII characters, which are hex-encoded again
             let actual_owner_key = {
@@ -2118,6 +2548,7 @@ pub async fn initiate_redemption(
             &state,
             &payload.issuer_pubkey,
             &payload.recipient_pubkey,
+            &denomination,
             payload.emergency,
         )
         .await
@@ -2148,13 +2579,20 @@ pub async fn initiate_redemption(
     // Create redemption request with blockchain data
     //
     // The reserve output must carry exactly the script of the reserve box being spent; derive
-    // it from the configured contract P2S (never a hardcoded constant, so contract changes
-    // cannot leave it stale).
-    let reserve_contract_p2s = if state.config.is_token_reserve_mode() {
-        state.config.basis_token_reserve_contract_p2s()
-    } else {
-        state.config.basis_reserve_contract_p2s()
+    // it from the reserve's recorded contract address (the scanner stamps the per-slot address;
+    // ERG and token reserves live at different addresses). Fall back to the configured ERG
+    // address when the reserve is not tracked.
+    let reserve_contract_address = {
+        let tracker = state.reserve_tracker.lock().await;
+        tracker
+            .get_reserve(&reserve_box_id)
+            .ok()
+            .map(|r| r.base_info.contract_address.clone())
+            .filter(|s| !s.is_empty())
     };
+    let reserve_contract_p2s_owned = reserve_contract_address
+        .unwrap_or_else(|| state.config.basis_reserve_contract_p2s().to_string());
+    let reserve_contract_p2s = reserve_contract_p2s_owned.as_str();
     let reserve_ergo_tree =
         match basis_offchain::ergo_tx::address_to_ergo_tree(reserve_contract_p2s) {
             Ok(tree) => tree,
@@ -2188,6 +2626,7 @@ pub async fn initiate_redemption(
         reserve_ergo_tree,
         fee_input_box_ids: Vec::new(),
         fee_input_total_value: 0,
+        denomination,
     };
 
     // Send command to tracker thread to initiate redemption
@@ -2387,9 +2826,30 @@ pub async fn complete_redemption(
     // Send command to tracker thread to complete redemption
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
+    let denomination = match resolve_denomination(
+        &_state,
+        &issuer_pubkey,
+        &recipient_pubkey,
+        &payload.denomination,
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "invalid denomination: {}",
+                    msg
+                ))),
+            );
+        }
+    };
+
     let cmd = TrackerCommand::CompleteRedemption {
         issuer_pubkey,
         recipient_pubkey,
+        denomination,
         redeemed_amount: payload.redeemed_amount,
         new_already_redeemed: payload.new_already_redeemed,
         response_tx,
@@ -2461,6 +2921,7 @@ pub async fn get_tracker_proof(
     let empty_string = "".to_string();
     let issuer_pubkey = params.get("issuer_pubkey").unwrap_or(&empty_string);
     let recipient_pubkey = params.get("recipient_pubkey").unwrap_or(&empty_string);
+    let requested_denom = params.get("denomination").cloned().unwrap_or_default();
     let _amount = params
         .get("amount")
         .and_then(|v| v.parse::<u64>().ok())
@@ -2534,11 +2995,28 @@ pub async fn get_tracker_proof(
     // Request tracker lookup proof from tracker thread
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
+    let denomination =
+        match resolve_denomination(&state, &issuer_pubkey, &recipient_pubkey, &requested_denom)
+            .await
+        {
+            Ok(d) => d,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(format!(
+                        "invalid denomination: {}",
+                        msg
+                    ))),
+                );
+            }
+        };
+
     if let Err(e) = state
         .tx
         .send(TrackerCommand::GetTrackerLookupProof {
             issuer_pubkey,
             recipient_pubkey,
+            denomination,
             response_tx,
         })
         .await
@@ -2621,6 +3099,7 @@ pub async fn get_reserve_proof(
     let empty_string = "".to_string();
     let issuer_pubkey = params.get("issuer_pubkey").unwrap_or(&empty_string);
     let recipient_pubkey = params.get("recipient_pubkey").unwrap_or(&empty_string);
+    let requested_denom = params.get("denomination").cloned().unwrap_or_default();
     let amount = params
         .get("amount")
         .and_then(|v| v.parse::<u64>().ok())
@@ -2689,11 +3168,28 @@ pub async fn get_reserve_proof(
     // Request reserve lookup proof from tracker thread
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
+    let denomination =
+        match resolve_denomination(&state, &issuer_pubkey, &recipient_pubkey, &requested_denom)
+            .await
+        {
+            Ok(d) => d,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(format!(
+                        "invalid denomination: {}",
+                        msg
+                    ))),
+                );
+            }
+        };
+
     if let Err(e) = state
         .tx
         .send(TrackerCommand::GetReserveLookupProof {
             issuer_pubkey,
             recipient_pubkey,
+            denomination,
             response_tx,
         })
         .await
@@ -2744,6 +3240,7 @@ pub async fn get_reserve_proof(
                 .send(TrackerCommand::GetReserveInsertProof {
                     issuer_pubkey,
                     recipient_pubkey,
+                    denomination,
                     timestamp: timestamp_param.unwrap_or(0),
                     new_already_redeemed,
                     response_tx: insert_proof_tx,
@@ -2840,6 +3337,7 @@ pub async fn get_reserve_proof(
 pub(crate) async fn ensure_single_issuer_reserve(
     state: &AppState,
     issuer_pubkey_hex: &str,
+    denomination: &basis_store::DenomKey,
 ) -> Result<(), String> {
     let normalized_issuer = basis_store::normalize_public_key(issuer_pubkey_hex);
     let mut matching_boxes: Vec<String> = {
@@ -2849,6 +3347,7 @@ pub(crate) async fn ensure_single_issuer_reserve(
             .into_iter()
             .filter(|reserve| {
                 basis_store::normalize_public_key(&reserve.owner_pubkey) == normalized_issuer
+                    && reserve.denomination().as_ref() == Some(denomination)
             })
             .map(|reserve| reserve.box_id)
             .collect()
@@ -2857,11 +3356,12 @@ pub(crate) async fn ensure_single_issuer_reserve(
 
     if matching_boxes.len() > 1 {
         return Err(format!(
-            "issuer {} has {} tracked reserves ({}). A debt note is not bound to a specific \
-             reserve, so it would redeem in full against each of them. Close the extra reserves \
-             before redeeming or requesting tracker signatures.",
+            "issuer {} has {} tracked reserves in denomination {} ({}). A debt note is not bound \
+             to a specific reserve, so it would redeem in full against each of them. Close the \
+             extra reserves before redeeming or requesting tracker signatures.",
             issuer_pubkey_hex,
             matching_boxes.len(),
+            denomination.denomination_id(),
             matching_boxes.join(", ")
         ));
     }
@@ -2926,6 +3426,7 @@ async fn lookup_stored_note(
     state: &AppState,
     issuer_pubkey_bytes: &[u8],
     recipient_pubkey_bytes: &[u8],
+    denomination: &basis_store::DenomKey,
 ) -> Result<
     basis_store::IouNote,
     (
@@ -2944,6 +3445,7 @@ async fn lookup_stored_note(
         .send(TrackerCommand::GetNoteByIssuerAndRecipient {
             issuer_pubkey: issuer,
             recipient_pubkey: recipient,
+            denomination: *denomination,
             response_tx: note_tx,
         })
         .await
@@ -3040,11 +3542,37 @@ pub async fn request_tracker_signature(
     // A request whose figures disagree with stored state is REJECTED rather than silently
     // overwritten, so a client working from stale state gets a clear error instead of a signature
     // for something it did not ask for.
-    let stored_note =
-        match lookup_stored_note(&state, &issuer_pubkey_bytes, &recipient_pubkey_bytes).await {
-            Ok(note) => note,
-            Err(response) => return response,
-        };
+    let denomination = match resolve_denomination(
+        &state,
+        &issuer_pubkey_array,
+        &recipient_pubkey_array,
+        &payload.denomination,
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "invalid denomination: {}",
+                    msg
+                ))),
+            );
+        }
+    };
+
+    let stored_note = match lookup_stored_note(
+        &state,
+        &issuer_pubkey_bytes,
+        &recipient_pubkey_bytes,
+        &denomination,
+    )
+    .await
+    {
+        Ok(note) => note,
+        Err(response) => return response,
+    };
     if payload.total_debt != stored_note.amount_collected
         || payload.timestamp != stored_note.timestamp
     {
@@ -3063,7 +3591,9 @@ pub async fn request_tracker_signature(
 
     // Fail closed when the issuer has more than one tracked reserve (PR #16 H2); signing
     // would attest debt that redeems in full against each reserve.
-    if let Err(msg) = ensure_single_issuer_reserve(&state, &payload.issuer_pubkey).await {
+    if let Err(msg) =
+        ensure_single_issuer_reserve(&state, &payload.issuer_pubkey, &denomination).await
+    {
         return (
             StatusCode::CONFLICT,
             Json(crate::models::error_response(msg)),
@@ -3194,6 +3724,7 @@ pub async fn request_tracker_signature(
     let message_to_sign_bytes = basis_store::schnorr::signing_message(
         &issuer_pubkey_array,
         &recipient_pubkey_array,
+        &stored_note.denomination,
         stored_note.amount_collected,
         stored_note.timestamp,
         &stored_note.tracker_nft_id,
@@ -3327,6 +3858,7 @@ async fn get_tracker_signature_for_redemption(
     state: &AppState,
     issuer_pubkey: &str,
     recipient_pubkey: &str,
+    denomination: &basis_store::DenomKey,
     _emergency: bool,
 ) -> Result<String, (StatusCode, Json<ApiResponse<()>>)> {
     // Decode public keys
@@ -3396,6 +3928,7 @@ async fn get_tracker_signature_for_redemption(
             .send(TrackerCommand::GetNoteByIssuerAndRecipient {
                 issuer_pubkey: issuer_pubkey_array,
                 recipient_pubkey: recipient_pubkey_array,
+                denomination: *denomination,
                 response_tx: note_tx,
             })
             .await
@@ -3448,6 +3981,7 @@ async fn get_tracker_signature_for_redemption(
     let message_to_sign_bytes = basis_store::schnorr::signing_message(
         &issuer_pubkey_array,
         &recipient_pubkey_array,
+        &stored_note.denomination,
         stored_note.amount_collected,
         stored_note.timestamp,
         &stored_note.tracker_nft_id,
@@ -3614,12 +4148,33 @@ pub async fn prepare_redemption(
             }
         };
 
+    let denomination = match resolve_denomination(
+        &state,
+        &issuer_pubkey_array,
+        &recipient_pubkey_array,
+        &payload.denomination,
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "invalid denomination: {}",
+                    msg
+                ))),
+            );
+        }
+    };
+
     let (note_response_tx, note_response_rx) = tokio::sync::oneshot::channel();
     if let Err(e) = state
         .tx
         .send(TrackerCommand::GetNoteByIssuerAndRecipient {
             issuer_pubkey: issuer_pubkey_array,
             recipient_pubkey: recipient_pubkey_array,
+            denomination,
             response_tx: note_response_tx,
         })
         .await
@@ -3680,7 +4235,9 @@ pub async fn prepare_redemption(
 
     // Fail closed when the issuer has more than one tracked reserve (PR #16 H2); signing
     // would attest debt that redeems in full against each reserve.
-    if let Err(msg) = ensure_single_issuer_reserve(&state, &payload.issuer_pubkey).await {
+    if let Err(msg) =
+        ensure_single_issuer_reserve(&state, &payload.issuer_pubkey, &denomination).await
+    {
         return (
             StatusCode::CONFLICT,
             Json(crate::models::error_response(msg)),
@@ -3829,6 +4386,7 @@ pub async fn prepare_redemption(
     let message_to_sign_bytes = basis_store::schnorr::signing_message(
         &issuer_pubkey_array,
         &recipient_pubkey_array,
+        &stored_note.denomination,
         total_debt,
         stored_note.timestamp,
         &stored_note.tracker_nft_id,
@@ -3973,6 +4531,7 @@ pub async fn prepare_redemption(
         .send(TrackerCommand::GenerateProof {
             issuer_pubkey: issuer_pubkey_bytes,
             recipient_pubkey: recipient_pubkey_bytes,
+            denomination,
             response_tx: proof_response_tx,
         })
         .await
@@ -4070,6 +4629,7 @@ pub async fn get_redemption_proof(
     let empty_string = "".to_string();
     let issuer_pubkey = params.get("issuer_pubkey").unwrap_or(&empty_string);
     let recipient_pubkey = params.get("recipient_pubkey").unwrap_or(&empty_string);
+    let requested_denom = params.get("denomination").cloned().unwrap_or_default();
     let _amount = params
         .get("amount")
         .and_then(|v| v.parse::<u64>().ok())
@@ -4162,11 +4722,32 @@ pub async fn get_redemption_proof(
         }
     };
 
+    let denomination = match resolve_denomination(
+        &state,
+        &issuer_pubkey_bytes,
+        &recipient_pubkey_bytes,
+        &requested_denom,
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "invalid denomination: {}",
+                    msg
+                ))),
+            );
+        }
+    };
+
     if let Err(e) = state
         .tx
         .send(TrackerCommand::GenerateProof {
             issuer_pubkey: issuer_pubkey_bytes,
             recipient_pubkey: recipient_pubkey_bytes,
+            denomination,
             response_tx: proof_response_tx,
         })
         .await
@@ -4397,30 +4978,29 @@ pub async fn create_reserve_payload(
         );
     }
 
-    let token_reserve_mode = config.is_token_reserve_mode();
-
-    // In token-reserve mode the reserve token ID must be supplied and match config.
-    let reserve_token_id = if token_reserve_mode {
-        let configured = config
-            .ergo
-            .reserve_token_id
-            .as_ref()
-            .expect("reserve_token_id is set when token mode is active");
-        if !payload.token_id.is_empty() && payload.token_id != *configured {
+    // The requested collateral: ERG when no token id is given, otherwise the token,
+    // which must be served by this tracker (present in ergo.reserve_tokens).
+    let reserve_token_id = if payload.token_id.is_empty() {
+        if payload.token_amount != 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "token_amount requires a token_id".to_string(),
+                )),
+            );
+        }
+        None
+    } else {
+        if config.served_token(&payload.token_id).is_none() {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(crate::models::error_response(format!(
-                    "token_id must match configured reserve_token_id ({})",
-                    configured
+                    "token_id {} is not served by this tracker (not in ergo.reserve_tokens)",
+                    payload.token_id
                 ))),
             );
         }
-        let id = if payload.token_id.is_empty() {
-            configured.clone()
-        } else {
-            payload.token_id.clone()
-        };
-        let bytes = match hex::decode(&id) {
+        let bytes = match hex::decode(&payload.token_id) {
             Ok(b) => b,
             Err(_) => {
                 return (
@@ -4444,7 +5024,7 @@ pub async fn create_reserve_payload(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(crate::models::error_response(
-                    "token_amount must be greater than 0 in token-reserve mode".to_string(),
+                    "token_amount must be greater than 0 for a token reserve".to_string(),
                 )),
             );
         }
@@ -4458,19 +5038,38 @@ pub async fn create_reserve_payload(
                 ))),
             );
         }
-        Some(id)
-    } else {
-        if !payload.token_id.is_empty() || payload.token_amount != 0 {
+        Some(payload.token_id.clone())
+    };
+    let token_reserve_mode = reserve_token_id.is_some();
+
+    // One active reserve per (owner, denomination): reject creation when the owner
+    // already has a tracked reserve in the requested denomination
+    // (specs/ergo/multi_collateral_reserves.md §6 invariant 2).
+    let requested_denomination = match &reserve_token_id {
+        Some(id) => {
+            let bytes = hex::decode(id).expect("token id validated above");
+            basis_store::DenomKey::Token(bytes.try_into().expect("32 bytes checked above"))
+        }
+        None => basis_store::DenomKey::Erg,
+    };
+    {
+        let tracker = state.reserve_tracker.lock().await;
+        let existing = tracker
+            .get_reserves_by_owner(&payload.owner_pubkey)
+            .into_iter()
+            .any(|r| r.denomination().as_ref() == Some(&requested_denomination));
+        if existing {
             return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "token_id and token_amount are only valid when reserve_token_id is configured"
-                        .to_string(),
-                )),
+                StatusCode::CONFLICT,
+                Json(crate::models::error_response(format!(
+                    "an active reserve already exists for owner {} in denomination {}; \
+                     one active reserve per (owner, denomination) is enforced",
+                    payload.owner_pubkey,
+                    requested_denomination.denomination_id()
+                ))),
             );
         }
-        None
-    };
+    }
 
     let reserve_contract_address = if token_reserve_mode {
         config.ergo.basis_token_reserve_contract_p2s.clone()
@@ -4638,9 +5237,17 @@ pub async fn get_reserve_token_config(
     tracing::debug!("Getting reserve token configuration");
 
     let config = state.config.as_ref();
+    // Transitional shape: report the first (sorted) served token. The full
+    // multi-token surface replaces this endpoint in the /config/reserve-collateral
+    // redesign (specs/ergo/multi_collateral_reserves.md §11).
+    let first_token = config
+        .ergo
+        .reserve_tokens
+        .iter()
+        .min_by(|a, b| a.0.cmp(b.0));
     let response = ReserveTokenConfigResponse {
-        reserve_token_id: config.ergo.reserve_token_id.clone(),
-        reserve_token_decimals: config.ergo.reserve_token_decimals,
+        reserve_token_id: first_token.map(|(id, _)| id.clone()),
+        reserve_token_decimals: first_token.map(|(_, c)| c.decimals).unwrap_or(0),
         basis_token_reserve_contract_p2s: config.ergo.basis_token_reserve_contract_p2s.clone(),
     };
 
@@ -4649,6 +5256,54 @@ pub async fn get_reserve_token_config(
     (
         StatusCode::OK,
         Json(crate::models::success_response(response)),
+    )
+}
+
+/// Get the reserve-collateral configuration: both contract addresses plus the
+/// served-token table (specs/ergo/multi_collateral_reserves.md §11).
+#[axum::debug_handler]
+pub async fn get_reserve_collateral_config(
+    State(state): State<AppState>,
+) -> (
+    StatusCode,
+    Json<ApiResponse<ReserveCollateralConfigResponse>>,
+) {
+    let config = state.config.as_ref();
+
+    let mut tokens: Vec<ServedTokenInfo> = config
+        .ergo
+        .reserve_tokens
+        .iter()
+        .map(|(id, c)| ServedTokenInfo {
+            token_id: id.clone(),
+            symbol: c.symbol.clone(),
+            decimals: c.decimals,
+            min_collateralization_ratio: c.min_collateralization_ratio,
+        })
+        .collect();
+    tokens.sort_by(|a, b| a.token_id.cmp(&b.token_id));
+
+    let mut denominations = vec![ServedDenomination {
+        id: "erg".to_string(),
+        symbol: "ERG".to_string(),
+        decimals: 9,
+    }];
+    denominations.extend(tokens.iter().map(|t| ServedDenomination {
+        id: format!("token:{}", t.token_id),
+        symbol: t.symbol.clone(),
+        decimals: t.decimals,
+    }));
+
+    (
+        StatusCode::OK,
+        Json(crate::models::success_response(
+            ReserveCollateralConfigResponse {
+                erg_contract_p2s: config.ergo.basis_reserve_contract_p2s.clone(),
+                token_contract_p2s: config.ergo.basis_token_reserve_contract_p2s.clone(),
+                tokens,
+                denominations,
+            },
+        )),
     )
 }
 
@@ -4744,6 +5399,26 @@ pub async fn get_note_state(
         }
     };
 
+    let denomination = match resolve_denomination(
+        &state,
+        &issuer_pubkey,
+        &recipient_pubkey,
+        &payload.denomination,
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(format!(
+                    "invalid denomination: {}",
+                    msg
+                ))),
+            );
+        }
+    };
+
     // Fetch the note.
     let (note_tx, note_rx) = tokio::sync::oneshot::channel();
     if let Err(e) = state
@@ -4751,6 +5426,7 @@ pub async fn get_note_state(
         .send(TrackerCommand::GetNoteByIssuerAndRecipient {
             issuer_pubkey,
             recipient_pubkey,
+            denomination,
             response_tx: note_tx,
         })
         .await
@@ -4792,6 +5468,7 @@ pub async fn get_note_state(
         .send(TrackerCommand::GetConfirmation {
             issuer_pubkey,
             recipient_pubkey,
+            denomination,
             response_tx: conf_tx,
         })
         .await
@@ -4876,6 +5553,7 @@ async fn fetch_confirmation(
     tx: &tokio::sync::mpsc::Sender<TrackerCommand>,
     issuer_pubkey: PubKey,
     recipient_pubkey: PubKey,
+    denomination: basis_store::DenomKey,
     amount_redeemed: u64,
 ) -> Option<NoteConfirmationSummary> {
     let (conf_tx, conf_rx) = tokio::sync::oneshot::channel();
@@ -4883,6 +5561,7 @@ async fn fetch_confirmation(
         .send(TrackerCommand::GetConfirmation {
             issuer_pubkey,
             recipient_pubkey,
+            denomination,
             response_tx: conf_tx,
         })
         .await
@@ -4898,4 +5577,51 @@ async fn fetch_confirmation(
         )),
         _ => None,
     }
+}
+
+/// Resolve the denomination for a note-addressing request.
+///
+/// An explicit `denomination` string is parsed and checked against the served set
+/// (`ergo.reserve_tokens`); an empty one resolves to the pair's existing note's
+/// denomination when exactly one exists, else ERG — never silently creating a
+/// second edge under the wrong denomination
+/// (specs/ergo/multi_collateral_reserves.md §9).
+pub(crate) async fn resolve_denomination(
+    state: &AppState,
+    issuer_pubkey: &PubKey,
+    recipient_pubkey: &PubKey,
+    requested: &str,
+) -> Result<basis_store::DenomKey, String> {
+    let requested = requested.trim();
+    if !requested.is_empty() {
+        return state.config.parse_served_denomination(requested);
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(TrackerCommand::GetNotesByIssuer {
+            issuer_pubkey: *issuer_pubkey,
+            response_tx: tx,
+        })
+        .await
+        .is_err()
+    {
+        return Err("tracker thread unavailable".to_string());
+    }
+    let notes = match rx.await {
+        Ok(Ok(notes)) => notes,
+        Ok(Err(e)) => return Err(format!("tracker error: {e:?}")),
+        Err(_) => return Err("tracker unavailable".to_string()),
+    };
+    let mut denoms: Vec<basis_store::DenomKey> = notes
+        .iter()
+        .filter(|n| &n.recipient_pubkey == recipient_pubkey)
+        .map(|n| n.denomination)
+        .collect();
+    denoms.sort();
+    denoms.dedup();
+    Ok(match denoms.as_slice() {
+        [only] => *only,
+        _ => basis_store::DenomKey::Erg,
+    })
 }
