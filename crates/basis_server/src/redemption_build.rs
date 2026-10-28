@@ -577,6 +577,38 @@ pub async fn build_redemption(
     }
 }
 
+/// Sign the tracker signature (context var #6) for a redemption build.
+///
+/// The message is bound to the note's STORED denomination: the token reserve
+/// contract verifies var #6 over
+/// `blake2b256(owner || receiver || tokenId) || totalDebt || timestamp || trackerNftId`
+/// (specs/ergo/multi_collateral_reserves.md §4.1). Signing the ERG debtKey instead
+/// made every token-denomination tracker signature unverifiable on-chain, so
+/// non-emergency token redemptions could never be redeemed through the normal window.
+#[allow(clippy::too_many_arguments)]
+fn sign_tracker_redemption(
+    tracker_secret: &[u8; 32],
+    tracker_pubkey: &basis_store::PubKey,
+    issuer_pk: &basis_store::PubKey,
+    recipient_pk: &basis_store::PubKey,
+    denomination: &basis_store::DenomKey,
+    total_debt: u64,
+    timestamp: u64,
+    tracker_nft_id: &[u8; 32],
+) -> Result<Vec<u8>, String> {
+    let message = basis_store::schnorr::signing_message(
+        issuer_pk,
+        recipient_pk,
+        denomination,
+        total_debt,
+        timestamp,
+        tracker_nft_id,
+    );
+    basis_store::schnorr::schnorr_sign(&message, tracker_secret, tracker_pubkey)
+        .map(|sig| sig.to_vec())
+        .map_err(|e| format!("tracker schnorr sign: {e:?}"))
+}
+
 async fn build_redemption_inner(
     state: &AppState,
     payload: &RedemptionBuildRequest,
@@ -1099,22 +1131,18 @@ async fn build_redemption_inner(
                 )
             }
         };
-        let message = basis_store::schnorr::signing_message(
+        match sign_tracker_redemption(
+            &tracker_secret,
+            &tracker_pubkey_bytes,
             &issuer_pk,
             &recipient_pk,
-            &basis_store::DenomKey::Erg,
+            &note.denomination,
             total_debt,
             note.timestamp,
             &note.tracker_nft_id,
-        );
-        match basis_store::schnorr::schnorr_sign(&message, &tracker_secret, &tracker_pubkey_bytes) {
-            Ok(sig) => sig.to_vec(),
-            Err(e) => {
-                return api_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("tracker schnorr sign: {e:?}"),
-                )
-            }
+        ) {
+            Ok(sig) => sig,
+            Err(e) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, e),
         }
     } else {
         Vec::new()
@@ -1992,5 +2020,105 @@ mod tests {
             );
         }
         assert!(limiter.check_and_record("issuer", "recipient", 1).is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // Tracker signature (context var #6) denomination binding
+    //
+    // The token reserve contract verifies var #6 over
+    // blake2b256(owner || receiver || tokenId) || …; a signature over the ERG
+    // debtKey makes every token redemption unverifiable on-chain.
+    // ------------------------------------------------------------------
+
+    fn sign_and_decode(
+        denomination: &basis_store::DenomKey,
+    ) -> (
+        [u8; 65],
+        basis_store::PubKey,
+        basis_store::PubKey,
+        basis_store::PubKey,
+    ) {
+        let (tracker_secret, tracker_pubkey) = basis_store::schnorr::generate_keypair();
+        let (_, issuer_pk) = basis_store::schnorr::generate_keypair();
+        let (_, recipient_pk) = basis_store::schnorr::generate_keypair();
+        let sig = sign_tracker_redemption(
+            &tracker_secret,
+            &tracker_pubkey,
+            &issuer_pk,
+            &recipient_pk,
+            denomination,
+            5_000_000,
+            1_743_379_200_000,
+            &[0x42; 32],
+        )
+        .expect("tracker signature signs");
+        assert_eq!(sig.len(), 65);
+        let mut array = [0u8; 65];
+        array.copy_from_slice(&sig);
+        (array, tracker_pubkey, issuer_pk, recipient_pk)
+    }
+
+    #[test]
+    fn tracker_redemption_signature_binds_token_denomination() {
+        let token_id = [0xab_u8; 32];
+        let denom = basis_store::DenomKey::Token(token_id);
+        let (sig, tracker_pubkey, issuer_pk, recipient_pk) = sign_and_decode(&denom);
+
+        // Verifies against the TOKEN debtKey message — what the token contract evaluates.
+        let token_message = basis_store::schnorr::signing_message(
+            &issuer_pk,
+            &recipient_pk,
+            &denom,
+            5_000_000,
+            1_743_379_200_000,
+            &[0x42; 32],
+        );
+        basis_store::schnorr::schnorr_verify(&sig, &token_message, &tracker_pubkey)
+            .expect("token tracker signature must verify over the token debtKey message");
+
+        // Regression pin: the ERG debtKey message must NOT verify. Signing the ERG
+        // key was the bug — such a signature is rejected by the reserve contract.
+        let erg_message = basis_store::schnorr::signing_message(
+            &issuer_pk,
+            &recipient_pk,
+            &basis_store::DenomKey::Erg,
+            5_000_000,
+            1_743_379_200_000,
+            &[0x42; 32],
+        );
+        assert!(
+            basis_store::schnorr::schnorr_verify(&sig, &erg_message, &tracker_pubkey).is_err(),
+            "token-note tracker signature must not verify over the ERG debtKey message"
+        );
+    }
+
+    #[test]
+    fn tracker_redemption_signature_erg_note_unchanged() {
+        let (sig, tracker_pubkey, issuer_pk, recipient_pk) =
+            sign_and_decode(&basis_store::DenomKey::Erg);
+
+        let erg_message = basis_store::schnorr::signing_message(
+            &issuer_pk,
+            &recipient_pk,
+            &basis_store::DenomKey::Erg,
+            5_000_000,
+            1_743_379_200_000,
+            &[0x42; 32],
+        );
+        basis_store::schnorr::schnorr_verify(&sig, &erg_message, &tracker_pubkey)
+            .expect("ERG-note tracker signature still verifies over the ERG debtKey message");
+
+        // Sanity: a different denomination's message must not verify for the ERG note.
+        let token_message = basis_store::schnorr::signing_message(
+            &issuer_pk,
+            &recipient_pk,
+            &basis_store::DenomKey::Token([0xab_u8; 32]),
+            5_000_000,
+            1_743_379_200_000,
+            &[0x42; 32],
+        );
+        assert!(
+            basis_store::schnorr::schnorr_verify(&sig, &token_message, &tracker_pubkey).is_err()
+        );
     }
 }
