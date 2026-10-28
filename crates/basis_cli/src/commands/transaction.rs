@@ -26,8 +26,22 @@ const TOKEN_RECIPIENT_MIN_VALUE_NANOERG: u64 = 1_000_000;
 /// Encode an unsigned integer using Ergo's VLQ (Variable-Length Quantity) encoding.
 /// Bytes are emitted least-significant group first (little-endian VLQ).
 /// Parse the denomination recorded on a stored note (defaults to ERG when absent).
-fn note_denom(note: &crate::api::SerializableIouNote) -> basis_store::DenomKey {
+pub(crate) fn note_denom(note: &crate::api::SerializableIouNote) -> basis_store::DenomKey {
     basis_store::DenomKey::parse(&note.denomination).unwrap_or(basis_store::DenomKey::Erg)
+}
+
+/// True when a reserve reports itself as belonging to `denomination`:
+/// ERG reserves report an empty `reserve_token_id`; token reserves report the
+/// collateral token's hex id (case-insensitive). Without this, a redemption
+/// against an issuer holding both an ERG and a token reserve could pick the
+/// wrong currency's reserve box and redeem token debt against ERG collateral.
+fn denom_matches_reserve(reserve_token_id: &str, denom: &basis_store::DenomKey) -> bool {
+    match denom {
+        basis_store::DenomKey::Erg => reserve_token_id.is_empty(),
+        basis_store::DenomKey::Token(id) => {
+            !reserve_token_id.is_empty() && reserve_token_id.eq_ignore_ascii_case(&hex::encode(id))
+        }
+    }
 }
 
 fn vlq_encode(mut value: usize) -> Vec<u8> {
@@ -132,6 +146,11 @@ pub enum TransactionCommands {
         /// fetched from the node wallet for the change/fee address.
         #[arg(long)]
         fee_secret: Option<String>,
+        /// Denomination of the note ("erg" or "token:<64-hex>"). Required to select the
+        /// right reserve when the pair also holds notes in another denomination; omitted
+        /// means ERG / legacy notes.
+        #[arg(long)]
+        denomination: Option<String>,
     },
     /// Tracker-assisted redemption: the tracker builds the unsigned transaction and signs the fee
     /// input(s) (POST /redemption/build); the CLI signs the issuer message with the current account
@@ -151,6 +170,11 @@ pub enum TransactionCommands {
         /// proveDlog(receiver). If omitted, fetched from the node wallet.
         #[arg(long)]
         recipient_secret: Option<String>,
+        /// Denomination of the note ("erg" or "token:<64-hex>"). Required to select the
+        /// right reserve when the pair also holds notes in another denomination; omitted
+        /// means ERG / legacy notes.
+        #[arg(long)]
+        denomination: Option<String>,
     },
 }
 
@@ -212,6 +236,7 @@ pub async fn handle_transaction_command(
             local_sign,
             recipient_secret,
             fee_secret,
+            denomination,
         } => {
             let result = generate_redemption_transaction(
                 client,
@@ -226,6 +251,7 @@ pub async fn handle_transaction_command(
                 local_sign,
                 recipient_secret,
                 fee_secret,
+                denomination.as_deref(),
             )
             .await?;
             if json {
@@ -238,6 +264,7 @@ pub async fn handle_transaction_command(
             recipient_pubkey,
             amount,
             recipient_secret,
+            denomination,
         } => {
             let result = redeem_tracker_assisted(
                 client,
@@ -246,6 +273,7 @@ pub async fn handle_transaction_command(
                 &recipient_pubkey,
                 amount,
                 recipient_secret,
+                denomination.as_deref(),
             )
             .await?;
             if json {
@@ -295,6 +323,7 @@ async fn build_redemption_tx(
     change_address: Option<String>,
     issuer_signature_hex: &str,
     local_sign: bool,
+    denomination: &basis_store::DenomKey,
 ) -> Result<RedemptionBuildResult> {
     // Validate public keys
     if hex::decode(issuer_pubkey)
@@ -319,7 +348,11 @@ async fn build_redemption_tx(
 
     progress!("🔍 Retrieving note information...");
     let note = client
-        .get_note(issuer_pubkey, recipient_pubkey)
+        .get_note_denominated(
+            issuer_pubkey,
+            recipient_pubkey,
+            Some(&denomination.denomination_id()),
+        )
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -396,6 +429,7 @@ async fn build_redemption_tx(
             }
         })
         .filter(|r| r.base_info.tracker_nft_id == expected_tracker_nft_id)
+        .filter(|r| denom_matches_reserve(&r.base_info.reserve_token_id, denomination))
         .max_by(|a, b| {
             a.base_info
                 .last_updated_height
@@ -436,7 +470,11 @@ async fn build_redemption_tx(
     // Get tracker lookup proof for context var #8 from server
     progress!("🔍 Retrieving tracker lookup proof from server...");
     let tracker_proof = client
-        .get_tracker_proof(issuer_pubkey, recipient_pubkey)
+        .get_tracker_proof(
+            issuer_pubkey,
+            recipient_pubkey,
+            Some(&denomination.denomination_id()),
+        )
         .await?;
     let total_debt = tracker_proof.total_debt;
     let tracker_lookup_proof = hex::decode(&tracker_proof.proof)
@@ -446,7 +484,13 @@ async fn build_redemption_tx(
     // Get the reserve proof from the server.
     progress!("🔍 Retrieving reserve insert proof from server...");
     let reserve_proof = client
-        .get_reserve_proof(issuer_pubkey, recipient_pubkey, amount, note_timestamp)
+        .get_reserve_proof(
+            issuer_pubkey,
+            recipient_pubkey,
+            amount,
+            note_timestamp,
+            Some(&denomination.denomination_id()),
+        )
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get reserve proof: {}", e))?;
 
@@ -645,6 +689,7 @@ async fn build_redemption_tx(
             total_debt,
             note_timestamp,
             emergency,
+            Some(&denomination.denomination_id()),
         )
         .await?;
     let tracker_signature = hex::decode(&tracker_signature_response.tracker_signature)
@@ -832,10 +877,20 @@ pub async fn execute_local_redemption(
     change_address: Option<String>,
     recipient_secret: Option<String>,
     fee_secret: Option<String>,
+    denomination: Option<&str>,
 ) -> Result<String> {
+    // Resolve the denomination up front: an explicit --denomination hint is
+    // validated against the stored note, and the note's own denomination then
+    // drives every downstream lookup (proofs, reserve selection, state sync).
+    let denom_hint = denomination
+        .map(basis_store::DenomKey::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid denomination: {}", e))?;
+    let hint_id = denom_hint.as_ref().map(|d| d.denomination_id());
+
     progress!("🔍 Retrieving note information...");
     let note = client
-        .get_note(issuer_pubkey, recipient_pubkey)
+        .get_note_denominated(issuer_pubkey, recipient_pubkey, hint_id.as_deref())
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -844,13 +899,27 @@ pub async fn execute_local_redemption(
                 recipient_pubkey
             )
         })?;
+    let denom = note_denom(&note);
+    if let Some(hint) = &denom_hint {
+        if *hint != denom {
+            return Err(anyhow::anyhow!(
+                "denomination mismatch: --denomination {} but the stored note is {}",
+                hint.denomination_id(),
+                denom.denomination_id()
+            ));
+        }
+    }
 
     // The reserve signature must be freshly generated for the current redemption because the
     // contract requires `timestamp > storedTimestamp`. After a prior redemption the note's
     // timestamp is refreshed, so the signature stored on the note is stale.
     progress!("🔍 Fetching tracker proof for total debt...");
     let tracker_proof = client
-        .get_tracker_proof(issuer_pubkey, recipient_pubkey)
+        .get_tracker_proof(
+            issuer_pubkey,
+            recipient_pubkey,
+            Some(&denom.denomination_id()),
+        )
         .await?;
     let total_debt = tracker_proof.total_debt;
 
@@ -898,6 +967,7 @@ pub async fn execute_local_redemption(
         change_address,
         &issuer_signature_hex,
         true,
+        &denom,
     )
     .await?;
 
@@ -944,7 +1014,7 @@ pub async fn execute_local_redemption(
             redeemed_amount: amount,
             new_already_redeemed: Some(new_already_redeemed),
 
-            denomination: String::new(),
+            denomination: denom.denomination_id(),
         })
         .await
     {
@@ -976,6 +1046,7 @@ pub async fn generate_redemption_transaction(
     local_sign: bool,
     recipient_secret: Option<String>,
     fee_secret: Option<String>,
+    denomination: Option<&str>,
 ) -> Result<GenerateRedemptionResult> {
     if local_sign {
         let tx_id = execute_local_redemption(
@@ -989,6 +1060,7 @@ pub async fn generate_redemption_transaction(
             change_address,
             recipient_secret,
             fee_secret,
+            denomination,
         )
         .await?;
         progress!("✅ Redemption broadcast. Transaction ID: {}", tx_id);
@@ -997,10 +1069,18 @@ pub async fn generate_redemption_transaction(
         ));
     }
 
+    // Resolve the denomination same as the local path: validate an explicit hint
+    // against the stored note, then drive everything from the note's own denomination.
+    let denom_hint = denomination
+        .map(basis_store::DenomKey::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid denomination: {}", e))?;
+    let hint_id = denom_hint.as_ref().map(|d| d.denomination_id());
+
     // Fetch the note so we can compute the issuer signature with the current account.
     progress!("🔍 Retrieving note information...");
     let note = client
-        .get_note(issuer_pubkey, recipient_pubkey)
+        .get_note_denominated(issuer_pubkey, recipient_pubkey, hint_id.as_deref())
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -1009,6 +1089,16 @@ pub async fn generate_redemption_transaction(
                 recipient_pubkey
             )
         })?;
+    let denom = note_denom(&note);
+    if let Some(hint) = &denom_hint {
+        if *hint != denom {
+            return Err(anyhow::anyhow!(
+                "denomination mismatch: --denomination {} but the stored note is {}",
+                hint.denomination_id(),
+                denom.denomination_id()
+            ));
+        }
+    }
 
     // Verify that the redemption amount does not exceed the note's outstanding debt
     if note.outstanding_debt() < amount {
@@ -1059,6 +1149,7 @@ pub async fn generate_redemption_transaction(
         change_address,
         &issuer_signature_hex,
         false,
+        &denom,
     )
     .await?;
 
@@ -1159,6 +1250,7 @@ pub async fn redeem_tracker_assisted(
     recipient_pubkey: &str,
     amount: u64,
     recipient_secret: Option<String>,
+    denomination: Option<&str>,
 ) -> Result<RedemptionBroadcastResult> {
     use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
     use ergo_lib::chain::transaction::Transaction;
@@ -1173,13 +1265,35 @@ pub async fn redeem_tracker_assisted(
         .try_into()
         .map_err(|_| anyhow::anyhow!("recipient pubkey must be 33 bytes"))?;
 
+    // Validate an explicit hint, fetch the note restricted to it, and confirm
+    // agreement so the denomination driving everything downstream is the note's own.
+    let denom_hint = denomination
+        .map(basis_store::DenomKey::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid denomination: {}", e))?;
+    let hint_id = denom_hint.as_ref().map(|d| d.denomination_id());
+
     progress!("🔍 Fetching note and tracker proof...");
     let note = client
-        .get_note(issuer_pubkey, recipient_pubkey)
+        .get_note_denominated(issuer_pubkey, recipient_pubkey, hint_id.as_deref())
         .await?
         .ok_or_else(|| anyhow::anyhow!("note not found for issuer/recipient"))?;
+    let denom = note_denom(&note);
+    if let Some(hint) = &denom_hint {
+        if *hint != denom {
+            return Err(anyhow::anyhow!(
+                "denomination mismatch: --denomination {} but the stored note is {}",
+                hint.denomination_id(),
+                denom.denomination_id()
+            ));
+        }
+    }
     let total_debt = client
-        .get_tracker_proof(issuer_pubkey, recipient_pubkey)
+        .get_tracker_proof(
+            issuer_pubkey,
+            recipient_pubkey,
+            Some(&denom.denomination_id()),
+        )
         .await?
         .total_debt;
     let timestamp = note.timestamp;
@@ -1224,7 +1338,7 @@ pub async fn redeem_tracker_assisted(
             tracker_box_id: None,
             change_address: None,
 
-            denomination: String::new(),
+            denomination: denom.denomination_id(),
         })
         .await
         .map_err(|e| anyhow::anyhow!("tracker build failed: {}", e))?;
@@ -1853,6 +1967,39 @@ async fn sign_and_broadcast_local(p: SignLocalParams<'_>) -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::{json, Map, Value};
+
+    // ------------------------------------------------------------------
+    // Reserve-denomination matching for local reserve selection
+    // ------------------------------------------------------------------
+
+    const TOKEN_ID_A_HEX: &str = "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669";
+
+    fn token_denom() -> basis_store::DenomKey {
+        basis_store::DenomKey::Token(hex::decode(TOKEN_ID_A_HEX).unwrap().try_into().unwrap())
+    }
+
+    #[test]
+    fn erg_denomination_matches_only_erg_reserves() {
+        assert!(denom_matches_reserve("", &basis_store::DenomKey::Erg));
+        assert!(!denom_matches_reserve(
+            TOKEN_ID_A_HEX,
+            &basis_store::DenomKey::Erg
+        ));
+        assert!(!denom_matches_reserve("", &token_denom()));
+    }
+
+    #[test]
+    fn token_denomination_matches_only_its_token() {
+        // Address computed case-insensitively: scanner may store either case.
+        assert!(denom_matches_reserve(TOKEN_ID_A_HEX, &token_denom()));
+        assert!(denom_matches_reserve(
+            &TOKEN_ID_A_HEX.to_ascii_uppercase(),
+            &token_denom()
+        ));
+        // A different token (or empty = ERG reserve) is not this denomination.
+        let other = "b8".repeat(32);
+        assert!(!denom_matches_reserve(&other, &token_denom()));
+    }
 
     /// A valid P2PK (proveDlog) ergoTree as returned by the node for a wallet address.
     const P2PK_TREE: &str =

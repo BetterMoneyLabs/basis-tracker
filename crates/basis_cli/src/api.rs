@@ -584,7 +584,13 @@ impl TrackerClient {
             self.base_url, issuer, recipient
         );
         if let Some(d) = denomination {
-            url = format!("{}?denomination={}", url, d);
+            // Validate and normalize before building the URL: the server only
+            // accepts "erg" or "token:<64-hex>", and raw user input must not be
+            // concatenated into the query string unencoded. Empty means "no
+            // restriction" (legacy notes).
+            if let Some(id) = canonical_denom_param(Some(d))? {
+                url = format!("{}?denomination={}", url, id);
+            }
         }
         let response = self.get(&url)?.call()?;
 
@@ -701,7 +707,11 @@ impl TrackerClient {
         total_debt: u64,
         timestamp: u64,
         emergency: bool,
+        denomination: Option<&str>,
     ) -> Result<TrackerSignatureResponse> {
+        // "erg"/"token:<hex>" when known so the server evaluates the acceptance
+        // policy against the right reserve; empty keeps the old server default.
+        let denomination = canonical_denom_param(denomination)?.unwrap_or_default();
         let request = TrackerSignatureRequest {
             issuer_pubkey: issuer_pubkey.to_string(),
             recipient_pubkey: recipient_pubkey.to_string(),
@@ -709,7 +719,7 @@ impl TrackerClient {
             timestamp,
             emergency,
 
-            denomination: String::new(),
+            denomination,
         };
 
         let url = format!("{}/tracker/signature", self.base_url);
@@ -852,17 +862,40 @@ pub struct ReserveProofResponse {
     pub new_reserve_state_digest: String,
 }
 
+/// Canonicalize a denomination argument ("erg" / "token:<64-hex>") for query
+/// parameters and request bodies. `None` and the empty string both mean "no
+/// restriction", which keeps old behavior for legacy notes whose stored
+/// denomination string is empty.
+fn canonical_denom_param(denomination: Option<&str>) -> Result<Option<String>> {
+    match denomination.filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(d) => {
+            let den = basis_store::DenomKey::parse(d)
+                .map_err(|e| anyhow::anyhow!("invalid denomination '{}': {}", d, e))?;
+            Ok(Some(den.denomination_id()))
+        }
+    }
+}
+
 impl TrackerClient {
-    /// Get tracker lookup proof for context var #8
+    /// Get tracker lookup proof for context var #8.
+    ///
+    /// `denomination` ("erg" or "token:<64-hex>") scopes the proof to the note's
+    /// denomination so multi-denomination trackers return the right debt; the
+    /// server resolves an omitted denomination as before.
     pub async fn get_tracker_proof(
         &self,
         issuer_pubkey: &str,
         recipient_pubkey: &str,
+        denomination: Option<&str>,
     ) -> Result<TrackerProofResponse> {
-        let url = format!(
+        let mut url = format!(
             "{}/tracker/proof?issuer_pubkey={}&recipient_pubkey={}",
             self.base_url, issuer_pubkey, recipient_pubkey
         );
+        if let Some(id) = canonical_denom_param(denomination)? {
+            url = format!("{}&denomination={}", url, id);
+        }
         let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
@@ -881,18 +914,25 @@ impl TrackerClient {
         }
     }
 
-    /// Get reserve proof for context var #5 (insert) and #7 (lookup)
+    /// Get reserve proof for context var #5 (insert) and #7 (lookup).
+    ///
+    /// `denomination` ("erg" or "token:<64-hex>") scopes the proof to the note's
+    /// denomination; the server resolves an omitted denomination as before.
     pub async fn get_reserve_proof(
         &self,
         issuer_pubkey: &str,
         recipient_pubkey: &str,
         amount: u64,
         timestamp: u64,
+        denomination: Option<&str>,
     ) -> Result<ReserveProofResponse> {
-        let url = format!(
+        let mut url = format!(
             "{}/reserve/proof?issuer_pubkey={}&recipient_pubkey={}&amount={}&timestamp={}",
             self.base_url, issuer_pubkey, recipient_pubkey, amount, timestamp
         );
+        if let Some(id) = canonical_denom_param(denomination)? {
+            url = format!("{}&denomination={}", url, id);
+        }
         let response = self.get(&url)?.call()?;
 
         if response.status() == 200 {
@@ -925,7 +965,11 @@ impl TrackerClient {
         issuer_pubkey: &str,
         recipient_pubkey: &str,
         amount: u64,
+        denomination: Option<&str>,
     ) -> Result<RedemptionPreparationResponse> {
+        // "erg"/"token:<hex>" when known so the server's checks run against the
+        // right reserve; empty keeps the old server default.
+        let denomination = canonical_denom_param(denomination)?.unwrap_or_default();
         let request = RedemptionPreparationRequest {
             issuer_pubkey: issuer_pubkey.to_string(),
             recipient_pubkey: recipient_pubkey.to_string(),
@@ -935,7 +979,7 @@ impl TrackerClient {
                 .unwrap()
                 .as_secs(),
 
-            denomination: String::new(),
+            denomination,
         };
 
         let url = format!("{}/redemption/prepare", self.base_url);
@@ -1680,6 +1724,33 @@ fn sign_canonical(canonical: &str, secret_key_hex: &str, pubkey_hex: &str) -> Re
 mod auth_helpers_tests {
     use super::*;
 
+    // ------------------------------------------------------------------
+    // Denomination parameter canonicalization for redemption-path helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn canonical_denom_param_none_and_empty_mean_unrestricted() {
+        assert_eq!(canonical_denom_param(None).unwrap(), None);
+        assert_eq!(canonical_denom_param(Some("")).unwrap(), None);
+        // Legacy/"no restriction" whitespace tolerance stays an error, not silent ERG.
+        assert!(canonical_denom_param(Some(" ")).is_err());
+    }
+
+    #[test]
+    fn canonical_denom_param_normalizes_known_ids() {
+        assert_eq!(canonical_denom_param(Some("erg")).unwrap().unwrap(), "erg");
+        assert_eq!(canonical_denom_param(Some("ERG")).unwrap().unwrap(), "erg");
+        let token_hex = "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669";
+        assert_eq!(
+            canonical_denom_param(Some(&format!("token:{token_hex}")))
+                .unwrap()
+                .unwrap(),
+            format!("token:{token_hex}")
+        );
+        // Canonical output is URL-safe: no raw user text reaches the query string.
+        assert!(canonical_denom_param(Some("erg&allow=1")).is_err());
+    }
+
     #[test]
     fn parse_relative_url_splits_query() {
         assert_eq!(
@@ -1735,7 +1806,15 @@ pub struct SerializableIouNoteWithAge {
     pub amount_redeemed: u64,
     pub timestamp: u64,
     pub signature: String,
+    /// Tracker NFT ID this note is bound to (server sends it; optional for
+    /// compatibility with older trackers).
+    #[serde(default)]
+    pub tracker_nft_id: String,
     pub age_seconds: u64,
+    /// Denomination of the debt: "erg" or "token:<64-hex>". Empty string means
+    /// legacy note / older tracker without denomination data (treated as ERG).
+    #[serde(default)]
+    pub denomination: String,
 }
 
 impl SerializableIouNoteWithAge {

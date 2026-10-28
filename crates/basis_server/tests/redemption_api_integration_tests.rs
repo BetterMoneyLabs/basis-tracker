@@ -318,9 +318,13 @@ mod redemption_api_tests {
                         recipient_from_signature,
                         issuer_to_signature,
                         recipient_to_signature,
+                        acceptance_check,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.exchange_debt(
+                        // Mirror the production hook: the acceptance check runs
+                        // inside the store against the pre-mutation state,
+                        // atomically with the mutation (finding #8).
+                        let result = redemption_manager.tracker.exchange_debt_checked(
                             &issuer_pubkey,
                             &recipient_pubkey,
                             &from_denomination,
@@ -332,6 +336,7 @@ mod redemption_api_tests {
                             &recipient_from_signature,
                             &issuer_to_signature,
                             &recipient_to_signature,
+                            acceptance_check.map(|check| check.0),
                         );
                         let _ = response_tx.send(result);
                     }
@@ -459,6 +464,29 @@ mod redemption_api_tests {
     }
 
     /// Helper to store a reserve for the issuer in the scanner's reserve storage
+    /// Add a reserve to the in-memory tracker — the data source the
+    /// acceptance-policy collateral lookup consults (same as
+    /// `ensure_single_issuer_reserve` and the acceptance predicates).
+    async fn add_tracker_reserve(state: &AppState, issuer_pubkey: &str, collateral: u64) {
+        let tracker = state.reserve_tracker.lock().await;
+        tracker
+            .update_reserve(basis_store::ExtendedReserveInfo {
+                base_info: basis_store::ReserveInfo {
+                    collateral_amount: collateral,
+                    last_updated_height: 0,
+                    contract_address: "test".to_string(),
+                    tracker_nft_id: "test".to_string(),
+                    refund_initiation_height: 0,
+                    reserve_token_id: String::new(),
+                },
+                total_debt: 0,
+                box_id: format!("box_{}", issuer_pubkey),
+                owner_pubkey: issuer_pubkey.to_string(),
+                last_updated_timestamp: 0,
+            })
+            .expect("Failed to update test tracker reserve");
+    }
+
     async fn add_test_reserve(state: &AppState, issuer_pubkey: &str, collateral: u64) {
         let scanner = state.ergo_scanner.lock().await;
         scanner
@@ -1319,6 +1347,11 @@ mod redemption_api_tests {
         )
         .await;
 
+        // The acceptance-policy collateral lookup needs a tracked reserve for the
+        // note's denomination; without one the handler fails closed (409) before
+        // reaching the signing step (finding #4).
+        add_tracker_reserve(&state, &issuer_hex, 10_000_000_000).await;
+
         let request = TrackerSignatureRequest {
             issuer_pubkey: issuer_hex,
             recipient_pubkey: recipient_hex,
@@ -1514,6 +1547,11 @@ mod redemption_api_tests {
             1000,
         )
         .await;
+
+        // The acceptance-policy collateral lookup needs a tracked reserve for the
+        // note's denomination; without one the handler fails closed (409) before
+        // reaching the signing step (finding #4).
+        add_tracker_reserve(&state, &issuer_hex, 10_000_000_000).await;
 
         let request = RedemptionPreparationRequest {
             issuer_pubkey: issuer_hex,
@@ -1940,5 +1978,255 @@ mod redemption_api_tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(!body.success);
+    }
+
+    // ============================================================================
+    // POST /notes/exchange: the acceptance policy is evaluated inside the
+    // tracker thread against the pre-mutation state, atomically with the
+    // mutation (finding #8). A store-path rejection surfaces as
+    // `NoteError::AcceptancePolicy` in the response.
+    // ============================================================================
+
+    /// Shared setup for the exchange acceptance tests: a state serving `token_id`
+    /// with a collateralization predicate attached.
+    async fn exchange_state_with_predicate(
+        token_id: &str,
+        min_ratio: f64,
+    ) -> basis_server::AppState {
+        let mut state = create_mock_app_state().await;
+        let mut config = (*state.config).clone();
+        config.ergo.reserve_tokens.insert(
+            token_id.to_string(),
+            basis_server::config::ReserveTokenConfig {
+                symbol: "USE".to_string(),
+                decimals: 3,
+                min_collateralization_ratio: None,
+            },
+        );
+        state.config = std::sync::Arc::new(config);
+        state.acceptance_predicate = basis_server::acceptance::builder::build_predicate_tree(
+            collateral_acceptance(min_ratio),
+        )
+        .unwrap()
+        .map(std::sync::Arc::from);
+        state
+    }
+
+    #[tokio::test]
+    async fn test_exchange_rejected_by_acceptance_policy_atomically() {
+        let token_id = "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669";
+        let state = exchange_state_with_predicate(token_id, 1.0).await;
+
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let (recipient_secret, recipient_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let recipient_hex = hex::encode(recipient_pubkey);
+        let nft = [0x42u8; 32];
+        let tok = basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap());
+
+        let add_note = |denom: basis_store::DenomKey, amount: u64, ts: u64| {
+            let state = state.clone();
+            let issuer_secret = issuer_secret;
+            async move {
+                let note = basis_store::IouNote::create_and_sign(
+                    recipient_pubkey,
+                    amount,
+                    ts,
+                    &issuer_secret,
+                    &nft,
+                    denom,
+                )
+                .unwrap();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                state
+                    .tx
+                    .send(TrackerCommand::AddNote {
+                        issuer_pubkey,
+                        note,
+                        response_tx: tx,
+                    })
+                    .await
+                    .unwrap();
+                rx.await.unwrap().unwrap();
+            }
+        };
+        add_note(basis_store::DenomKey::Erg, 100, 1000).await;
+        add_note(tok, 50, 1001).await;
+
+        // Only an ERG reserve exists (huge): the policy must evaluate the
+        // TARGET denomination and reject — cross-currency collateral must not
+        // satisfy the token edge (finding #4 semantics, #8 wiring).
+        add_tracker_reserve(&state, &issuer_hex, 10_000_000_000).await;
+
+        let ts = 2000u64;
+        let erg = basis_store::DenomKey::Erg;
+        let msg_from = basis_store::schnorr::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &erg,
+            70,
+            ts,
+            &nft,
+        );
+        let msg_to = basis_store::schnorr::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &tok,
+            140,
+            ts,
+            &nft,
+        );
+        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
+        };
+        let request = basis_server::models::ExchangeNotesRequest {
+            issuer_pubkey: issuer_hex.clone(),
+            recipient_pubkey: recipient_hex.clone(),
+            from_denomination: "erg".to_string(),
+            from_amount: 30,
+            to_denomination: format!("token:{}", token_id),
+            to_amount: 90,
+            timestamp: ts,
+            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
+            recipient_from_signature: sign(&recipient_secret, &msg_from, &recipient_pubkey),
+            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
+            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
+        };
+
+        let (status, body) = basis_server::api::exchange_notes(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {:?}", body.error);
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("AcceptancePolicy"),
+            "a store-path rejection must surface as NoteError::AcceptancePolicy, got: {}",
+            error
+        );
+
+        // The rejection was atomic: nothing moved.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+                issuer_pubkey,
+                recipient_pubkey,
+                denomination: tok,
+                response_tx: tx,
+            })
+            .await
+            .unwrap();
+        let note = rx.await.unwrap().unwrap().expect("token note still stored");
+        assert_eq!(note.amount_collected, 50, "rejection must not mutate");
+    }
+
+    #[tokio::test]
+    async fn test_exchange_accepted_when_target_reserve_satisfies_policy() {
+        let token_id = "a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669";
+        let state = exchange_state_with_predicate(token_id, 1.0).await;
+
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let (recipient_secret, recipient_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let recipient_hex = hex::encode(recipient_pubkey);
+        let nft = [0x42u8; 32];
+        let tok = basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap());
+
+        let add_note = |denom: basis_store::DenomKey, amount: u64, ts: u64| {
+            let state = state.clone();
+            let issuer_secret = issuer_secret;
+            async move {
+                let note = basis_store::IouNote::create_and_sign(
+                    recipient_pubkey,
+                    amount,
+                    ts,
+                    &issuer_secret,
+                    &nft,
+                    denom,
+                )
+                .unwrap();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                state
+                    .tx
+                    .send(TrackerCommand::AddNote {
+                        issuer_pubkey,
+                        note,
+                        response_tx: tx,
+                    })
+                    .await
+                    .unwrap();
+                rx.await.unwrap().unwrap();
+            }
+        };
+        add_note(basis_store::DenomKey::Erg, 100, 1000).await;
+        add_note(tok, 50, 1001).await;
+
+        // A token reserve covering the post-exchange token debt (140): the
+        // predicate must accept (200/140 = 1.43 >= 1.0, in token units).
+        state
+            .reserve_tracker
+            .lock()
+            .await
+            .update_reserve(basis_store::reserve_tracker::ExtendedReserveInfo {
+                base_info: basis_store::ReserveInfo {
+                    collateral_amount: 200,
+                    last_updated_height: 0,
+                    contract_address: "test".to_string(),
+                    tracker_nft_id: "test".to_string(),
+                    refund_initiation_height: 0,
+                    reserve_token_id: token_id.to_string(),
+                },
+                total_debt: 0,
+                box_id: "box_tok".to_string(),
+                owner_pubkey: issuer_hex.clone(),
+                last_updated_timestamp: 0,
+            })
+            .unwrap();
+
+        let ts = 2000u64;
+        let erg = basis_store::DenomKey::Erg;
+        let msg_from = basis_store::schnorr::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &erg,
+            70,
+            ts,
+            &nft,
+        );
+        let msg_to = basis_store::schnorr::signing_message(
+            &issuer_pubkey,
+            &recipient_pubkey,
+            &tok,
+            140,
+            ts,
+            &nft,
+        );
+        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
+        };
+        let request = basis_server::models::ExchangeNotesRequest {
+            issuer_pubkey: issuer_hex.clone(),
+            recipient_pubkey: recipient_hex.clone(),
+            from_denomination: "erg".to_string(),
+            from_amount: 30,
+            to_denomination: format!("token:{}", token_id),
+            to_amount: 90,
+            timestamp: ts,
+            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
+            recipient_from_signature: sign(&recipient_secret, &msg_from, &recipient_pubkey),
+            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
+            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
+        };
+
+        let (status, body) = basis_server::api::exchange_notes(
+            axum::extract::State(state),
+            axum::extract::Json(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {:?}", body.error);
+        let data = body.data.as_ref().expect("response data");
+        assert_eq!(data.to_new_total, 140);
     }
 }

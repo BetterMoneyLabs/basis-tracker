@@ -116,7 +116,8 @@ paths:
         sign both edges' new states; the recipient's signatures are the creditor
         consent required for a debt decrease (S3 rule). The tracker takes no view of
         the exchange rate — it is bilaterally agreed. Both edges commit in one
-        tracker state update.
+        tracker state update. The acceptance policy is evaluated in the target
+        denomination against the pre-mutation state, atomically with the mutation.
       operationId: exchangeNotes
       tags:
         - Notes
@@ -785,7 +786,11 @@ paths:
         stored note for the given issuer/recipient pair; the `total_debt` and
         `timestamp` request fields must match the stored note (mismatches are
         rejected with 409). The acceptance policy is enforced for non-emergency
-        requests before signing. Returns 404 when no note is stored for the pair.
+        requests before signing, evaluated against the issuer's tracked reserve
+        for the note's denomination: 409 when the issuer has more than one
+        tracked reserve in that denomination, or none — a reserve of another
+        currency is never consulted in its place. Returns 404 when no note is
+        stored for the pair.
       operationId: requestTrackerSignature
       tags:
         - Redemption
@@ -815,7 +820,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
         '409':
-          description: Request values do not match the stored note
+          description: >-
+            Request values do not match the stored note, or the issuer's tracked
+            reserve for the note's denomination is missing or not unique
           content:
             application/json:
               schema:
@@ -900,9 +907,11 @@ paths:
         The note for the issuer/recipient pair must exist in the tracker state;
         otherwise the request is rejected with 404. The tracker signature always
         covers the stored note's cumulative debt and payment timestamp — the
-        `timestamp` request field must match the stored note (409 on mismatch),
-        and `amount` is used only for the acceptance-policy check (skipped for
-        emergency requests).
+        `timestamp` request field must match the stored note — and `amount` is
+        used only for the acceptance-policy check (skipped for emergency
+        requests). That check is evaluated against the issuer's tracked reserve
+        for the note's denomination; 409 when that reserve is missing or not
+        unique — a reserve of another currency is never consulted in its place.
       operationId: prepareRedemption
       tags:
         - Redemption
@@ -921,6 +930,12 @@ paths:
                 $ref: '#/components/schemas/ApiResponseRedemptionPreparation'
         '400':
           description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '409':
+          description: The issuer's tracked reserve for the note's denomination is missing or not unique
           content:
             application/json:
               schema:
@@ -1013,7 +1028,12 @@ paths:
   /acceptance/check:
     post:
       summary: Check note acceptance
-      description: Check whether a note from the given issuer and total debt is acceptable under current policies.
+      description: >
+        Check whether a note from the given issuer and total debt is acceptable
+        under current policies. Collateralization is evaluated per
+        denomination: against the issuer's tracked reserve of the candidate
+        note's denomination, with the issuer's gross debt restricted to that
+        same currency.
       operationId: checkAcceptance
       tags:
         - Acceptance

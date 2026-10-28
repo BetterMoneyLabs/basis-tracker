@@ -133,6 +133,7 @@ pub async fn run_test_redemption(
                     &note.issuer_pubkey,
                     &note.recipient_pubkey,
                     redemption_amount,
+                    Some(&note.denomination),
                 )
                 .await
             {

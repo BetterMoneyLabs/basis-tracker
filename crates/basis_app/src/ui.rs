@@ -1350,9 +1350,20 @@ async fn tracker_assisted_redeem(
         .map_err(|_| "recipient pubkey must be 33 bytes".to_string())?;
 
     // Authoritative total debt from the tracker (must match context var #3 exactly).
+    // The note is fetched first so the proof is scoped to the note's own
+    // denomination (multi-denomination trackers resolve total debt per currency).
+    let note = app
+        .client
+        .get_note(issuer, recipient)
+        .await
+        .map_err(|e| format!("note lookup failed: {}", e))?;
     let total_debt = app
         .client
-        .get_tracker_proof(issuer, recipient)
+        .get_tracker_proof(
+            issuer,
+            recipient,
+            note.as_ref().map(|n| n.denomination.as_str()),
+        )
         .await
         .map_err(|e| format!("tracker proof failed: {}", e))?
         .total_debt;
@@ -1361,11 +1372,6 @@ async fn tracker_assisted_redeem(
     // from the stored note so it always matches what the server will verify.
     // The note carries its denomination and tracker binding; both go into the signed
     // message (multi_collateral_reserves.md §4.2, issue #15 C3).
-    let note = app
-        .client
-        .get_note(issuer, recipient)
-        .await
-        .map_err(|e| format!("note lookup failed: {}", e))?;
     let tracker_nft_id: [u8; 32] = note
         .as_ref()
         .and_then(|n| hex::decode(&n.tracker_nft_id).ok())
@@ -1426,7 +1432,9 @@ async fn tracker_assisted_redeem(
             tracker_box_id: None,
             change_address: None,
 
-            denomination: String::new(),
+            // Same denomination that signed the message above must scope the build;
+            // empty lets the server fall back to ERG for multi-denomination pairs.
+            denomination: denomination.denomination_id(),
         })
         .await
         .map_err(|e| format!("tracker build failed: {}", e))?;

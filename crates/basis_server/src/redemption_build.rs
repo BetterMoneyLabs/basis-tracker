@@ -905,6 +905,7 @@ async fn build_redemption_inner(
             0,
             reserve_refund_height > 0,
             &notes,
+            &denomination,
             &state.policy_storage,
             &state.config.acceptance,
         ) {

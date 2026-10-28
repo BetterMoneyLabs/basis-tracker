@@ -228,11 +228,17 @@ fn resolve_effective_policy(
 ///
 /// - `issuer_pubkey`: reserve owner (note issuer)
 /// - `redeemer_pubkey`: recipient requesting the redemption
-/// - `redeem_amount`: amount being redeemed (nanoERG)
-/// - `reserve_box_value`: current reserve collateral `C` (nanoERG)
-/// - `fee`: transaction fee paid from the reserve output (nanoERG)
+/// - `redeem_amount`: amount being redeemed (units of `denomination`)
+/// - `reserve_box_value`: current reserve collateral `C` (units of `denomination`)
+/// - `fee`: transaction fee paid from the reserve output (units of `denomination`)
 /// - `refund_pending`: whether the reserve has a pending refund (R7 height > 0)
-/// - `notes`: all of the issuer's notes (outstanding debt is derived per note)
+/// - `denomination`: currency of the reserve/note being redeemed. A reserve
+///   backs debt of one currency only, so the debt sum, the other-holders map
+///   and the FIFO fallback are computed from notes of this denomination alone;
+///   amounts in other currencies are never mixed in (finding #4,
+///   specs/ergo/multi_collateral_reserves.md).
+/// - `notes`: all of the issuer's notes (outstanding debt is derived per note;
+///   notes of other denominations are ignored)
 /// - `policy_storage`: per-recipient acceptance policy storage
 /// - `global_config`: the server's global acceptance configuration
 ///
@@ -249,9 +255,22 @@ pub fn check_redemption_policy_compliance(
     fee: u64,
     refund_pending: bool,
     notes: &[IouNote],
+    denomination: &basis_store::DenomKey,
     policy_storage: &AcceptancePolicyStorage,
     global_config: &AcceptanceConfig,
 ) -> Result<(), RedemptionPolicyError> {
+    // One reserve backs exactly one currency, and amounts in different
+    // currencies are not comparable. Scope every quantity below to the
+    // redeemed note's denomination: ERG debt must not inflate a token
+    // reserve's denominator (which makes over-redemption look safe) and
+    // token debt must not inflate an ERG reserve's (which vetoes honest
+    // redemptions). Filtering here, not at call sites, so no call site can
+    // forget it.
+    let notes: Vec<&IouNote> = notes
+        .iter()
+        .filter(|note| note.denomination == *denomination)
+        .collect();
+
     // Total outstanding debt D over all issuer notes (including the redeemer's)
     let total_debt = notes
         .iter()
@@ -266,7 +285,7 @@ pub fn check_redemption_policy_compliance(
     // Other holders: recipients with outstanding debt, excluding the redeemer.
     // Value: cumulative total debt (max amount_collected across their notes).
     let mut other_holders: HashMap<PubKey, u64> = HashMap::new();
-    for note in notes {
+    for note in &notes {
         if note.recipient_pubkey == *redeemer_pubkey || outstanding(note) == 0 {
             continue;
         }
@@ -420,6 +439,15 @@ mod tests {
     const HOLDER_A: u8 = 3;
     const HOLDER_B: u8 = 4;
 
+    const ERG_DENOM: basis_store::DenomKey = basis_store::DenomKey::Erg;
+    const TOKEN_ID: [u8; 32] = [0xab; 32];
+
+    fn test_token_note(recipient_n: u8, collected: u64, redeemed: u64, timestamp: u64) -> IouNote {
+        let mut note = test_note(recipient_n, collected, redeemed, timestamp);
+        note.denomination = basis_store::DenomKey::Token(TOKEN_ID);
+        note
+    }
+
     #[test]
     fn test_well_collateralized_passes() {
         // C=1000, D=500 (ratio 2.0). Redeem 100 (+fee 10):
@@ -437,6 +465,7 @@ mod tests {
             10,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -463,6 +492,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(0.85),
         );
@@ -491,6 +521,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -522,6 +553,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -570,6 +602,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &global,
         );
@@ -592,6 +625,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -611,6 +645,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -659,6 +694,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -689,6 +725,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -730,6 +767,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &config,
         );
@@ -775,6 +813,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &config,
         );
@@ -794,6 +833,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &config,
         );
@@ -831,6 +871,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -855,6 +896,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(0.5),
         );
@@ -878,6 +920,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(0.5),
         );
@@ -931,6 +974,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &config,
         );
@@ -953,6 +997,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &config,
         );
@@ -986,6 +1031,7 @@ mod tests {
             0,
             true,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &config,
         );
@@ -1003,6 +1049,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &config,
         );
@@ -1038,6 +1085,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(0.5),
         );
@@ -1082,6 +1130,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -1106,6 +1155,7 @@ mod tests {
             0,
             false,
             &notes,
+            &ERG_DENOM,
             &store.storage,
             &collateral_config(1.0),
         );
@@ -1255,6 +1305,107 @@ mod tests {
         assert!(
             !resolved.acceptable(&relaxed_env()),
             "a per-holder reject must win over a permissive global default"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Denomination scoping (finding #4): one reserve backs one currency, so
+    // amounts in other currencies must not enter the ratio or the FIFO rank.
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn token_denominated_debt_does_not_affect_erg_verdict() {
+        let store = test_storage();
+        // ERG book: C=10_000, redeemer collects 1_000, holder A collects 5_000.
+        // Pre ratio 10_000/6_000 = 1.67, post 9_000/5_000 = 1.8: passes min 1.5.
+        let mut notes = vec![
+            test_note(REDEEMER, 1_000, 0, 100),
+            test_note(HOLDER_A, 5_000, 0, 200),
+        ];
+        // A same-issuer token note with a huge raw-unit balance used to be summed
+        // into the ERG debt, pushing all_pre_violated and vetoing an honest
+        // redemption (finding #4 fail-closed half). It must be ignored here.
+        notes.push(test_token_note(HOLDER_B, 900_000, 0, 50));
+
+        let result = check_redemption_policy_compliance(
+            &test_pubkey(ISSUER),
+            &test_pubkey(REDEEMER),
+            1_000,
+            10_000,
+            0,
+            false,
+            &notes,
+            &ERG_DENOM,
+            &store.storage,
+            &collateral_config(1.5),
+        );
+        assert!(
+            result.is_ok(),
+            "token-denominated debt must not veto an ERG redemption: {result:?}"
+        );
+    }
+
+    #[test]
+    fn erg_denominated_debt_does_not_affect_token_verdict() {
+        let store = test_storage();
+        // Token book: C=10_000 token units, redeemer 1_000, holder A 5_000:
+        // pre 1.67, post 1.8, passes min 1.5 *in token units*.
+        let mut notes = vec![
+            test_token_note(REDEEMER, 1_000, 0, 100),
+            test_token_note(HOLDER_A, 5_000, 0, 200),
+        ];
+        // The issuer's large ERG reserve/debt must be invisible to the token
+        // reserve's policy check (finding #4 fail-open half: it used to make
+        // over-redemption of the token reserve look safe).
+        notes.push(test_note(HOLDER_B, 900_000, 0, 50));
+
+        let result = check_redemption_policy_compliance(
+            &test_pubkey(ISSUER),
+            &test_pubkey(REDEEMER),
+            1_000,
+            10_000,
+            0,
+            false,
+            &notes,
+            &basis_store::DenomKey::Token(TOKEN_ID),
+            &store.storage,
+            &collateral_config(1.5),
+        );
+        assert!(
+            result.is_ok(),
+            "ERG-denominated debt must not contaminate a token redemption: {result:?}"
+        );
+    }
+
+    #[test]
+    fn fifo_ranking_is_within_denomination() {
+        let store = test_storage();
+        // Distressed ERG reserve: C=100 vs ERG debt 800 (ratio 0.125 < 1.5), so
+        // every ERG holder is already violated and FIFO applies. The oldest note
+        // OVERALL is a token note; it must not block the oldest ERG holder.
+        let notes = vec![
+            // Other currency: oldest overall (ts 50), not on this reserve's book.
+            test_token_note(HOLDER_B, 500, 0, 50),
+            // Redeemer holds the oldest ERG note (ts 100).
+            test_note(REDEEMER, 300, 0, 100),
+            test_note(HOLDER_A, 500, 0, 150),
+        ];
+
+        let result = check_redemption_policy_compliance(
+            &test_pubkey(ISSUER),
+            &test_pubkey(REDEEMER),
+            100,
+            100,
+            0,
+            false,
+            &notes,
+            &ERG_DENOM,
+            &store.storage,
+            &collateral_config(1.5),
+        );
+        assert!(
+            result.is_ok(),
+            "FIFO must rank only notes of the redeemed denomination: {result:?}"
         );
     }
 }

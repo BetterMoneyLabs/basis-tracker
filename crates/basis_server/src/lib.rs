@@ -58,6 +58,18 @@ pub struct AppState {
     // Tracker box ID is fetched from tracker_storage directly
 }
 
+/// Boxed acceptance-policy check for an exchange (finding #8). The store
+/// evaluates it against the pre-mutation state, atomically with the mutation;
+/// `Err(reason)` aborts the exchange. Newtype only so `TrackerCommand`'s
+/// `Debug` derive can print a placeholder for the opaque closure.
+pub struct ExchangeAcceptanceCheck(pub basis_store::ExchangeAcceptanceCheckFn);
+
+impl std::fmt::Debug for ExchangeAcceptanceCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExchangeAcceptanceCheck(..)")
+    }
+}
+
 // Commands that can be sent to the tracker thread
 #[derive(Debug)]
 #[allow(clippy::type_complexity)]
@@ -99,6 +111,12 @@ pub enum TrackerCommand {
     /// Atomic cross-denomination debt exchange (triage/novation,
     /// specs/ergo/multi_collateral_reserves.md §10). All four signatures were
     /// verified by the API layer; the store re-verifies them before mutating.
+    ///
+    /// `acceptance_check` is evaluated by the store against the pre-mutation
+    /// state, atomically with the mutation (finding #8): evaluating it in the
+    /// API handler would race concurrent note mutations. The closure carries
+    /// the predicate and the reserve-collateral snapshot; `Err(reason)` aborts
+    /// the exchange with `NoteError::AcceptancePolicy` and nothing is mutated.
     ExchangeNotes {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
@@ -111,6 +129,7 @@ pub enum TrackerCommand {
         recipient_from_signature: basis_store::Signature,
         issuer_to_signature: basis_store::Signature,
         recipient_to_signature: basis_store::Signature,
+        acceptance_check: Option<ExchangeAcceptanceCheck>,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
     },
     InitiateRedemption {

@@ -22,6 +22,22 @@ mod pr16_security_remediation {
 
     /// Mock state whose tracker thread understands the commands these handlers issue.
     async fn mock_state(max_builds_per_pair_per_hour: u32) -> AppState {
+        mock_state_inner(max_builds_per_pair_per_hour, None).await
+    }
+
+    /// Like `mock_state`, but additionally serves a token denomination in
+    /// `ergo.reserve_tokens` so `token:<id>` requests parse (finding #4 tests).
+    async fn mock_state_with_served_token(
+        max_builds_per_pair_per_hour: u32,
+        token_id_hex: &str,
+    ) -> AppState {
+        mock_state_inner(max_builds_per_pair_per_hour, Some(token_id_hex.to_string())).await
+    }
+
+    async fn mock_state_inner(
+        max_builds_per_pair_per_hour: u32,
+        served_token: Option<String>,
+    ) -> AppState {
         let (tx, mut rx) = mpsc::channel(100);
         let event_store = Arc::new(basis_server::store::EventStore::new().await.unwrap());
 
@@ -121,7 +137,21 @@ mod pr16_security_remediation {
                 tracker_nft_id: Some(
                     "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304".to_string(),
                 ),
-                reserve_tokens: Default::default(),
+                reserve_tokens: match served_token {
+                    Some(id) => {
+                        let mut tokens = std::collections::HashMap::new();
+                        tokens.insert(
+                            id,
+                            basis_server::config::ReserveTokenConfig {
+                                symbol: "TST".to_string(),
+                                decimals: 2,
+                                min_collateralization_ratio: Some(1.5),
+                            },
+                        );
+                        tokens
+                    }
+                    None => Default::default(),
+                },
                 tracker_public_key: Some(
                     "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33".to_string(),
                 ),
@@ -199,6 +229,32 @@ mod pr16_security_remediation {
             .unwrap();
     }
 
+    /// Add a token-collateral reserve owned by `owner_hex` to the in-memory tracker.
+    async fn add_token_reserve(
+        state: &AppState,
+        owner_hex: &str,
+        box_id: &str,
+        token_id_hex: &str,
+    ) {
+        let tracker = state.reserve_tracker.lock().await;
+        tracker
+            .update_reserve(basis_store::ExtendedReserveInfo {
+                base_info: basis_store::ReserveInfo {
+                    collateral_amount: 10_000,
+                    last_updated_height: 0,
+                    contract_address: "test".to_string(),
+                    tracker_nft_id: "test".to_string(),
+                    refund_initiation_height: 0,
+                    reserve_token_id: token_id_hex.to_string(),
+                },
+                total_debt: 0,
+                box_id: box_id.to_string(),
+                owner_pubkey: owner_hex.to_string(),
+                last_updated_timestamp: 0,
+            })
+            .unwrap();
+    }
+
     /// Store a note for (issuer, recipient) with cumulative debt 10_000 and a fixed timestamp.
     async fn add_note(state: &AppState) -> ([u8; 33], [u8; 33]) {
         let (secret, issuer) = generate_keypair();
@@ -210,6 +266,32 @@ mod pr16_security_remediation {
             &secret,
             &[0x42; 32],
             basis_store::DenomKey::Erg,
+        )
+        .unwrap();
+        state
+            .tx
+            .send(TrackerCommand::AddNote {
+                issuer_pubkey: issuer,
+                note,
+                response_tx: tokio::sync::oneshot::channel().0,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (issuer, recipient)
+    }
+
+    /// Like `add_note`, but stores a token-denominated note.
+    async fn add_token_note(state: &AppState, token_id: &[u8; 32]) -> ([u8; 33], [u8; 33]) {
+        let (secret, issuer) = generate_keypair();
+        let (_, recipient) = generate_keypair();
+        let note = IouNote::create_and_sign(
+            recipient,
+            NOTE_TOTAL_DEBT,
+            NOTE_TIMESTAMP,
+            &secret,
+            &[0x42; 32],
+            basis_store::DenomKey::Token(*token_id),
         )
         .unwrap();
         state
@@ -340,6 +422,111 @@ mod pr16_security_remediation {
             status,
             StatusCode::CONFLICT,
             "a single reserve must not trip the fail-closed check"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // #4: the acceptance policy is scoped to the note's denomination. An ERG
+    // reserve must never evaluate a token note (fail-open through a huge
+    // cross-currency collateral figure), and a missing reserve in the note's
+    // currency fails closed instead of silently skipping the check.
+    // ------------------------------------------------------------------
+
+    const TEST_TOKEN_ID: [u8; 32] = [0xab; 32];
+
+    #[tokio::test]
+    async fn tracker_signature_refuses_token_note_without_token_reserve() {
+        let token_hex = hex::encode(TEST_TOKEN_ID);
+        let state = mock_state_with_served_token(60, &token_hex).await;
+        let (issuer, recipient) = add_token_note(&state, &TEST_TOKEN_ID).await;
+        let issuer_hex = hex::encode(issuer);
+
+        // Only an ERG reserve exists; it must not stand in for the token's.
+        add_reserve(&state, &issuer_hex, "box_erg").await;
+
+        let (status, body) = request_tracker_signature(
+            axum::extract::State(state),
+            axum::extract::Json(TrackerSignatureRequest {
+                issuer_pubkey: issuer_hex,
+                recipient_pubkey: hex::encode(recipient),
+                total_debt: NOTE_TOTAL_DEBT,
+                timestamp: NOTE_TIMESTAMP,
+                emergency: false,
+
+                denomination: format!("token:{token_hex}"),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "body: {:?}", body);
+        assert!(body
+            .error
+            .clone()
+            .unwrap()
+            .contains(&format!("denomination token:{token_hex}")));
+    }
+
+    #[tokio::test]
+    async fn prepare_redemption_refuses_token_note_without_token_reserve() {
+        let token_hex = hex::encode(TEST_TOKEN_ID);
+        let state = mock_state_with_served_token(60, &token_hex).await;
+        let (issuer, recipient) = add_token_note(&state, &TEST_TOKEN_ID).await;
+        let issuer_hex = hex::encode(issuer);
+        add_reserve(&state, &issuer_hex, "box_erg").await;
+
+        let (status, body) = prepare_redemption(
+            axum::extract::State(state),
+            axum::extract::Json(RedemptionPreparationRequest {
+                issuer_pubkey: issuer_hex,
+                recipient_pubkey: hex::encode(recipient),
+                amount: 1_000,
+                timestamp: NOTE_TIMESTAMP,
+                emergency: false,
+
+                denomination: format!("token:{token_hex}"),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "body: {:?}", body);
+        assert!(body
+            .error
+            .clone()
+            .unwrap()
+            .contains(&format!("denomination token:{token_hex}")));
+    }
+
+    #[tokio::test]
+    async fn tracker_signature_with_token_reserve_passes_fail_closed_gate() {
+        let token_hex = hex::encode(TEST_TOKEN_ID);
+        let state = mock_state_with_served_token(60, &token_hex).await;
+        let (issuer, recipient) = add_token_note(&state, &TEST_TOKEN_ID).await;
+        let issuer_hex = hex::encode(issuer);
+
+        // With the token reserve tracked, the request must get PAST the
+        // fail-closed gate (it fails later, at the signing step, because no
+        // tracker secret key or reachable node is configured here).
+        add_token_reserve(&state, &issuer_hex, "box_tok", &token_hex).await;
+
+        let (status, body) = request_tracker_signature(
+            axum::extract::State(state),
+            axum::extract::Json(TrackerSignatureRequest {
+                issuer_pubkey: issuer_hex,
+                recipient_pubkey: hex::encode(recipient),
+                total_debt: NOTE_TOTAL_DEBT,
+                timestamp: NOTE_TIMESTAMP,
+                emergency: false,
+
+                denomination: format!("token:{token_hex}"),
+            }),
+        )
+        .await;
+
+        assert_ne!(
+            status,
+            StatusCode::CONFLICT,
+            "a token reserve must satisfy the fail-closed gate: {:?}",
+            body.error
         );
     }
 

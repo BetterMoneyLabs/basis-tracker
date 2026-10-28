@@ -1280,7 +1280,7 @@ mod contract_range_tests {
 /// trees, and journal-based restart rebuilds reproducing digests exactly.
 #[cfg(test)]
 mod multi_denomination_tests {
-    use crate::{DenomKey, IouNote, NoteError, TrackerStateManager};
+    use crate::{DenomKey, ExchangeAcceptanceView, IouNote, NoteError, TrackerStateManager};
     use secp256k1::{Secp256k1, SecretKey};
 
     const NFT: [u8; 32] = [0x42; 32];
@@ -1567,6 +1567,155 @@ mod multi_denomination_tests {
             ),
             Err(NoteError::InvalidExchange(_))
         ));
+    }
+
+    /// Finding #8: the exchange acceptance check sees the exact pre-mutation
+    /// state and a rejection aborts the exchange without mutating anything.
+    #[test]
+    fn exchange_acceptance_check_sees_premutation_state_and_rejection_aborts() {
+        let mut manager = TrackerStateManager::new_with_temp_storage();
+        let issuer_secret = [1u8; 32];
+        let recipient_secret = [3u8; 32];
+        let issuer = pubkey(&issuer_secret);
+        let recipient = pubkey(&recipient_secret);
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+            )
+            .unwrap();
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret,
+                    &recipient,
+                    50,
+                    1001,
+                    DenomKey::Token(TOKEN_A),
+                ),
+            )
+            .unwrap();
+
+        let ts = 2000u64;
+        let msg_from =
+            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
+        let msg_to = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &DenomKey::Token(TOKEN_A),
+            90,
+            ts,
+            &NFT,
+        );
+        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
+        };
+        let sigs = (
+            sign_as(&issuer_secret, &msg_from, &issuer),
+            sign_as(&recipient_secret, &msg_from, &recipient),
+            sign_as(&issuer_secret, &msg_to, &issuer),
+            sign_as(&recipient_secret, &msg_to, &recipient),
+        );
+
+        // The check must observe the exact pre-mutation state: the to-edge note
+        // as it exists now (50 TOKEN_A), the issuer's full note set, and the
+        // (empty) confirmation records.
+        type ObservedState = Option<(u64, u64, usize, usize)>;
+        let observed: std::sync::Arc<std::sync::Mutex<ObservedState>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        #[allow(clippy::type_complexity)]
+        let check = {
+            let observed = std::sync::Arc::clone(&observed);
+            Box::new(move |view: ExchangeAcceptanceView| {
+                let to = view
+                    .to_note
+                    .as_ref()
+                    .map(|n| (n.amount_collected, n.amount_redeemed));
+                *observed.lock().unwrap() = Some((
+                    to.map(|(c, _)| c).unwrap_or(0),
+                    to.map(|(_, r)| r).unwrap_or(0),
+                    view.issuer_notes.len(),
+                    view.confirmations.len(),
+                ));
+                Err("test rejection".to_string())
+            }) as Box<dyn FnOnce(ExchangeAcceptanceView) -> Result<(), String> + Send>
+        };
+
+        let result = manager.exchange_debt_checked(
+            &issuer,
+            &recipient,
+            &DenomKey::Erg,
+            30,
+            &DenomKey::Token(TOKEN_A),
+            40,
+            ts,
+            &sigs.0,
+            &sigs.1,
+            &sigs.2,
+            &sigs.3,
+            Some(check),
+        );
+        assert!(
+            matches!(&result, Err(NoteError::AcceptancePolicy(msg)) if msg.contains("test rejection")),
+            "expected a policy rejection, got {result:?}"
+        );
+
+        // Nothing moved.
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            50
+        );
+
+        let observed = observed.lock().unwrap().take().unwrap();
+        assert_eq!(
+            (observed.0, observed.1),
+            (50, 0),
+            "to-edge pre-mutation state"
+        );
+        assert_eq!(observed.2, 2, "issuer notes visible to the check");
+        assert_eq!(
+            observed.3, 2,
+            "one confirmation record per note is visible to the check"
+        );
+
+        // An accepting check lets the same (still validly signed) exchange through.
+        let result = manager.exchange_debt_checked(
+            &issuer,
+            &recipient,
+            &DenomKey::Erg,
+            30,
+            &DenomKey::Token(TOKEN_A),
+            40,
+            ts,
+            &sigs.0,
+            &sigs.1,
+            &sigs.2,
+            &sigs.3,
+            Some(Box::new(|_| Ok(()))),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            70
+        );
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            90
+        );
     }
 
     /// §7.4 restart-rebuild equality: notes and reserve trees survive a restart

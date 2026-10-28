@@ -877,6 +877,87 @@ mod tests {
         assert!(!pred.acceptable(&ctx));
     }
 
+    /// Finding #4: a proposed note must be evaluated against the issuer's reserve
+    /// of ITS currency, never the ERG reserve (and never vice versa).
+    #[test]
+    fn collateralization_predicate_resolves_reserve_by_denomination() {
+        use basis_store::{ReserveInfo, ReserveTracker};
+
+        fn issuer_key() -> [u8; 33] {
+            let mut key = [0u8; 33];
+            key[0] = 0x02;
+            key[1] = 1;
+            key
+        }
+
+        fn reserve(
+            collateral: u64,
+            reserve_token_id: &str,
+            box_id: &str,
+        ) -> basis_store::reserve_tracker::ExtendedReserveInfo {
+            basis_store::reserve_tracker::ExtendedReserveInfo {
+                base_info: ReserveInfo {
+                    collateral_amount: collateral,
+                    last_updated_height: 0,
+                    contract_address: "test".to_string(),
+                    tracker_nft_id: "test".to_string(),
+                    refund_initiation_height: 0,
+                    reserve_token_id: reserve_token_id.to_string(),
+                },
+                total_debt: 0,
+                box_id: box_id.to_string(),
+                owner_pubkey: {
+                    let key = issuer_key();
+                    hex::encode(key)
+                },
+                last_updated_timestamp: 0,
+            }
+        }
+
+        let token_id = [0xabu8; 32];
+        let token_denom = basis_store::DenomKey::Token(token_id);
+        let pred = CollateralizationPredicate::new("collat", 1.5);
+
+        // Issuer has only an ERG reserve (large collateral): a token-denominated
+        // note must not borrow that collateral — looking up (issuer, token)
+        // finds nothing and the predicate fails closed.
+        let tracker = ReserveTracker::new();
+        tracker
+            .update_reserve(reserve(1_000_000, "", "erg_box"))
+            .unwrap();
+        let token_ctx = PredicateContext {
+            issuer_pubkey: issuer_key(),
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(100),
+            denomination: token_denom.clone(),
+        };
+        assert!(
+            !pred.acceptable(&token_ctx),
+            "token note must not be evaluated against the issuer's ERG reserve"
+        );
+
+        // Issuer has only the token reserve: the token context must resolve it
+        // and evaluate the ratio in token units (200/100 = 2.0 >= 1.5).
+        let tracker = ReserveTracker::new();
+        tracker
+            .update_reserve(reserve(200, &hex::encode(token_id), "token_box"))
+            .unwrap();
+        let ok_ctx = PredicateContext {
+            issuer_pubkey: issuer_key(),
+            recipient_pubkey: [0u8; 33],
+            total_debt: 100,
+            reserve_tracker: Some(tracker),
+            issuer_gross_debt: Some(100),
+            denomination: token_denom,
+        };
+        assert!(
+            pred.acceptable(&ok_ctx),
+            "token note must be evaluated against the token reserve"
+        );
+    }
+
     #[test]
     fn test_no_pending_refund_clone() {
         let pred = NoPendingRefundPredicate::new("no_refund");

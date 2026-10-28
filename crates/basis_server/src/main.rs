@@ -362,9 +362,12 @@ async fn main() {
                     recipient_from_signature,
                     issuer_to_signature,
                     recipient_to_signature,
+                    acceptance_check,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.exchange_debt(
+                    // The acceptance check runs inside the store against the
+                    // pre-mutation state, atomically with the mutation (finding #8).
+                    let result = redemption_manager.tracker.exchange_debt_checked(
                         &issuer_pubkey,
                         &recipient_pubkey,
                         &from_denomination,
@@ -376,6 +379,7 @@ async fn main() {
                         &recipient_from_signature,
                         &issuer_to_signature,
                         &recipient_to_signature,
+                        acceptance_check.map(|check| check.0),
                     );
 
                     // Keep the shared digest in sync so the tracker box updater

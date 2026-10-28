@@ -14,7 +14,7 @@ use crate::{
         TrackerEvent, TrackerSignatureRequest, TrackerSignatureResponse, TrackerStateResponse,
         UploadPolicyRequest, UploadPolicyResponse,
     },
-    AppState, TrackerCommand,
+    AppState, ExchangeAcceptanceCheck, TrackerCommand,
 };
 use basis_store::{IouNote, NoteError, PubKey, Signature};
 use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
@@ -395,6 +395,7 @@ pub async fn create_note(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -587,36 +588,56 @@ pub async fn exchange_notes(
         }
     };
 
-    // Acceptance policy re-evaluated in the TARGET denomination: moving liability
-    // into a denomination with no (or an under-collateralized) reserve is rejected.
-    if let Some(predicate) = &state.acceptance_predicate {
-        let reserve_tracker = state.reserve_tracker.lock().await.clone();
-        let issuer_gross_debt = load_issuer_gross_debt(
-            &state,
-            &issuer_pubkey,
-            &recipient_pubkey,
-            to_new_total,
-            &to_denomination,
-        )
-        .await;
-        let ctx = crate::acceptance::PredicateContext {
-            issuer_pubkey,
-            recipient_pubkey,
-            total_debt: to_new_total,
-            reserve_tracker: Some(reserve_tracker),
-            issuer_gross_debt,
-            denomination: to_denomination,
-        };
-        if !predicate.acceptable(&ctx) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(format!(
-                    "Exchange rejected by acceptance policy '{}' in the target denomination",
-                    predicate.name()
-                ))),
-            );
+    // Acceptance policy for the TARGET edge is evaluated inside the tracker
+    // thread against the pre-mutation state, atomically with the mutation
+    // (finding #8): evaluating it here would race concurrent note mutations —
+    // two exchanges could both pass against the same snapshot and together
+    // push the to-edge above the policy limit. The closure carries the
+    // predicate and the reserve-collateral snapshot (the same request-time
+    // collateral view the other endpoints check against); the store supplies
+    // the pre-mutation note state and aborts the exchange on rejection.
+    let acceptance_check = match &state.acceptance_predicate {
+        Some(predicate) => {
+            let reserve_tracker = state.reserve_tracker.lock().await.clone();
+            let predicate = std::sync::Arc::clone(predicate);
+            Some(ExchangeAcceptanceCheck(Box::new(
+                move |view: basis_store::ExchangeAcceptanceView| -> Result<(), String> {
+                    let to_new_total = view
+                        .to_note
+                        .as_ref()
+                        .map(|n| n.amount_collected)
+                        .unwrap_or(0)
+                        .checked_add(payload.to_amount)
+                        .ok_or_else(|| "to_amount overflows the to-edge total".to_string())?;
+                    let issuer_gross_debt = compute_issuer_gross_debt(
+                        &view.issuer_notes,
+                        &view.confirmations,
+                        &issuer_pubkey,
+                        &recipient_pubkey,
+                        to_new_total,
+                        &to_denomination,
+                    );
+                    let ctx = crate::acceptance::PredicateContext {
+                        issuer_pubkey,
+                        recipient_pubkey,
+                        total_debt: to_new_total,
+                        reserve_tracker: Some(reserve_tracker),
+                        issuer_gross_debt,
+                        denomination: to_denomination,
+                    };
+                    if predicate.acceptable(&ctx) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "rejected by acceptance policy '{}' in the target denomination",
+                            predicate.name()
+                        ))
+                    }
+                },
+            )))
         }
-    }
+        None => None,
+    };
 
     // Send the exchange to the tracker thread (it re-verifies all four signatures).
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -634,6 +655,7 @@ pub async fn exchange_notes(
             recipient_from_signature,
             issuer_to_signature,
             recipient_to_signature,
+            acceptance_check,
             response_tx,
         })
         .await
@@ -818,6 +840,7 @@ pub async fn get_notes_by_issuer(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -947,6 +970,7 @@ pub async fn get_notes_by_recipient(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -1139,6 +1163,7 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -1252,6 +1277,7 @@ pub async fn get_all_notes(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -1280,6 +1306,50 @@ pub async fn get_all_notes(
 /// state is not reconstructed on reorgs, so subtracting redeemed amounts could
 /// make a collateral check fail open. Returns `None` — deliberate fail-closed
 /// input for collateral predicates — when the tracker snapshot is unavailable.
+/// Pure core of [`load_issuer_gross_debt`]: the issuer's gross debt in
+/// `denomination`, taking the maximum of each edge's stored, confirmed and
+/// pending totals, with the candidate (recipient, total) edge replaced or
+/// added. Shared by the API handlers (which fetch notes and confirmations via
+/// tracker commands) and the exchange acceptance check (which receives the
+/// pre-mutation state from the tracker thread, finding #8).
+fn compute_issuer_gross_debt(
+    notes: &[basis_store::IouNote],
+    confirmations: &std::collections::HashMap<[u8; 32], basis_store::NoteConfirmation>,
+    issuer_pubkey: &PubKey,
+    candidate_recipient: &PubKey,
+    candidate_total_debt: u64,
+    denomination: &basis_store::DenomKey,
+) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut candidate_edge_replaced = false;
+    for note in notes {
+        // Liabilities are per denomination: a SigUSD reserve backs SigUSD debt only.
+        if &note.denomination != denomination {
+            continue;
+        }
+        let mut edge = note.amount_collected;
+        let key =
+            basis_store::NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, denomination);
+        if let Some(conf) = confirmations.get(&key.key_hash) {
+            if let Some(confirmed) = conf.confirmed_total_debt {
+                edge = edge.max(confirmed);
+            }
+            if let Some(pending) = conf.pending_total_debt {
+                edge = edge.max(pending);
+            }
+        }
+        if note.recipient_pubkey == *candidate_recipient {
+            edge = edge.max(candidate_total_debt);
+            candidate_edge_replaced = true;
+        }
+        total = total.checked_add(edge)?;
+    }
+    if !candidate_edge_replaced {
+        total = total.checked_add(candidate_total_debt)?;
+    }
+    Some(total)
+}
+
 async fn load_issuer_gross_debt(
     state: &AppState,
     issuer_pubkey: &PubKey,
@@ -1308,34 +1378,14 @@ async fn load_issuer_gross_debt(
         .ok()?;
     let confirmations = conf_rx.await.ok()?;
 
-    let mut total: u64 = 0;
-    let mut candidate_edge_replaced = false;
-    for note in &notes {
-        // Liabilities are per denomination: a SigUSD reserve backs SigUSD debt only.
-        if &note.denomination != denomination {
-            continue;
-        }
-        let mut edge = note.amount_collected;
-        let key =
-            basis_store::NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, denomination);
-        if let Some(conf) = confirmations.get(&key.key_hash) {
-            if let Some(confirmed) = conf.confirmed_total_debt {
-                edge = edge.max(confirmed);
-            }
-            if let Some(pending) = conf.pending_total_debt {
-                edge = edge.max(pending);
-            }
-        }
-        if note.recipient_pubkey == *candidate_recipient {
-            edge = edge.max(candidate_total_debt);
-            candidate_edge_replaced = true;
-        }
-        total = total.checked_add(edge)?;
-    }
-    if !candidate_edge_replaced {
-        total = total.checked_add(candidate_total_debt)?;
-    }
-    Some(total)
+    compute_issuer_gross_debt(
+        &notes,
+        &confirmations,
+        issuer_pubkey,
+        candidate_recipient,
+        candidate_total_debt,
+        denomination,
+    )
 }
 
 /// Check if a note would be accepted by the server's acceptance policy
@@ -1475,7 +1525,11 @@ pub async fn check_acceptance(
                                 total_debt: payload.total_debt,
                                 reserve_tracker: Some(reserve_tracker),
                                 issuer_gross_debt,
-                                denomination: basis_store::DenomKey::Erg,
+
+                                // Collateralization is per denomination: the reserve
+                                // and the liability snapshot must both belong to the
+                                // proposed note's currency.
+                                denomination,
                             };
 
                             let acceptable = predicate.acceptable(&ctx);
@@ -1549,7 +1603,10 @@ pub async fn check_acceptance(
                     total_debt: payload.total_debt,
                     reserve_tracker: Some(reserve_tracker),
                     issuer_gross_debt,
-                    denomination: basis_store::DenomKey::Erg,
+
+                    // Same rule as the per-recipient branch above: evaluate the
+                    // proposed note's currency, never ERG by default.
+                    denomination,
                 };
 
                 let acceptable = predicate.acceptable(&ctx);
@@ -1598,7 +1655,10 @@ pub async fn check_acceptance(
                     total_debt: payload.total_debt,
                     reserve_tracker: Some(reserve_tracker),
                     issuer_gross_debt,
-                    denomination: basis_store::DenomKey::Erg,
+
+                    // Same rule as the per-recipient branch above: evaluate the
+                    // proposed note's currency, never ERG by default.
+                    denomination,
                 };
                 let acceptable = predicate.acceptable(&ctx);
                 let reason = if acceptable {
@@ -2441,6 +2501,7 @@ pub async fn initiate_redemption(
                         0,
                         reserve_refund_initiation_height > 0,
                         &notes,
+                        &denomination,
                         &state.policy_storage,
                         &state.config.acceptance,
                     )
@@ -3371,38 +3432,31 @@ pub(crate) async fn ensure_single_issuer_reserve(
 /// Find the issuer's tracked reserve collateral for acceptance-policy checks.
 ///
 /// Returns `(collateral_amount, refund_initiation_height)` of the issuer's
-/// largest-collateral tracked reserve, or `None` when the scanner has no reserve
-/// for the issuer. Handles the double-hex-encoded owner keys that may be present
-/// in storage.
+/// tracked reserve **in `denomination`** — the note's currency — or `None` when
+/// there is no tracked reserve of that currency. Collateral in other currencies
+/// is never consulted: nanoERG and token units are not comparable numbers, so a
+/// cross-currency `max` would fake acceptance ratios.
+///
+/// Reads the same in-memory tracker as `ensure_single_issuer_reserve` and the
+/// acceptance predicates (not the scanner history DB, which keeps spent
+/// reserves): this is the same "one reserve per (owner, denomination)" view the
+/// redemption flow is gated on. Callers resolve the note's denomination and call
+/// `ensure_single_issuer_reserve` first, so at most one reserve matches; the max
+/// is a deterministic tie-break should a new caller skip that precondition.
 async fn find_issuer_reserve_collateral(
     state: &AppState,
     issuer_pubkey_hex: &str,
+    denomination: &basis_store::DenomKey,
 ) -> Option<(u64, u64)> {
-    let scanner = state.ergo_scanner.lock().await;
-    let all_reserves = match scanner.reserve_storage().get_all_reserves() {
-        Ok(reserves) => reserves,
-        Err(e) => {
-            tracing::error!("Failed to read reserves from database: {:?}", e);
-            return None;
-        }
-    };
-    drop(scanner);
-
     let normalized_issuer = basis_store::normalize_public_key(issuer_pubkey_hex);
+    let tracker = state.reserve_tracker.lock().await;
 
-    all_reserves
-        .iter()
+    tracker
+        .get_all_reserves()
+        .into_iter()
         .filter(|reserve| {
-            // The database might store the owner key double-encoded (hex of ASCII hex).
-            let actual_owner_key = if let Ok(decoded_bytes) = hex::decode(&reserve.owner_pubkey) {
-                match String::from_utf8(decoded_bytes) {
-                    Ok(s) if s.chars().all(|c| c.is_ascii_hexdigit()) => s,
-                    _ => reserve.owner_pubkey.clone(),
-                }
-            } else {
-                reserve.owner_pubkey.clone()
-            };
-            basis_store::normalize_public_key(&actual_owner_key) == normalized_issuer
+            basis_store::normalize_public_key(&reserve.owner_pubkey) == normalized_issuer
+                && reserve.denomination().as_ref() == Some(denomination)
         })
         .map(|reserve| {
             (
@@ -3412,7 +3466,6 @@ async fn find_issuer_reserve_collateral(
         })
         .max_by_key(|(collateral, _)| *collateral)
 }
-
 /// Look up the tracker's stored note for an (issuer, recipient) pair.
 ///
 /// SECURITY (PR #14 S4): the signing endpoints must sign STORED state, never values supplied by the
@@ -3643,7 +3696,7 @@ pub async fn request_tracker_signature(
             }
         };
 
-        match find_issuer_reserve_collateral(&state, &payload.issuer_pubkey).await {
+        match find_issuer_reserve_collateral(&state, &payload.issuer_pubkey, &denomination).await {
             Some((reserve_collateral, reserve_refund_height)) => {
                 // The signature attests the full debt, so check the worst case:
                 // redemption of the note's entire outstanding amount. The miner
@@ -3658,6 +3711,7 @@ pub async fn request_tracker_signature(
                         0,
                         reserve_refund_height > 0,
                         &notes,
+                        &denomination,
                         &state.policy_storage,
                         &state.config.acceptance,
                     )
@@ -3684,9 +3738,18 @@ pub async fn request_tracker_signature(
                 }
             }
             None => {
-                tracing::warn!(
-                    "Skipping acceptance-policy check for tracker signature: no tracked reserve for issuer {}",
-                    payload.issuer_pubkey
+                // Fail closed (finding #4): with no tracked reserve in the note's
+                // currency the debt is unbacked and the policy cannot honestly pass.
+                // Skipping here would let the tracker co-sign redemptions that
+                // /redeem and /redemption/build would refuse.
+                return (
+                    StatusCode::CONFLICT,
+                    Json(crate::models::error_response(format!(
+                        "No tracked reserve found for issuer {} in denomination {}; \
+                         refusing to sign a redemption the acceptance policy cannot evaluate",
+                        payload.issuer_pubkey,
+                        denomination.denomination_id()
+                    ))),
                 );
             }
         }
@@ -4300,7 +4363,7 @@ pub async fn prepare_redemption(
             }
         };
 
-        match find_issuer_reserve_collateral(&state, &payload.issuer_pubkey).await {
+        match find_issuer_reserve_collateral(&state, &payload.issuer_pubkey, &denomination).await {
             Some((reserve_collateral, reserve_refund_height)) => {
                 // The miner fee is paid by explicit fee inputs, not deducted from
                 // the reserve output (fee = 0 here).
@@ -4313,6 +4376,7 @@ pub async fn prepare_redemption(
                         0,
                         reserve_refund_height > 0,
                         &notes,
+                        &denomination,
                         &state.policy_storage,
                         &state.config.acceptance,
                     )
@@ -4339,9 +4403,16 @@ pub async fn prepare_redemption(
                 }
             }
             None => {
-                tracing::warn!(
-                    "Skipping acceptance-policy check for redemption preparation: no tracked reserve for issuer {}",
-                    payload.issuer_pubkey
+                // Fail closed (finding #4): no reserve in the note's currency means
+                // the redemption cannot settle and the policy cannot honestly pass.
+                return (
+                    StatusCode::CONFLICT,
+                    Json(crate::models::error_response(format!(
+                        "No tracked reserve found for issuer {} in denomination {}; \
+                         refusing to prepare a redemption the acceptance policy cannot evaluate",
+                        payload.issuer_pubkey,
+                        denomination.denomination_id()
+                    ))),
                 );
             }
         }

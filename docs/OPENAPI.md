@@ -170,7 +170,7 @@ configured Ergo node wallet.
 
 ### Acceptance
 
-- `POST /acceptance/check` - Check whether a note would be accepted by the server's policy
+- `POST /acceptance/check` - Check whether a note would be accepted by the server's policy (collateralization is evaluated per denomination: against the issuer's tracked reserve of the note's currency)
 - `POST /acceptance/policy` - Upload a signed per-recipient acceptance policy
 - `GET /acceptance/policy/{pubkey}` - Get a recipient's uploaded acceptance policy
 
@@ -363,8 +363,11 @@ curl -X POST http://localhost:3048/tracker/signature \
 
 The tracker always signs the stored note's cumulative `total_debt` and payment
 `timestamp`; the request fields of the same names are legacy and ignored. The
-acceptance policy is enforced for non-emergency requests before signing, and
-the endpoint returns 404 when no note is stored for the issuer/recipient pair.
+acceptance policy is enforced for non-emergency requests before signing — it is
+evaluated against the issuer's tracked reserve of the note's denomination (409
+when that reserve is missing or not unique; a reserve of another currency is
+never consulted) — and the endpoint returns 404 when no note is stored for the
+issuer/recipient pair.
 
 ### Create Reserve Payload
 

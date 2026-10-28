@@ -159,7 +159,8 @@ class BasisTokenSpec extends PropSpec with Matchers with ScalaCheckDrivenPropert
   // ========== HELPER METHODS - CRYPTO & TREES ==========
 
   // Debt-tree key, domain-separated per denomination
-  // (specs/ergo/multi_collateral_reserves.md): blake2b256(owner ‖ receiver ‖ 0x01 ‖ tokenId).
+  // (specs/ergo/multi_collateral_reserves.md): blake2b256(owner ‖ receiver ‖ tokenId)
+  // — the raw 32-byte token id, no separator or tag byte.
   // Used for the tracker debt tree (totalDebt lookup) and the signed message.
   def mkKey(ownerKey: GroupElement, receiverKey: GroupElement): Array[Byte] =
     Blake2b256(ownerKey.getEncoded.toArray ++ receiverKey.getEncoded.toArray ++ reserveTokenIdBytes)

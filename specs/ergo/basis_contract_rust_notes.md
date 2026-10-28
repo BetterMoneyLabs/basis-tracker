@@ -25,8 +25,9 @@ The contract uses TWO separate AVL trees:
 - **Purpose**: Commits to off-chain debt state
 - **Key**: the denomination-derived debt key (32 bytes):
   `Blake2b256(payer_pubkey || payee_pubkey)` for ERG, or
-  `Blake2b256(payer_pubkey || payee_pubkey || 0x01 || token_id)` for a token
-  denomination (`contract/basis-token.es`; see specs/ergo/multi_collateral_reserves.md).
+  `Blake2b256(payer_pubkey || payee_pubkey || token_id)` for a token
+  denomination — the raw 32-byte token id is appended with no separator or tag
+  byte (`contract/basis-token.es`; see specs/ergo/multi_collateral_reserves.md).
   One tracker tree holds an independent debt per (payer, payee, denomination).
 - **Value**: `total_debt` as Long (8 bytes BE)
 - **Flags**: InsertOnly (0x01)

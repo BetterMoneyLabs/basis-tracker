@@ -324,6 +324,11 @@ pub enum NoteError {
     /// A cross-denomination exchange request was malformed (same denominations,
     /// zero amounts, or it would push an edge below its already-redeemed amount).
     InvalidExchange(String),
+    /// The exchange was rejected by the recipient's acceptance policy in the
+    /// target denomination. Evaluated inside the tracker thread against the
+    /// pre-mutation state (finding #8), so a rejection is atomic with the
+    /// would-be mutation.
+    AcceptancePolicy(String),
     /// The note is bound to a different tracker NFT ID than this tracker's.
     /// Accepting it would pin debt that can never redeem against this tracker's
     /// reserves (issue #15 C3).
@@ -339,6 +344,26 @@ impl From<secp256k1::Error> for NoteError {
         NoteError::InvalidSignature
     }
 }
+
+/// Pre-mutation tracker state handed to an exchange's acceptance-policy check
+/// (finding #8). The check must run atomically with the mutation, so the
+/// tracker thread supplies the exact state the exchange is about to change
+/// instead of the API handler racing concurrent commands with a stale snapshot.
+pub struct ExchangeAcceptanceView {
+    /// The to-edge note before the exchange (`None` when the edge is new).
+    pub to_note: Option<IouNote>,
+    /// All of the issuer's notes before the exchange.
+    pub issuer_notes: Vec<IouNote>,
+    /// Confirmation records (committed/pending cumulative totals) before the
+    /// exchange, keyed by note-key hash.
+    pub confirmations: std::collections::HashMap<[u8; 32], NoteConfirmation>,
+}
+
+/// Boxed acceptance-policy check for an exchange (see
+/// [`TrackerStateManager::exchange_debt_checked`]). `Err(reason)` aborts the
+/// exchange without mutating.
+pub type ExchangeAcceptanceCheckFn =
+    Box<dyn FnOnce(ExchangeAcceptanceView) -> Result<(), String> + Send>;
 
 /// Tracker state manager with persistent AVL tree
 pub struct TrackerStateManager {
@@ -1245,6 +1270,67 @@ impl TrackerStateManager {
 
         self.update_state();
         Ok(())
+    }
+
+    /// Evaluate an exchange's acceptance-policy check against the pre-mutation
+    /// state and, on success, perform the exchange — atomically.
+    ///
+    /// Finding #8: the API layer must not evaluate the acceptance policy itself.
+    /// Reading the notes there and mutating here leaves a window in which a
+    /// concurrent exchange (or note creation) lands, so two requests can both
+    /// pass against the same snapshot and together push the to-edge above the
+    /// policy limit. Tracker commands are processed sequentially on one thread,
+    /// so evaluating the check here — against the state this very call reads —
+    /// and mutating immediately after closes that window.
+    ///
+    /// The closure carries the predicate and the reserve-collateral snapshot
+    /// captured at request time (collateral can still move concurrently via the
+    /// scanner, as with every other endpoint); the note state it receives is
+    /// authoritative. `Err(reason)` aborts the exchange with
+    /// [`NoteError::AcceptancePolicy`] and nothing is mutated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn exchange_debt_checked(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        from_denomination: &DenomKey,
+        from_amount: u64,
+        to_denomination: &DenomKey,
+        to_amount: u64,
+        timestamp: u64,
+        issuer_from_signature: &Signature,
+        recipient_from_signature: &Signature,
+        issuer_to_signature: &Signature,
+        recipient_to_signature: &Signature,
+        acceptance_check: Option<ExchangeAcceptanceCheckFn>,
+    ) -> Result<(), NoteError> {
+        if let Some(check) = acceptance_check {
+            let view = ExchangeAcceptanceView {
+                to_note: self.get_note_optional(
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    to_denomination,
+                )?,
+                issuer_notes: self.get_issuer_notes(issuer_pubkey)?,
+                confirmations: self.all_confirmations(),
+            };
+            if let Err(reason) = check(view) {
+                return Err(NoteError::AcceptancePolicy(reason));
+            }
+        }
+        self.exchange_debt(
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denomination,
+            from_amount,
+            to_denomination,
+            to_amount,
+            timestamp,
+            issuer_from_signature,
+            recipient_from_signature,
+            issuer_to_signature,
+            recipient_to_signature,
+        )
     }
 
     /// Record that `amount_redeemed` was redeemed against an existing note.

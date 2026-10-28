@@ -586,6 +586,24 @@ pub async fn redeem_note(
         ));
     }
 
+    // The stored note's own denomination drives the whole redemption: with
+    // multi-denomination trackers, sending an empty denomination lets the server
+    // fall back to the pair's single-note denomination or ERG, which can select
+    // the wrong reserve for token-denominated debts.
+    let denom = crate::commands::transaction::note_denom(&note);
+    if let Some(d) = denomination {
+        let hint = basis_store::DenomKey::parse(d)
+            .map_err(|e| anyhow::anyhow!("invalid denomination '{}': {}", d, e))?;
+        if hint != denom {
+            return Err(anyhow::anyhow!(
+                "denomination mismatch: --denomination {} but the stored note is {}",
+                hint.denomination_id(),
+                denom.denomination_id()
+            ));
+        }
+    }
+    let denom_id = denom.denomination_id();
+
     let new_already_redeemed = note.amount_redeemed.saturating_add(amount);
 
     if server_sign {
@@ -607,7 +625,7 @@ pub async fn redeem_note(
             emergency: false,
             tracker_signature: None, // Server will generate tracker signature
 
-            denomination: String::new(),
+            denomination: denom_id.clone(),
         };
 
         let response = client.initiate_redemption(redeem_request).await?;
@@ -624,7 +642,7 @@ pub async fn redeem_note(
             redeemed_amount: amount,
             new_already_redeemed: Some(new_already_redeemed),
 
-            denomination: String::new(),
+            denomination: denom_id,
         };
 
         client.complete_redemption(complete_request).await?;
@@ -653,6 +671,7 @@ pub async fn redeem_note(
             None,  // change_address
             Some(recipient_secret),
             None, // fee_secret
+            denomination,
         )
         .await?;
 
