@@ -255,7 +255,7 @@
 
       val ownerKeyBytes = ownerKey.getEncoded // Reserve owner's public key (from R4 register) bytes
 
-0      // Debt record key, derived from the denomination so one tracker box can
+      // Debt record key, derived from the denomination so one tracker box can
       // hold ERG, SigUSD, rsBTC, ... debt in a single AVL tree without collisions
       // (specs/ergo/multi_collateral_reserves.md):
       //   debtKey = blake2b256(ownerKey || receiverKey || tokenId)
