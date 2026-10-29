@@ -25,6 +25,7 @@ fn test_app(auth_config: AuthConfig) -> Router {
         .route("/", get(protected_handler))
         .route("/notes", get(protected_handler).post(protected_handler))
         .route("/acceptance/policy", post(protected_handler))
+        .route("/redeem/complete", post(protected_handler))
         .layer(axum::middleware::from_fn(authorization_middleware))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
@@ -426,7 +427,7 @@ async fn api_key_without_admin_key_keeps_admin_role() {
 #[tokio::test]
 async fn api_key_with_admin_key_set_grants_only_write() {
     // With a separate admin_api_key configured, the shared api_key is Write-only:
-    // readable routes pass, operator-only (Admin) routes are rejected with 403.
+    // readable and Write routes pass, the operator-only (Admin) route is rejected with 403.
     let mut config = AuthConfig::default();
     config.mode = AuthMode::ApiKey;
     config.api_key = Some("shared-key".to_string());
@@ -451,10 +452,25 @@ async fn api_key_with_admin_key_set_grants_only_write() {
         .unwrap();
     assert_eq!(body.as_ref(), b"role=Write");
 
+    // A recipient-signed policy upload is an ordinary Write operation.
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/acceptance/policy")
+                .method("POST")
+                .header("Authorization", "Bearer shared-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/redeem/complete")
                 .method("POST")
                 .header("Authorization", "Bearer shared-key")
                 .body(Body::empty())

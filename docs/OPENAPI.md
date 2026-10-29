@@ -70,8 +70,8 @@ When authentication is enabled, routes require the following roles:
 | Role | Access |
 |------|--------|
 | `Read` | All `GET` endpoints plus read-only `POST` endpoints (`/notes/state`, `/acceptance/check`) |
-| `Write` | `Read` access plus note creation, redemption, and `/tracker/signature` |
-| `Admin` | `Write` access plus `/reserves/create` and `/acceptance/policy` |
+| `Write` | `Read` access plus note creation, redemption, `/tracker/signature`, `/reserves/create` and `/acceptance/policy` |
+| `Admin` | `Write` access plus `/redeem/complete` |
 
 ### Authentication
 

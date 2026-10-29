@@ -368,12 +368,11 @@ where `BODY_HASH` is the lowercase hex SHA-256 of the raw request body. The serv
 Role-based access control assigns each request a role:
 
 - `Read`: `GET` endpoints and read-only `POST` queries (`/notes/state`, `/acceptance/check`).
-- `Write`: state-changing endpoints such as `/notes`, `/redeem`, `/redemption/prepare`, `/tracker/signature`.
-- `Admin`: reserve creation (`/reserves/create`), redemption completion (`/redeem/complete`) and policy management (`/acceptance/policy`).
+- `Write`: state-changing endpoints such as `/notes`, `/redeem`, `/redemption/prepare`, `/tracker/signature`, plus reserve payload creation (`/reserves/create`) and recipient-signed policy uploads (`/acceptance/policy`).
+- `Admin`: redemption completion (`/redeem/complete`).
 
-In `none` mode every request receives `Admin`. In `api_key` mode the shared key receives
-`Admin`, unless `admin_api_key` is configured — then `api_key` grants only `Write` and the
-admin key grants `Admin`. In `signature` mode the role is taken from the matching
+In `none` mode every request receives `Admin`. In `api_key` mode `admin_api_key` is required:
+`api_key` grants only `Write` and the admin key grants `Admin`. In `signature` mode the role is taken from the matching
 `authorized_clients` entry.
 
 TLS should be enabled (`tls_cert_path` / `tls_key_path`) whenever authentication is used in production, otherwise credentials and signatures travel in plaintext.

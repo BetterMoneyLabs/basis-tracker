@@ -32,10 +32,10 @@ mode = "none"
 # Shared API key for server-to-server / MCP clients when mode = "api_key".
 # The literal "change-me" is rejected at startup; use a strong random key.
 # api_key = "change-me"
-# Separate operator credential for Admin routes (/reserves/create, /acceptance/policy,
-# /redeem/complete). When set, `api_key` grants only Write access, so the key shared
-# with ordinary clients cannot drive operator-only endpoints. When unset, `api_key`
-# keeps its full Admin meaning (a startup warning is printed in that case).
+# Separate operator credential for Admin routes (/redeem/complete). Required when
+# mode = "api_key": `api_key` then grants only Write access, so the key shared with
+# ordinary clients cannot drive operator-only endpoints. The server refuses to start
+# without it, with the literal "change-me-admin", or with a value equal to api_key.
 # admin_api_key = "change-me-admin"
 # Escape hatch: allow authenticated operation over plain HTTP on a non-loopback bind.
 # Without TLS, API keys and signatures travel unencrypted. Leave false.
