@@ -17,6 +17,8 @@ pub mod redemption_blockchain_tests;
 #[cfg(test)]
 pub mod redemption_simple_tests;
 pub mod reserve_tracker;
+#[cfg(test)]
+mod review_regression_tests;
 pub mod scala_test_vectors;
 pub mod schnorr;
 pub mod schnorr_test_vectors;
