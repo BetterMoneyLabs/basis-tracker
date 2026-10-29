@@ -950,7 +950,10 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
         unsigned_tx: serde_json::Value,
     ) -> Result<serde_json::Value, TrackerBoxUpdaterError> {
-        info!("Signing unsigned transaction: {}", unsigned_tx);
+        info!(
+            "Signing unsigned transaction: {}",
+            redacted_sign_request(&unsigned_tx)
+        );
 
         let client = basis_store::http::bounded_client();
         let url = format!(
@@ -1224,6 +1227,17 @@ impl TrackerBoxUpdater {
     }
 }
 
+/// The `/wallet/transaction/sign` request without its `secrets` (the tracker's private key),
+/// for logging. The full request used to be logged at INFO on every update, which put the key
+/// that controls the tracker wallet, the tracker NFT box and tracker signatures into the logs (follow-up review N5).
+fn redacted_sign_request(request: &serde_json::Value) -> serde_json::Value {
+    let mut redacted = request.clone();
+    if let Some(object) = redacted.as_object_mut() {
+        object.remove("secrets");
+    }
+    redacted
+}
+
 /// Derive a P2PK change address from a compressed tracker public key.
 fn derive_change_address(tracker_pubkey: &[u8; 33]) -> Result<String, TrackerBoxUpdaterError> {
     use ergo_lib::ergo_chain_types::EcPoint;
@@ -1267,6 +1281,23 @@ fn change_address_to_ergo_tree(address_str: &str) -> Result<String, TrackerBoxUp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_request_is_logged_without_the_tracker_secret() {
+        let secret_hex = "5c".repeat(32);
+        let request = serde_json::json!({
+            "tx": { "inputs": [], "dataInputs": [], "outputs": [] },
+            "inputsRaw": [],
+            "dataInputsRaw": [],
+            "secrets": { "dlog": [secret_hex.clone()] }
+        });
+        let logged = redacted_sign_request(&request).to_string();
+        assert!(
+            !logged.contains(&secret_hex),
+            "secret leaked into: {logged}"
+        );
+        assert!(logged.contains("\"tx\""));
+    }
 
     #[test]
     fn test_confirmation_depth_current_tip() {
