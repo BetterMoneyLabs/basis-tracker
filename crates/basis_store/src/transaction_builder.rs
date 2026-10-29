@@ -586,14 +586,18 @@ impl RedemptionTransactionBuilder {
         format!("05{}", hex::encode(vlq))
     }
 
-    /// Serialize bytes as Coll[Byte] constant (prefix 0x0e + 1-byte length + data)
+    /// Serialize bytes as Coll[Byte] constant (prefix 0x0e + VLQ length + data).
+    ///
+    /// The length is VLQ-encoded like every other Ergo collection length. A fixed one-byte
+    /// length produced malformed constants from 128 bytes on, and the previous `assert!` on
+    /// 255 bytes panicked the tracker thread on ordinary tracker/reserve proofs (follow-up
+    /// review N3).
     fn serialize_ergo_coll_bytes(data: &[u8]) -> String {
-        assert!(
-            data.len() <= 255,
-            "Coll[Byte] length {} exceeds 255-byte prefix",
-            data.len()
-        );
-        format!("0e{:02x}{}", data.len(), hex::encode(data))
+        format!(
+            "0e{}{}",
+            hex::encode(basis_offchain::ergo_tx::vlq_encode(data.len())),
+            hex::encode(data)
+        )
     }
 
     /// Serialize a GroupElement (33-byte compressed pubkey) as Ergo constant (prefix 07)
@@ -1311,5 +1315,26 @@ mod tests {
             reserve_token_id
         );
         assert_eq!(recipient_assets[0]["amount"].as_u64().unwrap(), 250);
+    }
+
+    /// Follow-up review N3: context vars #5, #7 and #8 are AVL proofs that grow with the trees.
+    /// A tracker lookup proof passes 255 bytes at ~64 notes, where the old 1-byte length
+    /// `assert!` panicked the tracker thread; from 128 bytes the length byte was invalid VLQ.
+    #[test]
+    fn coll_bytes_constant_round_trips_for_proof_sized_values() {
+        use ergo_lib::ergotree_ir::mir::constant::{Constant, TryExtractFrom};
+        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+        use ergo_lib::ergotree_ir::types::stype::SType;
+
+        for len in [0usize, 65, 127, 128, 255, 256, 317, 1_000] {
+            let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let encoded = RedemptionTransactionBuilder::serialize_ergo_coll_bytes(&data);
+            let bytes = hex::decode(&encoded).unwrap();
+            let constant = Constant::sigma_parse_bytes(&bytes)
+                .unwrap_or_else(|e| panic!("len {len}: not a valid constant: {e:?}"));
+            assert_eq!(constant.tpe, SType::SColl(SType::SByte.into()), "len {len}");
+            let parsed = Vec::<u8>::try_extract_from(constant.v).unwrap();
+            assert_eq!(parsed, data, "len {len}");
+        }
     }
 }

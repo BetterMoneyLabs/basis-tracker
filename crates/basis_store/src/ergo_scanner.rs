@@ -74,7 +74,13 @@ use crate::{
 /// Page size for `POST /blockchain/box/unspent/byAddress`. The node defaults to
 /// 5 boxes (newest first) when no limit is given, which silently dropped older
 /// reserves from tracking (issue: scanner only saw 5 reserve boxes per address).
-const RESERVE_BOX_PAGE_LIMIT: u64 = 1000;
+///
+/// Each page is read through `read_json_capped` (2 MiB). A box can serialize to
+/// 4 KB and the node renders it as pretty-printed hex plus the P2S address, so
+/// a page must stay small enough that a full page of maximum-size boxes fits:
+/// with 1000 per page, a few hundred junk boxes at the reserve address stopped
+/// every scan for good (follow-up review N4).
+const RESERVE_BOX_PAGE_LIMIT: u64 = 100;
 
 #[derive(Error, Debug)]
 pub enum ScannerError {
@@ -1787,6 +1793,50 @@ mod tests {
                 box_id
             );
         }
+    }
+
+    /// Follow-up review N4: anyone can create maximum-size boxes at the reserve
+    /// address for ~0.0015 ERG each. A full page of them, rendered the way the
+    /// node returns indexed boxes, must still fit under the body cap, or every
+    /// scan fails from then on.
+    #[test]
+    fn full_page_of_maximum_size_boxes_fits_the_body_cap() {
+        let tree_hex = crate::contract_compiler::get_basis_token_reserve_ergo_tree_hex().unwrap();
+        let address = crate::contract_compiler::get_basis_token_reserve_contract_p2s().unwrap();
+        // Ergo caps a serialized box at 4096 bytes; let registers fill what the tree leaves.
+        let per_register = (4096 - tree_hex.len() / 2 - 100) / 6;
+        let register = || format!("0e{}", "ab".repeat(per_register));
+        let box_json = |i: usize| {
+            serde_json::json!({
+                "boxId": format!("{:064x}", i),
+                "transactionId": format!("{:064x}", i),
+                "blockId": format!("{:064x}", i),
+                "value": u64::MAX,
+                "index": 0,
+                "globalIndex": i,
+                "creationHeight": 1_900_000,
+                "settlementHeight": 1_900_000,
+                "inclusionHeight": 1_900_000,
+                "ergoTree": tree_hex,
+                "address": address,
+                "assets": [],
+                "additionalRegisters": {
+                    "R4": register(), "R5": register(), "R6": register(),
+                    "R7": register(), "R8": register(), "R9": register()
+                },
+                "spentTransactionId": null,
+                "spendingHeight": null
+            })
+        };
+        let page: Vec<_> = (0..RESERVE_BOX_PAGE_LIMIT as usize).map(box_json).collect();
+        let body = serde_json::to_string_pretty(&page).unwrap();
+        assert!(
+            body.len() <= crate::http::MAX_BODY_BYTES,
+            "a full page of {} maximum-size boxes is {} bytes, over the {} byte cap",
+            RESERVE_BOX_PAGE_LIMIT,
+            body.len(),
+            crate::http::MAX_BODY_BYTES
+        );
     }
 
     #[test]

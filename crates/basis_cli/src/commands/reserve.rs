@@ -141,7 +141,10 @@ pub async fn create_reserve(
     };
 
     // Call the API to create the reserve payload
-    let payload = client.create_reserve(request).await?;
+    let payload = client.create_reserve(request.clone()).await?;
+    // The tracker only builds the payload and whoever submits it pays what it says, so it must be
+    // the reserve requested above before it is shown, returned or submitted.
+    crate::verify::verify_reserve_payload(&request, &payload, None)?;
 
     let tx_id = if submit {
         let cfg = account_manager.config_manager.get_config();
@@ -154,6 +157,7 @@ pub async fn create_reserve(
         Some(crate::api::submit_reserve_to_node(
             node_url,
             cfg.node_api_key.as_deref(),
+            &request,
             &payload,
         )?)
     } else {

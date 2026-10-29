@@ -291,7 +291,11 @@ async fn main() {
 
         while let Some(cmd) = rx.blocking_recv() {
             tracing::debug!("Tracker thread received command: {:?}", cmd);
-            match cmd {
+            // A panic while handling one command must not end this loop: every endpoint that
+            // talks to the tracker would then report "tracker unavailable" until a restart
+            // (follow-up review N3). The panicking command's response sender is dropped, so
+            // only its caller sees an error.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cmd {
                 TrackerCommand::AddNote {
                     issuer_pubkey,
                     note,
@@ -563,6 +567,11 @@ async fn main() {
                         .reconcile_with_confirmed_digest(&digest, &box_id, height);
                     let _ = response_tx.send(result);
                 }
+            }));
+            if outcome.is_err() {
+                tracing::error!(
+                    "Tracker command panicked; dropped it and kept the tracker running"
+                );
             }
         }
     });

@@ -55,15 +55,19 @@ fn required_role(path: &str, method: &str) -> ClientRole {
 
     match method {
         "POST" => match path {
-            // Admin-only: reserve creation and policy management.
-            //
-            // `/redeem/complete` is Admin-only as well: it mutates tracker redemption state
-            // from caller-supplied values, so ordinary Write clients must not reach it
-            // (PR #16 B6). The removed `/reserves/submit` route fell through to the
-            // unknown-POST default below, which is also Admin.
-            "/reserves/create" | "/redeem/complete" | "/acceptance/policy" => ClientRole::Admin,
-            // Write: state-changing redemption and note operations.
-            "/notes"
+            // Admin-only: `/redeem/complete` mutates tracker redemption state from
+            // caller-supplied values, so ordinary Write clients must not reach it (PR #16 B6).
+            // The removed `/reserves/submit` route fell through to the unknown-POST default
+            // below, which is also Admin.
+            "/redeem/complete" => ClientRole::Admin,
+            // Write: state-changing redemption and note operations. `/reserves/create` only
+            // builds a payload the owner submits to their own node (PR #16 B4), and an
+            // `/acceptance/policy` upload is signed by the recipient it applies to, so both are
+            // ordinary client operations; with the admin key now mandatory in `api_key` mode,
+            // keeping them Admin would force operators to hand the admin key to every client.
+            "/reserves/create"
+            | "/acceptance/policy"
+            | "/notes"
             | "/redeem"
             | "/redemption/prepare"
             | "/redemption/build"
@@ -139,8 +143,9 @@ mod tests {
         );
         assert_eq!(
             required_role("/acceptance/policy", "POST"),
-            ClientRole::Admin
+            ClientRole::Write
         );
+        assert_eq!(required_role("/reserves/create", "POST"), ClientRole::Write);
         assert_eq!(required_role("/notes/state", "POST"), ClientRole::Read);
         assert_eq!(required_role("/acceptance/check", "POST"), ClientRole::Read);
     }

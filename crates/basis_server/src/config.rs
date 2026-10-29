@@ -105,11 +105,11 @@ pub struct AuthConfig {
     /// explicitly. Defaults to false, so the safe case is the default case.
     #[serde(default)]
     pub allow_anonymous_non_loopback: bool,
-    /// Separate operator credential for Admin routes (`/reserves/*`,
-    /// `/acceptance/policy`, `/redeem/complete`). When set, `api_key` only
-    /// grants `ClientRole::Write`, so the key shared with ordinary clients
-    /// cannot drive operator-only endpoints. When absent, `api_key` keeps its
-    /// previous full-Admin meaning.
+    /// Separate operator credential for Admin routes (`/redeem/complete`).
+    /// `api_key` then only grants `ClientRole::Write`, so the key shared with
+    /// ordinary clients cannot drive operator-only endpoints. Required in
+    /// `api_key` mode: `validate_startup` refuses to start without a distinct,
+    /// non-placeholder admin key.
     #[serde(default)]
     pub admin_api_key: Option<String>,
     /// Allow authenticated operation over plain HTTP on a non-loopback bind.
@@ -189,6 +189,10 @@ fn default_signature_timestamp_tolerance_ms() -> u64 {
 /// `api_key` mode with this value means the "secret" is public knowledge, so
 /// `validate_startup` refuses it.
 pub const PLACEHOLDER_API_KEY: &str = "change-me";
+
+/// Placeholder `admin_api_key` shipped (commented out) in `config/basis.toml.example`;
+/// `validate_startup` refuses it.
+pub const PLACEHOLDER_ADMIN_API_KEY: &str = "change-me-admin";
 
 /// Returns true when `host` refers to a loopback interface, i.e. the server is
 /// only reachable from the local machine. Used by the startup guard that
@@ -426,11 +430,31 @@ impl AppConfig {
     /// `Err` here is what keeps the old `auth.mode = "none"` + `host = "0.0.0.0"` default from
     /// shipping an open admin port.
     ///
-    /// With authentication enabled, two more combinations are refused: the placeholder API key
-    /// from `config/basis.toml.example` (a "secret" that is public knowledge), and plain HTTP on a
-    /// non-loopback bind (credentials and signatures would travel unencrypted). Each has an
-    /// explicit escape-hatch flag.
+    /// With authentication enabled, more combinations are refused: the placeholder API keys
+    /// from `config/basis.toml.example` (a "secret" that is public knowledge), `api_key` mode
+    /// without a distinct admin key, and plain HTTP on a non-loopback bind (credentials and
+    /// signatures would travel unencrypted; this one has an explicit escape-hatch flag).
+    ///
+    /// In every mode the configured reserve contract addresses must be the contracts this
+    /// build was compiled against.
     pub fn validate_startup(&self) -> Result<(), String> {
+        // The scanner counts every box at these addresses as collateral, so they must be the
+        // compiled contracts. A stale address, such as the pre-multi-token token script that
+        // reads ERG debt as token debt, would otherwise be accepted silently (follow-up review
+        // N11). ErgoTrees are compared, so testnet-encoded addresses work too.
+        check_reserve_contract_address(
+            "ergo.basis_reserve_contract_p2s",
+            &self.ergo.basis_reserve_contract_p2s,
+            basis_store::contract_compiler::get_basis_reserve_ergo_tree_hex(),
+        )?;
+        if !self.ergo.basis_token_reserve_contract_p2s.is_empty() {
+            check_reserve_contract_address(
+                "ergo.basis_token_reserve_contract_p2s",
+                &self.ergo.basis_token_reserve_contract_p2s,
+                basis_store::contract_compiler::get_basis_token_reserve_ergo_tree_hex(),
+            )?;
+        }
+
         if self.server.auth.mode == AuthMode::None {
             if !self.binds_loopback_only() && !self.server.auth.allow_anonymous_non_loopback {
                 return Err(format!(
@@ -455,12 +479,30 @@ impl AppConfig {
                     PLACEHOLDER_API_KEY
                 ));
             }
-            if self.server.auth.admin_api_key.is_none() {
-                tracing::warn!(
-                    "server.auth.admin_api_key is not set: the shared server.auth.api_key grants \
-                     Admin access, including operator-only routes (/reserves/*, \
-                     /acceptance/policy). Configure admin_api_key so the key shared with ordinary \
-                     clients only grants Write."
+            // Without a distinct admin key the key shared with every client is Admin, so any
+            // client can call /redeem/complete and mark any pair's debt as redeemed (PR #16 B6,
+            // follow-up review N7). Refuse instead of warning.
+            let admin_api_key = self.server.auth.admin_api_key.as_deref().unwrap_or("");
+            if admin_api_key.is_empty() {
+                return Err("refusing to start: auth.mode = \"api_key\" requires \
+                     server.auth.admin_api_key. Without it the key shared with ordinary clients \
+                     grants Admin, including /redeem/complete. Set a distinct, unguessable \
+                     admin_api_key."
+                    .to_string());
+            }
+            if admin_api_key == PLACEHOLDER_ADMIN_API_KEY {
+                return Err(format!(
+                    "refusing to start: server.auth.admin_api_key is the placeholder value {:?} \
+                     shipped in config/basis.toml.example, which is public knowledge. Set a real, \
+                     unguessable key.",
+                    PLACEHOLDER_ADMIN_API_KEY
+                ));
+            }
+            if self.server.auth.api_key.as_deref() == Some(admin_api_key) {
+                return Err(
+                    "refusing to start: server.auth.admin_api_key equals server.auth.api_key, so \
+                     every client would be Admin. Use a distinct key."
+                        .to_string(),
                 );
             }
         }
@@ -732,6 +774,33 @@ impl AppConfig {
     }
 }
 
+/// Refuse a configured reserve contract address whose ErgoTree is not the compiled one.
+fn check_reserve_contract_address(
+    field: &str,
+    address: &str,
+    compiled_tree_hex: Result<String, basis_store::contract_compiler::CompilerError>,
+) -> Result<(), String> {
+    use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
+    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+    let compiled = compiled_tree_hex.map_err(|e| {
+        format!("refusing to start: cannot load the compiled contract for {field}: {e:?}")
+    })?;
+    let configured = AddressEncoder::unchecked_parse_address_from_str(address)
+        .ok()
+        .and_then(|a| a.script().ok())
+        .and_then(|tree| tree.sigma_serialize_bytes().ok())
+        .map(hex::encode);
+    if configured.as_deref() != Some(compiled.as_str()) {
+        return Err(format!(
+            "refusing to start: {field} is not the reserve contract compiled into this build \
+             (it may be a previous, vulnerable version). Use the address from \
+             config/basis.toml.example."
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,8 +1039,10 @@ mod tests {
             },
             ergo: ErgoConfig {
                 node: NodeConfig::default(),
-                basis_reserve_contract_p2s: "test".to_string(),
-                basis_token_reserve_contract_p2s: "test_token".to_string(),
+                basis_reserve_contract_p2s:
+                    basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
+                basis_token_reserve_contract_p2s:
+                    basis_store::contract_compiler::get_basis_token_reserve_contract_p2s().unwrap(),
                 tracker_nft_id: None,
                 reserve_tokens: Default::default(),
                 tracker_public_key: None,
@@ -991,8 +1062,69 @@ mod tests {
         AuthConfig {
             mode: AuthMode::ApiKey,
             api_key: Some(key.to_string()),
+            admin_api_key: Some(format!("{key}-admin-distinct")),
             ..Default::default()
         }
+    }
+
+    /// Follow-up review N7: without a distinct admin key the shared client key is Admin and
+    /// can drive /redeem/complete, so `api_key` mode must not start without one.
+    #[test]
+    fn validate_startup_requires_distinct_admin_api_key() {
+        for (admin, expected) in [
+            (None, "requires server.auth.admin_api_key"),
+            (Some(""), "requires server.auth.admin_api_key"),
+            (Some(PLACEHOLDER_ADMIN_API_KEY), "placeholder"),
+            (Some("a-real-secret-key"), "equals server.auth.api_key"),
+        ] {
+            let mut auth = api_key_auth("a-real-secret-key");
+            auth.admin_api_key = admin.map(str::to_string);
+            let config = startup_test_config("127.0.0.1", auth);
+            let err = config.validate_startup().unwrap_err();
+            assert!(
+                err.contains(expected),
+                "admin {:?}: unexpected error: {}",
+                admin,
+                err
+            );
+        }
+    }
+
+    /// Follow-up review N11: a reserve address that is not the compiled contract (here the
+    /// pre-multi-token token script still shipped in demos/specs, which reads ERG debt as
+    /// token debt) must be refused, while the same contract under a testnet prefix is fine.
+    #[test]
+    fn validate_startup_refuses_stale_reserve_contract_address() {
+        const PREVIOUS_TOKEN_P2S_PREFIX: &str = "EUNip3sG";
+
+        let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
+        let previous_token_p2s = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../specs/ergo/token_reserve.md"
+        ))
+        .ok()
+        .and_then(|doc| {
+            doc.split(|c: char| !c.is_ascii_alphanumeric())
+                .find(|w| w.starts_with(PREVIOUS_TOKEN_P2S_PREFIX))
+                .map(str::to_string)
+        });
+        config.ergo.basis_token_reserve_contract_p2s =
+            previous_token_p2s.unwrap_or_else(|| "not-an-address".to_string());
+        let err = config.validate_startup().unwrap_err();
+        assert!(err.contains("basis_token_reserve_contract_p2s"), "{}", err);
+
+        let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
+        config.ergo.basis_reserve_contract_p2s = "test".to_string();
+        assert!(config.validate_startup().is_err());
+
+        // Same ErgoTree, testnet address encoding: accepted.
+        use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
+        let mainnet = basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap();
+        let address = AddressEncoder::unchecked_parse_address_from_str(&mainnet).unwrap();
+        let testnet = AddressEncoder::encode_address_as_string(NetworkPrefix::Testnet, &address);
+        let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
+        config.ergo.basis_reserve_contract_p2s = testnet;
+        assert!(config.validate_startup().is_ok());
     }
 
     #[test]

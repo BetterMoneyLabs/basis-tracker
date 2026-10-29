@@ -263,12 +263,17 @@ struct NodePaymentRequest {
 ///
 /// The node signs it with the owner's wallet key, so the owner's wallet must
 /// hold the reserve NFT (`nft_id`) and enough ERG for the reserve value and
-/// fee. Returns the transaction id.
+/// fee. The node pays whatever the payload says, so it is first checked to be
+/// exactly the reserve `request` asked the tracker for
+/// ([`crate::verify::verify_reserve_payload`]). Returns the transaction id.
 pub fn submit_reserve_to_node(
     node_url: &str,
     node_api_key: Option<&str>,
+    request: &CreateReserveRequest,
     payload: &ReserveCreationResponse,
 ) -> Result<String> {
+    crate::verify::verify_reserve_payload(request, payload, None)?;
+
     let payment_requests: Vec<NodePaymentRequest> = payload
         .requests
         .iter()

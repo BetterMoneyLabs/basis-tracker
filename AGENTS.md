@@ -280,10 +280,10 @@ The tracker server supports optional TLS and three authentication modes
 
 Role mapping: `none` grants every request `Admin` (loopback-only by default;
 the server additionally restricts CORS to loopback origins and validates the
-`Host` header in this mode). In `api_key` mode the shared `api_key` grants
-`Admin` unless `server.auth.admin_api_key` is configured — then `api_key`
-grants only `Write` and Admin routes (`/reserves/create`, `/acceptance/policy`,
-`/redeem/complete`) require the admin key. In `signature` mode the role comes
+`Host` header in this mode). In `api_key` mode `server.auth.admin_api_key` is
+required (distinct from `api_key`, not the example placeholder): the shared
+`api_key` grants only `Write`, and the Admin route (`/redeem/complete`) requires
+the admin key. In `signature` mode the role comes
 from the matching `authorized_clients` entry. Startup refuses the example
 placeholder key, `none` on non-loopback binds, and auth over plain HTTP on
 non-loopback binds (unless the explicit `allow_*` escape hatches are set).
