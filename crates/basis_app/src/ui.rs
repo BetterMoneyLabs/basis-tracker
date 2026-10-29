@@ -1383,9 +1383,8 @@ async fn tracker_assisted_redeem(
         .and_then(|n| basis_store::DenomKey::parse(&n.denomination).ok())
         .unwrap_or(basis_store::DenomKey::Erg);
 
-    // Issuer (reserve owner) signature over the redemption message: signed by the issuer's
-    // account when it is local, otherwise (the creditor redeeming) the stored note's signature,
-    // verified locally.
+    // Issuer (reserve owner) signature over the redemption message: the stored note's
+    // signature, verified locally.
     let message = redemption_signing_message(
         &issuer_pk,
         &recipient_pk,
@@ -1394,14 +1393,8 @@ async fn tracker_assisted_redeem(
         timestamp,
         &tracker_nft_id,
     );
-    let issuer_account = app
-        .account_manager
-        .accounts
-        .values()
-        .find(|a| a.get_pubkey_hex() == issuer);
     let note_signature = note.as_ref().map(|n| n.signature.as_str()).unwrap_or("");
     let issuer_sig = basis_cli_lib::verify::redemption_issuer_signature(
-        issuer_account,
         &issuer_pk,
         note_signature,
         &message,

@@ -22,7 +22,6 @@ use basis_store::contract_compiler::{
 };
 use basis_store::DenomKey;
 
-use crate::account::Account;
 use crate::api::{CreateReserveRequest, ReserveCreationResponse};
 
 /// R5 of a new reserve: the empty AVL tree (digest for `PlasmaParameters(32, None)`), flags 0x03
@@ -204,12 +203,29 @@ pub fn verify_redemption_tx(
     let reserve = &input_boxes[0];
     verify_reserve_input(reserve, issuer_pk, denomination)?;
     let recipient_tree = tree_bytes(&p2pk_tree(recipient_pk)?)?;
+    // Every other input must be a plain P2PK box of another key. The recipient's proof is valid
+    // for every input whose script reduces to proveDlog(recipient), not only boxes at the
+    // recipient's P2PK address: another Basis reserve redeeming one of the recipient's notes
+    // (the redeem path ends in `proveDlog(receiver)` and does not say where the funds go), the
+    // recipient's own reserve completing a refund, or a differently encoded or conditional
+    // script. The tracker's fee inputs are plain P2PK boxes of its wallet.
+    let recipient_point = parse_point(recipient_pk)?;
     for (i, input) in input_boxes.iter().enumerate().skip(1) {
-        if tree_bytes(&input.ergo_tree)? == recipient_tree {
-            return Err(anyhow!(
-                "input {} is a box of the recipient's own P2PK; the reserve proof would spend it",
-                i
-            ));
+        match Address::recreate_from_ergo_tree(&input.ergo_tree) {
+            Ok(Address::P2Pk(owner)) if *owner.h != recipient_point => {}
+            Ok(Address::P2Pk(_)) => {
+                return Err(anyhow!(
+                    "input {} is a box of the recipient's own P2PK; the reserve proof would \
+                     spend it",
+                    i
+                ))
+            }
+            _ => {
+                return Err(anyhow!(
+                    "input {} is not a plain P2PK box; the reserve proof could satisfy its script",
+                    i
+                ))
+            }
         }
     }
 
@@ -257,24 +273,21 @@ pub fn verify_redemption_tx(
 /// Issuer signature for redemption context var #2 over `message`
 /// (`debtKey || totalDebt || timestamp || trackerNftId`).
 ///
-/// `issuer_account` is the issuer's own account when it is available locally; it signs. Otherwise
-/// (a creditor redeeming) the stored note's signature is reused: the issuer signed this exact
-/// message when the note reached `totalDebt` at `timestamp`. It is verified here first, so a
-/// mismatch fails with a clear error instead of on-chain.
+/// This is the stored note's signature: the issuer signed this exact message when the note
+/// reached `totalDebt` at `timestamp`. It is verified here first, so a mismatch fails with a
+/// clear error instead of on-chain. The client never signs a fresh one, even when the issuer's
+/// key is local: `totalDebt` comes from the tracker, and an issuer signature over an inflated
+/// total is a valid note for that total, and lets the reserve be drained up to it.
 pub fn redemption_issuer_signature(
-    issuer_account: Option<&Account>,
     issuer_pk: &[u8; 33],
     note_signature_hex: &str,
     message: &[u8; 80],
 ) -> Result<[u8; 65]> {
-    if let Some(account) = issuer_account {
-        return account.sign_message(message);
-    }
     let signature: [u8; 65] = decode_array(note_signature_hex, "stored note signature")?;
     basis_offchain::schnorr::schnorr_verify(&signature, message, issuer_pk).map_err(|_| {
         anyhow!(
             "note not yet committed at this amount: the stored issuer signature does not cover \
-             the redemption's total debt and timestamp, and the issuer key is not available here"
+             the redemption's total debt and timestamp"
         )
     })?;
     Ok(signature)
@@ -364,6 +377,7 @@ fn decode_array<const N: usize>(value_hex: &str, label: &str) -> Result<[u8; N]>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::Account;
     use crate::api::{Asset, ReservePaymentRequest};
     use basis_offchain::signing::redemption_signing_message;
     use ergo_lib::chain::transaction::{DataInput, TxId, UnsignedInput};
@@ -850,6 +864,65 @@ mod tests {
         assert!(case.err().contains("input 2 is a box of the recipient"));
     }
 
+    /// A reserve redeems into whatever outputs the transaction has once the receiver signs
+    /// (`... && proveDlog(receiver)`), so another issuer's reserve, or the issuer's reserve in
+    /// another denomination, at a later input would let the tracker redeem the recipient's other
+    /// notes to itself with the same proof.
+    #[test]
+    fn redemption_rejects_other_reserves_at_other_inputs() {
+        for extra in [
+            reserve_box(&DenomKey::Erg, TRACKER_PK),
+            reserve_box(&token_denom(), ISSUER_PK),
+            reserve_box(&DenomKey::Erg, RECIPIENT_PK),
+        ] {
+            let mut case = Case::honest(DenomKey::Erg);
+            case.inputs.push(on_chain(
+                candidate(
+                    *extra.value.as_u64(),
+                    extra.ergo_tree.clone(),
+                    extra.tokens.clone(),
+                    extra.additional_registers.clone(),
+                ),
+                3,
+            ));
+            assert!(
+                case.err().contains("input 2 is not a plain P2PK box"),
+                "{}",
+                case.err()
+            );
+        }
+    }
+
+    /// The recipient's key under another encoding of the same proposition (constant
+    /// segregation) is still the recipient's box.
+    #[test]
+    fn redemption_rejects_recipient_key_under_another_tree_encoding() {
+        use ergo_lib::ergotree_ir::ergo_tree::ErgoTreeHeader;
+        use ergo_lib::ergotree_ir::mir::expr::Expr;
+        use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::SigmaProp;
+
+        let proposition = Expr::Const(Constant::from(SigmaProp::from(ProveDlog::new(
+            parse_point(&pk(RECIPIENT_PK)).unwrap(),
+        ))));
+        let segregated = ErgoTree::new(ErgoTreeHeader::v0(true), &proposition).unwrap();
+        assert_ne!(
+            tree_bytes(&segregated).unwrap(),
+            tree_bytes(&p2pk(RECIPIENT_PK)).unwrap()
+        );
+
+        let mut case = Case::honest(DenomKey::Erg);
+        case.inputs.push(on_chain(
+            candidate(
+                5_000_000_000,
+                segregated,
+                None,
+                NonMandatoryRegisters::empty(),
+            ),
+            3,
+        ));
+        assert!(case.err().contains("input 2 is a box of the recipient"));
+    }
+
     #[test]
     fn redemption_rejects_outputs_not_paying_recipient() {
         // Redeemed value routed to the tracker.
@@ -910,16 +983,6 @@ mod tests {
     }
 
     #[test]
-    fn issuer_signature_is_signed_by_a_local_issuer() {
-        let issuer = Account::new("issuer".to_string()).unwrap();
-        let issuer_pk = pk(&issuer.get_pubkey_hex());
-        let message = redemption_message(&issuer, 100);
-        let signature =
-            redemption_issuer_signature(Some(&issuer), &issuer_pk, "", &message).unwrap();
-        basis_offchain::schnorr::schnorr_verify(&signature, &message, &issuer_pk).unwrap();
-    }
-
-    #[test]
     fn issuer_signature_reuses_the_verified_note_signature() {
         let issuer = Account::new("issuer".to_string()).unwrap();
         let issuer_pk = pk(&issuer.get_pubkey_hex());
@@ -929,7 +992,6 @@ mod tests {
 
         // The creditor redeems at the note's committed amount: the stored signature is it.
         let reused = redemption_issuer_signature(
-            None,
             &issuer_pk,
             &hex::encode(note_signature),
             &redemption_message(&issuer, 100),
@@ -937,9 +999,9 @@ mod tests {
         .unwrap();
         assert_eq!(reused, note_signature);
 
-        // A total debt the note was not signed at cannot use it.
+        // A total debt the note was not signed at cannot use it. Nothing is signed instead, so a
+        // tracker reporting an inflated total gets no issuer signature over it.
         let err = redemption_issuer_signature(
-            None,
             &issuer_pk,
             &hex::encode(note_signature),
             &redemption_message(&issuer, 150),
@@ -948,6 +1010,6 @@ mod tests {
         assert!(err
             .to_string()
             .contains("note not yet committed at this amount"));
-        assert!(redemption_issuer_signature(None, &issuer_pk, "zz", &[0u8; 80]).is_err());
+        assert!(redemption_issuer_signature(&issuer_pk, "zz", &[0u8; 80]).is_err());
     }
 }
