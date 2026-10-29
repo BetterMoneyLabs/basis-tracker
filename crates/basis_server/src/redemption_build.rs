@@ -11,8 +11,9 @@
 //!     `bytes_to_sign`, then calls `POST /redemption/submit` with the fully-signed tx.
 //!   * `POST /redemption/submit` — the tracker broadcasts the fully-signed transaction, but only
 //!     when its echoed `unsigned_tx` matches a live entry recorded by `/redemption/build`
-//!     (single-use, 30-minute expiry). The tracker state advance uses the STORED entry values,
-//!     never caller-supplied amounts (PR #16 B6).
+//!     (single-use, 30-minute expiry) and the signed transaction has the built transaction's id.
+//!     The tracker state advance uses the STORED entry values, never caller-supplied amounts
+//!     (PR #16 B6).
 //!
 //! Neither end reorders the reserve-input context extension: the tracker emits it in Scala
 //! `ContextExtension` order, so both ends sign an identical `bytes_to_sign`.
@@ -30,6 +31,7 @@ use std::time::{Duration, Instant};
 use ergo_lib::chain::ergo_state_context::ErgoStateContext;
 use ergo_lib::chain::parameters::Parameters;
 use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
+use ergo_lib::chain::transaction::Transaction;
 use ergo_lib::ergo_chain_types::{Header, PreHeader};
 use ergo_lib::ergotree_ir::chain::ergo_box::ErgoBox;
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
@@ -312,12 +314,24 @@ pub fn unsigned_tx_fingerprint(unsigned_tx: &Value) -> Result<UnsignedTxFingerpr
     Ok(sha2::Sha256::digest(&bytes).into())
 }
 
+/// Transaction id (hex) of an unsigned transaction JSON value, as the node computes it:
+/// `blake2b256` of the bytes to sign, which cover inputs (with context extensions), data
+/// inputs and outputs. A signed transaction has the same id as the unsigned one it signs.
+pub fn unsigned_tx_id(unsigned_tx: &Value) -> Result<String, String> {
+    let unsigned: UnsignedTransaction = serde_json::from_value(unsigned_tx.clone())
+        .map_err(|e| format!("unsigned_tx is not a valid unsigned transaction: {e}"))?;
+    Ok(String::from(unsigned.id()))
+}
+
 /// Server-side state recorded by `/redemption/build` and consumed by `/redemption/submit`.
 ///
 /// Everything that mutates tracker state after a broadcast comes from this entry, never from
 /// caller-supplied request fields (PR #16 B6).
 #[derive(Debug, Clone)]
 pub struct PendingRedemption {
+    /// Id of the unsigned transaction the build returned. Submit only accepts a signed
+    /// transaction with exactly this id.
+    pub unsigned_tx_id: String,
     /// Reserve box the built transaction spends.
     pub reserve_box_id: String,
     /// Issuer (reserve owner) compressed public key, hex.
@@ -337,7 +351,9 @@ pub struct PendingRedemption {
 
 impl PendingRedemption {
     /// Create an entry stamped with the current time.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        unsigned_tx_id: String,
         reserve_box_id: String,
         issuer_pubkey: String,
         recipient_pubkey: String,
@@ -347,6 +363,7 @@ impl PendingRedemption {
         denomination: basis_store::DenomKey,
     ) -> Self {
         Self {
+            unsigned_tx_id,
             reserve_box_id,
             issuer_pubkey,
             recipient_pubkey,
@@ -388,9 +405,10 @@ impl PendingRedemptionRegistry {
     /// Validate `signed_tx` against the pending entry for `fingerprint` and consume the entry.
     ///
     /// The entry is removed on the FIRST submit attempt (single-use): an unknown or expired
-    /// fingerprint yields 409, a signed transaction that does not spend the build's reserve box
-    /// or whose reserve-output R5 digest differs from the build's yields 400. After a failed
-    /// attempt the client must call `/redemption/build` again.
+    /// fingerprint yields 409; a signed transaction that is not the built one (different tx
+    /// id), does not spend the build's reserve box, or whose reserve-output R5 digest differs
+    /// from the build's yields 400. After a failed attempt the client must call
+    /// `/redemption/build` again.
     pub fn validate_and_consume(
         &self,
         fingerprint: &UnsignedTxFingerprint,
@@ -411,6 +429,29 @@ impl PendingRedemptionRegistry {
                         .to_string(),
                 )),
             };
+
+        // The signed transaction must be exactly the transaction the build produced. Checking
+        // only "spends the reserve" and "outputs[0] carries the digest" let a caller submit any
+        // other transaction that touches the reserve box (e.g. an unsigned top-up with a decoy
+        // box at outputs[0]) and still have the stored redemption applied. ergo-lib recomputes
+        // the id from the transaction body when parsing, so a forged `id` field is rejected.
+        let signed: Transaction = serde_json::from_value(signed_tx.clone()).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("signed_tx is not a valid signed transaction: {e}"),
+            )
+        })?;
+        let signed_tx_id = String::from(signed.id());
+        if signed_tx_id != entry.unsigned_tx_id {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "signed_tx {} is not the transaction {} built by the matching \
+                     /redemption/build call",
+                    signed_tx_id, entry.unsigned_tx_id
+                ),
+            ));
+        }
 
         // The signed transaction must spend the reserve box the build selected.
         let spends_reserve = signed_tx
@@ -1493,6 +1534,7 @@ async fn build_redemption_inner(
             )
         }
     };
+    let built_tx_id = String::from(unsigned.id());
 
     let parse_box = |hexstr: &str, label: &str| -> ApiResult<ErgoBox> {
         let bytes = hex::decode(hexstr).map_err(|e| {
@@ -1630,6 +1672,7 @@ async fn build_redemption_inner(
     if !state.pending_redemptions.record(
         fingerprint,
         PendingRedemption::new(
+            built_tx_id,
             response.reserve_box_id.clone(),
             payload.issuer_pubkey.clone(),
             payload.recipient_pubkey.clone(),
@@ -1652,8 +1695,8 @@ async fn build_redemption_inner(
 ///
 /// SECURITY (PR #16 B6): the submit is bound to server-side state recorded by
 /// `/redemption/build`. The echoed `unsigned_tx` must hash to a live, single-use pending
-/// entry; the signed transaction must spend the entry's reserve box and carry the entry's
-/// reserve-output R5 digest. After a successful broadcast the tracker's local state is synced
+/// entry, and the signed transaction must have the built transaction's id (so it has the same
+/// inputs, context extensions and outputs). After a successful broadcast the tracker's local state is synced
 /// from the STORED entry (`redeemed_amount`, `new_already_redeemed`, issuer/recipient) — the
 /// caller-supplied amount fields on the wire are ignored (kept only for compatibility).
 #[axum::debug_handler]
@@ -1879,9 +1922,66 @@ mod tests {
 
     // ----- pending redemption registry (PR #16 B6) -----
 
-    fn pending_entry(box_id: &str) -> PendingRedemption {
+    const RESERVE_BOX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const FUNDING_BOX: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    /// P2PK ErgoTree of the secp256k1 generator, a valid stand-in for any recipient/attacker.
+    const P2PK_TREE: &str =
+        "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    fn output(ergo_tree: &str, value: u64, r5_digest: Option<&[u8]>) -> Value {
+        let registers = match r5_digest {
+            // Registers must be densely packed, so R4 (owner key) comes along with R5.
+            Some(d) => json!({
+                "R4": format!("07{}", &P2PK_TREE[6..]),
+                "R5": format!("64{}032000", hex::encode(d)),
+            }),
+            None => json!({}),
+        };
+        json!({
+            "value": value,
+            "ergoTree": ergo_tree,
+            "assets": [],
+            "additionalRegisters": registers,
+            "creationHeight": 1_000
+        })
+    }
+
+    /// An unsigned transaction (as `/redemption/build` returns it) and the same transaction
+    /// with empty proofs, standing in for the client's signed copy. ergo-lib computes both ids
+    /// from the transaction body, exactly as the node does.
+    fn tx_pair(inputs: &[&str], outputs: Vec<Value>) -> (Value, Value) {
+        let unsigned_json = json!({
+            "inputs": inputs
+                .iter()
+                .map(|id| json!({ "boxId": id, "extension": {} }))
+                .collect::<Vec<_>>(),
+            "dataInputs": [],
+            "outputs": outputs,
+        });
+        let unsigned: UnsignedTransaction = serde_json::from_value(unsigned_json.clone()).unwrap();
+        let proofs = vec![
+            ergo_lib::ergotree_interpreter::sigma_protocol::prover::ProofBytes::Empty;
+            inputs.len()
+        ];
+        let signed = Transaction::from_unsigned_tx(unsigned, proofs).unwrap();
+        (unsigned_json, serde_json::to_value(&signed).unwrap())
+    }
+
+    /// The honest built redemption: spends the reserve, reserve successor first.
+    fn built_redemption() -> (Value, Value) {
+        tx_pair(
+            &[RESERVE_BOX, FUNDING_BOX],
+            vec![
+                output(P2PK_TREE, 9_000_000_000, Some(&[0x11; 33])),
+                output(P2PK_TREE, 1_000_000_000, None),
+            ],
+        )
+    }
+
+    fn pending_entry(unsigned_tx: &Value) -> PendingRedemption {
         PendingRedemption {
-            reserve_box_id: box_id.to_string(),
+            unsigned_tx_id: unsigned_tx_id(unsigned_tx).unwrap(),
+            reserve_box_id: RESERVE_BOX.to_string(),
             issuer_pubkey: "aa".repeat(33),
             recipient_pubkey: "bb".repeat(33),
             redeemed_amount: 1_000,
@@ -1892,27 +1992,20 @@ mod tests {
         }
     }
 
-    fn signed_tx_for(entry: &PendingRedemption) -> Value {
-        json!({
-            "inputs": [{ "boxId": entry.reserve_box_id, "extension": {} }],
-            "outputs": [{
-                "additionalRegisters": {
-                    "R5": format!("64{}032000", hex::encode(&entry.reserve_r5_digest))
-                }
-            }]
-        })
+    fn recorded(registry: &PendingRedemptionRegistry) -> (UnsignedTxFingerprint, Value) {
+        let (unsigned, signed) = built_redemption();
+        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
+        assert!(registry.record(fp, pending_entry(&unsigned)));
+        (fp, signed)
     }
 
     #[test]
     fn pending_entry_happy_path_returns_stored_state() {
         let registry = PendingRedemptionRegistry::new();
-        let unsigned = json!({ "inputs": [], "outputs": [] });
-        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
-        assert!(registry.record(fp, pending_entry("reserve1")));
+        let (fp, signed) = recorded(&registry);
 
-        let signed = signed_tx_for(&pending_entry("reserve1"));
         let entry = registry.validate_and_consume(&fp, &signed).unwrap();
-        assert_eq!(entry.reserve_box_id, "reserve1");
+        assert_eq!(entry.reserve_box_id, RESERVE_BOX);
         assert_eq!(entry.redeemed_amount, 1_000);
         assert_eq!(entry.new_already_redeemed, 2_000);
     }
@@ -1930,11 +2023,7 @@ mod tests {
     #[test]
     fn pending_entry_is_single_use() {
         let registry = PendingRedemptionRegistry::new();
-        let unsigned = json!({ "inputs": [], "outputs": [] });
-        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
-        let entry = pending_entry("reserve1");
-        let signed = signed_tx_for(&entry);
-        assert!(registry.record(fp, entry));
+        let (fp, signed) = recorded(&registry);
 
         assert!(registry.validate_and_consume(&fp, &signed).is_ok());
         let err = registry.validate_and_consume(&fp, &signed).unwrap_err();
@@ -1949,13 +2038,12 @@ mod tests {
     #[test]
     fn pending_entry_rejects_signed_tx_spending_a_different_box() {
         let registry = PendingRedemptionRegistry::new();
-        let unsigned = json!({ "inputs": [], "outputs": [] });
-        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
-        let entry = pending_entry("reserve1");
-        assert!(registry.record(fp, entry.clone()));
+        let (fp, _) = recorded(&registry);
 
-        let mut signed = signed_tx_for(&entry);
-        signed["inputs"][0]["boxId"] = json!("attacker_box");
+        let (_, signed) = tx_pair(
+            &["3333333333333333333333333333333333333333333333333333333333333333"],
+            vec![output(P2PK_TREE, 9_000_000_000, Some(&[0x11; 33]))],
+        );
         let err = registry.validate_and_consume(&fp, &signed).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
@@ -1963,30 +2051,70 @@ mod tests {
     #[test]
     fn pending_entry_rejects_signed_tx_with_wrong_r5_digest() {
         let registry = PendingRedemptionRegistry::new();
-        let unsigned = json!({ "inputs": [], "outputs": [] });
-        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
-        let entry = pending_entry("reserve1");
-        assert!(registry.record(fp, entry.clone()));
+        let (fp, _) = recorded(&registry);
 
-        let mut signed = signed_tx_for(&entry);
-        signed["outputs"][0]["additionalRegisters"]["R5"] =
-            json!(format!("64{}032000", "22".repeat(33)));
+        let (_, signed) = tx_pair(
+            &[RESERVE_BOX, FUNDING_BOX],
+            vec![
+                output(P2PK_TREE, 9_000_000_000, Some(&[0x22; 33])),
+                output(P2PK_TREE, 1_000_000_000, None),
+            ],
+        );
         let err = registry.validate_and_consume(&fp, &signed).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// Follow-up review N1: a top-up (action 1, no signature needed) that spends the reserve and
+    /// puts a decoy box carrying the build's R5 digest at `outputs[0]` passed the old "spends
+    /// the reserve + outputs[0].R5" check, so the tracker applied a redemption that never
+    /// happened and its reserve tree diverged from the chain.
+    #[test]
+    fn pending_entry_rejects_unrelated_tx_with_decoy_r5_output() {
+        let registry = PendingRedemptionRegistry::new();
+        let (fp, _) = recorded(&registry);
+
+        let (_, top_up) = tx_pair(
+            &[RESERVE_BOX, FUNDING_BOX],
+            vec![
+                // Attacker-owned decoy carrying the expected digest.
+                output(P2PK_TREE, 1_000_000, Some(&[0x11; 33])),
+                // Real reserve successor: R5 unchanged, +0.1 ERG.
+                output(P2PK_TREE, 10_100_000_000, Some(&[0xff; 33])),
+            ],
+        );
+        let err = registry.validate_and_consume(&fp, &top_up).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn pending_entry_rejects_forged_tx_id() {
+        let registry = PendingRedemptionRegistry::new();
+        let (fp, signed) = recorded(&registry);
+
+        // Same claimed id, different body: ergo-lib recomputes the id and refuses it.
+        let (_, mut other) = tx_pair(
+            &[RESERVE_BOX, FUNDING_BOX],
+            vec![
+                output(P2PK_TREE, 1_000_000, Some(&[0x11; 33])),
+                output(P2PK_TREE, 10_100_000_000, None),
+            ],
+        );
+        other["id"] = signed["id"].clone();
+        let err = registry.validate_and_consume(&fp, &other).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
     #[test]
     fn pending_entry_expired_is_conflict() {
         let registry = PendingRedemptionRegistry::new();
-        let unsigned = json!({ "inputs": [], "outputs": [] });
+        let (unsigned, signed) = built_redemption();
         let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
-        let mut entry = pending_entry("reserve1");
+        let mut entry = pending_entry(&unsigned);
         entry.issued_at = Instant::now() - PENDING_REDEMPTION_TTL - Duration::from_secs(1);
         // Bypass `record` so the stale timestamp survives (record sets nothing itself, but
         // inserting directly makes the intent explicit).
         registry.lock().insert(fp, entry);
 
-        let signed = signed_tx_for(&pending_entry("reserve1"));
         let err = registry.validate_and_consume(&fp, &signed).unwrap_err();
         assert_eq!(
             err.0,

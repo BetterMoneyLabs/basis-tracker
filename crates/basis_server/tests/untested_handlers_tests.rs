@@ -473,9 +473,8 @@ mod untested_handlers {
     //
     // Since PR #16 B6 the submit endpoint is bound to server-side state recorded by
     // /redemption/build: the echoed `unsigned_tx` must hash to a live, single-use pending
-    // entry, the signed transaction must spend the entry's reserve box and carry its R5
-    // digest, and the tracker state advance uses the STORED entry values. These tests pin
-    // that behaviour.
+    // entry, the signed transaction must be the built transaction (same tx id), and the
+    // tracker state advance uses the STORED entry values. These tests pin that behaviour.
     // ========================================================================
 
     /// Reserve box id the pending entries below are recorded against.
@@ -510,21 +509,48 @@ mod untested_handlers {
         format!("http://{}", addr)
     }
 
+    /// An unsigned transaction spending `box_id` whose first output carries the R5 digest the
+    /// pending entries below are recorded with (`0x11` x 33), plus the same transaction with
+    /// empty proofs standing in for the client's signed copy.
+    fn tx_pair(box_id: &str) -> (serde_json::Value, serde_json::Value) {
+        use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
+        use ergo_lib::chain::transaction::Transaction;
+        use ergo_lib::ergotree_interpreter::sigma_protocol::prover::ProofBytes;
+        let unsigned_tx = serde_json::json!({
+            "inputs": [{ "boxId": box_id, "extension": {} }],
+            "dataInputs": [],
+            "outputs": [{
+                "value": 1_000_000_000u64,
+                "ergoTree": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                "assets": [],
+                "additionalRegisters": {
+                    "R4": "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                    "R5": format!("64{}032000", "11".repeat(33))
+                },
+                "creationHeight": 1_000
+            }]
+        });
+        let unsigned: UnsignedTransaction =
+            serde_json::from_value(unsigned_tx.clone()).expect("valid unsigned tx");
+        let signed =
+            Transaction::from_unsigned_tx(unsigned, vec![ProofBytes::Empty]).expect("signed tx");
+        (unsigned_tx, serde_json::to_value(&signed).unwrap())
+    }
+
     /// Record a pending redemption entry the way `POST /redemption/build` would, returning
-    /// the unsigned transaction JSON whose fingerprint keys the entry.
+    /// the unsigned transaction JSON whose fingerprint keys the entry and its signed copy.
     fn record_pending(
         state: &basis_server::AppState,
         issuer_pubkey: &str,
         recipient_pubkey: &str,
         redeemed_amount: u64,
-    ) -> serde_json::Value {
-        use basis_server::redemption_build::{unsigned_tx_fingerprint, PendingRedemption};
-        let unsigned_tx = serde_json::json!({
-            "inputs": [{ "boxId": RESERVE_BOX_ID, "extension": {} }],
-            "dataInputs": [],
-            "outputs": []
-        });
+    ) -> (serde_json::Value, serde_json::Value) {
+        use basis_server::redemption_build::{
+            unsigned_tx_fingerprint, unsigned_tx_id, PendingRedemption,
+        };
+        let (unsigned_tx, signed_tx) = tx_pair(RESERVE_BOX_ID);
         let entry = PendingRedemption::new(
+            unsigned_tx_id(&unsigned_tx).expect("tx id"),
             RESERVE_BOX_ID.to_string(),
             issuer_pubkey.to_string(),
             recipient_pubkey.to_string(),
@@ -538,20 +564,7 @@ mod untested_handlers {
             state.pending_redemptions.record(fingerprint, entry),
             "pending entry should be recorded"
         );
-        unsigned_tx
-    }
-
-    /// A signed transaction spending `box_id` whose reserve output carries the R5 digest the
-    /// pending entries above are recorded with (`0x11` x 33).
-    fn signed_tx_spending(box_id: &str) -> serde_json::Value {
-        serde_json::json!({
-            "inputs": [{ "boxId": box_id, "extension": {} }],
-            "outputs": [{
-                "additionalRegisters": {
-                    "R5": format!("64{}032000", "11".repeat(33))
-                }
-            }]
-        })
+        (unsigned_tx, signed_tx)
     }
 
     fn submit_request(
@@ -575,7 +588,7 @@ mod untested_handlers {
         // No /redemption/build ever happened, so there is no pending entry for this tx.
         let req = submit_request(
             serde_json::json!({ "inputs": [], "outputs": [] }),
-            signed_tx_spending(RESERVE_BOX_ID),
+            tx_pair(RESERVE_BOX_ID).1,
         );
         let (status, body) =
             submit_redemption(axum::extract::State(state), axum::extract::Json(req)).await;
@@ -589,9 +602,10 @@ mod untested_handlers {
         let node_url = spawn_accepting_node().await;
         let state = mock_state_with_config(&node_url).await;
 
-        let unsigned_tx = record_pending(&state, ISSUER_HEX, RECIPIENT_HEX, 1_000);
+        let (unsigned_tx, _) = record_pending(&state, ISSUER_HEX, RECIPIENT_HEX, 1_000);
         // The signed transaction spends a box the build never selected.
-        let req = submit_request(unsigned_tx, signed_tx_spending("some_other_box"));
+        let other_box = "ef".repeat(32);
+        let req = submit_request(unsigned_tx, tx_pair(&other_box).1);
         let (status, body) =
             submit_redemption(axum::extract::State(state), axum::extract::Json(req)).await;
 
@@ -628,10 +642,10 @@ mod untested_handlers {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let unsigned_tx =
+        let (unsigned_tx, signed_tx) =
             record_pending(&state, &hex::encode(issuer), &hex::encode(recipient), 1_000);
 
-        let mut req = submit_request(unsigned_tx, signed_tx_spending(RESERVE_BOX_ID));
+        let mut req = submit_request(unsigned_tx, signed_tx);
         // Deliberately wrong wire values: the stored entry (redeemed_amount = 1_000) must win.
         req.redeemed_amount = 20_000;
         req.new_already_redeemed = 999_999;
@@ -673,8 +687,8 @@ mod untested_handlers {
         let node_url = spawn_accepting_node().await;
         let state = mock_state_with_config(&node_url).await;
 
-        let unsigned_tx = record_pending(&state, ISSUER_HEX, RECIPIENT_HEX, 1_000);
-        let req = submit_request(unsigned_tx, signed_tx_spending(RESERVE_BOX_ID));
+        let (unsigned_tx, signed_tx) = record_pending(&state, ISSUER_HEX, RECIPIENT_HEX, 1_000);
+        let req = submit_request(unsigned_tx, signed_tx);
 
         let (first_status, first_body) = submit_redemption(
             axum::extract::State(state.clone()),
@@ -699,8 +713,8 @@ mod untested_handlers {
         // branch without needing a live node.
         let state = mock_state_with_config("http://127.0.0.1:1").await;
 
-        let unsigned_tx = record_pending(&state, ISSUER_HEX, RECIPIENT_HEX, 1_000);
-        let req = submit_request(unsigned_tx, signed_tx_spending(RESERVE_BOX_ID));
+        let (unsigned_tx, signed_tx) = record_pending(&state, ISSUER_HEX, RECIPIENT_HEX, 1_000);
+        let req = submit_request(unsigned_tx, signed_tx);
         let (status, body) =
             submit_redemption(axum::extract::State(state), axum::extract::Json(req)).await;
 
