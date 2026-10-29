@@ -1327,9 +1327,10 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
 }
 
 /// Tracker-assisted redemption. The tracker builds the unsigned transaction and signs the fee
-/// input(s) (`POST /redemption/build`); the TUI signs the issuer message with the local issuer
-/// account, adds the reserve input's `proveDlog(recipient)` proof over the same `bytes_to_sign`,
-/// and submits the fully-signed transaction (`POST /redemption/submit`).
+/// input(s) (`POST /redemption/build`); the TUI supplies the issuer signature (local issuer
+/// account, or the stored note's), checks the build, adds the reserve input's
+/// `proveDlog(recipient)` proof over the same `bytes_to_sign`, and submits the fully-signed
+/// transaction (`POST /redemption/submit`).
 ///
 /// Returns the broadcast transaction id on success.
 async fn tracker_assisted_redeem(
@@ -1382,7 +1383,9 @@ async fn tracker_assisted_redeem(
         .and_then(|n| basis_store::DenomKey::parse(&n.denomination).ok())
         .unwrap_or(basis_store::DenomKey::Erg);
 
-    // Issuer (reserve owner) signs the redemption message.
+    // Issuer (reserve owner) signature over the redemption message: signed by the issuer's
+    // account when it is local, otherwise (the creditor redeeming) the stored note's signature,
+    // verified locally.
     let message = redemption_signing_message(
         &issuer_pk,
         &recipient_pk,
@@ -1395,16 +1398,15 @@ async fn tracker_assisted_redeem(
         .account_manager
         .accounts
         .values()
-        .find(|a| a.get_pubkey_hex() == issuer)
-        .ok_or_else(|| {
-            format!(
-                "no local account for issuer {}... (the issuer must co-sign the redemption)",
-                &issuer[..16.min(issuer.len())]
-            )
-        })?;
-    let issuer_sig = issuer_account
-        .sign_message(&message)
-        .map_err(|e| format!("issuer signing failed: {}", e))?;
+        .find(|a| a.get_pubkey_hex() == issuer);
+    let note_signature = note.as_ref().map(|n| n.signature.as_str()).unwrap_or("");
+    let issuer_sig = basis_cli_lib::verify::redemption_issuer_signature(
+        issuer_account,
+        &issuer_pk,
+        note_signature,
+        &message,
+    )
+    .map_err(|e| format!("issuer signature: {}", e))?;
 
     // Recipient (receiver) secret for the reserve input's proveDlog(recipient).
     let cur = app.current_account.as_ref().ok_or("no current account")?;
@@ -1467,6 +1469,19 @@ async fn tracker_assisted_redeem(
         .to_vec()
         .try_into()
         .map_err(|_| "headers array".to_string())?;
+
+    // Nothing the tracker built is signed with the receiver's key until it is checked to be
+    // this note's redemption.
+    basis_cli_lib::verify::verify_redemption_tx(
+        &unsigned,
+        &input_boxes,
+        &data_boxes,
+        &issuer_pk,
+        &recipient_pk,
+        &denomination,
+        amount,
+    )
+    .map_err(|e| format!("refusing to sign the tracker's redemption: {}", e))?;
 
     // Add the reserve input (index 0) proveDlog(recipient) proof over the same bytes_to_sign.
     let signed = add_input_proof(
@@ -1732,8 +1747,19 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                 token_id,
             };
 
-            match app.client.create_reserve(request).await {
+            match app.client.create_reserve(request.clone()).await {
                 Ok(response) => {
+                    // Never offer to submit a payload that funds anything but this reserve.
+                    if let Err(e) =
+                        basis_cli_lib::verify::verify_reserve_payload(&request, &response, None)
+                    {
+                        app.set_notification(
+                            format!("Refusing the tracker's reserve payload: {}", e),
+                            true,
+                        );
+                        app.navigate_to(Screen::Reserves);
+                        return Ok(());
+                    }
                     println!("\n{}Reserve creation payload:{}", GREEN, RESET);
                     println!("{}Fee: {} nanoERG{}", BOLD, response.fee, RESET);
                     println!(
@@ -1755,6 +1781,7 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                                 match basis_cli_lib::api::submit_reserve_to_node(
                                     node_url,
                                     app.node_api_key.as_deref(),
+                                    &request,
                                     &response,
                                 ) {
                                     Ok(tx_id) => {

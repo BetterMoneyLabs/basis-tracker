@@ -6,6 +6,7 @@ mod crypto;
 mod demo_keys;
 mod interactive;
 mod output;
+mod verify;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
