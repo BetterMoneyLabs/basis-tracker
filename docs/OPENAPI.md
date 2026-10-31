@@ -110,7 +110,8 @@ All endpoints return a standardized response envelope:
 ### Notes
 
 - `POST /notes` - Create a new IOU note (requires `tracker_nft_id`, which must match this tracker's configured NFT id — see "Signing Message Format" below; optional `denomination` field, `"erg"` or `"token:<64-hex>"`, defaulting to the pair's existing note's denomination when unambiguous, else ERG)
-- `POST /notes/exchange` - Exchange debt between two denominations of one (issuer, recipient) pair (off-chain novation / triage; both parties sign both edges' new states — the recipient's signatures are the creditor consent required for a debt decrease)
+- `POST /notes/exchange` - Exchange debt between two denominations of one (issuer, recipient) pair in two phases (issue #17): the from-edge decrease applies immediately, the to-edge increase is staged until the decrease is committed on-chain and the issuer's from-denomination reserve box is verified unchanged (both parties sign both edges' new states — the recipient's signatures are the creditor consent required for a debt decrease; requires exactly one tracked from-denomination reserve, else 409)
+- `GET /exchanges/pending` - List staged and cancelled two-phase exchange records (optional `issuer_pubkey` / `recipient_pubkey` query filters); staged records await the reserve verification, cancelled records carry the reason (the from-edge decrease stays applied)
 - `GET /notes` - Get all IOU notes with age and confirmation state
 - `GET /notes/issuer/{pubkey}` - Get all notes issued by a public key
 - `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get a specific note (optional `?denomination=` query parameter)

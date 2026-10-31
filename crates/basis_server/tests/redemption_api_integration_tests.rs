@@ -318,6 +318,7 @@ mod redemption_api_tests {
                         recipient_from_signature,
                         issuer_to_signature,
                         recipient_to_signature,
+                        from_reserve_box_id,
                         acceptance_check,
                         response_tx,
                     } => {
@@ -336,7 +337,32 @@ mod redemption_api_tests {
                             &recipient_from_signature,
                             &issuer_to_signature,
                             &recipient_to_signature,
+                            &from_reserve_box_id,
                             acceptance_check.map(|check| check.0),
+                        );
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ListStagedExchanges { response_tx } => {
+                        let result = redemption_manager.tracker.list_staged_exchanges();
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ProcessStagedExchanges {
+                        observations,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager
+                            .tracker
+                            .process_staged_exchanges(&observations);
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ListPendingExchanges {
+                        issuer_pubkey,
+                        recipient_pubkey,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.list_pending_exchanges(
+                            issuer_pubkey.as_ref(),
+                            recipient_pubkey.as_ref(),
                         );
                         let _ = response_tx.send(result);
                     }
@@ -1907,6 +1933,11 @@ mod redemption_api_tests {
         )
         .await;
 
+        // Issue #17: exchanges require exactly one tracked from-denomination
+        // reserve — phase 2 observes its box on-chain before applying the
+        // to-edge increase.
+        add_tracker_reserve(&state, &issuer_hex, 500_000_000).await;
+
         // Exchange 30 ERG -> 90 USE at ts 2000. Both parties sign both edges' new
         // messages: from-edge new total 70 ERG, to-edge new total 140 USE.
         let ts = 2000u64;
@@ -1955,6 +1986,45 @@ mod redemption_api_tests {
         assert!(data.exchanged);
         assert_eq!(data.from_new_total, 70);
         assert_eq!(data.to_new_total, 140);
+        // Two-phase exchange (issue #17): only the from-edge decrease applied;
+        // the to-edge increase is staged.
+        assert_eq!(data.to_edge_status, "pending");
+
+        // The to-edge total is unchanged until the decrease commits.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+                issuer_pubkey,
+                recipient_pubkey,
+                denomination: tok,
+                response_tx: tx,
+            })
+            .await
+            .unwrap();
+        let to_note = rx.await.unwrap().unwrap().expect("to-edge note");
+        assert_eq!(
+            to_note.amount_collected, 50,
+            "to-edge increase must stay staged until the decrease is confirmed"
+        );
+
+        // The staged exchange is observable via /exchanges/pending.
+        let (status, body) = basis_server::api::list_pending_exchanges(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(basis_server::api::PendingExchangesQuery {
+                issuer_pubkey: Some(issuer_hex.clone()),
+                recipient_pubkey: Some(recipient_hex.clone()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let pending = body.data.as_ref().expect("pending exchanges");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, "staged");
+        assert_eq!(pending[0].from_new_total, 70);
+        assert_eq!(pending[0].to_new_total, 140);
+        assert_eq!(pending[0].to_amount, 90);
+        assert_eq!(pending[0].cancel_reason, None);
 
         // Creditor consent is required: reuse the same request with the recipient's
         // from-edge signature replaced by an issuer-signed one.
@@ -2184,6 +2254,9 @@ mod redemption_api_tests {
                 last_updated_timestamp: 0,
             })
             .unwrap();
+        // Issue #17: the from-denomination (ERG) reserve must also be tracked —
+        // phase 2 observes its box on-chain before applying the staged increase.
+        add_tracker_reserve(&state, &issuer_hex, 500_000_000).await;
 
         let ts = 2000u64;
         let erg = basis_store::DenomKey::Erg;
@@ -2228,5 +2301,6 @@ mod redemption_api_tests {
         assert_eq!(status, StatusCode::OK, "body: {:?}", body.error);
         let data = body.data.as_ref().expect("response data");
         assert_eq!(data.to_new_total, 140);
+        assert_eq!(data.to_edge_status, "pending");
     }
 }

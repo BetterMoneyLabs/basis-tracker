@@ -362,6 +362,7 @@ async fn main() {
                     recipient_from_signature,
                     issuer_to_signature,
                     recipient_to_signature,
+                    from_reserve_box_id,
                     acceptance_check,
                     response_tx,
                 } => {
@@ -379,16 +380,54 @@ async fn main() {
                         &recipient_from_signature,
                         &issuer_to_signature,
                         &recipient_to_signature,
+                        &from_reserve_box_id,
                         acceptance_check.map(|check| check.0),
                     );
 
                     // Keep the shared digest in sync so the tracker box updater
-                    // commits the exchanged state.
+                    // commits the exchanged state. Only the from-edge decrease
+                    // is applied here; the to-edge increase is staged and
+                    // applied by ProcessStagedExchanges after this commit is
+                    // confirmed (issue #17).
                     if result.is_ok() {
                         let current_root = redemption_manager.tracker.get_state().avl_root_digest;
                         shared_state_for_tracker.set_avl_root_digest(current_root);
                     }
 
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::ListStagedExchanges { response_tx } => {
+                    let result = redemption_manager.tracker.list_staged_exchanges();
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::ProcessStagedExchanges {
+                    observations,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .process_staged_exchanges(&observations);
+
+                    // An applied to-edge increase changed the live tree; keep
+                    // the shared digest in sync so the updater commits it.
+                    if let Ok(processed) = &result {
+                        if processed.applied > 0 {
+                            let current_root =
+                                redemption_manager.tracker.get_state().avl_root_digest;
+                            shared_state_for_tracker.set_avl_root_digest(current_root);
+                        }
+                    }
+
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::ListPendingExchanges {
+                    issuer_pubkey,
+                    recipient_pubkey,
+                    response_tx,
+                } => {
+                    let result = redemption_manager
+                        .tracker
+                        .list_pending_exchanges(issuer_pubkey.as_ref(), recipient_pubkey.as_ref());
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::InitiateRedemption {
@@ -883,6 +922,10 @@ async fn main() {
         .route(
             "/notes/exchange",
             post(exchange_notes).options(handle_options),
+        )
+        .route(
+            "/exchanges/pending",
+            get(list_pending_exchanges).options(handle_options),
         )
         .route(
             "/acceptance/check",

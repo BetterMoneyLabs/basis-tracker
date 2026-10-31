@@ -108,16 +108,23 @@ paths:
 
   /notes/exchange:
     post:
-      summary: Exchange debt between denominations (off-chain novation / triage)
+      summary: Exchange debt between denominations (two-phase off-chain novation)
       description: >-
-        Atomically moves cumulative debt between two denominations of one
-        (issuer, recipient) pair: the from-denomination edge decreases by
-        from_amount, the to-denomination edge increases by to_amount. Both parties
-        sign both edges' new states; the recipient's signatures are the creditor
-        consent required for a debt decrease (S3 rule). The tracker takes no view of
-        the exchange rate — it is bilaterally agreed. Both edges commit in one
-        tracker state update. The acceptance policy is evaluated in the target
-        denomination against the pre-mutation state, atomically with the mutation.
+        Moves cumulative debt between two denominations of one (issuer, recipient)
+        pair in two phases (issue #17). Phase 1, applied immediately: the
+        from-denomination edge decreases by from_amount. Phase 2, staged: the
+        to-denomination edge increases by to_amount, but only applies once the
+        from-edge decrease is committed on-chain AND the issuer's tracked
+        from-denomination reserve box is verified unchanged (still unspent with
+        an R5 digest matching the tracker's reserve tree). This prevents the
+        creditor from redeeming the old from-edge note AND collecting the staged
+        to-edge increase. Both parties sign both edges' new states; the
+        recipient's signatures are the creditor consent required for a debt
+        decrease (S3 rule). The acceptance policy is evaluated in the target
+        denomination against the pre-mutation state, atomically with the
+        mutation. The request fails with 409 when the issuer has zero or
+        multiple tracked reserves in the from denomination. Track progress via
+        GET /exchanges/pending.
       operationId: exchangeNotes
       tags:
         - Notes
@@ -129,13 +136,70 @@ paths:
               $ref: '#/components/schemas/ExchangeNotesRequest'
       responses:
         '200':
-          description: Exchange applied
+          description: >-
+            From-edge decrease applied; to-edge increase staged
+            (to_edge_status "pending")
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseExchangeNotes'
         '400':
           description: Invalid request, unserved denomination, missing creditor consent, or acceptance-policy rejection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '409':
+          description: The issuer has no tracked reserve or multiple tracked reserves in the from denomination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+  /exchanges/pending:
+    get:
+      summary: List staged and cancelled cross-denomination exchanges
+      description: >-
+        Returns the persisted two-phase exchange records (issue #17) for the
+        tracker, optionally filtered by issuer and/or recipient public key.
+        Staged records await the from-edge decrease being committed and the
+        from-denomination reserve box being verified unchanged; cancelled
+        records carry the reason the exchange was abandoned (the from-edge
+        decrease stays applied). Applied records are removed once the to-edge
+        increase is applied. Cancelled records older than 30 days are pruned
+        on access.
+      operationId: listPendingExchanges
+      tags:
+        - Notes
+      parameters:
+        - name: issuer_pubkey
+          in: query
+          required: false
+          description: Hex-encoded issuer public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+        - name: recipient_pubkey
+          in: query
+          required: false
+          description: Hex-encoded recipient public key (66 characters)
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{66}$'
+      responses:
+        '200':
+          description: Pending exchange records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponsePendingExchanges'
+        '400':
+          description: Invalid public key filter
           content:
             application/json:
               schema:
@@ -1300,9 +1364,75 @@ components:
         to_new_total:
           type: integer
           format: uint64
+          description: The to-edge total once the staged increase applies (not yet effective).
         timestamp:
           type: integer
           format: uint64
+        to_edge_status:
+          type: string
+          enum:
+            - pending
+          description: >-
+            Always "pending": the to-edge increase is staged until the
+            from-edge decrease is committed and the from-denomination reserve
+            box is verified unchanged (issue #17 two-phase exchange).
+
+    PendingExchangeView:
+      type: object
+      properties:
+        issuer_pubkey:
+          type: string
+        recipient_pubkey:
+          type: string
+        from_denomination:
+          type: string
+          example: "erg"
+        from_old_total:
+          type: integer
+          format: uint64
+          description: The from-edge's collected total before the exchange decrease.
+        from_new_total:
+          type: integer
+          format: uint64
+          description: The from-edge's collected total after the decrease (applied immediately).
+        to_denomination:
+          type: string
+          example: "token:a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
+        to_amount:
+          type: integer
+          format: uint64
+          description: The to-edge increase amount.
+        to_new_total:
+          type: integer
+          format: uint64
+          description: The to-edge's total once the staged increase is applied.
+        status:
+          type: string
+          enum:
+            - staged
+            - cancelled
+        cancel_reason:
+          type: string
+          nullable: true
+          description: Why the exchange was abandoned (cancelled records only).
+        created_at:
+          type: integer
+          format: uint64
+          description: Unix timestamp (millis) when the exchange was staged.
+
+    ApiResponsePendingExchanges:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PendingExchangeView'
+        error:
+          type: string
+          nullable: true
 
     ApiResponseExchangeNotes:
       type: object

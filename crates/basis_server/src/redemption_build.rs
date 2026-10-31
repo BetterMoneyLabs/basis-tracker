@@ -995,6 +995,15 @@ async fn build_redemption_inner(
                     "note is not committed on-chain yet; wait for the next tracker box update",
                 )
             }
+            Ok(Err(basis_store::NoteError::StaleCommittedDebt { committed, local })) => {
+                return api_err(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "the committed tracker state for this note ({}) is ahead of its current total ({}) because a consented debt decrease (exchange) has not been committed yet; building a redemption now would over-redeem. Retry after the next tracker box update (issue #17)",
+                        committed, local
+                    ),
+                )
+            }
             Ok(Err(e)) => {
                 return api_err(
                     StatusCode::INTERNAL_SERVER_ERROR,

@@ -97,6 +97,38 @@ pub struct ExchangeNotesResponse {
     pub from_new_total: u64,
     pub to_new_total: u64,
     pub timestamp: u64,
+    /// Status of the to-edge increase: always `"pending"` on success — only
+    /// the from-edge decrease is applied immediately; the to-edge increase is
+    /// staged until the decrease is confirmed in a tracker box and the
+    /// from-denomination reserve is verified unchanged (issue #17). The
+    /// to-edge note appears once applied; a cancelled exchange is visible via
+    /// `GET /exchanges/pending`.
+    pub to_edge_status: String,
+}
+
+/// One pending (staged or cancelled) cross-denomination exchange, as returned
+/// by `GET /exchanges/pending` (issue #17).
+#[derive(Debug, Serialize)]
+pub struct PendingExchangeView {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub from_denomination: String,
+    /// The from-edge's collected total before the exchange decrease.
+    pub from_old_total: u64,
+    /// The from-edge's collected total after the decrease (applied immediately).
+    pub from_new_total: u64,
+    pub to_denomination: String,
+    /// The to-edge increase amount.
+    pub to_amount: u64,
+    /// The to-edge's total once the staged increase is applied.
+    pub to_new_total: u64,
+    /// `"staged"` while the to-edge increase awaits the from-edge decrease
+    /// being committed and the reserve being verified; `"cancelled"` when the
+    /// exchange was abandoned (`cancel_reason` explains why).
+    pub status: String,
+    pub cancel_reason: Option<String>,
+    /// Unix timestamp (millis) when the exchange was staged.
+    pub created_at: u64,
 }
 
 // Response structure for API responses

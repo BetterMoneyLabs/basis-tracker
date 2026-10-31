@@ -272,6 +272,30 @@ mod cors_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::ExchangeNotes { .. } => {}
+                    TrackerCommand::ListStagedExchanges { response_tx } => {
+                        let result = redemption_manager.tracker.list_staged_exchanges();
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ProcessStagedExchanges {
+                        observations,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager
+                            .tracker
+                            .process_staged_exchanges(&observations);
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ListPendingExchanges {
+                        issuer_pubkey,
+                        recipient_pubkey,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.list_pending_exchanges(
+                            issuer_pubkey.as_ref(),
+                            recipient_pubkey.as_ref(),
+                        );
+                        let _ = response_tx.send(result);
+                    }
                 }
             }
         });

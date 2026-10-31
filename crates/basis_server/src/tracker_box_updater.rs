@@ -414,6 +414,11 @@ impl TrackerBoxUpdater {
                                 .await;
                             let _ = rrx.await;
                         }
+
+                        // Issue #17 phase 2: with the from-edge decrease now
+                        // confirmed, evaluate staged exchanges (apply the
+                        // to-edge increase or cancel if the reserve changed).
+                        Self::process_pending_exchanges(&config, &cmd_tx).await;
                     }
                     Ok(false) => {
                         pending_missing_cycles += 1;
@@ -541,6 +546,11 @@ impl TrackerBoxUpdater {
                             let _ = rrx.await;
                         }
 
+                        // Issue #17 phase 2: reconcile may have promoted the
+                        // from-edge decrease to Confirmed (e.g. after a
+                        // restart); evaluate staged exchanges now.
+                        Self::process_pending_exchanges(&config, &cmd_tx).await;
+
                         if onchain_digest == current_digest.as_slice() {
                             info!("On-chain tracker box already has current AVL root digest");
                             last_submitted_digest = Some(current_digest);
@@ -655,6 +665,156 @@ impl TrackerBoxUpdater {
         }
 
         Ok((tx_id.to_string(), 0))
+    }
+
+    /// Fetch a reserve box's on-chain R5 digest from the node's UTXO set.
+    ///
+    /// Returns `Ok(None)` when the box is no longer unspent — a redemption,
+    /// top-up, or refund completion spends the reserve box, so for the staged
+    /// exchange integrity check (issue #17) a missing box is conclusive.
+    /// Transport/parse errors return `Err` so the caller can distinguish
+    /// "node unavailable" from "box spent" and skip rather than cancel.
+    async fn fetch_reserve_box_r5(
+        config: &TrackerBoxUpdateConfig,
+        box_id: &str,
+    ) -> Result<Option<[u8; 33]>, TrackerBoxUpdaterError> {
+        let client = basis_store::http::bounded_client();
+        let url = format!(
+            "{}/utxo/byId/{}",
+            config.node_url.trim_end_matches('/'),
+            box_id
+        );
+
+        let mut request = client.get(&url);
+        if let Some(ref api_key) = config.api_key {
+            request = request.header("api_key", api_key);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(e.to_string()))?;
+
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(TrackerBoxUpdaterError::HttpError(format!(
+                "HTTP {} fetching reserve box {}",
+                response.status(),
+                box_id
+            )));
+        }
+
+        let body: serde_json::Value = basis_store::http::read_json_capped(response)
+            .await
+            .map_err(|e| TrackerBoxUpdaterError::HttpError(format!("JSON parse error: {}", e)))?;
+
+        // The R5 register holds the serialized AVL tree: one type byte followed
+        // by the 33-byte root digest (same layout as the tracker box R5).
+        let r5_hex = body
+            .get("additionalRegisters")
+            .and_then(|r| r.get("R5"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                TrackerBoxUpdaterError::SerializationError(format!(
+                    "reserve box {} has no R5 register",
+                    box_id
+                ))
+            })?;
+        let r5_bytes = hex::decode(r5_hex).map_err(|e| {
+            TrackerBoxUpdaterError::SerializationError(format!(
+                "reserve box {} has malformed R5 register: {}",
+                box_id, e
+            ))
+        })?;
+        if r5_bytes.len() < 34 {
+            return Err(TrackerBoxUpdaterError::SerializationError(format!(
+                "reserve box {} has truncated R5 register",
+                box_id
+            )));
+        }
+        let mut digest = [0u8; 33];
+        digest.copy_from_slice(&r5_bytes[1..34]);
+        Ok(Some(digest))
+    }
+
+    /// Issue #17 phase 2: apply or cancel staged exchanges now that tracker
+    /// state has been confirmed on-chain.
+    ///
+    /// Lists the staged exchanges, observes each one's from-denomination
+    /// reserve box on the node, and hands the observations to the tracker
+    /// thread, which applies the to-edge increase only when the from-edge
+    /// decrease is confirmed and the reserve is verified unchanged. A node
+    /// error observing one reserve skips that exchange for this cycle (wait);
+    /// it is retried on a later confirmation pass.
+    async fn process_pending_exchanges(
+        config: &TrackerBoxUpdateConfig,
+        cmd_tx: &Option<tokio::sync::mpsc::Sender<crate::TrackerCommand>>,
+    ) {
+        let Some(tx) = cmd_tx else { return };
+
+        let (rtx, rrx) = tokio::sync::oneshot::channel();
+        if tx
+            .send(crate::TrackerCommand::ListStagedExchanges { response_tx: rtx })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let staged = match rrx.await {
+            Ok(Ok(staged)) => staged,
+            Ok(Err(e)) => {
+                error!("Failed to list staged exchanges: {:?}", e);
+                return;
+            }
+            Err(_) => return,
+        };
+        if staged.is_empty() {
+            return;
+        }
+
+        let mut observations = Vec::new();
+        for exchange in &staged {
+            match Self::fetch_reserve_box_r5(config, &exchange.reserve_box_id).await {
+                Ok(digest) => observations.push(basis_store::ExchangeObservation {
+                    key: exchange.key,
+                    reserve_r5_digest: digest,
+                }),
+                Err(e) => {
+                    // Leave this exchange staged; it is retried next cycle.
+                    error!(
+                        "Failed to observe reserve box {} for staged exchange {}: {}. Will retry.",
+                        exchange.reserve_box_id,
+                        hex::encode(exchange.key),
+                        e
+                    );
+                }
+            }
+        }
+        if observations.is_empty() {
+            return;
+        }
+
+        let (rtx, rrx) = tokio::sync::oneshot::channel();
+        let _ = tx
+            .send(crate::TrackerCommand::ProcessStagedExchanges {
+                observations,
+                response_tx: rtx,
+            })
+            .await;
+        match rrx.await {
+            Ok(Ok(processed)) => {
+                if processed.applied > 0 || processed.cancelled > 0 {
+                    info!(
+                        "Processed staged exchanges: {} applied, {} cancelled",
+                        processed.applied, processed.cancelled
+                    );
+                }
+            }
+            Ok(Err(e)) => error!("Failed to process staged exchanges: {:?}", e),
+            Err(_) => {}
+        }
     }
 
     /// Find the tracker box on chain using the tracker NFT ID.

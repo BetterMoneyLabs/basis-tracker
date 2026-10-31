@@ -1424,8 +1424,9 @@ mod multi_denomination_tests {
         );
     }
 
-    /// §10 exchange: consented cross-denomination debt movement is atomic and
-    /// signature-checked; non-consented or malformed exchanges are rejected.
+    /// §10 exchange (two-phase, issue #17): the from-edge decrease applies
+    /// immediately; the to-edge increase is staged and applied only after the
+    /// decrease is confirmed and the reserve is verified unchanged.
     #[test]
     fn exchange_moves_debt_between_denominations() {
         let mut manager = TrackerStateManager::new_with_temp_storage();
@@ -1454,12 +1455,6 @@ mod multi_denomination_tests {
             .unwrap();
 
         // Exchange 30 ERG for 40 TOKEN_A at timestamp 2000.
-        let sign = |secret: &[u8; 32], denom: &DenomKey, total: u64, ts: u64| {
-            let pk = pubkey(secret);
-            let msg = crate::schnorr::signing_message(&issuer, &recipient, denom, total, ts, &NFT);
-            let _ = pk;
-            crate::schnorr::schnorr_sign(&msg, secret, &issuer).unwrap()
-        };
         let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
             crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
         };
@@ -1474,7 +1469,6 @@ mod multi_denomination_tests {
             ts,
             &NFT,
         );
-        let _ = sign;
         let issuer_from = sign_as(&issuer_secret, &msg_from, &issuer);
         let recipient_from = sign_as(&recipient_secret, &msg_from, &recipient);
         let issuer_to = sign_as(&issuer_secret, &msg_to, &issuer);
@@ -1493,27 +1487,87 @@ mod multi_denomination_tests {
                 &recipient_from,
                 &issuer_to,
                 &recipient_to,
+                "reserve_box",
             )
             .unwrap();
 
+        // Phase 1: the from-edge decrease is applied immediately...
         assert_eq!(
             manager
                 .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
                 .unwrap(),
             70
         );
+        let erg_note = manager
+            .lookup_note(&issuer, &recipient, &DenomKey::Erg)
+            .unwrap();
+        assert!(erg_note.verify_signature(&issuer).is_ok());
+        assert_eq!(erg_note.timestamp, ts);
+
+        // ...but the to-edge increase is only staged, not applied.
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            50
+        );
+        let staged = manager.list_pending_exchanges(None, None).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].1.from_new_total, 70);
+        assert_eq!(staged[0].1.from_old_total, 100);
+        assert_eq!(staged[0].1.to_note.amount_collected, 90);
+        assert_eq!(staged[0].1.reserve_box_id, "reserve_box");
+        assert!(matches!(
+            staged[0].1.status,
+            crate::PendingExchangeStatus::Staged
+        ));
+
+        // Processing before the decrease is confirmed waits: nothing happens.
+        let processed = manager.process_staged_exchanges(&[]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (0, 0));
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            50
+        );
+
+        // Simulate the tracker box update being confirmed: the from-edge
+        // decrease is now the committed on-chain state.
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(digest, "tracker_box", 5)
+            .unwrap();
+
+        // Phase 2 with an intact reserve: the to-edge increase is applied.
+        let observation = crate::ExchangeObservation {
+            key: staged[0].0,
+            reserve_r5_digest: Some(
+                manager
+                    .reserve_state_digest(&issuer, &DenomKey::Erg)
+                    .try_into()
+                    .unwrap(),
+            ),
+        };
+        let processed = manager.process_staged_exchanges(&[observation]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (1, 0));
         assert_eq!(
             manager
                 .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
                 .unwrap(),
             90
         );
-        // The exchanged notes still verify under the new signatures.
-        let erg_note = manager
-            .lookup_note(&issuer, &recipient, &DenomKey::Erg)
+        let tok_note = manager
+            .lookup_note(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
             .unwrap();
-        assert!(erg_note.verify_signature(&issuer).is_ok());
-        assert_eq!(erg_note.timestamp, ts);
+        assert!(tok_note.verify_signature(&issuer).is_ok());
+        assert_eq!(tok_note.timestamp, ts);
+        // The applied record is removed; the to-edge note is the completion signal.
+        assert!(manager
+            .list_pending_exchanges(None, None)
+            .unwrap()
+            .is_empty());
 
         // Creditor consent is required: a bad recipient signature is rejected and
         // nothing moves.
@@ -1541,6 +1595,7 @@ mod multi_denomination_tests {
             &bad_recipient_from,
             &sign_as(&issuer_secret, &msg_to2, &issuer),
             &sign_as(&recipient_secret, &msg_to2, &recipient),
+            "reserve_box",
         );
         assert!(matches!(result, Err(NoteError::InvalidSignature)));
         assert_eq!(
@@ -1549,6 +1604,10 @@ mod multi_denomination_tests {
                 .unwrap(),
             70
         );
+        assert!(manager
+            .list_pending_exchanges(None, None)
+            .unwrap()
+            .is_empty());
 
         // Same-denomination exchange is rejected.
         assert!(matches!(
@@ -1564,6 +1623,7 @@ mod multi_denomination_tests {
                 &recipient_from,
                 &issuer_to,
                 &recipient_to,
+                "reserve_box",
             ),
             Err(NoteError::InvalidExchange(_))
         ));
@@ -1655,6 +1715,7 @@ mod multi_denomination_tests {
             &sigs.1,
             &sigs.2,
             &sigs.3,
+            "reserve_box",
             Some(check),
         );
         assert!(
@@ -1688,7 +1749,9 @@ mod multi_denomination_tests {
             "one confirmation record per note is visible to the check"
         );
 
-        // An accepting check lets the same (still validly signed) exchange through.
+        // An accepting check lets the same (still validly signed) exchange
+        // through: the from-edge decrease applies, the to-edge increase is
+        // staged (issue #17) and applies once the decrease is confirmed.
         let result = manager.exchange_debt_checked(
             &issuer,
             &recipient,
@@ -1701,6 +1764,7 @@ mod multi_denomination_tests {
             &sigs.1,
             &sigs.2,
             &sigs.3,
+            "reserve_box",
             Some(Box::new(|_| Ok(()))),
         );
         assert!(result.is_ok(), "{result:?}");
@@ -1714,8 +1778,623 @@ mod multi_denomination_tests {
             manager
                 .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
                 .unwrap(),
+            50,
+            "to-edge increase must stay staged until the decrease is confirmed"
+        );
+        let staged = manager.list_pending_exchanges(None, None).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].1.to_note.amount_collected, 90);
+
+        // Simulate the confirmation of the from-edge decrease, then apply.
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(digest, "tracker_box", 5)
+            .unwrap();
+        let observation = crate::ExchangeObservation {
+            key: staged[0].0,
+            reserve_r5_digest: Some(
+                manager
+                    .reserve_state_digest(&issuer, &DenomKey::Erg)
+                    .try_into()
+                    .unwrap(),
+            ),
+        };
+        let processed = manager.process_staged_exchanges(&[observation]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (1, 0));
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
             90
         );
+    }
+
+    /// Shared setup for the issue #17 phase-2 tests: add an ERG note (100) and
+    /// a TOKEN_A note (50), then stage an exchange of 30 ERG for 40 TOKEN_A at
+    /// timestamp 2000. Returns the manager, both pubkeys, and the staged
+    /// record's from-edge note key.
+    fn stage_exchange() -> (TrackerStateManager, [u8; 33], [u8; 33], [u8; 32]) {
+        let mut manager = TrackerStateManager::new_with_temp_storage();
+        let issuer_secret = [1u8; 32];
+        let recipient_secret = [3u8; 32];
+        let issuer = pubkey(&issuer_secret);
+        let recipient = pubkey(&recipient_secret);
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+            )
+            .unwrap();
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret,
+                    &recipient,
+                    50,
+                    1001,
+                    DenomKey::Token(TOKEN_A),
+                ),
+            )
+            .unwrap();
+
+        let ts = 2000u64;
+        let msg_from =
+            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
+        let msg_to = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &DenomKey::Token(TOKEN_A),
+            90,
+            ts,
+            &NFT,
+        );
+        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
+        };
+        manager
+            .exchange_debt(
+                &issuer,
+                &recipient,
+                &DenomKey::Erg,
+                30,
+                &DenomKey::Token(TOKEN_A),
+                40,
+                ts,
+                &sign_as(&issuer_secret, &msg_from, &issuer),
+                &sign_as(&recipient_secret, &msg_from, &recipient),
+                &sign_as(&issuer_secret, &msg_to, &issuer),
+                &sign_as(&recipient_secret, &msg_to, &recipient),
+                "reserve_box",
+            )
+            .unwrap();
+
+        let staged_key = manager.list_staged_exchanges().unwrap()[0].key;
+        (manager, issuer, recipient, staged_key)
+    }
+
+    fn issuer_secret() -> [u8; 32] {
+        [1u8; 32]
+    }
+
+    fn recipient_secret() -> [u8; 32] {
+        [3u8; 32]
+    }
+
+    /// Issue #17: a staged exchange is cancelled when the from-denomination
+    /// reserve box is no longer unspent — an on-chain reserve action (such as
+    /// the creditor's pre-built redemption of the old note) happened during the
+    /// staging window. The to-edge increase must NOT be applied then.
+    #[test]
+    fn exchange_to_edge_cancelled_when_reserve_box_spent() {
+        let (mut manager, issuer, recipient, staged_key) = stage_exchange();
+        let from_digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(from_digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(from_digest, "tracker_box", 5)
+            .unwrap();
+
+        // The reserve box was spent on-chain: no R5 digest available.
+        let observation = crate::ExchangeObservation {
+            key: staged_key,
+            reserve_r5_digest: None,
+        };
+        let processed = manager.process_staged_exchanges(&[observation]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (0, 1));
+
+        // The to-edge increase was NOT applied; the from-edge decrease stays.
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            50
+        );
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            70
+        );
+        let pending = manager.list_pending_exchanges(None, None).unwrap();
+        assert_eq!(pending.len(), 1);
+        match &pending[0].1.status {
+            crate::PendingExchangeStatus::Cancelled { reason } => {
+                assert!(
+                    reason.contains("no longer unspent"),
+                    "unexpected cancel reason: {reason}"
+                );
+            }
+            other => panic!("expected cancelled status, got {other:?}"),
+        }
+
+        // Re-processing does nothing: the record is no longer staged.
+        let processed = manager
+            .process_staged_exchanges(&[crate::ExchangeObservation {
+                key: staged_key,
+                reserve_r5_digest: None,
+            }])
+            .unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (0, 0));
+    }
+
+    /// Issue #17: a staged exchange is cancelled when the reserve box's on-chain
+    /// R5 digest diverges from the tracker's reserve-tree digest — the signature
+    /// of an unreported on-chain redemption during the staging window.
+    #[test]
+    fn exchange_to_edge_cancelled_on_reserve_digest_mismatch() {
+        let (mut manager, issuer, recipient, staged_key) = stage_exchange();
+        let from_digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(from_digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(from_digest, "tracker_box", 5)
+            .unwrap();
+
+        // The box is still unspent but its R5 no longer matches the tracker's
+        // reserve tree: someone redeemed without telling the tracker.
+        let observation = crate::ExchangeObservation {
+            key: staged_key,
+            reserve_r5_digest: Some([0x9au8; 33]),
+        };
+        let processed = manager.process_staged_exchanges(&[observation]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (0, 1));
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            50
+        );
+        let pending = manager.list_pending_exchanges(None, None).unwrap();
+        match &pending[0].1.status {
+            crate::PendingExchangeStatus::Cancelled { reason } => {
+                assert!(
+                    reason.contains("R5 digest"),
+                    "unexpected cancel reason: {reason}"
+                );
+            }
+            other => panic!("expected cancelled status, got {other:?}"),
+        }
+    }
+
+    /// Issue #17: a staged exchange is cancelled when the from-edge commits to
+    /// a different value than the exchange's decrease — the tracker state moved
+    /// past the exchange (e.g. the issuer issued new debt on the edge).
+    #[test]
+    fn exchange_cancelled_when_from_edge_commits_different_value() {
+        let (mut manager, issuer, recipient, staged_key) = stage_exchange();
+
+        // The issuer issues new debt on the from-edge before the decrease
+        // commits: the committed value will not be the exchange's 70.
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret(), &recipient, 80, 2001, DenomKey::Erg),
+            )
+            .unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(digest, "tracker_box", 5)
+            .unwrap();
+
+        let observation = crate::ExchangeObservation {
+            key: staged_key,
+            reserve_r5_digest: Some(
+                manager
+                    .reserve_state_digest(&issuer, &DenomKey::Erg)
+                    .try_into()
+                    .unwrap(),
+            ),
+        };
+        let processed = manager.process_staged_exchanges(&[observation]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (0, 1));
+        // The to-edge increase was not applied.
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            50
+        );
+        let pending = manager.list_pending_exchanges(None, None).unwrap();
+        match &pending[0].1.status {
+            crate::PendingExchangeStatus::Cancelled { reason } => {
+                assert!(
+                    reason.contains("committed total is 80"),
+                    "unexpected cancel reason: {reason}"
+                );
+            }
+            other => panic!("expected cancelled status, got {other:?}"),
+        }
+    }
+
+    /// Issue #17: a staged exchange is cancelled when the to-edge changed while
+    /// staged (a new note was issued on it) — applying the staged note would
+    /// lower that edge.
+    #[test]
+    fn exchange_cancelled_when_to_edge_changes_during_staging() {
+        let (mut manager, issuer, recipient, staged_key) = stage_exchange();
+
+        // New debt on the to-edge before the from-edge decrease commits.
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret(),
+                    &recipient,
+                    60,
+                    2001,
+                    DenomKey::Token(TOKEN_A),
+                ),
+            )
+            .unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(digest, "tracker_box", 5)
+            .unwrap();
+
+        let observation = crate::ExchangeObservation {
+            key: staged_key,
+            reserve_r5_digest: Some(
+                manager
+                    .reserve_state_digest(&issuer, &DenomKey::Erg)
+                    .try_into()
+                    .unwrap(),
+            ),
+        };
+        let processed = manager.process_staged_exchanges(&[observation]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (0, 1));
+        // The to-edge kept its new (higher) value; the staged 90 was not applied.
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            60
+        );
+        let pending = manager.list_pending_exchanges(None, None).unwrap();
+        match &pending[0].1.status {
+            crate::PendingExchangeStatus::Cancelled { reason } => {
+                assert!(
+                    reason.contains("to-edge changed"),
+                    "unexpected cancel reason: {reason}"
+                );
+            }
+            other => panic!("expected cancelled status, got {other:?}"),
+        }
+    }
+
+    /// Issue #17: a redemption recorded on the to-edge while the exchange is
+    /// staged is carried forward when the staged increase is applied.
+    #[test]
+    fn exchange_applies_with_to_edge_redeemed_carry_forward() {
+        let (mut manager, issuer, recipient, staged_key) = stage_exchange();
+
+        // The creditor redeems 10 TOKEN_A (reported) while the exchange is staged.
+        manager
+            .record_redemption(&issuer, &recipient, &DenomKey::Token(TOKEN_A), 10)
+            .unwrap();
+
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(digest, "tracker_box", 5)
+            .unwrap();
+
+        let observation = crate::ExchangeObservation {
+            key: staged_key,
+            reserve_r5_digest: Some(
+                manager
+                    .reserve_state_digest(&issuer, &DenomKey::Erg)
+                    .try_into()
+                    .unwrap(),
+            ),
+        };
+        let processed = manager.process_staged_exchanges(&[observation]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (1, 0));
+        let tok_note = manager
+            .lookup_note(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+            .unwrap();
+        assert_eq!(tok_note.amount_collected, 90);
+        assert_eq!(
+            tok_note.amount_redeemed, 10,
+            "redeemed amount carried forward"
+        );
+    }
+
+    /// Issue #17: only one staged exchange may be in flight per (issuer,
+    /// recipient) pair; after it resolves, a new exchange is accepted.
+    #[test]
+    fn only_one_staged_exchange_per_pair() {
+        let (mut manager, issuer, recipient, _staged_key) = stage_exchange();
+
+        // A second exchange for the same pair is rejected while one is staged.
+        let ts2 = 2001u64;
+        let msg_from2 =
+            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 60, ts2, &NFT);
+        let msg_to2 = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &DenomKey::Token(TOKEN_A),
+            100,
+            ts2,
+            &NFT,
+        );
+        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
+        };
+        let issuer_secret = issuer_secret();
+        let recipient_secret = recipient_secret();
+        let result = manager.exchange_debt(
+            &issuer,
+            &recipient,
+            &DenomKey::Erg,
+            10,
+            &DenomKey::Token(TOKEN_A),
+            10,
+            ts2,
+            &sign_as(&issuer_secret, &msg_from2, &issuer),
+            &sign_as(&recipient_secret, &msg_from2, &recipient),
+            &sign_as(&issuer_secret, &msg_to2, &issuer),
+            &sign_as(&recipient_secret, &msg_to2, &recipient),
+            "reserve_box",
+        );
+        assert!(
+            matches!(&result, Err(NoteError::InvalidExchange(msg)) if msg.contains("already staged")),
+            "expected an already-staged rejection, got {result:?}"
+        );
+
+        // Resolve the staged exchange, then a new exchange is accepted.
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(digest, "tracker_box", 5)
+            .unwrap();
+        let staged = manager.list_staged_exchanges().unwrap();
+        let observation = crate::ExchangeObservation {
+            key: staged[0].key,
+            reserve_r5_digest: Some(
+                manager
+                    .reserve_state_digest(&issuer, &DenomKey::Erg)
+                    .try_into()
+                    .unwrap(),
+            ),
+        };
+        manager.process_staged_exchanges(&[observation]).unwrap();
+
+        let result = manager.exchange_debt(
+            &issuer,
+            &recipient,
+            &DenomKey::Erg,
+            10,
+            &DenomKey::Token(TOKEN_A),
+            10,
+            ts2,
+            &sign_as(&issuer_secret, &msg_from2, &issuer),
+            &sign_as(&recipient_secret, &msg_from2, &recipient),
+            &sign_as(&issuer_secret, &msg_to2, &issuer),
+            &sign_as(&recipient_secret, &msg_to2, &recipient),
+            "reserve_box",
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Issue #17: staged exchange records survive a restart (binary round-trip
+    /// through the pending_exchanges partition) and apply after reopening.
+    #[test]
+    fn exchange_staged_record_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let recipient_secret = [3u8; 32];
+        let issuer = pubkey(&issuer_secret);
+        let recipient = pubkey(&recipient_secret);
+
+        let staged_key = {
+            let mut manager = TrackerStateManager::new(dir.path());
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+                )
+                .unwrap();
+            manager
+                .add_note(
+                    &issuer,
+                    &create_note(
+                        &issuer_secret,
+                        &recipient,
+                        50,
+                        1001,
+                        DenomKey::Token(TOKEN_A),
+                    ),
+                )
+                .unwrap();
+            let ts = 2000u64;
+            let msg_from =
+                crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
+            let msg_to = crate::schnorr::signing_message(
+                &issuer,
+                &recipient,
+                &DenomKey::Token(TOKEN_A),
+                90,
+                ts,
+                &NFT,
+            );
+            let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+                crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
+            };
+            manager
+                .exchange_debt(
+                    &issuer,
+                    &recipient,
+                    &DenomKey::Erg,
+                    30,
+                    &DenomKey::Token(TOKEN_A),
+                    40,
+                    ts,
+                    &sign_as(&issuer_secret, &msg_from, &issuer),
+                    &sign_as(&recipient_secret, &msg_from, &recipient),
+                    &sign_as(&issuer_secret, &msg_to, &issuer),
+                    &sign_as(&recipient_secret, &msg_to, &recipient),
+                    "box99",
+                )
+                .unwrap();
+            manager.list_staged_exchanges().unwrap()[0].key
+        };
+
+        // Reopen: the staged record survives with all fields intact.
+        let mut manager = TrackerStateManager::new(dir.path());
+        let pending = manager.list_pending_exchanges(None, None).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, staged_key);
+        assert_eq!(pending[0].1.from_new_total, 70);
+        assert_eq!(pending[0].1.from_old_total, 100);
+        assert_eq!(pending[0].1.to_note.amount_collected, 90);
+        assert_eq!(pending[0].1.reserve_box_id, "box99");
+        assert!(matches!(
+            pending[0].1.status,
+            crate::PendingExchangeStatus::Staged
+        ));
+
+        // The decrease is still committed-state pending; confirm and apply.
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(digest, "tracker_box", 5)
+            .unwrap();
+        let observation = crate::ExchangeObservation {
+            key: staged_key,
+            reserve_r5_digest: Some(
+                manager
+                    .reserve_state_digest(&issuer, &DenomKey::Erg)
+                    .try_into()
+                    .unwrap(),
+            ),
+        };
+        let processed = manager.process_staged_exchanges(&[observation]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (1, 0));
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            90
+        );
+    }
+
+    /// Issue #17 defense in depth: while an exchange decrease is uncommitted,
+    /// committed-state lookup proofs are refused — a redemption built from the
+    /// stale committed value would over-redeem the edge.
+    #[test]
+    fn stale_committed_proof_rejected_during_exchange_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let issuer_secret = [1u8; 32];
+        let recipient_secret = [3u8; 32];
+        let issuer = pubkey(&issuer_secret);
+        let recipient = pubkey(&recipient_secret);
+
+        let mut manager = TrackerStateManager::new(dir.path());
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+            )
+            .unwrap();
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret,
+                    &recipient,
+                    50,
+                    1001,
+                    DenomKey::Token(TOKEN_A),
+                ),
+            )
+            .unwrap();
+
+        // Commit the pre-exchange state (from-edge confirmed at 100).
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx0", 1).unwrap();
+        manager
+            .confirm_pending_notes(digest, "tracker_box", 5)
+            .unwrap();
+
+        // Stage the exchange: the live from-edge drops to 70 while the
+        // committed value stays 100.
+        let ts = 2000u64;
+        let msg_from =
+            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
+        let msg_to = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &DenomKey::Token(TOKEN_A),
+            90,
+            ts,
+            &NFT,
+        );
+        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
+        };
+        manager
+            .exchange_debt(
+                &issuer,
+                &recipient,
+                &DenomKey::Erg,
+                30,
+                &DenomKey::Token(TOKEN_A),
+                40,
+                ts,
+                &sign_as(&issuer_secret, &msg_from, &issuer),
+                &sign_as(&recipient_secret, &msg_from, &recipient),
+                &sign_as(&issuer_secret, &msg_to, &issuer),
+                &sign_as(&recipient_secret, &msg_to, &recipient),
+                "reserve_box",
+            )
+            .unwrap();
+
+        // The pre-exchange committed proof (100) is now stale: the live edge is 70.
+        let result =
+            manager.generate_committed_tracker_lookup_proof(&issuer, &recipient, &DenomKey::Erg);
+        assert!(
+            matches!(
+                &result,
+                Err(NoteError::StaleCommittedDebt {
+                    committed: 100,
+                    local: 70
+                })
+            ),
+            "expected StaleCommittedDebt, got {result:?}"
+        );
+
+        // Once the decrease commits, proofs work again (at the new value).
+        let digest = manager.get_state().avl_root_digest;
+        manager
+            .reconcile_with_confirmed_digest(&digest, "tracker_box", 6)
+            .unwrap();
+        let proof = manager
+            .generate_committed_tracker_lookup_proof(&issuer, &recipient, &DenomKey::Erg)
+            .unwrap();
+        assert_eq!(proof.value, 70u64.to_be_bytes().to_vec());
     }
 
     /// §7.4 restart-rebuild equality: notes and reserve trees survive a restart
