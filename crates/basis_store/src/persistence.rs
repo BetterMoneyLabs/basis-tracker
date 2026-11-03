@@ -40,10 +40,28 @@ pub struct ScannerMetadataStorage {
     partition: fjall::Partition,
 }
 
+/// A reserve box rejected by scanner admission control (issue #19), kept for
+/// operator observability. Quarantined boxes are never tracked, so they cannot
+/// poison `resolve_issuer_reserve` with a duplicate (owner, denomination).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QuarantinedReserve {
+    /// Box ID (normalized hex encoding, same as `ExtendedReserveInfo.box_id`).
+    pub box_id: String,
+    /// Owner public key from R4 (hex).
+    pub owner_pubkey: String,
+    /// Denomination: "ERG" or the hex-encoded token id.
+    pub denomination: String,
+    /// Why the box was rejected.
+    pub reason: String,
+    /// Unix timestamp (millis) when the box was quarantined.
+    pub quarantined_at: u64,
+}
+
 /// Database storage for reserve information
 #[derive(Clone)]
 pub struct ReserveStorage {
     partition: fjall::Partition,
+    quarantine_partition: fjall::Partition,
 }
 
 /// Database storage for tracker information
@@ -1036,7 +1054,16 @@ impl ReserveStorage {
             .open_partition("reserves", PartitionCreateOptions::default())
             .map_err(|e| NoteError::StorageError(format!("Failed to open partition: {}", e)))?;
 
-        Ok(Self { partition })
+        let quarantine_partition = keyspace
+            .open_partition("quarantined_reserves", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open quarantine partition: {}", e))
+            })?;
+
+        Ok(Self {
+            partition,
+            quarantine_partition,
+        })
     }
 
     /// Store a reserve in the database
@@ -1097,6 +1124,61 @@ impl ReserveStorage {
             .map_err(|e| NoteError::StorageError(format!("Failed to remove reserve: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Persist a quarantined reserve box (issue #19).
+    pub fn store_quarantined(&self, record: &QuarantinedReserve) -> Result<(), NoteError> {
+        let value = serde_json::to_vec(record).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize quarantined reserve: {}", e))
+        })?;
+
+        self.quarantine_partition
+            .insert(record.box_id.as_bytes(), &value)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store quarantined reserve: {}", e))
+            })?;
+
+        Ok(())
+    }
+
+    /// Retrieve a quarantined reserve box by box ID, if quarantined.
+    pub fn get_quarantined(&self, box_id: &str) -> Result<Option<QuarantinedReserve>, NoteError> {
+        match self.quarantine_partition.get(box_id.as_bytes()) {
+            Ok(Some(value_bytes)) => {
+                let record: QuarantinedReserve =
+                    serde_json::from_slice(&value_bytes).map_err(|e| {
+                        NoteError::StorageError(format!(
+                            "Failed to deserialize quarantined reserve: {}",
+                            e
+                        ))
+                    })?;
+                Ok(Some(record))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get quarantined reserve: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Get all quarantined reserve boxes.
+    pub fn get_all_quarantined(&self) -> Result<Vec<QuarantinedReserve>, NoteError> {
+        let mut records = Vec::new();
+
+        for item in self.quarantine_partition.iter() {
+            let (_key_bytes, value_bytes) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate quarantine partition: {}", e))
+            })?;
+
+            let record: QuarantinedReserve = serde_json::from_slice(&value_bytes).map_err(|e| {
+                NoteError::StorageError(format!("Failed to deserialize quarantined reserve: {}", e))
+            })?;
+
+            records.push(record);
+        }
+
+        Ok(records)
     }
 }
 

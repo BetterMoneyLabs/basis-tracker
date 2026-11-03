@@ -4023,9 +4023,11 @@ pub async fn request_tracker_signature(
         let encoder = AddressEncoder::new(NetworkPrefix::Mainnet); // Use appropriate network prefix
         let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
 
-        // Get node URL and API key from configuration
-        let node_url = &state.config.ergo.node.node_url;
-        let api_key = state.config.ergo.node.api_key.as_deref();
+        // Schnorr signing uses the tracker wallet node ([ergo.wallet], falling back
+        // to the scanner node when unset).
+        let (wallet_node_url, wallet_api_key) = state.config.ergo_wallet_node();
+        let node_url = &wallet_node_url;
+        let api_key = wallet_api_key.as_deref();
 
         // Call the Ergo node's schnorrSign API to generate the tracker signature
         match call_schnorr_sign_api(node_url, api_key, &tracker_p2pk_address, &message_to_sign)
@@ -4276,9 +4278,11 @@ async fn get_tracker_signature_for_redemption(
     let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
     let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
 
-    // Get node URL and API key from configuration
-    let node_url = &state.config.ergo.node.node_url;
-    let api_key = state.config.ergo.node.api_key.as_deref();
+    // Schnorr signing uses the tracker wallet node ([ergo.wallet], falling back
+    // to the scanner node when unset).
+    let (wallet_node_url, wallet_api_key) = state.config.ergo_wallet_node();
+    let node_url = &wallet_node_url;
+    let api_key = wallet_api_key.as_deref();
 
     // Call the Ergo node's schnorrSign API
     call_schnorr_sign_api(node_url, api_key, &tracker_p2pk_address, &message_to_sign)
@@ -4664,9 +4668,11 @@ pub async fn prepare_redemption(
     let encoder = AddressEncoder::new(NetworkPrefix::Mainnet); // Use appropriate network prefix
     let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
 
-    // Get node URL and API key from configuration
-    let node_url = &state.config.ergo.node.node_url;
-    let api_key = state.config.ergo.node.api_key.as_deref();
+    // Schnorr signing uses the tracker wallet node ([ergo.wallet], falling back
+    // to the scanner node when unset).
+    let (wallet_node_url, wallet_api_key) = state.config.ergo_wallet_node();
+    let node_url = &wallet_node_url;
+    let api_key = wallet_api_key.as_deref();
 
     // Call the Ergo node's schnorrSign API to generate the tracker signature
     let tracker_signature =

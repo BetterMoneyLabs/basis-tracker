@@ -99,11 +99,7 @@ async fn main() {
     tracing::info!("Initializing Ergo scanner with blockchain monitoring...");
 
     // Create scanner configuration with actual reserve contract P2S
-    let mut scanner_config = config.ergo.node.clone();
-    scanner_config.reserve_contract_p2s = Some(config.ergo.basis_reserve_contract_p2s.clone());
-    scanner_config.token_reserve_contract_p2s =
-        Some(config.ergo.basis_token_reserve_contract_p2s.clone());
-    scanner_config.tracker_nft_id = config.ergo.tracker_nft_id.clone();
+    let scanner_config = config.ergo_scanner_config();
 
     // Create real scanner state with configured node URL and contract template
     let ergo_scanner = match ServerState::new(scanner_config, &data_dir) {
@@ -163,11 +159,11 @@ async fn main() {
     {
         tracing::info!("Initializing tracker scanner with tracker NFT ID...");
         let tracker_scanner_config = TrackerNodeConfig {
-            start_height: config.ergo.node.start_height,
+            start_height: config.ergo.scanner.start_height,
             tracker_nft_id: config.ergo.tracker_nft_id.clone(),
-            node_url: config.ergo.node.node_url.clone(),
+            node_url: config.ergo.scanner.node_url.clone(),
             scan_name: Some("Basis Tracker Scanner".to_string()),
-            api_key: config.ergo.node.api_key.clone(),
+            api_key: config.ergo.scanner.api_key.clone(),
         };
 
         // Create tracker scanner state with persistent storage paths (similar to reserve scanner)
@@ -610,8 +606,8 @@ async fn main() {
     tracing::info!("Initializing tracker box updater...");
 
     // Check if node configuration is provided, abort if not
-    if config.ergo.node.node_url.is_empty() {
-        tracing::error!("No Ergo node URL provided in configuration. Tracker box updater requires node connection.");
+    if config.ergo.scanner.node_url.is_empty() {
+        tracing::error!("No Ergo scanner node URL provided in configuration. Tracker box updater requires node connection.");
         std::process::exit(1);
     }
 
@@ -633,9 +629,12 @@ async fn main() {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(600);
 
+    let (wallet_node_url, wallet_api_key) = config.ergo_wallet_node();
     let tracker_box_config = TrackerBoxUpdateConfig {
-        node_url: config.ergo.node.node_url.clone(),
-        api_key: config.ergo.node.api_key.clone(),
+        wallet_node_url,
+        wallet_api_key,
+        scanner_node_url: config.ergo.scanner.node_url.clone(),
+        scanner_api_key: config.ergo.scanner.api_key.clone(),
         update_interval_seconds: tracker_update_interval,
         fee: config.transaction.fee,
         change_address: config.get_change_address().ok(),
@@ -982,6 +981,7 @@ async fn main() {
         .route("/notes/state", post(get_note_state).options(handle_options))
         .route("/reserves/{box_id}", get(get_reserve_by_box_id))
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
+        .route("/reserves/quarantined", get(get_quarantined_reserves))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
         .route(
@@ -1037,6 +1037,7 @@ async fn main() {
     tracing::debug!("  GET /reserves");
     tracing::debug!("  GET /reserves/{{box_id}}");
     tracing::debug!("  GET /reserves/issuer/{{pubkey}}");
+    tracing::debug!("  GET /reserves/quarantined");
     tracing::debug!("  POST /reserves/create");
     tracing::debug!("  GET /events");
     tracing::debug!("  GET /events/paginated");
@@ -1163,40 +1164,12 @@ async fn background_scanner_task(state: AppState, config: AppConfig) {
             }
         }
 
-        // Update reserve tracker with current unspent boxes
-        match scanner.get_unspent_reserve_boxes_tagged().await {
-            Ok(boxes) => {
-                let tracker = match state.reserve_tracker.try_lock() {
-                    Ok(tracker) => tracker,
-                    Err(_) => {
-                        tracing::debug!("Reserve tracker is busy, skipping update");
-                        continue;
-                    }
-                };
-
-                for tagged in &boxes {
-                    let scan_box = &tagged.scan_box;
-                    // Collateral, denomination, tracker NFT and contract address are
-                    // derived per box by the scanner (never stamped from config).
-                    if let Ok(reserve_info) =
-                        scanner.parse_reserve_box(scan_box, tagged.kind, &tagged.contract_address)
-                    {
-                        if let Err(e) = tracker.update_reserve(reserve_info) {
-                            tracing::warn!(
-                                "Failed to update reserve info for {}: {}",
-                                scan_box.box_id,
-                                e
-                            );
-                        }
-                    }
-                    continue;
-                }
-
-                tracing::debug!("Updated reserve tracker with {} unspent boxes", boxes.len());
-            }
-            Err(e) => {
-                tracing::error!("Failed to get unspent reserve boxes: {}", e);
-            }
+        // Update reserve tracker with current unspent boxes. Admission control
+        // (C4 root checks + lineage verification, issue #19) lives in
+        // `process_scan_boxes`; never insert scanned boxes into the tracker
+        // directly.
+        if let Err(e) = scanner.process_scan_boxes().await {
+            tracing::error!("Failed to process reserve boxes: {}", e);
         }
     }
 }

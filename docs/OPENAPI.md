@@ -123,6 +123,7 @@ All endpoints return a standardized response envelope:
 - `GET /reserves` - Get all reserves
 - `GET /reserves/{box_id}` - Get a specific reserve by box ID
 - `GET /reserves/issuer/{pubkey}` - Get reserves for an issuer
+- `GET /reserves/quarantined` - List reserve boxes rejected by admission control (issue #19): duplicates that do not descend from the tracked reserve for their (owner, denomination), roots that failed setup validation, or roots whose creating transaction spends no P2PK input of the R4 owner key. Quarantined boxes are never tracked.
 - `POST /reserves/create` - Build a reserve creation payment request
 
 `POST /reserves/create` only *builds* the payment request. To create the
@@ -135,6 +136,13 @@ curl -X POST http://your-ergo-node:9053/wallet/payment/send \
   -H "api_key: <your-node-api-key>" \
   -d '<the requests array from the /reserves/create response>'
 ```
+
+Note: the tracker only tracks a reserve whose creating transaction spends a
+P2PK input of the R4 owner key (see `specs/ergo/reserve_admission.md`). The
+manual submission above is only safe when every box in the node wallet
+belongs to the owner key; `basis-cli reserve create --submit` guarantees the
+proof input automatically (pinning inputs, or creating a 0.001 ERG
+pre-deployment UTXO when the wallet has no owner P2PK box).
 
 The tracker no longer exposes an endpoint that forwards payments to its
 configured Ergo node wallet.

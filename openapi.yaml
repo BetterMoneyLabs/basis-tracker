@@ -464,6 +464,31 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
+  /reserves/quarantined:
+    get:
+      summary: Get quarantined reserve boxes
+      description: >-
+        Retrieve reserve contract boxes rejected by admission control
+        (issue #19): duplicates that do not descend from the tracked reserve
+        for their (owner, denomination), or roots that failed setup validation.
+        Quarantined boxes are never tracked, so they cannot block an issuer.
+      operationId: getQuarantinedReserves
+      tags:
+        - Reserves
+      responses:
+        '200':
+          description: Successfully retrieved quarantined reserve boxes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseQuarantinedReserves'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
   /reserves/create:
     post:
       summary: Create reserve transaction payload
@@ -475,6 +500,12 @@ paths:
         owner's wallet must hold the reserve NFT and enough ERG for the reserve
         value plus fee. The `nft_id` must not be the tracker's own NFT, and the
         amounts are bounded by `server.reserve_creation_max_*` config caps.
+        The tracker only tracks a reserve whose creating transaction spends a
+        P2PK input of the R4 owner key (see specs/ergo/reserve_admission.md);
+        `basis-cli reserve create --submit` guarantees that (pinning inputs, or
+        a pre-deployment 0.001 ERG UTXO when the wallet has no owner P2PK box),
+        while a manual /wallet/payment/send submission is only safe when every
+        wallet box belongs to the owner key.
       operationId: createReservePayload
       tags:
         - Reserves
@@ -2978,6 +3009,43 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/SerializableReserveInfo'
+
+    ApiResponseQuarantinedReserves:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/SerializableQuarantinedReserve'
+
+    SerializableQuarantinedReserve:
+      type: object
+      description: >-
+        A reserve contract box rejected by scanner admission control
+        (issue #19). Quarantined boxes are never tracked.
+      properties:
+        box_id:
+          type: string
+          description: Hex-encoded box ID
+          example: "f1e2d3c4b5a697887766554433221100ffeeddccbbaa99887766554433221100"
+        owner_pubkey:
+          type: string
+          description: Owner public key from R4 (hex, 66 characters)
+          example: "010101010101010101010101010101010101010101010101010101010101010101"
+        denomination:
+          type: string
+          description: '"ERG" or the hex-encoded collateral token id'
+          example: "ERG"
+        reason:
+          type: string
+          description: Why the box was quarantined
+        quarantined_at:
+          type: integer
+          format: int64
+          description: Unix timestamp (milliseconds) when the box was quarantined
+          example: 1762041600000
 
     ApiResponseReserve:
       allOf:

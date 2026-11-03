@@ -176,8 +176,14 @@ impl SharedTrackerState {
 /// Configuration for the tracker box updater
 #[derive(Debug, Clone)]
 pub struct TrackerBoxUpdateConfig {
-    pub node_url: String,
-    pub api_key: Option<String>,
+    /// Node hosting the tracker wallet: `/wallet/*`, transaction signing, and
+    /// broadcast go here.
+    pub wallet_node_url: String,
+    pub wallet_api_key: Option<String>,
+    /// Node used for chain reads (`/blockchain/*`, `/utxo/*`, `/info`); needs
+    /// `extraIndex = true`.
+    pub scanner_node_url: String,
+    pub scanner_api_key: Option<String>,
     pub update_interval_seconds: u64,
     pub fee: u64,
     pub change_address: Option<String>,
@@ -195,8 +201,10 @@ pub struct TrackerBoxUpdateConfig {
 impl Default for TrackerBoxUpdateConfig {
     fn default() -> Self {
         Self {
-            node_url: "http://localhost:9053".to_string(),
-            api_key: None,
+            wallet_node_url: "http://localhost:9053".to_string(),
+            wallet_api_key: None,
+            scanner_node_url: "http://localhost:9053".to_string(),
+            scanner_api_key: None,
             update_interval_seconds: 600,
             fee: 1_000_000,
             change_address: None,
@@ -618,12 +626,12 @@ impl TrackerBoxUpdater {
         let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/blockchain/transaction/byId/{}",
-            config.node_url.trim_end_matches('/'),
+            config.scanner_node_url.trim_end_matches('/'),
             tx_id
         );
 
         let mut request = client.get(&url);
-        if let Some(ref api_key) = config.api_key {
+        if let Some(ref api_key) = config.scanner_api_key {
             request = request.header("api_key", api_key);
         }
 
@@ -681,12 +689,12 @@ impl TrackerBoxUpdater {
         let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/utxo/byId/{}",
-            config.node_url.trim_end_matches('/'),
+            config.scanner_node_url.trim_end_matches('/'),
             box_id
         );
 
         let mut request = client.get(&url);
-        if let Some(ref api_key) = config.api_key {
+        if let Some(ref api_key) = config.scanner_api_key {
             request = request.header("api_key", api_key);
         }
 
@@ -829,12 +837,12 @@ impl TrackerBoxUpdater {
         let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/blockchain/box/unspent/byTokenId/{}?limit=20",
-            config.node_url.trim_end_matches('/'),
+            config.scanner_node_url.trim_end_matches('/'),
             tracker_nft_id
         );
 
         let mut request = client.get(&url);
-        if let Some(ref api_key) = config.api_key {
+        if let Some(ref api_key) = config.scanner_api_key {
             request = request.header("api_key", api_key);
         }
 
@@ -927,11 +935,11 @@ impl TrackerBoxUpdater {
         let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/wallet/boxes/unspent?minConfirmations=0&maxConfirmations=-1",
-            config.node_url.trim_end_matches('/')
+            config.wallet_node_url.trim_end_matches('/')
         );
 
         let mut request = client.get(&url);
-        if let Some(ref api_key) = config.api_key {
+        if let Some(ref api_key) = config.wallet_api_key {
             request = request.header("api_key", api_key);
         }
 
@@ -1029,12 +1037,12 @@ impl TrackerBoxUpdater {
         let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/utxo/byIdBinary/{}",
-            config.node_url.trim_end_matches('/'),
+            config.wallet_node_url.trim_end_matches('/'),
             box_id
         );
 
         let mut request = client.get(&url);
-        if let Some(ref api_key) = config.api_key {
+        if let Some(ref api_key) = config.wallet_api_key {
             request = request.header("api_key", api_key);
         }
 
@@ -1069,10 +1077,10 @@ impl TrackerBoxUpdater {
         config: &TrackerBoxUpdateConfig,
     ) -> Result<u32, TrackerBoxUpdaterError> {
         let client = basis_store::http::bounded_client();
-        let url = format!("{}/info", config.node_url.trim_end_matches('/'));
+        let url = format!("{}/info", config.scanner_node_url.trim_end_matches('/'));
 
         let mut request = client.get(&url);
-        if let Some(ref api_key) = config.api_key {
+        if let Some(ref api_key) = config.scanner_api_key {
             request = request.header("api_key", api_key);
         }
 
@@ -1115,11 +1123,11 @@ impl TrackerBoxUpdater {
         let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/wallet/transaction/sign",
-            config.node_url.trim_end_matches('/')
+            config.wallet_node_url.trim_end_matches('/')
         );
 
         let mut request = client.post(&url).json(&unsigned_tx);
-        if let Some(ref api_key) = config.api_key {
+        if let Some(ref api_key) = config.wallet_api_key {
             request = request.header("api_key", api_key);
         }
 
@@ -1154,10 +1162,13 @@ impl TrackerBoxUpdater {
         info!("Broadcasting signed transaction: {}", signed_tx);
 
         let client = basis_store::http::bounded_client();
-        let url = format!("{}/transactions", config.node_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/transactions",
+            config.wallet_node_url.trim_end_matches('/')
+        );
 
         let mut request = client.post(&url).json(signed_tx);
-        if let Some(ref api_key) = config.api_key {
+        if let Some(ref api_key) = config.wallet_api_key {
             request = request.header("api_key", api_key);
         }
 
@@ -1356,12 +1367,12 @@ impl TrackerBoxUpdater {
         let client = basis_store::http::bounded_client();
         let url = format!(
             "{}/blockchain/transaction/byId/{}",
-            config.node_url.trim_end_matches('/'),
+            config.scanner_node_url.trim_end_matches('/'),
             tx_id
         );
 
         let mut request = client.get(&url);
-        if let Some(ref api_key) = config.api_key {
+        if let Some(ref api_key) = config.scanner_api_key {
             request = request.header("api_key", api_key);
         }
 

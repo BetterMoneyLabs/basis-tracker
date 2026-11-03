@@ -131,15 +131,30 @@ wallet is never involved (PR #16 B4). The reserve owner submits the payload to
 **their own Ergo node** — the node wallet must hold the reserve NFT and enough ERG
 for the reserve value plus fee.
 
-With `node_url` (and `node_api_key` if needed) set in `~/.basis/cli.toml`, the CLI
-can submit for you:
+The tracker only tracks a reserve whose creating transaction spends a P2PK input of
+the R4 owner key (issue #19; see `specs/ergo/reserve_admission.md`). With `node_url`
+(and `node_api_key` if needed) set in `~/.basis/cli.toml`, the CLI can submit for you
+and guarantees that proof input:
 
 ```bash
 basis-cli reserve create --nft-id <your_nft_id> --amount 1000000000 --submit
 ```
 
-Without `--submit` (or without node settings) the CLI prints the payload; submit it
-to your node manually:
+Under `--submit` the CLI inspects the node wallet first:
+
+- if every wallet box belongs to the owner key, the payload is sent as-is;
+- otherwise the deployment inputs are pinned (`/wallet/transaction/send` with
+  `inputsRaw`: the owner's P2PK box plus funding boxes, with explicit change);
+- if the wallet holds no P2PK box for the owner key at all, the CLI first sends a
+  pre-deployment transaction of 0.001 ERG to the owner's own address, waits for it to
+  appear in the wallet, and then submits the pinned deployment spending it. (If the
+  node wallet does not hold the owner key, this step fails with an explicit error.)
+
+Without `--submit` (or without node settings) the CLI prints the payload for manual
+submission. **Manual submission is only safe when every unspent box in the node
+wallet belongs to the owner key** — otherwise the node may fund the transaction from
+inputs with no P2PK(owner) box, and the tracker will quarantine the reserve as
+unproven:
 
 ```bash
 curl -X POST http://127.0.0.1:9053/wallet/payment/send \
@@ -148,8 +163,8 @@ curl -X POST http://127.0.0.1:9053/wallet/payment/send \
   -d '<the requests array from the payload>'
 ```
 
-The TUI wallet offers the same flow after generating the payload. The requests array
-already uses the camelCase `tokenId` format the node expects and is returned as the
-transaction id.
+The TUI wallet offers the same flow as `--submit` after generating the payload. The
+requests array already uses the camelCase `tokenId` format the node expects and is
+returned as the transaction id.
 
 Note: Make sure your Ergo node is running and you have the correct API key. Also, ensure that your wallet has sufficient ERG and the specified NFT to create the reserve.

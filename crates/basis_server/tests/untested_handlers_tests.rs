@@ -136,10 +136,11 @@ mod untested_handlers {
                 redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: basis_server::config::ErgoConfig {
-                node: basis_store::ergo_scanner::NodeConfig {
+                scanner: basis_store::ergo_scanner::NodeConfig {
                     node_url: node_url.to_string(),
                     ..Default::default()
                 },
+                wallet: Default::default(),
                 basis_reserve_contract_p2s: "9testReserveP2SAddress".to_string(),
                 basis_token_reserve_contract_p2s: "9testTokenReserveP2S".to_string(),
                 tracker_nft_id: Some(

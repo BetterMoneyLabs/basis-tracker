@@ -71,8 +71,9 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `GET /reserves` - Get all reserve information
 - `GET /reserves/issuer/{pubkey}` - Get reserves for a specific issuer
 - `GET /reserves/{box_id}` - Get a single reserve by its box id
+- `GET /reserves/quarantined` - List reserve boxes rejected by admission control (see `specs/ergo/reserve_admission.md`)
 - `GET /key-status/{pubkey}` - Get status information for a public key
-- `POST /reserves/create` - Create a reserve creation payload for Ergo node's `/wallet/payment/send` API
+- `POST /reserves/create` - Create a reserve creation payload for Ergo node's `/wallet/payment/send` API (the tracker only tracks the reserve if the creating transaction spends a P2PK input of the R4 owner key — `basis-cli reserve create --submit` guarantees this)
 
 ### Acceptance Policy Endpoints
 
@@ -200,7 +201,7 @@ The server now implements real cryptographic functionality using the Ergo node's
 
 #### Schnorr Signature Generation
 - **Local Signing (Primary)**: If `tracker_secret_key` is configured in server config, signatures are generated locally using the tracker's secret key
-- **Remote Fallback**: If no secret key is configured, falls back to Ergo node's `/utils/schnorrSign` API
+- **Remote Fallback**: If no secret key is configured, falls back to the `/utils/schnorrSign` API of the node configured under `[ergo.wallet]` (falling back to `[ergo.scanner]`)
 - **Format**: 65-byte signatures (33 bytes for 'a' component + 32 bytes for 'z' component)
 - **Structure**: Properly formatted with compressed public key prefix (0x02 or 0x03) followed by the signature components
 - **Security**: Supports both local signing (secret key in config) and remote signing (private keys secured within Ergo node)
@@ -304,7 +305,7 @@ Key configuration includes:
   tokens); larger requests are rejected with HTTP 400.
 - **`server.redemption_build_max_per_pair_per_hour`**: per-(issuer, recipient) rate limit on
   `POST /redemption/build` (default 60/hour, rolling window); excess requests get HTTP 429.
-- **Ergo node connection details**: `ergo.node.node_url` defaults to `http://127.0.0.1:9053`; point it at your Ergo node for real deployments
+- **Ergo node connection details**: `ergo.scanner.node_url` defaults to `http://127.0.0.1:9053`; point it at your Ergo node (with `extraIndex = true`) for real deployments. Wallet operations (`/wallet/*`, schnorr signing, broadcast) go to `ergo.wallet.node_url`, which falls back to the scanner node when unset.
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)
 - Tracker public key (for identifying the tracker server)
@@ -312,8 +313,8 @@ Key configuration includes:
 - Transaction fees
 
 **Critical Requirements**:
-1. `ergo.node.node_url` defaults to `http://127.0.0.1:9053` (local node); point it at your Ergo node for real deployments.
-2. The server requires access to an Ergo node with the Schnorr signing API (`/utils/schnorrSign`) enabled for endpoints that require tracker signatures. The tracker private key must be available in the Ergo node's wallet for signature generation.
+1. `ergo.scanner.node_url` defaults to `http://127.0.0.1:9053` (local node); point it at your Ergo node (with `extraIndex = true`) for real deployments. `ergo.wallet.node_url` optionally points at a separate node hosting the tracker wallet; it falls back to the scanner node when unset.
+2. The server requires access to an Ergo node with the Schnorr signing API (`/utils/schnorrSign`) enabled for endpoints that require tracker signatures. The tracker private key must be available in the wallet of the node configured under `[ergo.wallet]` (falling back to `[ergo.scanner]`) for signature generation.
 3. The tracker public key must be provided in the configuration for signature verification purposes.
 4. The tracker API key must be provided to authenticate requests to the Ergo node's signing API.
 5. When `server.auth.mode` is not `none`, configure TLS (`server.tls_cert_path` and `server.tls_key_path`) for production deployments so credentials and signatures are not sent in plaintext.

@@ -181,8 +181,8 @@ basis_reserve_contract_p2s = "your_reserve_contract_p2s_address"
 
 3. **Set Ergo Node Configuration**:
 ```toml
-[ergo.node]
-url = "http://your-ergo-node:9053"
+[ergo.scanner]
+node_url = "http://your-ergo-node:9053"
 api_key = "your_node_api_key"
 timeout_secs = 30
 ```

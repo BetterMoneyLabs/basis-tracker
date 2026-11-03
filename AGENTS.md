@@ -203,13 +203,22 @@ println!("Current blockchain height: {}", height);
 - **ReserveSpent**: Reserve box spent/closed
 
 ### Node Configuration
-- `ergo.node.node_url` defaults to `http://127.0.0.1:9053` (a local node); set it explicitly
-  for mainnet/testnet. Never rely on a third-party plaintext node — it sees every request
+- The server config splits node access in two (`config/basis.toml`):
+  - `[ergo.scanner]` (`ergo.scanner.node_url`) — chain reads and box scanning
+    (`/blockchain/*`, `/utxo/*`); the node must run with `extraIndex = true`.
+    Defaults to `http://127.0.0.1:9053`; set it explicitly for mainnet/testnet.
+    Never rely on a third-party plaintext node — it sees every request.
+  - `[ergo.wallet]` (`ergo.wallet.node_url`, `ergo.wallet.api_key`) — tracker wallet
+    operations (`/wallet/*`, schnorr signing, `/transactions` broadcast). No extra
+    indices needed; falls back to the scanner node when unset, so single-node setups
+    only configure `[ergo.scanner]`.
+- The legacy `[ergo.node]` section is rejected at startup with a migration error.
 - **Local**: `http://localhost:9053` (development)
 - Public mainnet/testnet nodes exist, but operator-controlled or local nodes are recommended
 
 ### Configuration
-- Node configuration stored in `config/basis.toml` under `[ergo.node]`
+- Node configuration stored in `config/basis.toml` under `[ergo.scanner]` (and
+  optionally `[ergo.wallet]`)
 - Supports multiple networks (mainnet, testnet, local)
 - Configurable timeouts and contract templates
 - API key support for authenticated nodes

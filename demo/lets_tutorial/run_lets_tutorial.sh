@@ -139,7 +139,7 @@ basis_reserve_contract_p2s = "$RESERVE_P2S"
 tracker_nft_id = "$TRACKER_NFT_ID"
 tracker_public_key = "$TRACKER_PUBKEY"
 
-[ergo.node]
+[ergo.scanner]
 start_height = 0
 node_url = "http://127.0.0.1:9053"
 EOF
