@@ -433,10 +433,10 @@ Redemption transactions use context extension variables to pass data to the Basi
 | **#4** | Note payment timestamp (8 bytes) | From the stored note (server-authoritative) |
 | **#5** | Reserve insert proof | From `/reserve/proof` endpoint |
 | **#6** | Tracker's Schnorr signature (65 bytes) | From `/tracker/signature` endpoint |
-| **#7** | Reserve lookup proof (optional) | From `/reserve/proof` endpoint |
+| **#7** | Reserve lookup proof (see rule below) | From `/reserve/proof` endpoint |
 | **#8** | Tracker lookup proof | From `/tracker/proof` endpoint |
 
-**Note:** Context variable #7 (reserve lookup proof) is omitted for first redemptions when `already_redeemed = 0`.
+**Note:** Context variable #7 (reserve lookup proof) **must be omitted** for first redemptions (when `already_redeemed = 0`) and **must be present** from the second redemption on. The tracker clients follow this rule automatically; third-party builders must too — sending #7 for a first redemption or omitting it later makes the transaction fail on-chain.
 
 ## AVL Proof Endpoints
 

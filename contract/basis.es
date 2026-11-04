@@ -206,10 +206,13 @@
     // #4 - timestamp of the payment (Long, milliseconds since Unix epoch)
     // #5 - proof for insertOrUpdate into reserve's AVL tree (Coll[Byte])
     // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
-    // #7 - [OPTIONAL] proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)
-    //      Omitted only for a first redemption. If omitted, the contract uses AvlTree.insert, which
+    // #7 - proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt).
+    //      MUST be omitted for a first redemption and MUST be present from the second redemption on.
+    //      If omitted, the contract uses AvlTree.insert, which
     //      fails if the key is already present -- so omitting #7 for an already-redeemed note is
-    //      rejected rather than treated as "nothing redeemed yet".
+    //      rejected rather than treated as "nothing redeemed yet". If present for a first
+    //      redemption, the lookup finds no key and the .get throws -- so do not send a
+    //      proof-of-absence.
     // #8 - proof for AVL tree lookup in tracker's tree for hash(ownerKey||receiverKey) -> totalDebt (required)
 
     // action and reserve output index. By passing them instead of hard-coding, we allow for multiple notes to be
@@ -258,8 +261,9 @@
       // #4 - timestamp of the payment (Long, milliseconds since Unix epoch)
       // #5 - proof for insertOrUpdate into reserve's AVL tree (Coll[Byte])
       // #6 - tracker's signature bytes (Schnorr signature on key || totalDebt || timestamp || trackerNftId (SELF.R6))
-      // #7 - [OPTIONAL] proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt)
-      //      Omitted only for a first redemption (see the insert/insertOrUpdate branch below)
+      // #7 - proof for AVL tree lookup in reserve's tree for hash(ownerKey||receiverKey) -> (timestamp, redeemedDebt).
+      //      MUST be omitted for a first redemption, MUST be present afterwards
+      //      (see the insert/insertOrUpdate branch below)
       // #8 - proof for AVL tree lookup in tracker's tree for hash(ownerKey||receiverKey) -> totalDebt (required)
 
       // Base point for elliptic curve operations
