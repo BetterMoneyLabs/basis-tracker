@@ -1,4 +1,4 @@
-# Exchange Atomicity: Staged To-Edge Application (Issue #17)
+# Exchange Atomicity: Staged To-Edge Application (Issue #17) and Failure Atomicity (Issue #20)
 
 ## Problem
 
@@ -173,3 +173,44 @@ Known related hazard, out of scope here: any `add_note` on an existing edge
 whose new timestamp crosses another note's timestamp has the same effect
 (pre-existing). Exchanges are fixed because they are the only mutation this
 spec introduces; the general case deserves its own issue.
+
+## Failure atomicity (issue #20)
+
+Each phase's storage writes commit as **one fjall batch**
+(`NoteStorage::commit_exchange_staged` / `commit_exchange_apply`), so they
+land together or not at all — including across a process crash (the batch is
+journaled):
+
+- Phase 1: the staged record + the decreased from-edge note + its recomputed
+  confirmation record. (The from-edge key already exists, so the
+  issuer/recipient indices are unchanged.)
+- Phase 2: the increased to-edge note + its index entries (if the edge is
+  new) + its confirmation record + the staged record's removal. Batching the
+  removal also fixes a subtler hazard: previously a failed delete left the
+  record staged, and the next cycle's base-unchanged check spuriously
+  **cancelled** an exchange that had actually applied.
+
+The in-memory AVL tree is never written incrementally by the exchange paths:
+after the commit they rebuild it from storage in canonical order, building
+into a fresh tree and swapping it in **only on success**. If the rebuild
+fails, the previous (valid) tree stays in place, `tree_dirty` is set, and
+`update_state` retries the rebuild before refreshing the committed digest —
+so a half-rebuilt or stale tree is never published as current (a liveness
+delay, never a half-applied state).
+
+Fault-injection tests (`basis_store::tests::multi_denomination_tests`):
+`exchange_phase1_commit_failure_leaves_state_unchanged`,
+`exchange_phase2_commit_failure_keeps_staged_and_retries`, and
+`exchange_rebuild_failure_keeps_old_tree_and_recovers` force the phase-1
+commit, the phase-2 commit and the rebuild to fail respectively, and assert
+the whole observable state (notes, staged records, tree digest,
+confirmations) is unchanged, then that a retry succeeds.
+
+The same hardening was applied to the single-note paths (`add_note` /
+`update_note`): `store_note` now commits the note record and both index
+entries in one fjall batch, and it runs BEFORE the in-memory tree update, so
+a storage failure leaves every observable state unchanged and a tree failure
+leaves storage safely ahead (the committed digest then merely lacks a note
+the tracker cannot prove yet), with `tree_dirty` triggering a rebuild from
+storage before the next digest update. Covered by
+`add_note_store_failure_leaves_state_unchanged`.

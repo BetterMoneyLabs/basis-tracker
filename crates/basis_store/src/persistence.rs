@@ -26,12 +26,21 @@ const JOURNAL_VALUE_LEN: usize = 49;
 /// - `issuer_index`: Secondary index (issuer_pubkey -> list of note keys)
 /// - `recipient_index`: Secondary index (recipient_pubkey -> list of note keys)
 pub struct NoteStorage {
+    keyspace: fjall::Keyspace,
     notes_partition: fjall::Partition,
     issuer_index: fjall::Partition,
     recipient_index: fjall::Partition,
     confirmations_partition: fjall::Partition,
     reserve_avl_journal_partition: fjall::Partition,
     pending_exchanges_partition: fjall::Partition,
+    /// Test-only fault-injection hook: while set, the atomic exchange commit
+    /// methods return an error without writing anything (issue #20 tests).
+    #[cfg(test)]
+    pub fail_exchange_commits: std::sync::atomic::AtomicBool,
+    /// Test-only fault-injection hook: while set, `store_note` returns an
+    /// error without writing anything (add_note/update_note atomicity tests).
+    #[cfg(test)]
+    pub fail_note_store: std::sync::atomic::AtomicBool,
 }
 
 /// Database storage for scanner metadata
@@ -230,12 +239,17 @@ impl NoteStorage {
             })?;
 
         Ok(Self {
+            keyspace,
             notes_partition,
             issuer_index,
             recipient_index,
             confirmations_partition,
             reserve_avl_journal_partition,
             pending_exchanges_partition,
+            #[cfg(test)]
+            fail_exchange_commits: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_note_store: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -381,20 +395,41 @@ impl NoteStorage {
 
     /// Store an IOU note with its issuer public key
     pub fn store_note(&self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+        #[cfg(test)]
+        if self
+            .fail_note_store
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(NoteError::StorageError(
+                "injected note store failure".to_string(),
+            ));
+        }
+
         let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
 
         let value_bytes = Self::serialize_note_value(issuer_pubkey, note);
 
-        self.notes_partition
-            .insert(&key_bytes, &value_bytes)
-            .map_err(|e| NoteError::StorageError(format!("Failed to insert note: {}", e)))?;
+        // The note record and both index entries commit in ONE journaled
+        // batch, so a crash or I/O error cannot leave a stored note with
+        // stale indices (issue #20 follow-up). Index writes are computed
+        // read-first and skipped when the key is already listed.
+        let issuer_index_value =
+            self.index_value_with_key(&self.issuer_index, issuer_pubkey, &key)?;
+        let recipient_index_value =
+            self.index_value_with_key(&self.recipient_index, &note.recipient_pubkey, &key)?;
 
-        // Update indices for efficient querying
-        Self::add_to_index(&self.issuer_index, issuer_pubkey, &key)?;
-        Self::add_to_index(&self.recipient_index, &note.recipient_pubkey, &key)?;
-
-        Ok(())
+        let mut batch = self.keyspace.batch();
+        batch.insert(&self.notes_partition, &key_bytes, value_bytes);
+        if let Some(value) = issuer_index_value {
+            batch.insert(&self.issuer_index, issuer_pubkey, value);
+        }
+        if let Some(value) = recipient_index_value {
+            batch.insert(&self.recipient_index, &note.recipient_pubkey, value);
+        }
+        batch
+            .commit()
+            .map_err(|e| NoteError::StorageError(format!("Failed to insert note: {}", e)))
     }
 
     /// Retrieve an IOU note by issuer, recipient and denomination
@@ -541,6 +576,136 @@ impl NoteStorage {
                 NoteError::StorageError(format!("Failed to delete pending exchange: {}", e))
             })?;
         Ok(())
+    }
+
+    /// Compute the index-partition write needed to add `note_key` to `index`,
+    /// mirroring `add_to_index`'s dedup: `None` if the key is already listed,
+    /// `Some(serialized_list)` otherwise. Read-first so the write can join an
+    /// atomic batch.
+    fn index_value_with_key(
+        &self,
+        index: &fjall::Partition,
+        pubkey: &PubKey,
+        note_key: &NoteKey,
+    ) -> Result<Option<Vec<u8>>, NoteError> {
+        let existing = index
+            .get(pubkey)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read index: {}", e)))?;
+        let mut keys = match existing {
+            Some(bytes) => Self::deserialize_note_keys(&bytes)?,
+            None => Vec::new(),
+        };
+        let key_bytes = note_key.to_bytes();
+        if keys.iter().any(|k| k.to_bytes() == key_bytes) {
+            return Ok(None);
+        }
+        keys.push(note_key.clone());
+        Ok(Some(Self::serialize_note_keys(&keys)))
+    }
+
+    /// Atomically commit an exchange's phase 1 (issue #20): the staged exchange
+    /// record, the decreased from-edge note, and its recomputed confirmation
+    /// record land together or not at all (a single journaled fjall batch).
+    /// The from-edge key already exists, so the issuer/recipient indices are
+    /// unchanged. On `Err` nothing was written.
+    pub fn commit_exchange_staged(
+        &self,
+        issuer_pubkey: &PubKey,
+        staged_record: &PendingExchangeRecord,
+        from_note: &IouNote,
+        from_confirmation: &NoteConfirmation,
+    ) -> Result<(), NoteError> {
+        #[cfg(test)]
+        if self
+            .fail_exchange_commits
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(NoteError::StorageError(
+                "injected exchange commit failure".to_string(),
+            ));
+        }
+
+        let from_key = NoteKey::from_assets(
+            issuer_pubkey,
+            &from_note.recipient_pubkey,
+            &from_note.denomination,
+        );
+        let staged_value = Self::serialize_pending_exchange(staged_record)?;
+        let note_value = Self::serialize_note_value(issuer_pubkey, from_note);
+        let confirmation_value = serde_json::to_vec(from_confirmation).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+        })?;
+
+        let mut batch = self.keyspace.batch();
+        batch.insert(
+            &self.pending_exchanges_partition,
+            &from_key.key_hash,
+            staged_value,
+        );
+        batch.insert(&self.notes_partition, from_key.to_bytes(), note_value);
+        batch.insert(
+            &self.confirmations_partition,
+            &from_key.key_hash,
+            confirmation_value,
+        );
+        batch
+            .commit()
+            .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange: {}", e)))
+    }
+
+    /// Atomically commit an exchange's phase 2 (issue #20): the increased
+    /// to-edge note, its index entries (if the edge is new), its recomputed
+    /// confirmation record, and the removal of the staged record land together
+    /// or not at all. On `Err` nothing was written, so the staged record
+    /// survives and the apply is retried on the next confirmation cycle.
+    pub fn commit_exchange_apply(
+        &self,
+        issuer_pubkey: &PubKey,
+        to_note: &IouNote,
+        to_confirmation: &NoteConfirmation,
+        staged_key: &[u8; 32],
+    ) -> Result<(), NoteError> {
+        #[cfg(test)]
+        if self
+            .fail_exchange_commits
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(NoteError::StorageError(
+                "injected exchange commit failure".to_string(),
+            ));
+        }
+
+        let to_key = NoteKey::from_assets(
+            issuer_pubkey,
+            &to_note.recipient_pubkey,
+            &to_note.denomination,
+        );
+        let note_value = Self::serialize_note_value(issuer_pubkey, to_note);
+        let confirmation_value = serde_json::to_vec(to_confirmation).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+        })?;
+        let issuer_index_value =
+            self.index_value_with_key(&self.issuer_index, issuer_pubkey, &to_key)?;
+        let recipient_index_value =
+            self.index_value_with_key(&self.recipient_index, &to_note.recipient_pubkey, &to_key)?;
+
+        let mut batch = self.keyspace.batch();
+        batch.insert(&self.notes_partition, to_key.to_bytes(), note_value);
+        if let Some(value) = issuer_index_value {
+            batch.insert(&self.issuer_index, issuer_pubkey, value);
+        }
+        if let Some(value) = recipient_index_value {
+            batch.insert(&self.recipient_index, &to_note.recipient_pubkey, value);
+        }
+        batch.insert(
+            &self.confirmations_partition,
+            &to_key.key_hash,
+            confirmation_value,
+        );
+        batch.remove(&self.pending_exchanges_partition, staged_key);
+        batch
+            .commit()
+            .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange apply: {}", e)))
     }
 
     /// Serialize a denomination as a tag byte plus a fixed 32-byte token id

@@ -1977,6 +1977,350 @@ mod multi_denomination_tests {
         }
     }
 
+    /// Issue #20: if the phase-1 atomic commit fails, NOTHING changes — the
+    /// from-edge note, the staged records, the live tree digest and the
+    /// confirmations are all exactly as before, and the exchange can simply be
+    /// retried once storage is healthy again.
+    #[test]
+    fn exchange_phase1_commit_failure_leaves_state_unchanged() {
+        let mut manager = TrackerStateManager::new_with_temp_storage();
+        let issuer = pubkey(&issuer_secret());
+        let recipient = pubkey(&recipient_secret());
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret(), &recipient, 100, 1000, DenomKey::Erg),
+            )
+            .unwrap();
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret(),
+                    &recipient,
+                    50,
+                    1001,
+                    DenomKey::Token(TOKEN_A),
+                ),
+            )
+            .unwrap();
+
+        let digest_before = manager.get_state().avl_root_digest;
+        let confirmations_before = manager.all_confirmations();
+
+        let ts = 2000u64;
+        let msg_from =
+            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
+        let msg_to = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &DenomKey::Token(TOKEN_A),
+            90,
+            ts,
+            &NFT,
+        );
+        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
+        };
+        let do_exchange = |manager: &mut TrackerStateManager| {
+            manager.exchange_debt(
+                &issuer,
+                &recipient,
+                &DenomKey::Erg,
+                30,
+                &DenomKey::Token(TOKEN_A),
+                40,
+                ts,
+                &sign_as(&issuer_secret(), &msg_from, &issuer),
+                &sign_as(&recipient_secret(), &msg_from, &recipient),
+                &sign_as(&issuer_secret(), &msg_to, &issuer),
+                &sign_as(&recipient_secret(), &msg_to, &recipient),
+                "reserve_box",
+            )
+        };
+
+        manager
+            .storage
+            .fail_exchange_commits
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = do_exchange(&mut manager);
+        assert!(
+            matches!(result, Err(NoteError::StorageError(_))),
+            "expected injected storage failure, got {result:?}"
+        );
+
+        // Everything is unchanged: notes, staged records, tree, confirmations.
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            50
+        );
+        assert!(manager
+            .list_pending_exchanges(None, None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(manager.get_state().avl_root_digest, digest_before);
+        assert_eq!(manager.all_confirmations(), confirmations_before);
+
+        // After the storage failure clears, the same exchange goes through.
+        manager
+            .storage
+            .fail_exchange_commits
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        do_exchange(&mut manager).unwrap();
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            70
+        );
+        assert_eq!(manager.list_pending_exchanges(None, None).unwrap().len(), 1);
+    }
+
+    /// Issue #20: if the phase-2 atomic commit fails, the to-edge note is not
+    /// written, the staged record survives as Staged (previously a failed
+    /// staged-record delete led to a spurious cancellation of an exchange that
+    /// had actually applied), and the next confirmation cycle applies the
+    /// exchange exactly once.
+    #[test]
+    fn exchange_phase2_commit_failure_keeps_staged_and_retries() {
+        let (mut manager, issuer, recipient, staged_key) = stage_exchange();
+        let from_digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(from_digest, "tx1", 1).unwrap();
+        manager
+            .confirm_pending_notes(from_digest, "tracker_box", 5)
+            .unwrap();
+
+        let digest_before = manager.get_state().avl_root_digest;
+        let make_observation = |manager: &TrackerStateManager| crate::ExchangeObservation {
+            key: staged_key,
+            reserve_r5_digest: Some(
+                manager
+                    .reserve_state_digest(&issuer, &DenomKey::Erg)
+                    .try_into()
+                    .unwrap(),
+            ),
+        };
+
+        manager
+            .storage
+            .fail_exchange_commits
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = manager.process_staged_exchanges(&[make_observation(&manager)]);
+        assert!(
+            matches!(result, Err(NoteError::StorageError(_))),
+            "expected injected storage failure, got {result:?}"
+        );
+
+        // Nothing changed: to-edge untouched, record still staged, digest kept.
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            50
+        );
+        assert_eq!(manager.get_state().avl_root_digest, digest_before);
+        let staged = manager.list_pending_exchanges(None, None).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert!(
+            matches!(staged[0].1.status, crate::PendingExchangeStatus::Staged),
+            "record must stay staged, got {:?}",
+            staged[0].1.status
+        );
+
+        // Next cycle, with storage healthy again: applied exactly once.
+        manager
+            .storage
+            .fail_exchange_commits
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let processed = manager
+            .process_staged_exchanges(&[make_observation(&manager)])
+            .unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (1, 0));
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Token(TOKEN_A))
+                .unwrap(),
+            90
+        );
+        assert!(manager
+            .list_pending_exchanges(None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Issue #20: if the canonical tree rebuild fails AFTER the atomic storage
+    /// commit, the previous (valid) tree stays in place, its digest is kept as
+    /// the committed state, and `update_state` retries the rebuild until it
+    /// succeeds — a half-rebuilt tree is never published.
+    #[test]
+    fn exchange_rebuild_failure_keeps_old_tree_and_recovers() {
+        let mut manager = TrackerStateManager::new_with_temp_storage();
+        let issuer = pubkey(&issuer_secret());
+        let recipient = pubkey(&recipient_secret());
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret(), &recipient, 100, 1000, DenomKey::Erg),
+            )
+            .unwrap();
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret(),
+                    &recipient,
+                    50,
+                    1001,
+                    DenomKey::Token(TOKEN_A),
+                ),
+            )
+            .unwrap();
+
+        let digest_before = manager.get_state().avl_root_digest;
+        manager.fail_tree_rebuild = true;
+
+        let ts = 2000u64;
+        let msg_from =
+            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
+        let msg_to = crate::schnorr::signing_message(
+            &issuer,
+            &recipient,
+            &DenomKey::Token(TOKEN_A),
+            90,
+            ts,
+            &NFT,
+        );
+        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
+        };
+        // The storage commit succeeds; only the in-memory rebuild fails.
+        manager
+            .exchange_debt(
+                &issuer,
+                &recipient,
+                &DenomKey::Erg,
+                30,
+                &DenomKey::Token(TOKEN_A),
+                40,
+                ts,
+                &sign_as(&issuer_secret(), &msg_from, &issuer),
+                &sign_as(&recipient_secret(), &msg_from, &recipient),
+                &sign_as(&issuer_secret(), &msg_to, &issuer),
+                &sign_as(&recipient_secret(), &msg_to, &recipient),
+                "reserve_box",
+            )
+            .unwrap();
+
+        // Storage has the decrease; the live tree is still the old, valid one.
+        assert!(manager.tree_dirty);
+        assert_eq!(manager.get_state().avl_root_digest, digest_before);
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            manager
+                .lookup_note(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap()
+                .amount_collected,
+            70
+        );
+        assert_eq!(manager.list_pending_exchanges(None, None).unwrap().len(), 1);
+
+        // Once the rebuild works again, the next state update heals the tree.
+        manager.fail_tree_rebuild = false;
+        manager.update_state();
+        assert!(!manager.tree_dirty);
+        assert_ne!(manager.get_state().avl_root_digest, digest_before);
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            70
+        );
+    }
+
+    /// Issue #20 follow-up: `add_note` stores the note (atomically, with its
+    /// index entries) BEFORE updating the in-memory tree, so a storage failure
+    /// leaves the tree digest, the confirmations and the stored note all
+    /// unchanged — and the same note can simply be re-submitted.
+    #[test]
+    fn add_note_store_failure_leaves_state_unchanged() {
+        let mut manager = TrackerStateManager::new_with_temp_storage();
+        let issuer = pubkey(&issuer_secret());
+        let recipient = pubkey(&recipient_secret());
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret(), &recipient, 100, 1000, DenomKey::Erg),
+            )
+            .unwrap();
+
+        let digest_before = manager.get_state().avl_root_digest;
+        let confirmations_before = manager.all_confirmations();
+
+        manager
+            .storage
+            .fail_note_store
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = manager.add_note(
+            &issuer,
+            &create_note(&issuer_secret(), &recipient, 150, 1002, DenomKey::Erg),
+        );
+        assert!(
+            matches!(result, Err(NoteError::StorageError(_))),
+            "expected injected storage failure, got {result:?}"
+        );
+
+        // Nothing changed: not in the tree, not in storage, not in confirmations.
+        assert_eq!(manager.get_state().avl_root_digest, digest_before);
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            manager
+                .lookup_note(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap()
+                .amount_collected,
+            100
+        );
+        assert_eq!(manager.all_confirmations(), confirmations_before);
+
+        // After the failure clears, the same note goes through.
+        manager
+            .storage
+            .fail_note_store
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret(), &recipient, 150, 1002, DenomKey::Erg),
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            150
+        );
+    }
+
     /// Issue #17: a staged exchange is cancelled when the from-edge commits to
     /// a different value than the exchange's decrease — the tracker state moved
     /// past the exchange (e.g. the issuer issued new debt on the edge).
