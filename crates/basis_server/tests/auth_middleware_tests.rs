@@ -25,6 +25,7 @@ fn test_app(auth_config: AuthConfig) -> Router {
         .route("/", get(protected_handler))
         .route("/notes", get(protected_handler).post(protected_handler))
         .route("/acceptance/policy", post(protected_handler))
+        .route("/reserves/create", post(protected_handler))
         .route("/redeem/complete", post(protected_handler))
         .layer(axum::middleware::from_fn(authorization_middleware))
         .layer(axum::middleware::from_fn_with_state(
@@ -467,6 +468,21 @@ async fn api_key_with_admin_key_set_grants_only_write() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
+    // Reserve creation only builds a payload the owner submits, so it is Write too.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/reserves/create")
+                .method("POST")
+                .header("Authorization", "Bearer shared-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
     let response = app
         .oneshot(
             Request::builder()
@@ -492,7 +508,7 @@ async fn admin_api_key_grants_admin_role() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/acceptance/policy")
+                .uri("/redeem/complete")
                 .method("POST")
                 .header("Authorization", "Bearer operator-key")
                 .body(Body::empty())

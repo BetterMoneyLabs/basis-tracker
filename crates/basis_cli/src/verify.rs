@@ -29,6 +29,14 @@ use crate::api::{CreateReserveRequest, ReserveCreationResponse};
 const EMPTY_RESERVE_TREE_R5: &str =
     "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000";
 
+/// Highest reserve-creation fee this client will pay (`payload.fee`).
+///
+/// The tracker's default is 0.001 ERG, and a reserve deployment is a small transaction, so
+/// 0.01 ERG leaves an order of magnitude of headroom. Without a bound, a dishonest tracker can
+/// set `fee` to the owner's whole wallet balance: the pinned deployment path sends this value
+/// to the node and selects enough owner inputs to cover it.
+const MAX_RESERVE_DEPLOYMENT_FEE_NANO: u64 = 10_000_000;
+
 /// Check a `POST /reserves/create` payload before the owner's wallet is asked to fund it.
 ///
 /// The owner's node pays exactly what the payload says, so a dishonest tracker could otherwise
@@ -36,8 +44,12 @@ const EMPTY_RESERVE_TREE_R5: &str =
 /// The payload must be the single reserve box `request` describes: the reserve contract compiled
 /// into this client for its denomination, the requested ERG value, the reserve NFT (amount 1)
 /// followed by the collateral token for a token reserve, R4 = owner key, R5 = empty reserve tree,
-/// R6 = a 32-byte tracker NFT id (`expected_tracker_nft_id` when the caller knows it) and R7
-/// absent or Long 0.
+/// R6 = a 32-byte tracker NFT id (`expected_tracker_nft_id` when the caller knows it), R7 absent
+/// or Long 0, the change address derived from the owner key, and a fee no higher than
+/// [`MAX_RESERVE_DEPLOYMENT_FEE_NANO`]. The last two checks matter because newer submission paths
+/// send the owner's change (and the pre-deployment funding UTXO) to `payload.change_address` and
+/// pay `payload.fee`; a tracker that names its own address or an excessive fee there would take
+/// the owner's funds.
 pub fn verify_reserve_payload(
     request: &CreateReserveRequest,
     payload: &ReserveCreationResponse,
@@ -69,6 +81,13 @@ pub fn verify_reserve_payload(
             request.erg_amount
         ));
     }
+    if payload.fee > MAX_RESERVE_DEPLOYMENT_FEE_NANO {
+        return Err(anyhow!(
+            "reserve deployment fee is {} nanoERG, above the {} nanoERG this client pays",
+            payload.fee,
+            MAX_RESERVE_DEPLOYMENT_FEE_NANO
+        ));
+    }
 
     // The reserve NFT first, then the collateral token: the order basis-token.es reads them in.
     let mut expected_assets = vec![(request.nft_id.as_str(), 1)];
@@ -96,13 +115,21 @@ pub fn verify_reserve_payload(
     {
         return Err(anyhow!("unexpected register {} in reserve payload", other));
     }
+    let owner_pk: [u8; 33] = decode_array(&request.owner_pubkey, "owner public key")?;
+    // The owner's node pays change, and on the pinned-deployment path the pre-deployment
+    // funding UTXO, to this address. It must be the owner's own P2PK address.
+    if address_tree_bytes(&payload.change_address)? != tree_bytes(&p2pk_tree(&owner_pk)?)? {
+        return Err(anyhow!(
+            "change address {} is not the owner's P2PK address",
+            payload.change_address
+        ));
+    }
     let register = |id: &str| -> Result<Constant> {
         let value = registers
             .get(id)
             .ok_or_else(|| anyhow!("register {} missing from reserve payload", id))?;
         parse_constant(value).map_err(|e| anyhow!("register {}: {}", id, e))
     };
-    let owner_pk: [u8; 33] = decode_array(&request.owner_pubkey, "owner public key")?;
     if register("R4")? != Constant::from(parse_point(&owner_pk)?) {
         return Err(anyhow!("R4 is not the owner key {}", request.owner_pubkey));
     }
@@ -513,6 +540,46 @@ mod tests {
         // The token contract is not the reserve an ERG request asked for either.
         payload.requests[0].address = get_basis_token_reserve_contract_p2s().unwrap();
         assert!(reserve_err(&request, &payload).contains("not the erg reserve contract"));
+    }
+
+    #[test]
+    fn reserve_payload_rejects_excessive_fee() {
+        let request = reserve_request(false);
+
+        // The tracker default is well under the cap.
+        let mut payload = honest_payload(&request);
+        payload.fee = MAX_RESERVE_DEPLOYMENT_FEE_NANO;
+        verify_reserve_payload(&request, &payload, None).unwrap();
+
+        // A dishonest tracker cannot make the owner burn their wallet as a fee.
+        let mut payload = honest_payload(&request);
+        payload.fee = MAX_RESERVE_DEPLOYMENT_FEE_NANO + 1;
+        let err = reserve_err(&request, &payload);
+        assert!(err.contains("fee") && err.contains("above"), "{}", err);
+    }
+
+    #[test]
+    fn reserve_payload_rejects_tracker_or_invalid_change_address() {
+        let request = reserve_request(false);
+
+        // Change (and the pinned-deployment funding UTXO) must never go to the tracker.
+        let mut payload = honest_payload(&request);
+        payload.change_address = basis_offchain::ergo_tx::pubkey_to_address(TRACKER_PK).unwrap();
+        let err = reserve_err(&request, &payload);
+        assert!(
+            err.contains("change address") && err.contains("owner's P2PK"),
+            "{}",
+            err
+        );
+
+        // Nor to a script that is not the owner's P2PK script.
+        let mut payload = honest_payload(&request);
+        payload.change_address = get_basis_reserve_contract_p2s().unwrap();
+        assert!(reserve_err(&request, &payload).contains("change address"));
+
+        let mut payload = honest_payload(&request);
+        payload.change_address = "not-an-address".to_string();
+        assert!(reserve_err(&request, &payload).contains("invalid address"));
     }
 
     #[test]

@@ -1090,28 +1090,22 @@ mod tests {
         }
     }
 
-    /// Follow-up review N11: a reserve address that is not the compiled contract (here the
-    /// pre-multi-token token script still shipped in demos/specs, which reads ERG debt as
-    /// token debt) must be refused, while the same contract under a testnet prefix is fine.
+    /// Follow-up review N11: a reserve address that is not the compiled contract (here the ERG
+    /// contract configured as the token contract, or a non-address) must be refused, while the
+    /// same contract under a testnet prefix is fine.
     #[test]
     fn validate_startup_refuses_stale_reserve_contract_address() {
-        const PREVIOUS_TOKEN_P2S_PREFIX: &str = "EUNip3sG";
-
         let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
-        let previous_token_p2s = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../specs/ergo/token_reserve.md"
-        ))
-        .ok()
-        .and_then(|doc| {
-            doc.split(|c: char| !c.is_ascii_alphanumeric())
-                .find(|w| w.starts_with(PREVIOUS_TOKEN_P2S_PREFIX))
-                .map(str::to_string)
-        });
         config.ergo.basis_token_reserve_contract_p2s =
-            previous_token_p2s.unwrap_or_else(|| "not-an-address".to_string());
+            basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap();
         let err = config.validate_startup().unwrap_err();
         assert!(err.contains("basis_token_reserve_contract_p2s"), "{}", err);
+
+        let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
+        config.ergo.basis_reserve_contract_p2s =
+            basis_store::contract_compiler::get_basis_token_reserve_contract_p2s().unwrap();
+        let err = config.validate_startup().unwrap_err();
+        assert!(err.contains("basis_reserve_contract_p2s"), "{}", err);
 
         let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
         config.ergo.basis_reserve_contract_p2s = "test".to_string();

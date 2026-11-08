@@ -1394,12 +1394,9 @@ async fn tracker_assisted_redeem(
         &tracker_nft_id,
     );
     let note_signature = note.as_ref().map(|n| n.signature.as_str()).unwrap_or("");
-    let issuer_sig = basis_cli_lib::verify::redemption_issuer_signature(
-        &issuer_pk,
-        note_signature,
-        &message,
-    )
-    .map_err(|e| format!("issuer signature: {}", e))?;
+    let issuer_sig =
+        basis_cli_lib::verify::redemption_issuer_signature(&issuer_pk, note_signature, &message)
+            .map_err(|e| format!("issuer signature: {}", e))?;
 
     // Recipient (receiver) secret for the reserve input's proveDlog(recipient).
     let cur = app.current_account.as_ref().ok_or("no current account")?;

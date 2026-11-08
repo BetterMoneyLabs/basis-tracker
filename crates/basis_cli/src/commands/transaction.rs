@@ -949,11 +949,8 @@ pub async fn execute_local_redemption(
         note.timestamp,
         &tracker_nft_id,
     );
-    let issuer_signature = crate::verify::redemption_issuer_signature(
-        &issuer_pk,
-        &note.signature,
-        &message,
-    )?;
+    let issuer_signature =
+        crate::verify::redemption_issuer_signature(&issuer_pk, &note.signature, &message)?;
     let issuer_signature_hex = hex::encode(issuer_signature);
 
     let build = build_redemption_tx(
@@ -1130,11 +1127,8 @@ pub async fn generate_redemption_transaction(
         note.timestamp,
         &tracker_nft_id,
     );
-    let issuer_signature = crate::verify::redemption_issuer_signature(
-        &issuer_pk,
-        &note.signature,
-        &message,
-    )?;
+    let issuer_signature =
+        crate::verify::redemption_issuer_signature(&issuer_pk, &note.signature, &message)?;
     let issuer_signature_hex = hex::encode(issuer_signature);
 
     let build = build_redemption_tx(
@@ -1310,11 +1304,8 @@ pub async fn redeem_tracker_assisted(
         timestamp,
         &tracker_nft_id,
     );
-    let issuer_sig = crate::verify::redemption_issuer_signature(
-        &issuer_pk,
-        &note.signature,
-        &message,
-    )?;
+    let issuer_sig =
+        crate::verify::redemption_issuer_signature(&issuer_pk, &note.signature, &message)?;
     progress!("✅ issuer signature ({} bytes)", issuer_sig.len());
 
     // Tracker builds the unsigned tx and signs the fee input(s).

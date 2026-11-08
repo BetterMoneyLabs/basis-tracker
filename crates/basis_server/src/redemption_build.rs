@@ -1950,10 +1950,22 @@ mod tests {
     /// with empty proofs, standing in for the client's signed copy. ergo-lib computes both ids
     /// from the transaction body, exactly as the node does.
     fn tx_pair(inputs: &[&str], outputs: Vec<Value>) -> (Value, Value) {
+        tx_pair_with_extension(inputs, outputs, json!({}))
+    }
+
+    fn tx_pair_with_extension(
+        inputs: &[&str],
+        outputs: Vec<Value>,
+        extension: Value,
+    ) -> (Value, Value) {
         let unsigned_json = json!({
             "inputs": inputs
                 .iter()
-                .map(|id| json!({ "boxId": id, "extension": {} }))
+                .enumerate()
+                .map(|(i, id)| {
+                    let extension = if i == 0 { extension.clone() } else { json!({}) };
+                    json!({ "boxId": id, "extension": extension })
+                })
                 .collect::<Vec<_>>(),
             "dataInputs": [],
             "outputs": outputs,
@@ -2100,6 +2112,52 @@ mod tests {
             ],
         );
         other["id"] = signed["id"].clone();
+        let err = registry.validate_and_consume(&fp, &other).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// Follow-up review N1: the tx id must cover the reserve input's context extension as well
+    /// as its boxes. Otherwise a caller could swap the build's redemption extension (action #0,
+    /// amount, issuer signature, AVL proofs) for another one and still pass the id check.
+    #[test]
+    fn pending_entry_binds_reserve_input_context_extension() {
+        let (unsigned, signed) = tx_pair_with_extension(
+            &[RESERVE_BOX, FUNDING_BOX],
+            vec![
+                output(P2PK_TREE, 9_000_000_000, Some(&[0x11; 33])),
+                output(P2PK_TREE, 1_000_000_000, None),
+            ],
+            json!({ "0": "0200" }),
+        );
+        assert_eq!(
+            unsigned_tx_id(&unsigned).unwrap(),
+            signed["id"].as_str().unwrap(),
+            "the signed copy must have the built transaction id"
+        );
+
+        // The matching signed copy is accepted.
+        let registry = PendingRedemptionRegistry::new();
+        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
+        assert!(registry.record(fp, pending_entry(&unsigned)));
+        assert!(registry.validate_and_consume(&fp, &signed).is_ok());
+
+        // A different extension changes the transaction id, even though the caller echoes the
+        // original unsigned transaction (so the fingerprint still matches).
+        let registry = PendingRedemptionRegistry::new();
+        let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
+        assert!(registry.record(fp, pending_entry(&unsigned)));
+        let (other_unsigned, other) = tx_pair_with_extension(
+            &[RESERVE_BOX, FUNDING_BOX],
+            vec![
+                output(P2PK_TREE, 9_000_000_000, Some(&[0x11; 33])),
+                output(P2PK_TREE, 1_000_000_000, None),
+            ],
+            json!({ "0": "0201" }),
+        );
+        assert_ne!(
+            unsigned_tx_id(&unsigned).unwrap(),
+            unsigned_tx_id(&other_unsigned).unwrap()
+        );
         let err = registry.validate_and_consume(&fp, &other).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
