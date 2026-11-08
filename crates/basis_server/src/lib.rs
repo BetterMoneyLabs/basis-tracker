@@ -253,6 +253,12 @@ pub enum TrackerCommand {
         submitted_height: u64,
         response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
     },
+    /// Pin the current live tree as the content of the next tracker box
+    /// update and return its digest, in one tracker-thread step (issue #15
+    /// follow-up N2). The updater submits exactly the returned digest.
+    PrepareTrackerUpdate {
+        response_tx: tokio::sync::oneshot::Sender<Result<[u8; 33], basis_store::NoteError>>,
+    },
     /// Promote all pending notes to confirmed after an update tx confirms.
     /// `digest` is the AVL root committed by the confirming tracker box.
     ConfirmPendingNotes {

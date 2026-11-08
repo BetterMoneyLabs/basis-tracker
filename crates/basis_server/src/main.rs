@@ -576,6 +576,10 @@ async fn main() {
                     );
                     let _ = response_tx.send(result);
                 }
+                TrackerCommand::PrepareTrackerUpdate { response_tx } => {
+                    let result = redemption_manager.tracker.prepare_tracker_update();
+                    let _ = response_tx.send(result);
+                }
                 TrackerCommand::ConfirmPendingNotes {
                     digest,
                     box_id,

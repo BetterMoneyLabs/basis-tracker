@@ -749,8 +749,9 @@ permanently divergent with no alarm.
 Two related defects in the same file:
 - `lib.rs:646` — `self.storage.get_all_confirmations().unwrap_or_default();` treats a read error
   as "no confirmations", so after a restart every note silently becomes `LocalOnly`.
-- `lib.rs:698` — `let _ = (digest, submitted_height);` in `mark_notes_pending` discards the two
-  values identifying *which* commitment the pending state refers to.
+- `mark_notes_pending` previously discarded the digest it was given
+  (`let _ = (digest, submitted_height);`). Since the N2 fix the digest selects the pinned
+  tree snapshot that the in-flight update commits; only `submitted_height` remains unused.
 
 ### M8. Dead Reserve Event Pipeline 🟢
 

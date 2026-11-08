@@ -3,7 +3,7 @@
 //! Each test asserts the correct behaviour, fails at `3df7ed9`, and is `#[ignore]`d with the
 //! finding id so the default test run stays green. Run them with
 //! `cargo test -p basis_store review_regression -- --ignored` and drop the `#[ignore]` once the
-//! finding is fixed.
+//! finding is fixed. The N2 tests below were un-ignored by the snapshot-based fix.
 
 use crate::{DenomKey, IouNote, PubKey, TrackerStateManager};
 use secp256k1::{Secp256k1, SecretKey};
@@ -69,7 +69,6 @@ fn assert_committed_proofs_work(
 /// timestamp, but the live (committed) tree has first-insertion shape. An ordinary repeat
 /// payment to an earlier creditor reorders the rebuild and breaks every committed proof.
 #[test]
-#[ignore = "follow-up review N2: committed tree rebuilt in the wrong insertion order"]
 fn committed_proofs_survive_a_repeat_payment() {
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer = keypair(1);
@@ -90,7 +89,6 @@ fn committed_proofs_survive_a_repeat_payment() {
 /// an existing note's (client clock skew, or one deliberately backdated self-note by any
 /// Write client).
 #[test]
-#[ignore = "follow-up review N2: committed tree rebuilt in the wrong insertion order"]
 fn committed_proofs_survive_a_backdated_new_note() {
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer = keypair(1);
@@ -108,7 +106,6 @@ fn committed_proofs_survive_a_backdated_new_note() {
 /// Pending becomes LocalOnly, `confirm_pending_notes` only promotes Pending notes, so the value
 /// the chain committed is never recorded and the rebuild no longer matches.
 #[test]
-#[ignore = "follow-up review N2: confirmation state loses values re-posted while pending"]
 fn committed_proofs_survive_a_note_updated_while_its_commit_is_pending() {
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer = keypair(1);
@@ -130,7 +127,6 @@ fn committed_proofs_survive_a_note_updated_while_its_commit_is_pending() {
 /// calls, then sends MarkNotesPending, which marks the CURRENT note values. A note posted in
 /// that window is recorded as committed although the submitted digest does not contain it.
 #[test]
-#[ignore = "follow-up review N2: mark_notes_pending ignores the digest it is given"]
 fn committed_proofs_survive_a_note_posted_while_the_update_is_built() {
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer = keypair(1);

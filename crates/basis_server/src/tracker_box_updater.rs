@@ -578,12 +578,49 @@ impl TrackerBoxUpdater {
                 }
             }
 
+            // N2: take the digest AND pin the snapshot of the tree behind it
+            // in one tracker-thread step, immediately before building the
+            // transaction. The notes posted while the transaction is built and
+            // submitted then cannot desync MarkNotesPending from the digest
+            // that actually goes on-chain.
+            let submit_digest = match &cmd_tx {
+                Some(tx) => {
+                    let (rtx, rrx) = tokio::sync::oneshot::channel();
+                    match tx
+                        .send(crate::TrackerCommand::PrepareTrackerUpdate { response_tx: rtx })
+                        .await
+                    {
+                        Ok(()) => {
+                            match rrx.await {
+                                Ok(Ok(digest)) => digest,
+                                Ok(Err(e)) => {
+                                    error!(
+                                        "Failed to prepare tracker update: {:?}. Skipping cycle.",
+                                        e
+                                    );
+                                    continue;
+                                }
+                                Err(_) => {
+                                    error!("Tracker thread dropped the prepare request. Skipping cycle.");
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            error!("Tracker command channel closed. Skipping update cycle.");
+                            continue;
+                        }
+                    }
+                }
+                None => current_digest,
+            };
+
             match Self::submit_tracker_update(
                 &tracker_nft_id,
                 &config,
                 &tracker_box,
                 &tracker_pubkey,
-                &current_digest,
+                &submit_digest,
             )
             .await
             {
@@ -594,14 +631,14 @@ impl TrackerBoxUpdater {
                     );
 
                     let submitted_height = Self::get_node_height(&config).await.unwrap_or(0) as u64;
-                    shared_state.set_pending(current_digest, tx_id.clone(), submitted_height);
-                    pending_tx = Some((tx_id.clone(), current_digest));
+                    shared_state.set_pending(submit_digest, tx_id.clone(), submitted_height);
+                    pending_tx = Some((tx_id.clone(), submit_digest));
 
                     if let Some(ref tx) = cmd_tx {
                         let (rtx, rrx) = tokio::sync::oneshot::channel();
                         let _ = tx
                             .send(crate::TrackerCommand::MarkNotesPending {
-                                digest: current_digest,
+                                digest: submit_digest,
                                 tx_id,
                                 submitted_height,
                                 response_tx: rtx,

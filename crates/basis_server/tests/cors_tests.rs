@@ -222,6 +222,10 @@ mod cors_tests {
                     TrackerCommand::GetAllConfirmations { response_tx } => {
                         let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
                     }
+                    TrackerCommand::PrepareTrackerUpdate { response_tx } => {
+                        let result = redemption_manager.tracker.prepare_tracker_update();
+                        let _ = response_tx.send(result);
+                    }
                     TrackerCommand::MarkNotesPending {
                         digest,
                         tx_id,

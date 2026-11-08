@@ -33,6 +33,10 @@ pub struct NoteStorage {
     confirmations_partition: fjall::Partition,
     reserve_avl_journal_partition: fjall::Partition,
     pending_exchanges_partition: fjall::Partition,
+    /// Tracker-tree metadata: the persisted first-insertion order of tree keys
+    /// and the committed tree snapshot behind the confirmed on-chain digest
+    /// (issue #15 follow-up N2).
+    tracker_meta_partition: fjall::Partition,
     /// Test-only fault-injection hook: while set, the atomic exchange commit
     /// methods return an error without writing anything (issue #20 tests).
     #[cfg(test)]
@@ -238,6 +242,12 @@ impl NoteStorage {
                 ))
             })?;
 
+        let tracker_meta_partition = keyspace
+            .open_partition("tracker_meta", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open tracker meta partition: {}", e))
+            })?;
+
         Ok(Self {
             keyspace,
             notes_partition,
@@ -246,6 +256,7 @@ impl NoteStorage {
             confirmations_partition,
             reserve_avl_journal_partition,
             pending_exchanges_partition,
+            tracker_meta_partition,
             #[cfg(test)]
             fail_exchange_commits: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -512,6 +523,67 @@ impl NoteStorage {
             results.push((key_bytes, confirmation));
         }
         Ok(results)
+    }
+
+    /// Persist the first-insertion order of the tracker tree keys. AVL+ tree
+    /// shape depends on it, so a restart must replay this exact order to
+    /// reproduce the committed digest (issue #15 follow-up N2).
+    pub fn store_tracker_insertion_order(&self, order: &[[u8; 32]]) -> Result<(), NoteError> {
+        let value = serde_json::to_vec(order).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize insertion order: {}", e))
+        })?;
+        self.tracker_meta_partition
+            .insert("tracker_insertion_order", &value)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store insertion order: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// Load the persisted tracker tree insertion order (empty for databases
+    /// that predate it).
+    pub fn load_tracker_insertion_order(&self) -> Result<Vec<[u8; 32]>, NoteError> {
+        match self.tracker_meta_partition.get("tracker_insertion_order") {
+            Ok(Some(value)) => serde_json::from_slice(&value).map_err(|e| {
+                NoteError::StorageError(format!("Failed to parse insertion order: {}", e))
+            }),
+            Ok(None) => Ok(Vec::new()),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to load insertion order: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Persist the snapshot of the tree behind the latest confirmed on-chain
+    /// digest, so committed redemption proofs survive a restart (N2).
+    pub fn store_committed_snapshot(
+        &self,
+        snapshot: &crate::TreeSnapshot,
+    ) -> Result<(), NoteError> {
+        let value = serde_json::to_vec(snapshot).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize committed snapshot: {}", e))
+        })?;
+        self.tracker_meta_partition
+            .insert("committed_tree_snapshot", &value)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store committed snapshot: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// Load the persisted committed tree snapshot, if any.
+    pub fn load_committed_snapshot(&self) -> Result<Option<crate::TreeSnapshot>, NoteError> {
+        match self.tracker_meta_partition.get("committed_tree_snapshot") {
+            Ok(Some(value)) => serde_json::from_slice(&value).map(Some).map_err(|e| {
+                NoteError::StorageError(format!("Failed to parse committed snapshot: {}", e))
+            }),
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to load committed snapshot: {}",
+                e
+            ))),
+        }
     }
 
     /// Persist a staged (pending) cross-denomination exchange record, keyed by
