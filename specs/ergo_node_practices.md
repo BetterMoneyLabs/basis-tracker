@@ -36,8 +36,15 @@ The Ergo node exposes two related endpoints:
 - **`POST /wallet/payment/send`** — accepts a JSON array of `PaymentRequest` objects
   (simpler, default fee of 0.001 ERG is used).
 
-For reserve creation and most test flows, use `/wallet/payment/send` with a
-`PaymentRequest` array.
+For most test flows, use `/wallet/payment/send` with a `PaymentRequest` array.
+
+**Reserve creation is the exception**: the tracker only tracks a reserve whose
+creating transaction spends a P2PK input of the R4 owner key
+(`specs/ergo/reserve_admission.md`). Automatic input selection via
+`/wallet/payment/send` guarantees that only when every wallet box belongs to the
+owner key; use `basis-cli reserve create --submit` instead, which pins a P2PK(owner)
+input via `/wallet/transaction/send` (`inputsRaw`) or creates a 0.001 ERG
+pre-deployment UTXO first when the wallet has no owner P2PK box.
 
 ## 3. Issuing a Reserve NFT
 
@@ -116,7 +123,13 @@ curl -s -X POST http://127.0.0.1:3048/reserves/create \
 
    The tracker never broadcasts the payload — there is no `/reserves/submit`
    endpoint. The reserve owner submits the payload to their **own** Ergo node,
-   so the tracker's wallet is never involved:
+   so the tracker's wallet is never involved. The tracker only tracks the reserve
+   if the creating transaction spends a P2PK input of the R4 owner key
+   (`specs/ergo/reserve_admission.md`), so prefer
+   `basis-cli reserve create ... --submit` (which guarantees that input; see §2) when
+   `node_url` (and `node_api_key`) are set in `~/.basis/cli.toml`. A manual
+   `/wallet/payment/send` submission like the following is only safe when every
+   unspent wallet box belongs to the owner key:
 
    ```bash
    curl -s -X POST http://127.0.0.1:9053/wallet/payment/send \
@@ -124,8 +137,6 @@ curl -s -X POST http://127.0.0.1:3048/reserves/create \
      -H "api_key: <your_node_api_key>" \
      -d '<the requests array from the response>'
    ```
-   The CLI does this for you with `basis-cli reserve create ... --submit` when
-   `node_url` (and `node_api_key`) are set in `~/.basis/cli.toml`.
 
    When constructing the request manually from the `requests` array:
    - Replace `token_id` with **`tokenId`** (camelCase).

@@ -128,7 +128,7 @@ mod integration_tests {
         // Test that check_transaction_confirmation handles a non-existent tx gracefully
         // Using a local/mock URL that will definitely timeout/fail
         let config = TrackerBoxUpdateConfig {
-            node_url: "http://localhost:99999".to_string(), // Invalid port - will fail fast
+            scanner_node_url: "http://localhost:99999".to_string(), // Invalid port - will fail fast
             ..Default::default()
         };
 

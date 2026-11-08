@@ -172,7 +172,7 @@ tracker_nft_id = "$TRACKER_NFT_ID"
 tracker_public_key = "$TRACKER_PUBKEY"
 tracker_secret_key = "$TRACKER_SECRET"
 
-[ergo.node]
+[ergo.scanner]
 start_height = $START_HEIGHT
 node_url = "$NODE_URL"
 api_key = "$NODE_API_KEY"

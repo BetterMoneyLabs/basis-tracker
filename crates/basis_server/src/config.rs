@@ -245,12 +245,31 @@ pub struct ReserveTokenConfig {
     pub min_collateralization_ratio: Option<f64>,
 }
 
+/// Tracker wallet node configuration (`[ergo.wallet]`).
+///
+/// Used for every endpoint that touches the tracker's wallet or broadcasts
+/// transactions (`/wallet/*`, schnorr signing, `/transactions`). No extra indices
+/// are needed on this node. When `node_url` is empty, the scanner node is used.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WalletNodeConfig {
+    /// Ergo node URL hosting the tracker wallet; empty means "use the scanner node".
+    #[serde(default)]
+    pub node_url: String,
+    /// API key for the wallet node; empty means "use the scanner node's key".
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
 /// Ergo blockchain configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ErgoConfig {
-    /// Ergo node configuration
-    pub node: NodeConfig,
+    /// Scanner node configuration: chain reads and box scanning
+    /// (`/blockchain/*`, `/utxo/*`, `/info`). Requires `extraIndex = true` on the node.
+    pub scanner: NodeConfig,
+    /// Tracker wallet node configuration; falls back to `scanner` when unset.
+    #[serde(default)]
+    pub wallet: WalletNodeConfig,
     /// Basis reserve contract P2S address (ERG-backed reserve)
     pub basis_reserve_contract_p2s: String,
     /// Basis token reserve contract P2S address. Every token-backed reserve lives at
@@ -323,6 +342,24 @@ impl Default for ConfirmationConfig {
     }
 }
 
+/// Refuse the pre-split `[ergo.node]` section with a clear migration message.
+///
+/// Without this check a stale config would either fail deserialization with an
+/// opaque "unknown field" error or (worse, for env-sourced keys) be silently
+/// ignored while the server falls back to localhost defaults.
+fn reject_legacy_node_section(config: &config::Config) -> Result<(), config::ConfigError> {
+    if config.get::<config::Value>("ergo.node").is_ok() {
+        return Err(config::ConfigError::Message(
+            "the [ergo.node] config section was split: rename it to [ergo.scanner] (chain reads \
+             and box scanning; the node needs extraIndex = true) and optionally add [ergo.wallet] \
+             with node_url/api_key for the node hosting the tracker wallet (wallet ops and \
+             transaction broadcast; falls back to the scanner node when unset)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl AppConfig {
     /// Load configuration from file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, config::ConfigError> {
@@ -330,11 +367,19 @@ impl AppConfig {
             .add_source(config::File::from(path.as_ref()))
             .build()?;
 
+        reject_legacy_node_section(&config)?;
         config.try_deserialize()
     }
 
     /// Load configuration from default locations
     pub fn load() -> Result<Self, config::ConfigError> {
+        let config = config::Config::builder()
+            .add_source(config::File::with_name("config/basis").required(false))
+            .build()?;
+        // Check the raw file for the legacy section before applying defaults, so a
+        // stale config gets a clear migration error instead of silent defaults.
+        reject_legacy_node_section(&config)?;
+
         let config = config::Config::builder()
             // Default configuration
             .set_default("server.host", "0.0.0.0")?
@@ -349,18 +394,21 @@ impl AppConfig {
             .set_default("server.auth.api_key", "")?
             .set_default("server.auth.allowed_origins", Vec::<String>::new())?
             .set_default("server.auth.signature_timestamp_tolerance_ms", 30_000)?
-            // Node configuration defaults
-            .set_default("ergo.node.start_height", "")?
-            .set_default("ergo.node.reserve_contract_p2s", "")?
+            // Scanner node configuration defaults
+            .set_default("ergo.scanner.start_height", "")?
+            .set_default("ergo.scanner.reserve_contract_p2s", "")?
             // SECURITY: default to a LOCAL node, not a third-party host.
             //
             // This used to default to `http://159.89.116.15:11088`, a public mainnet node over
             // plaintext HTTP. An operator who did not set `node_url` therefore sent every request
             // -- including the node `api_key`, which grants full wallet access -- to somebody
             // else's machine, unencrypted. Matches config/basis.toml.example.
-            .set_default("ergo.node.node_url", "http://127.0.0.1:9053")?
-            .set_default("ergo.node.scan_name", "Basis Reserve Scanner")?
-            .set_default("ergo.node.api_key", "")? // Set via config file or BASIS_ERGO_NODE_API_KEY env var
+            .set_default("ergo.scanner.node_url", "http://127.0.0.1:9053")?
+            .set_default("ergo.scanner.scan_name", "Basis Reserve Scanner")?
+            .set_default("ergo.scanner.api_key", "")? // Set via config file or BASIS_ERGO_SCANNER_API_KEY env var
+            // Tracker wallet node defaults: empty means "use the scanner node"
+            .set_default("ergo.wallet.node_url", "")?
+            .set_default("ergo.wallet.api_key", "")?
             // Transaction configuration defaults
             .set_default("transaction.fee", 1000000)? // 0.001 ERG
             // Token reserve configuration defaults
@@ -524,14 +572,30 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Get the Ergo node configuration
-    pub fn ergo_node_config(&self) -> NodeConfig {
-        let mut config = self.ergo.node.clone();
+    /// Get the scanner node configuration (chain reads, box scanning).
+    pub fn ergo_scanner_config(&self) -> NodeConfig {
+        let mut config = self.ergo.scanner.clone();
         config.reserve_contract_p2s = Some(self.ergo.basis_reserve_contract_p2s.clone());
         config.token_reserve_contract_p2s =
             Some(self.ergo.basis_token_reserve_contract_p2s.clone());
         config.tracker_nft_id = self.ergo.tracker_nft_id.clone();
         config
+    }
+
+    /// Get the tracker wallet node `(url, api_key)`: `/wallet/*` endpoints, schnorr
+    /// signing, and transaction broadcast go here. Falls back to the scanner node
+    /// when `ergo.wallet.node_url` / `ergo.wallet.api_key` are not configured.
+    pub fn ergo_wallet_node(&self) -> (String, Option<String>) {
+        let url = if self.ergo.wallet.node_url.is_empty() {
+            self.ergo.scanner.node_url.clone()
+        } else {
+            self.ergo.wallet.node_url.clone()
+        };
+        let api_key = match self.ergo.wallet.api_key.as_ref().filter(|k| !k.is_empty()) {
+            Some(key) => Some(key.clone()),
+            None => self.ergo.scanner.api_key.clone(),
+        };
+        (url, api_key)
     }
 
     /// Get the Basis reserve contract P2S address
@@ -821,7 +885,7 @@ mod tests {
                     default_redemption_build_max_per_pair_per_hour(),
             },
             ergo: ErgoConfig {
-                node: NodeConfig {
+                scanner: NodeConfig {
                     start_height: None,
                     reserve_contract_p2s: None,
                     token_reserve_contract_p2s: None,
@@ -830,6 +894,7 @@ mod tests {
                     scan_name: None,
                     api_key: Some("test".to_string()),
                 },
+                wallet: WalletNodeConfig::default(),
                 basis_reserve_contract_p2s: "test".to_string(),
                 basis_token_reserve_contract_p2s: "test_token".to_string(),
                 tracker_nft_id: None,
@@ -910,7 +975,7 @@ mod tests {
                     default_redemption_build_max_per_pair_per_hour(),
             },
             ergo: ErgoConfig {
-                node: NodeConfig {
+                scanner: NodeConfig {
                     start_height: None,
                     reserve_contract_p2s: None,
                     token_reserve_contract_p2s: None,
@@ -919,6 +984,7 @@ mod tests {
                     scan_name: None,
                     api_key: Some("test".to_string()),
                 },
+                wallet: WalletNodeConfig::default(),
                 basis_reserve_contract_p2s: "test".to_string(),
                 basis_token_reserve_contract_p2s: "test_token".to_string(),
                 tracker_nft_id: None,
@@ -1038,7 +1104,8 @@ mod tests {
                     default_redemption_build_max_per_pair_per_hour(),
             },
             ergo: ErgoConfig {
-                node: NodeConfig::default(),
+                scanner: NodeConfig::default(),
+                wallet: WalletNodeConfig::default(),
                 basis_reserve_contract_p2s:
                     basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap(),
                 basis_token_reserve_contract_p2s:
@@ -1171,5 +1238,60 @@ mod tests {
         auth.allow_anonymous_non_loopback = true;
         let config = startup_test_config("0.0.0.0", auth);
         assert!(config.validate_startup().is_ok());
+    }
+
+    #[test]
+    fn wallet_node_falls_back_to_scanner_node() {
+        let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
+        config.ergo.scanner.node_url = "https://scanner.example:9053".to_string();
+        config.ergo.scanner.api_key = Some("scanner-key".to_string());
+
+        // Unset wallet config: both url and key fall back to the scanner node.
+        let (url, key) = config.ergo_wallet_node();
+        assert_eq!(url, "https://scanner.example:9053");
+        assert_eq!(key.as_deref(), Some("scanner-key"));
+
+        // Only the wallet url set: key still falls back.
+        config.ergo.wallet.node_url = "http://127.0.0.1:9053".to_string();
+        let (url, key) = config.ergo_wallet_node();
+        assert_eq!(url, "http://127.0.0.1:9053");
+        assert_eq!(key.as_deref(), Some("scanner-key"));
+
+        // Both set: full override.
+        config.ergo.wallet.api_key = Some("wallet-key".to_string());
+        let (url, key) = config.ergo_wallet_node();
+        assert_eq!(url, "http://127.0.0.1:9053");
+        assert_eq!(key.as_deref(), Some("wallet-key"));
+    }
+
+    #[test]
+    fn legacy_ergo_node_section_is_rejected() {
+        let toml = r#"
+            [ergo.node]
+            node_url = "http://127.0.0.1:9053"
+        "#;
+        let config = config::Config::builder()
+            .add_source(config::File::from_str(toml, config::FileFormat::Toml))
+            .build()
+            .unwrap();
+        let err = reject_legacy_node_section(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("ergo.scanner"),
+            "unexpected error: {}",
+            err
+        );
+
+        // The new section names pass the check.
+        let toml = r#"
+            [ergo.scanner]
+            node_url = "http://127.0.0.1:9053"
+            [ergo.wallet]
+            node_url = "http://127.0.0.1:9054"
+        "#;
+        let config = config::Config::builder()
+            .add_source(config::File::from_str(toml, config::FileFormat::Toml))
+            .build()
+            .unwrap();
+        assert!(reject_legacy_node_section(&config).is_ok());
     }
 }

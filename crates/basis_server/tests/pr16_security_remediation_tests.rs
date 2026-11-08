@@ -128,10 +128,11 @@ mod pr16_security_remediation {
                 redemption_build_max_per_pair_per_hour: max_builds_per_pair_per_hour,
             },
             ergo: basis_server::config::ErgoConfig {
-                node: basis_store::ergo_scanner::NodeConfig {
+                scanner: basis_store::ergo_scanner::NodeConfig {
                     node_url: "http://localhost:9053".to_string(),
                     ..Default::default()
                 },
+                wallet: Default::default(),
                 basis_reserve_contract_p2s: "9testReserveP2SAddress".to_string(),
                 basis_token_reserve_contract_p2s: "9testTokenReserveP2S".to_string(),
                 tracker_nft_id: Some(

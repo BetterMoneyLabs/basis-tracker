@@ -439,7 +439,7 @@ tracker_secret_key = "$TRACKER_SECRET"
 reserve_token_id = "$USE_TOKEN_ID"
 reserve_token_decimals = $USE_DECIMALS
 
-[ergo.node]
+[ergo.scanner]
 start_height = $START_HEIGHT
 node_url = "$NODE_URL"
 api_key = "$NODE_API_KEY"

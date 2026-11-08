@@ -8,6 +8,6 @@ basis_reserve_contract_p2s = "2XoR96YVZfWybxeo7qdMkA1BRhxFivm8gTuLLuKREiW6833XWK
 tracker_nft_id = "0d444b11102ea28b293f9e4d3de24e9c30b6d4790906882dad0c8abbc22bc3c5"
 tracker_public_key = "0208b884ab55715910f298114686f38eb17b58c9b1330d456ed28567b866480e71"
 
-[ergo.node]
+[ergo.scanner]
 start_height = 0
 node_url = "http://127.0.0.1:9053"

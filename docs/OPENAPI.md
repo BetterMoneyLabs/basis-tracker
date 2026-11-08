@@ -110,7 +110,8 @@ All endpoints return a standardized response envelope:
 ### Notes
 
 - `POST /notes` - Create a new IOU note (requires `tracker_nft_id`, which must match this tracker's configured NFT id — see "Signing Message Format" below; optional `denomination` field, `"erg"` or `"token:<64-hex>"`, defaulting to the pair's existing note's denomination when unambiguous, else ERG)
-- `POST /notes/exchange` - Exchange debt between two denominations of one (issuer, recipient) pair (off-chain novation / triage; both parties sign both edges' new states — the recipient's signatures are the creditor consent required for a debt decrease)
+- `POST /notes/exchange` - Exchange debt between two denominations of one (issuer, recipient) pair in two phases (issue #17): the from-edge decrease applies immediately, the to-edge increase is staged until the decrease is committed on-chain and the issuer's from-denomination reserve box is verified unchanged (both parties sign both edges' new states — the recipient's signatures are the creditor consent required for a debt decrease; requires exactly one tracked from-denomination reserve, else 409)
+- `GET /exchanges/pending` - List staged and cancelled two-phase exchange records (optional `issuer_pubkey` / `recipient_pubkey` query filters); staged records await the reserve verification, cancelled records carry the reason (the from-edge decrease stays applied)
 - `GET /notes` - Get all IOU notes with age and confirmation state
 - `GET /notes/issuer/{pubkey}` - Get all notes issued by a public key
 - `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get a specific note (optional `?denomination=` query parameter)
@@ -122,6 +123,7 @@ All endpoints return a standardized response envelope:
 - `GET /reserves` - Get all reserves
 - `GET /reserves/{box_id}` - Get a specific reserve by box ID
 - `GET /reserves/issuer/{pubkey}` - Get reserves for an issuer
+- `GET /reserves/quarantined` - List reserve boxes rejected by admission control (issue #19): duplicates that do not descend from the tracked reserve for their (owner, denomination), roots that failed setup validation, or roots whose creating transaction spends no P2PK input of the R4 owner key. Quarantined boxes are never tracked.
 - `POST /reserves/create` - Build a reserve creation payment request
 
 `POST /reserves/create` only *builds* the payment request. To create the
@@ -134,6 +136,13 @@ curl -X POST http://your-ergo-node:9053/wallet/payment/send \
   -H "api_key: <your-node-api-key>" \
   -d '<the requests array from the /reserves/create response>'
 ```
+
+Note: the tracker only tracks a reserve whose creating transaction spends a
+P2PK input of the R4 owner key (see `specs/ergo/reserve_admission.md`). The
+manual submission above is only safe when every box in the node wallet
+belongs to the owner key; `basis-cli reserve create --submit` guarantees the
+proof input automatically (pinning inputs, or creating a 0.001 ERG
+pre-deployment UTXO when the wallet has no owner P2PK box).
 
 The tracker no longer exposes an endpoint that forwards payments to its
 configured Ergo node wallet.
@@ -424,10 +433,10 @@ Redemption transactions use context extension variables to pass data to the Basi
 | **#4** | Note payment timestamp (8 bytes) | From the stored note (server-authoritative) |
 | **#5** | Reserve insert proof | From `/reserve/proof` endpoint |
 | **#6** | Tracker's Schnorr signature (65 bytes) | From `/tracker/signature` endpoint |
-| **#7** | Reserve lookup proof (optional) | From `/reserve/proof` endpoint |
+| **#7** | Reserve lookup proof (see rule below) | From `/reserve/proof` endpoint |
 | **#8** | Tracker lookup proof | From `/tracker/proof` endpoint |
 
-**Note:** Context variable #7 (reserve lookup proof) is omitted for first redemptions when `already_redeemed = 0`.
+**Note:** Context variable #7 (reserve lookup proof) **must be omitted** for first redemptions (when `already_redeemed = 0`) and **must be present** from the second redemption on. The tracker clients follow this rule automatically; third-party builders must too — sending #7 for a first redemption or omitting it later makes the transaction fail on-chain.
 
 ## AVL Proof Endpoints
 

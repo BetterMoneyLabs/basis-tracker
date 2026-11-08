@@ -182,22 +182,35 @@ struct NodeClient {
 }
 
 impl NodeClient {
-    fn from_state(state: &AppState) -> Self {
+    /// Node used for chain reads (`/utxo/*` on chain boxes, `/blocks/*`): the
+    /// scanner node (`[ergo.scanner]`, extra-indexed).
+    fn chain(state: &AppState) -> Self {
         NodeClient {
             url: state
                 .config
                 .ergo
-                .node
+                .scanner
                 .node_url
                 .trim_end_matches('/')
                 .to_string(),
             api_key: state
                 .config
                 .ergo
-                .node
+                .scanner
                 .api_key
                 .clone()
                 .filter(|k| !k.is_empty()),
+        }
+    }
+
+    /// Node hosting the tracker wallet: `/wallet/*` (fee inputs), binaries of
+    /// wallet-selected fee boxes, and transaction broadcast. Falls back to the
+    /// scanner node when `[ergo.wallet]` is not configured.
+    fn wallet(state: &AppState) -> Self {
+        let (url, api_key) = state.config.ergo_wallet_node();
+        NodeClient {
+            url: url.trim_end_matches('/').to_string(),
+            api_key,
         }
     }
 
@@ -707,7 +720,8 @@ async fn build_redemption_inner(
         Err(e) => return api_err(StatusCode::BAD_REQUEST, format!("recipient address: {e}")),
     };
 
-    let node = NodeClient::from_state(state);
+    let chain_node = NodeClient::chain(state);
+    let wallet_node = NodeClient::wallet(state);
 
     // Look up the note to confirm it exists. The stored note's payment
     // timestamp is authoritative for the tracker signature, context var #4, and
@@ -861,7 +875,7 @@ async fn build_redemption_inner(
             } else {
                 MIN_RESERVE_REMAINDER
             };
-            match node.box_details(box_id).await {
+            match chain_node.box_details(box_id).await {
                 Ok(b) if b.value >= min_box_value => match b.r5_digest_hex() {
                     Some(d) if d == tracker_reserve_digest => {
                         found = Some((
@@ -1036,6 +1050,15 @@ async fn build_redemption_inner(
                     "note is not committed on-chain yet; wait for the next tracker box update",
                 )
             }
+            Ok(Err(basis_store::NoteError::StaleCommittedDebt { committed, local })) => {
+                return api_err(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "the committed tracker state for this note ({}) is ahead of its current total ({}) because a consented debt decrease (exchange) has not been committed yet; building a redemption now would over-redeem. Retry after the next tracker box update (issue #17)",
+                        committed, local
+                    ),
+                )
+            }
             Ok(Err(e)) => {
                 return api_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1204,7 +1227,7 @@ async fn build_redemption_inner(
         }
     };
 
-    let reserve_box = match node.box_details(&reserve_box_id).await {
+    let reserve_box = match chain_node.box_details(&reserve_box_id).await {
         Ok(b) => b,
         Err(e) => {
             return api_err(
@@ -1222,7 +1245,7 @@ async fn build_redemption_inner(
     // Token-backed reserves preserve the reserve's ERG value and move reserve tokens.
     let is_token_reserve = !reserve_token_id.is_empty();
 
-    let wallet_boxes = match node.wallet_boxes().await {
+    let wallet_boxes = match wallet_node.wallet_boxes().await {
         Ok(b) => b,
         Err(e) => {
             return api_err(
@@ -1494,7 +1517,7 @@ async fn build_redemption_inner(
     reorder_reserve_extension_scala(&mut unsigned_tx);
 
     // Parse boxes for local fee signing.
-    let reserve_box_binary = match node.box_binary(&reserve_box_id).await {
+    let reserve_box_binary = match chain_node.box_binary(&reserve_box_id).await {
         Ok(b) => b,
         Err(e) => {
             return api_err(
@@ -1503,7 +1526,7 @@ async fn build_redemption_inner(
             )
         }
     };
-    let tracker_box_binary = match node.box_binary(&tracker_box_id).await {
+    let tracker_box_binary = match chain_node.box_binary(&tracker_box_id).await {
         Ok(b) => b,
         Err(e) => {
             return api_err(
@@ -1514,7 +1537,7 @@ async fn build_redemption_inner(
     };
     let mut fee_binaries = Vec::with_capacity(fee_boxes.len());
     for fb in &fee_boxes {
-        match node.box_binary(&fb.box_id).await {
+        match wallet_node.box_binary(&fb.box_id).await {
             Ok(b) => fee_binaries.push(b),
             Err(e) => {
                 return api_err(
@@ -1562,7 +1585,7 @@ async fn build_redemption_inner(
     let data_boxes = vec![tracker_ebox];
 
     // State context for proving (contract does not read headers/params; height from PreHeader).
-    let headers = match node.last_headers().await {
+    let headers = match chain_node.last_headers().await {
         Ok(h) if h.len() >= 10 => h,
         Ok(h) => {
             return api_err(
@@ -1757,7 +1780,7 @@ pub async fn submit_redemption(
         }
     };
 
-    let node = NodeClient::from_state(&state);
+    let node = NodeClient::wallet(&state);
     let tx_id = match node.broadcast(&payload.signed_tx).await {
         Ok(tx_id) => tx_id,
         Err(e) => {

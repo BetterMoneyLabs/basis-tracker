@@ -78,11 +78,21 @@ tracker_public_key = "your_tracker_public_key_or_p2pk_address_here"
 # WARNING: never commit this value to version control
 tracker_secret_key = "your_tracker_secret_key_here"
 
-[ergo.node]
+# Scanner node: chain reads and box scanning (/blockchain/*, /utxo/*).
+# This node MUST run with extraIndex = true (see docs/ergo_node_setup.md).
+[ergo.scanner]
 start_height = 0
 node_url = "http://127.0.0.1:9053"
 api_key = "your_node_api_key_here"
 timeout_secs = 30
+
+# Tracker wallet node: /wallet/* endpoints, schnorr signing, and transaction
+# broadcast. Hosts the tracker wallet; no extra indices needed. Uncomment to use
+# a separate node (e.g. a local wallet-only node while scanning via a remote
+# extra-indexed node); when unset, the scanner node is used for everything.
+# [ergo.wallet]
+# node_url = "http://127.0.0.1:9053"
+# api_key = "your_wallet_node_api_key_here"
 
 [transaction]
 # Default transaction fee in nanoERG (0.001 ERG = 1,000,000 nanoERG)

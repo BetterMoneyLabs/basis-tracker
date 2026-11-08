@@ -1,4 +1,8 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    Json,
+};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,8 +11,8 @@ use crate::{
         ApiResponse, Asset, CheckAcceptanceRequest, CheckAcceptanceResponse,
         CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, ExchangeNotesRequest,
         ExchangeNotesResponse, KeyStatusDenomination, KeyStatusResponse, NoteConfirmationSummary,
-        NoteStateRequest, NoteStateResponse, PendingTxResponse, ProofResponse, RedeemRequest,
-        RedeemResponse, RedemptionPreparationRequest, RedemptionPreparationResponse,
+        NoteStateRequest, NoteStateResponse, PendingExchangeView, PendingTxResponse, ProofResponse,
+        RedeemRequest, RedeemResponse, RedemptionPreparationRequest, RedemptionPreparationResponse,
         ReserveCollateralConfigResponse, ReserveCreationResponse, ReservePaymentRequest,
         ReserveTokenConfigResponse, SerializableIouNote, ServedDenomination, ServedTokenInfo,
         TrackerEvent, TrackerSignatureRequest, TrackerSignatureResponse, TrackerStateResponse,
@@ -396,6 +400,12 @@ pub async fn create_note(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
+                NoteError::StaleCommittedDebt { committed, local } => format!(
+                    "Committed tracker state ({}) is ahead of the note's current total ({}); \
+                     a consented debt decrease has not been committed yet. \
+                     Retry after the next tracker box update",
+                    committed, local
+                ),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -487,51 +497,70 @@ pub async fn exchange_notes(
         );
     }
 
-    // Decode the four signatures.
-    let decode_sig =
-        |name: &str,
-         hex_str: &str|
-         -> Result<Signature, (StatusCode, Json<ApiResponse<ExchangeNotesResponse>>)> {
-            let bytes = hex::decode(hex_str).map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(crate::models::error_response(format!(
-                        "{} must be hex-encoded",
-                        name
-                    ))),
-                )
-            })?;
-            bytes.try_into().map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(crate::models::error_response(format!(
-                        "{} must be 65 bytes",
-                        name
-                    ))),
-                )
-            })
-        };
+    // The from-edge's canonical reserve (issue #17): the staged to-edge
+    // increase is only applied after the from-edge decrease is committed AND
+    // this reserve box is verified unchanged on-chain, so the request fails
+    // closed when the issuer's from-denomination reserve is ambiguous or
+    // untracked (no box to observe in phase 2).
+    let from_reserve_box_id = match ensure_single_issuer_reserve(
+        &state,
+        &payload.issuer_pubkey,
+        &from_denomination,
+    )
+    .await
+    {
+        Ok(Some(box_id)) => box_id,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(crate::models::error_response(format!(
+                    "issuer {} has no tracked reserve in denomination {}; exchanges require a tracked from-denomination reserve",
+                    payload.issuer_pubkey,
+                    from_denomination.denomination_id()
+                ))),
+            )
+        }
+        Err(msg) => {
+            return (StatusCode::CONFLICT, Json(crate::models::error_response(msg)))
+        }
+    };
+
+    // Decode the four signatures. The closure returns a plain message so the
+    // Err variant stays small (the full response tuple is built only on the
+    // error path).
+    let decode_sig = |name: &str, hex_str: &str| -> Result<Signature, String> {
+        let bytes = hex::decode(hex_str).map_err(|_| format!("{} must be hex-encoded", name))?;
+        bytes
+            .try_into()
+            .map_err(|_| format!("{} must be 65 bytes", name))
+    };
+    let bad_request = |msg: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(msg)),
+        )
+    };
     let issuer_from_signature =
         match decode_sig("issuer_from_signature", &payload.issuer_from_signature) {
             Ok(s) => s,
-            Err(r) => return r,
+            Err(msg) => return bad_request(msg),
         };
     let recipient_from_signature = match decode_sig(
         "recipient_from_signature",
         &payload.recipient_from_signature,
     ) {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(msg) => return bad_request(msg),
     };
     let issuer_to_signature = match decode_sig("issuer_to_signature", &payload.issuer_to_signature)
     {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(msg) => return bad_request(msg),
     };
     let recipient_to_signature =
         match decode_sig("recipient_to_signature", &payload.recipient_to_signature) {
             Ok(s) => s,
-            Err(r) => return r,
+            Err(msg) => return bad_request(msg),
         };
 
     // The to-edge's new total (for the response and the acceptance re-evaluation).
@@ -655,6 +684,7 @@ pub async fn exchange_notes(
             recipient_from_signature,
             issuer_to_signature,
             recipient_to_signature,
+            from_reserve_box_id,
             acceptance_check,
             response_tx,
         })
@@ -697,6 +727,11 @@ pub async fn exchange_notes(
                     from_new_total,
                     to_new_total,
                     timestamp: payload.timestamp,
+                    // Two-phase exchange (issue #17): only the from-edge
+                    // decrease is applied now; the to-edge increase is staged
+                    // until the decrease is confirmed and the from-reserve is
+                    // verified unchanged.
+                    to_edge_status: "pending".to_string(),
                 })),
             )
         }
@@ -704,6 +739,116 @@ pub async fn exchange_notes(
             StatusCode::BAD_REQUEST,
             Json(crate::models::error_response(format!(
                 "Exchange rejected: {:?}",
+                e
+            ))),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread did not respond".to_string(),
+            )),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PendingExchangesQuery {
+    /// Optional issuer public key filter (hex, 66 chars).
+    pub issuer_pubkey: Option<String>,
+    /// Optional recipient public key filter (hex, 66 chars).
+    pub recipient_pubkey: Option<String>,
+}
+
+/// List pending (staged or cancelled) cross-denomination exchanges (issue #17).
+///
+/// A staged exchange has applied only its from-edge decrease; the to-edge
+/// increase is applied automatically once the decrease is confirmed in a
+/// tracker box and the from-denomination reserve is verified unchanged. A
+/// cancelled exchange is kept with the reason it was abandoned. Applied
+/// exchanges are removed from the list — the to-edge note's existence is the
+/// completion signal.
+#[axum::debug_handler]
+pub async fn list_pending_exchanges(
+    State(state): State<AppState>,
+    Query(params): Query<PendingExchangesQuery>,
+) -> (StatusCode, Json<ApiResponse<Vec<PendingExchangeView>>>) {
+    let issuer_pubkey = match &params.issuer_pubkey {
+        Some(hex_str) => match parse_pubkey(hex_str) {
+            Ok(pk) => Some(pk),
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(msg)),
+                )
+            }
+        },
+        None => None,
+    };
+    let recipient_pubkey = match &params.recipient_pubkey {
+        Some(hex_str) => match parse_pubkey(hex_str) {
+            Ok(pk) => Some(pk),
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(msg)),
+                )
+            }
+        },
+        None => None,
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(TrackerCommand::ListPendingExchanges {
+            issuer_pubkey,
+            recipient_pubkey,
+            response_tx: tx,
+        })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+
+    match rx.await {
+        Ok(Ok(records)) => {
+            let views = records
+                .into_iter()
+                .map(|(_, record)| {
+                    let to_base = record.to_base_collected.unwrap_or(0);
+                    let (status, cancel_reason) = match &record.status {
+                        basis_store::PendingExchangeStatus::Staged => ("staged".to_string(), None),
+                        basis_store::PendingExchangeStatus::Cancelled { reason } => {
+                            ("cancelled".to_string(), Some(reason.clone()))
+                        }
+                    };
+                    PendingExchangeView {
+                        issuer_pubkey: hex::encode(record.issuer_pubkey),
+                        recipient_pubkey: hex::encode(record.recipient_pubkey),
+                        from_denomination: record.from_denomination.denomination_id(),
+                        from_old_total: record.from_old_total,
+                        from_new_total: record.from_new_total,
+                        to_denomination: record.to_denomination.denomination_id(),
+                        to_amount: record.to_note.amount_collected.saturating_sub(to_base),
+                        to_new_total: record.to_note.amount_collected,
+                        status,
+                        cancel_reason,
+                        created_at: record.created_at,
+                    }
+                })
+                .collect();
+            (StatusCode::OK, Json(crate::models::success_response(views)))
+        }
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(format!(
+                "tracker error: {:?}",
                 e
             ))),
         ),
@@ -841,6 +986,12 @@ pub async fn get_notes_by_issuer(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
+                NoteError::StaleCommittedDebt { committed, local } => format!(
+                    "Committed tracker state ({}) is ahead of the note's current total ({}); \
+                     a consented debt decrease has not been committed yet. \
+                     Retry after the next tracker box update",
+                    committed, local
+                ),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -971,6 +1122,12 @@ pub async fn get_notes_by_recipient(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
+                NoteError::StaleCommittedDebt { committed, local } => format!(
+                    "Committed tracker state ({}) is ahead of the note's current total ({}); \
+                     a consented debt decrease has not been committed yet. \
+                     Retry after the next tracker box update",
+                    committed, local
+                ),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -1164,6 +1321,12 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
+                NoteError::StaleCommittedDebt { committed, local } => format!(
+                    "Committed tracker state ({}) is ahead of the note's current total ({}); \
+                     a consented debt decrease has not been committed yet. \
+                     Retry after the next tracker box update",
+                    committed, local
+                ),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -1278,6 +1441,12 @@ pub async fn get_all_notes(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
+                NoteError::StaleCommittedDebt { committed, local } => format!(
+                    "Committed tracker state ({}) is ahead of the note's current total ({}); \
+                     a consented debt decrease has not been committed yet. \
+                     Retry after the next tracker box update",
+                    committed, local
+                ),
             };
             (
                 StatusCode::BAD_REQUEST,
@@ -3394,12 +3563,17 @@ pub async fn get_reserve_proof(
 /// configuration is ambiguous would pin tracker state against one reserve while the creditor
 /// can drain the others, so refuse until the owner consolidates to a single reserve.
 ///
-/// Returns `Err(message)` describing the conflict; callers map it to 409 CONFLICT.
+/// Returns `Ok(Some(box_id))` of the single tracked reserve in the
+/// denomination, `Ok(None)` when the issuer has no tracked reserve there (the
+/// note is unredeemable anyway), or `Err(message)` describing the conflict;
+/// callers map it to 409 CONFLICT. The exchange flow requires `Ok(Some(..))`:
+/// it stores the box id on the staged record so phase 2 can verify the reserve
+/// was not drained while the to-edge increase was staged (issue #17).
 pub(crate) async fn ensure_single_issuer_reserve(
     state: &AppState,
     issuer_pubkey_hex: &str,
     denomination: &basis_store::DenomKey,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let normalized_issuer = basis_store::normalize_public_key(issuer_pubkey_hex);
     let mut matching_boxes: Vec<String> = {
         let tracker = state.reserve_tracker.lock().await;
@@ -3426,7 +3600,7 @@ pub(crate) async fn ensure_single_issuer_reserve(
             matching_boxes.join(", ")
         ));
     }
-    Ok(())
+    Ok(matching_boxes.pop())
 }
 
 /// Find the issuer's tracked reserve collateral for acceptance-policy checks.
@@ -3849,9 +4023,11 @@ pub async fn request_tracker_signature(
         let encoder = AddressEncoder::new(NetworkPrefix::Mainnet); // Use appropriate network prefix
         let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
 
-        // Get node URL and API key from configuration
-        let node_url = &state.config.ergo.node.node_url;
-        let api_key = state.config.ergo.node.api_key.as_deref();
+        // Schnorr signing uses the tracker wallet node ([ergo.wallet], falling back
+        // to the scanner node when unset).
+        let (wallet_node_url, wallet_api_key) = state.config.ergo_wallet_node();
+        let node_url = &wallet_node_url;
+        let api_key = wallet_api_key.as_deref();
 
         // Call the Ergo node's schnorrSign API to generate the tracker signature
         match call_schnorr_sign_api(node_url, api_key, &tracker_p2pk_address, &message_to_sign)
@@ -4102,9 +4278,11 @@ async fn get_tracker_signature_for_redemption(
     let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
     let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
 
-    // Get node URL and API key from configuration
-    let node_url = &state.config.ergo.node.node_url;
-    let api_key = state.config.ergo.node.api_key.as_deref();
+    // Schnorr signing uses the tracker wallet node ([ergo.wallet], falling back
+    // to the scanner node when unset).
+    let (wallet_node_url, wallet_api_key) = state.config.ergo_wallet_node();
+    let node_url = &wallet_node_url;
+    let api_key = wallet_api_key.as_deref();
 
     // Call the Ergo node's schnorrSign API
     call_schnorr_sign_api(node_url, api_key, &tracker_p2pk_address, &message_to_sign)
@@ -4490,9 +4668,11 @@ pub async fn prepare_redemption(
     let encoder = AddressEncoder::new(NetworkPrefix::Mainnet); // Use appropriate network prefix
     let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
 
-    // Get node URL and API key from configuration
-    let node_url = &state.config.ergo.node.node_url;
-    let api_key = state.config.ergo.node.api_key.as_deref();
+    // Schnorr signing uses the tracker wallet node ([ergo.wallet], falling back
+    // to the scanner node when unset).
+    let (wallet_node_url, wallet_api_key) = state.config.ergo_wallet_node();
+    let node_url = &wallet_node_url;
+    let api_key = wallet_api_key.as_deref();
 
     // Call the Ergo node's schnorrSign API to generate the tracker signature
     let tracker_signature =

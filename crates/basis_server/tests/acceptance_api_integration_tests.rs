@@ -697,10 +697,11 @@ async fn create_test_app(
             redemption_build_max_per_pair_per_hour: 60,
         },
         ergo: config::ErgoConfig {
-            node: NodeConfig {
+            scanner: NodeConfig {
                 node_url: "http://example.com".to_string(),
                 ..Default::default()
             },
+            wallet: Default::default(),
             basis_reserve_contract_p2s: "test".to_string(),
             basis_token_reserve_contract_p2s: "test_token".to_string(),
             tracker_nft_id: Some("test".to_string()),
@@ -800,10 +801,11 @@ async fn create_test_app_with_policy_routes(
             redemption_build_max_per_pair_per_hour: 60,
         },
         ergo: config::ErgoConfig {
-            node: NodeConfig {
+            scanner: NodeConfig {
                 node_url: "http://example.com".to_string(),
                 ..Default::default()
             },
+            wallet: Default::default(),
             basis_reserve_contract_p2s: "test".to_string(),
             basis_token_reserve_contract_p2s: "test_token".to_string(),
             tracker_nft_id: Some("test".to_string()),
@@ -909,10 +911,11 @@ async fn create_test_app_with_all_routes(
             redemption_build_max_per_pair_per_hour: 60,
         },
         ergo: config::ErgoConfig {
-            node: NodeConfig {
+            scanner: NodeConfig {
                 node_url: "http://example.com".to_string(),
                 ..Default::default()
             },
+            wallet: Default::default(),
             basis_reserve_contract_p2s: "test".to_string(),
             basis_token_reserve_contract_p2s: "test_token".to_string(),
             tracker_nft_id: Some("test".to_string()),

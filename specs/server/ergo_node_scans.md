@@ -28,7 +28,7 @@ The main scanner state includes:
 
 #### Configuration (NodeConfig)
 
-The scanner configuration includes:
+The scanner configuration includes (populated from `[ergo.scanner]` in `config/basis.toml`):
 - `start_height`: Starting block height for scanning (optional)
 - `reserve_contract_p2s`: P2S address of the Basis reserve contract to scan for
 - `node_url`: URL of the Ergo node to connect to
@@ -119,7 +119,7 @@ The initialization ensures that tracker scan registration happens seamlessly dur
 
 #### Configuration (TrackerNodeConfig)
 
-The tracker scanner configuration includes:
+The tracker scanner configuration includes (also populated from `[ergo.scanner]`; both scanners use the extra-indexed node):
 - `start_height`: Starting block height for scanning (optional)
 - `tracker_nft_id`: Hex-encoded ID of the tracker NFT to scan for
 - `node_url`: URL of the Ergo node to connect to

@@ -259,14 +259,291 @@ struct NodePaymentRequest {
     registers: std::collections::HashMap<String, String>,
 }
 
+/// ErgoTree hex prefix of a pay-to-public-key (P2PK) script: `0008cd` followed by the
+/// 33-byte compressed public key.
+const P2PK_ERGO_TREE_PREFIX: &str = "0008cd";
+
+/// Value of the pre-deployment UTXO sent to the owner's own P2PK address when the
+/// wallet holds no P2PK(owner) box yet (0.001 ERG).
+const PRE_DEPLOY_UTXO_VALUE: u64 = 1_000_000;
+
+/// Bounded wait for the pre-deployment UTXO to appear in the node wallet.
+const PRE_DEPLOY_POLL_ATTEMPTS: u32 = 15;
+const PRE_DEPLOY_POLL_INTERVAL_SECS: u64 = 2;
+
+/// ErgoTree of the P2PK script locking boxes to `pubkey_hex` (33-byte compressed key).
+fn p2pk_ergo_tree(pubkey_hex: &str) -> String {
+    format!("{}{}", P2PK_ERGO_TREE_PREFIX, pubkey_hex)
+}
+
+/// Recover the reserve owner public key from the payload's R4 register (`07` + pubkey).
+fn payload_owner_pubkey(payload: &ReserveCreationResponse) -> Result<String> {
+    for request in &payload.requests {
+        if let Some(r4) = request.registers.get("R4") {
+            if let Some(pubkey) = r4.strip_prefix("07") {
+                if pubkey.len() == 66 && hex::decode(pubkey).is_ok() {
+                    return Ok(pubkey.to_string());
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "reserve creation payload has no valid R4 owner public key register"
+    ))
+}
+
+fn node_get(node_url: &str, api_key: Option<&str>, path: &str) -> ureq::Request {
+    let mut request = ureq::get(&format!("{}{}", node_url.trim_end_matches('/'), path));
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        request = request.set("api_key", key);
+    }
+    request
+}
+
+fn node_post(node_url: &str, api_key: Option<&str>, path: &str) -> ureq::Request {
+    let mut request = ureq::post(&format!("{}{}", node_url.trim_end_matches('/'), path));
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        request = request.set("api_key", key);
+    }
+    request
+}
+
+/// Fetch unspent wallet boxes (including unconfirmed ones) from the node.
+fn fetch_wallet_boxes(node_url: &str, api_key: Option<&str>) -> Result<Vec<ErgoBoxDetails>> {
+    #[derive(Debug, Deserialize)]
+    struct WalletBoxEntry {
+        #[serde(rename = "box")]
+        details: ErgoBoxDetails,
+    }
+    let response = node_get(
+        node_url,
+        api_key,
+        "/wallet/boxes/unspent?minConfirmations=-1&maxConfirmations=-1",
+    )
+    .call()
+    .map_err(|e| anyhow::anyhow!("Ergo node /wallet/boxes/unspent failed: {}", e))?;
+    let entries: Vec<WalletBoxEntry> = response.into_json()?;
+    Ok(entries.into_iter().map(|e| e.details).collect())
+}
+
+/// Fetch the hex-encoded serialized bytes of a box (for `inputsRaw`).
+fn fetch_box_binary(node_url: &str, api_key: Option<&str>, box_id: &str) -> Result<String> {
+    let path = format!("/utxo/byIdBinary/{}", box_id);
+    let response = node_get(node_url, api_key, &path)
+        .call()
+        .map_err(|e| anyhow::anyhow!("Ergo node {} failed: {}", path, e))?;
+    let body: serde_json::Value = response.into_json()?;
+    body["bytes"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("missing 'bytes' in {} response", path))
+}
+
+/// POST payment requests to `/wallet/payment/send`; returns the transaction id.
+fn payment_send(
+    node_url: &str,
+    api_key: Option<&str>,
+    requests: &[NodePaymentRequest],
+) -> Result<String> {
+    let response = node_post(node_url, api_key, "/wallet/payment/send")
+        .send_json(requests)
+        .map_err(|e| anyhow::anyhow!("Ergo node /wallet/payment/send failed: {}", e))?;
+    // The node returns the transaction id as a quoted string.
+    let body = response.into_string()?;
+    Ok(body.trim().trim_matches('"').to_string())
+}
+
+/// Total amount of `token_id` held by the selected boxes.
+fn selected_token_sum(selected: &[&ErgoBoxDetails], token_id: &str) -> u64 {
+    selected
+        .iter()
+        .flat_map(|b| b.assets.iter())
+        .filter(|t| t.token_id == token_id)
+        .map(|t| t.amount)
+        .sum()
+}
+
+/// Tokens the selected boxes hold beyond what the reserve output needs; these must be
+/// returned in an explicit change output.
+fn leftover_tokens(
+    selected: &[&ErgoBoxDetails],
+    token_targets: &[(String, u64)],
+) -> Vec<(String, u64)> {
+    let mut totals: Vec<(String, u64)> = Vec::new();
+    for token in selected.iter().flat_map(|b| b.assets.iter()) {
+        match totals.iter_mut().find(|(id, _)| *id == token.token_id) {
+            Some((_, total)) => *total += token.amount,
+            None => totals.push((token.token_id.clone(), token.amount)),
+        }
+    }
+    totals
+        .into_iter()
+        .map(|(id, total)| {
+            let used = token_targets
+                .iter()
+                .find(|(id2, _)| *id2 == id)
+                .map(|(_, n)| *n)
+                .unwrap_or(0);
+            (id, total.saturating_sub(used))
+        })
+        .filter(|(_, left)| *left > 0)
+        .collect()
+}
+
+/// Pick the boxes the deployment transaction must spend: a P2PK(`p2pk_tree`) proof box
+/// first, then funding boxes until the reserve output, fee, and required tokens are
+/// covered (with ERG headroom for a token change output when one is needed).
+///
+/// Returns `Ok(None)` when the wallet holds no P2PK box at all — the caller must create
+/// a pre-deployment UTXO first. `Err` means the wallet cannot fund the deployment.
+fn select_deployment_boxes(
+    wallet_boxes: &[ErgoBoxDetails],
+    p2pk_tree: &str,
+    erg_target: u64,
+    token_targets: &[(String, u64)],
+) -> Result<Option<Vec<ErgoBoxDetails>>> {
+    let proof_index = match wallet_boxes.iter().position(|b| b.ergo_tree == p2pk_tree) {
+        Some(index) => index,
+        None => return Ok(None),
+    };
+
+    let covers = |selected: &[&ErgoBoxDetails]| -> bool {
+        let erg_sum: u64 = selected.iter().map(|b| b.value).sum();
+        let erg_ok = erg_sum >= erg_target;
+        let tokens_ok = token_targets
+            .iter()
+            .all(|(id, needed)| selected_token_sum(selected, id) >= *needed);
+        // A change output holding leftover tokens also needs some ERG in it.
+        let change_ok = leftover_tokens(selected, token_targets).is_empty() || erg_sum > erg_target;
+        erg_ok && tokens_ok && change_ok
+    };
+
+    let mut selected: Vec<&ErgoBoxDetails> = vec![&wallet_boxes[proof_index]];
+    for (index, wallet_box) in wallet_boxes.iter().enumerate() {
+        if index == proof_index || covers(&selected) {
+            continue;
+        }
+        selected.push(wallet_box);
+    }
+    if !covers(&selected) {
+        return Err(anyhow::anyhow!(
+            "owner wallet cannot fund the reserve deployment: need {} nanoERG plus tokens {:?}, \
+             and ERG headroom for change when leftover tokens must be returned",
+            erg_target,
+            token_targets
+        ));
+    }
+    Ok(Some(selected.into_iter().cloned().collect()))
+}
+
+/// Compute the explicit change (ERG remainder plus leftover tokens) for a pinned-input
+/// deployment, where the node requires strict input/output balance.
+fn deployment_change(
+    selected: &[ErgoBoxDetails],
+    erg_target: u64,
+    token_targets: &[(String, u64)],
+) -> Option<(u64, Vec<NodeAsset>)> {
+    let refs: Vec<&ErgoBoxDetails> = selected.iter().collect();
+    let erg_sum: u64 = selected.iter().map(|b| b.value).sum();
+    let change_erg = erg_sum.saturating_sub(erg_target);
+    let change_tokens: Vec<NodeAsset> = leftover_tokens(&refs, token_targets)
+        .into_iter()
+        .map(|(token_id, amount)| NodeAsset { token_id, amount })
+        .collect();
+    if change_erg == 0 && change_tokens.is_empty() {
+        None
+    } else {
+        Some((change_erg, change_tokens))
+    }
+}
+
+/// Send a small amount to the owner's own P2PK address so the wallet holds a box the
+/// tracker accepts as the reserve-creation proof, and wait for it to appear.
+fn create_predeployment_utxo(
+    node_url: &str,
+    api_key: Option<&str>,
+    payload: &ReserveCreationResponse,
+    p2pk_tree: &str,
+) -> Result<Vec<ErgoBoxDetails>> {
+    let request = [NodePaymentRequest {
+        address: payload.change_address.clone(),
+        value: PRE_DEPLOY_UTXO_VALUE,
+        assets: Vec::new(),
+        registers: Default::default(),
+    }];
+    let tx_id = payment_send(node_url, api_key, &request)?;
+    for _ in 0..PRE_DEPLOY_POLL_ATTEMPTS {
+        let boxes = fetch_wallet_boxes(node_url, api_key)?;
+        if boxes.iter().any(|b| b.ergo_tree == p2pk_tree) {
+            return Ok(boxes);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(
+            PRE_DEPLOY_POLL_INTERVAL_SECS,
+        ));
+    }
+    Err(anyhow::anyhow!(
+        "pre-deployment transaction {} was sent but no P2PK box for the reserve owner \
+         appeared in the wallet; is the owner key derived in this node wallet?",
+        tx_id
+    ))
+}
+
+/// Broadcast the deployment with `inputsRaw` pinning the proof box, via
+/// `/wallet/transaction/send`; returns the transaction id.
+fn send_pinned_deployment(
+    node_url: &str,
+    api_key: Option<&str>,
+    payload: &ReserveCreationResponse,
+    payment_requests: &[NodePaymentRequest],
+    selected: &[ErgoBoxDetails],
+    erg_target: u64,
+    token_targets: &[(String, u64)],
+) -> Result<String> {
+    let mut inputs_raw = Vec::with_capacity(selected.len());
+    for selected_box in selected {
+        inputs_raw.push(fetch_box_binary(node_url, api_key, &selected_box.box_id)?);
+    }
+    let mut requests = payment_requests.to_vec();
+    if let Some((change_erg, change_tokens)) =
+        deployment_change(selected, erg_target, token_targets)
+    {
+        requests.push(NodePaymentRequest {
+            address: payload.change_address.clone(),
+            value: change_erg,
+            assets: change_tokens,
+            registers: Default::default(),
+        });
+    }
+    let body = serde_json::json!({
+        "requests": requests,
+        "fee": payload.fee,
+        "inputsRaw": inputs_raw,
+    });
+    let response = node_post(node_url, api_key, "/wallet/transaction/send")
+        .send_json(&body)
+        .map_err(|e| anyhow::anyhow!("Ergo node /wallet/transaction/send failed: {}", e))?;
+    let body = response.into_string()?;
+    Ok(body.trim().trim_matches('"').to_string())
+}
+
 /// Submit a reserve creation payload to the OWNER's Ergo node for broadcast.
 ///
-/// The node signs it with the owner's wallet key, so the owner's wallet must
-/// hold the reserve NFT (`nft_id`) and enough ERG for the reserve value and
-/// fee. The node pays whatever the payload says, so it is first checked to be
-/// exactly the reserve `request` asked the tracker for (including the owner's
-/// change address and a bounded fee, [`crate::verify::verify_reserve_payload`]).
-/// Returns the transaction id.
+/// The node signs it with the owner's wallet key, so the owner's wallet must hold the
+/// reserve NFT (`nft_id`) and enough ERG for the reserve value and fee. Returns the
+/// transaction id.
+///
+/// The node pays whatever the payload says, so the payload is first checked to be
+/// exactly the reserve `request` asked the tracker for (including the owner's change
+/// address and a bounded fee, [`crate::verify::verify_reserve_payload`]).
+///
+/// The tracker only admits a reserve root box whose creating transaction spends a P2PK
+/// input of the R4 owner key (see `specs/ergo/reserve_admission.md`), so this function
+/// guarantees one:
+/// - if every wallet box is P2PK(owner), plain `/wallet/payment/send` suffices;
+/// - otherwise the inputs are pinned via `inputsRaw` (P2PK(owner) proof box plus funding
+///   boxes, with an explicit change output);
+/// - if the wallet holds no P2PK(owner) box at all, a pre-deployment transaction first
+///   sends 0.001 ERG to the owner's own address, and the pinned deployment spends it.
 pub fn submit_reserve_to_node(
     node_url: &str,
     node_api_key: Option<&str>,
@@ -293,17 +570,47 @@ pub fn submit_reserve_to_node(
         })
         .collect();
 
-    let url = format!("{}/wallet/payment/send", node_url.trim_end_matches('/'));
-    let mut request = ureq::post(&url);
-    if let Some(key) = node_api_key.filter(|k| !k.is_empty()) {
-        request = request.set("api_key", key);
+    let owner_pubkey = payload_owner_pubkey(payload)?;
+    let p2pk_tree = p2pk_ergo_tree(&owner_pubkey);
+
+    let mut wallet_boxes = fetch_wallet_boxes(node_url, node_api_key)?;
+    if !wallet_boxes.is_empty() && wallet_boxes.iter().all(|b| b.ergo_tree == p2pk_tree) {
+        // Any automatic input selection spends only P2PK(owner) inputs.
+        return payment_send(node_url, node_api_key, &payment_requests);
     }
-    let response = request
-        .send_json(&payment_requests)
-        .map_err(|e| anyhow::anyhow!("Ergo node /wallet/payment/send failed: {}", e))?;
-    // The node returns the transaction id as a quoted string.
-    let body = response.into_string()?;
-    Ok(body.trim().trim_matches('"').to_string())
+    if !wallet_boxes.iter().any(|b| b.ergo_tree == p2pk_tree) {
+        wallet_boxes = create_predeployment_utxo(node_url, node_api_key, payload, &p2pk_tree)?;
+    }
+
+    let erg_target = payload
+        .requests
+        .iter()
+        .map(|r| r.value)
+        .sum::<u64>()
+        .saturating_add(payload.fee);
+    let mut token_targets: Vec<(String, u64)> = Vec::new();
+    for asset in payload.requests.iter().flat_map(|r| r.assets.iter()) {
+        match token_targets
+            .iter_mut()
+            .find(|(id, _)| *id == asset.token_id)
+        {
+            Some((_, total)) => *total += asset.amount,
+            None => token_targets.push((asset.token_id.clone(), asset.amount)),
+        }
+    }
+    let selected = select_deployment_boxes(&wallet_boxes, &p2pk_tree, erg_target, &token_targets)?
+        .ok_or_else(|| {
+            anyhow::anyhow!("wallet holds no P2PK box for the reserve owner after pre-deployment")
+        })?;
+    send_pinned_deployment(
+        node_url,
+        node_api_key,
+        payload,
+        &payment_requests,
+        &selected,
+        erg_target,
+        &token_targets,
+    )
 }
 
 /// Reserve-token configuration returned by the tracker.
@@ -1775,6 +2082,144 @@ mod auth_helpers_tests {
             parse_relative_url("http://localhost:3048/notes", "http://localhost:3048").unwrap(),
             ("/notes".to_string(), String::new())
         );
+    }
+}
+
+// -------------------------------------------------------------------------
+// Reserve deployment helpers (P2PK proof input guarantee)
+// -------------------------------------------------------------------------
+
+#[cfg(test)]
+mod reserve_deploy_tests {
+    use super::*;
+
+    const OWNER_PK: &str = "02a7955281885bf0f0ca4a48678848cad8dc5b328ce8bc1d4481d041c98e891ff3";
+
+    fn test_payload() -> ReserveCreationResponse {
+        let mut registers = std::collections::HashMap::new();
+        registers.insert("R4".to_string(), format!("07{}", OWNER_PK));
+        ReserveCreationResponse {
+            requests: vec![ReservePaymentRequest {
+                address: "reserveP2S".to_string(),
+                value: 10_000_000,
+                assets: vec![Asset {
+                    token_id: "aa".repeat(32),
+                    amount: 1,
+                }],
+                registers,
+            }],
+            fee: 1_000_000,
+            change_address: "ownerAddress".to_string(),
+        }
+    }
+
+    fn wallet_box(
+        box_id: &str,
+        ergo_tree: &str,
+        value: u64,
+        tokens: Vec<(&str, u64)>,
+    ) -> ErgoBoxDetails {
+        ErgoBoxDetails {
+            box_id: box_id.to_string(),
+            value,
+            ergo_tree: ergo_tree.to_string(),
+            assets: tokens
+                .into_iter()
+                .map(|(token_id, amount)| Token {
+                    token_id: token_id.to_string(),
+                    amount,
+                })
+                .collect(),
+            additional_registers: Default::default(),
+            creation_height: 1,
+            transaction_id: "bb".repeat(32),
+            index: 0,
+        }
+    }
+
+    #[test]
+    fn payload_owner_pubkey_strips_type_prefix() {
+        assert_eq!(payload_owner_pubkey(&test_payload()).unwrap(), OWNER_PK);
+        let mut bad = test_payload();
+        bad.requests[0].registers.clear();
+        assert!(payload_owner_pubkey(&bad).is_err());
+    }
+
+    #[test]
+    fn select_returns_none_without_proof_box() {
+        let boxes = vec![wallet_box(
+            "b1",
+            "0008cdother",
+            100_000_000,
+            vec![(&"aa".repeat(32), 1)],
+        )];
+        let targets = vec![("aa".repeat(32), 1u64)];
+        assert!(
+            select_deployment_boxes(&boxes, &p2pk_ergo_tree(OWNER_PK), 11_000_000, &targets)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn select_puts_proof_box_first_and_covers_targets() {
+        let tree = p2pk_ergo_tree(OWNER_PK);
+        let nft = "aa".repeat(32);
+        let boxes = vec![
+            wallet_box("funding", "0008cdother", 100_000_000, vec![(&nft, 1)]),
+            wallet_box("proof", &tree, 1_000_000, vec![]),
+        ];
+        let targets = vec![(nft.clone(), 1u64)];
+        let selected = select_deployment_boxes(&boxes, &tree, 11_000_000, &targets)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected[0].box_id, "proof");
+        assert!(selected.iter().any(|b| b.box_id == "funding"));
+
+        let change = deployment_change(&selected, 11_000_000, &targets).unwrap();
+        assert_eq!(change.0, 101_000_000 - 11_000_000);
+        assert!(change.1.is_empty());
+    }
+
+    #[test]
+    fn select_errors_when_tokens_uncoverable() {
+        let tree = p2pk_ergo_tree(OWNER_PK);
+        let boxes = vec![wallet_box("proof", &tree, 100_000_000, vec![])];
+        let targets = vec![("aa".repeat(32), 1u64)];
+        assert!(select_deployment_boxes(&boxes, &tree, 11_000_000, &targets).is_err());
+    }
+
+    #[test]
+    fn select_adds_box_for_token_change_headroom() {
+        let tree = p2pk_ergo_tree(OWNER_PK);
+        let nft = "aa".repeat(32);
+        let stray = "cc".repeat(32);
+        // Proof box exactly covers ERG target and carries the NFT plus a stray token;
+        // the stray token forces a change output, so another box must add ERG headroom.
+        let boxes = vec![
+            wallet_box("proof", &tree, 11_000_000, vec![(&nft, 1), (&stray, 5)]),
+            wallet_box("extra", &tree, 2_000_000, vec![]),
+        ];
+        let targets = vec![(nft, 1u64)];
+        let selected = select_deployment_boxes(&boxes, &tree, 11_000_000, &targets)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.len(), 2);
+
+        let change = deployment_change(&selected, 11_000_000, &targets).unwrap();
+        assert_eq!(change.0, 2_000_000);
+        assert_eq!(change.1.len(), 1);
+        assert_eq!(change.1[0].token_id, stray);
+        assert_eq!(change.1[0].amount, 5);
+    }
+
+    #[test]
+    fn change_is_none_on_exact_balance() {
+        let tree = p2pk_ergo_tree(OWNER_PK);
+        let nft = "aa".repeat(32);
+        let boxes = vec![wallet_box("proof", &tree, 11_000_000, vec![(&nft, 1)])];
+        let targets = vec![(nft, 1u64)];
+        assert!(deployment_change(&boxes, 11_000_000, &targets).is_none());
     }
 }
 

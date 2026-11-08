@@ -55,22 +55,38 @@ The updater service is configurable with the following parameters:
 
 ```rust
 pub struct TrackerBoxUpdateConfig {
+    /// Node hosting the tracker wallet: `/wallet/*`, transaction signing, and
+    /// broadcast go here.
+    pub wallet_node_url: String,
+    pub wallet_api_key: Option<String>,
+    /// Node used for chain reads (`/blockchain/*`, `/utxo/*`, `/info`); needs
+    /// `extraIndex = true`.
+    pub scanner_node_url: String,
+    pub scanner_api_key: Option<String>,
     /// Interval in seconds between tracker box updates (default: 600 seconds = 10 minutes)
     pub update_interval_seconds: u64,
-    /// Ergo node URL for API requests (required, no default provided)
-    pub node_url: String,
-    /// API key for Ergo node authentication (optional)
-    pub api_key: Option<String>,
     /// Transaction fee in nanoERG paid by wallet inputs for each tracker update
     pub fee: u64,
     /// Optional change address for the fee-input change output
     pub change_address: Option<String>,
     /// Optional tracker secret key (32 bytes) used as a dlog secret when signing
     pub tracker_secret_key: Option<[u8; 32]>,
+    /// Minimum on-chain depth (including the inclusion block) before a tracker box
+    /// update is treated as confirmed and pending notes are promoted
+    pub min_confirmation_depth: u64,
+    /// Reserve contract addresses (P2S) to exclude when searching for the tracker box
+    pub reserve_contract_addresses: Vec<String>,
 }
 ```
 
-**Critical Requirement**: The `ergo_node_url` must be explicitly provided in the configuration. If it's not provided (empty string), the tracker will abort on startup with exit code 1. No default localhost value is used. This ensures the tracker cannot operate without proper connection to an Ergo node.`
+The two node roles map to `ergo.scanner.*` and `ergo.wallet.*` in `config/basis.toml`;
+the wallet node falls back to the scanner node when `[ergo.wallet]` is unset.
+Chain-read endpoints (`/blockchain/transaction/byId`, `/blockchain/box/unspent/byTokenId`,
+`/utxo/byId`, `/info`) go to the scanner node; wallet endpoints (`/wallet/boxes/unspent`,
+`/utxo/byIdBinary` for wallet fee boxes, `/wallet/transaction/sign`) and `/transactions`
+broadcast go to the wallet node.
+
+**Critical Requirement**: `ergo.scanner.node_url` must be non-empty in the configuration; if it is empty, the tracker aborts on startup with exit code 1. This ensures the tracker cannot operate without proper connection to an Ergo node.
 
 ### Shared State Structure
 
@@ -453,7 +469,7 @@ The redemption transaction builder now includes proper validation, transaction s
 
 The tracker box updater is integrated into the server startup flow:
 
-1. **Node Configuration Validation**: Verify that `ergo.node.node_url` is provided in config; abort with exit code 1 if missing
+1. **Node Configuration Validation**: Verify that `ergo.scanner.node_url` is provided in config; abort with exit code 1 if missing
 2. **Shared State Creation**: Create `SharedTrackerState` instance during server initialization
 3. **Tracker Thread Integration**: Update shared state whenever tracker operations occur
 4. **Updater Service Startup**: Spawn the updater task as a background tokio task with proper node configuration

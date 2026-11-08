@@ -67,9 +67,97 @@ impl From<IndexedErgoBox> for ScanBox {
 }
 
 use crate::{
-    persistence::{ReserveStorage, ScannerMetadataStorage},
+    persistence::{QuarantinedReserve, ReserveStorage, ScannerMetadataStorage},
     ExtendedReserveInfo, ReserveTracker,
 };
+
+/// Normalize a box id the way `ExtendedReserveInfo.box_id` is stored:
+/// hex-decode (when valid hex) and re-encode, so comparisons with node-provided
+/// box ids are case- and encoding-insensitive.
+fn normalized_box_id(box_id: &str) -> String {
+    hex::encode(hex::decode(box_id).unwrap_or_else(|_| box_id.as_bytes().to_vec()))
+}
+
+/// The ergoTree of a pay-to-public-key (P2PK) box: `0008cd` followed by the
+/// 33-byte compressed public key (see `basis_offchain::ergo_tx::pubkey_to_address`).
+fn p2pk_ergo_tree(pubkey_hex: &str) -> String {
+    format!("0008cd{}", pubkey_hex)
+}
+
+/// Maximum generations walked backwards when verifying that a new reserve box
+/// descends from the tracked one (issue #19). Covers tracker downtime spanning
+/// several reserve actions (top-up of a top-up, etc.).
+const LINEAGE_WALK_DEPTH: usize = 8;
+
+/// Admission decision for a parsed reserve box (issue #19).
+///
+/// Only one box per (owner, denomination) lineage is ever tracked: a
+/// C4-validated root, or a verified successor of the currently tracked box.
+/// Everything else is quarantined before it reaches the tracker, so an
+/// attacker cannot poison `ReserveTracker::resolve_issuer_reserve` with a dust
+/// duplicate carrying the victim's key in R4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReserveAdmission {
+    /// The box may be tracked.
+    Admitted,
+    /// The box must not be tracked; `reason` is persisted on the quarantine
+    /// record.
+    Quarantined { reason: String },
+    /// Admission could not be decided this cycle (e.g. a node error during the
+    /// lineage check); retry next cycle. The box is neither admitted nor
+    /// quarantined, and the tracked box for the same (owner, denomination)
+    /// must not be removed as spent while a successor candidate is pending.
+    Retry,
+}
+
+/// The outcome of ingesting one scanned reserve box (parse + admission +
+/// tracking), used by both scan ingestion paths (issue #19).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanBoxIngest {
+    /// The box was admitted and (re-)stored; carries the normalized box id.
+    Tracked(String),
+    /// The box was rejected as unparseable or quarantined; carries the
+    /// normalized box id. Rejected boxes never trigger removal of themselves
+    /// and must not block removal of other genuinely-spent reserves.
+    Rejected(String),
+    /// The lineage check was inconclusive this cycle; carries the owner pubkey
+    /// and denomination of the pending lineage so the caller keeps the
+    /// currently tracked box until the check resolves.
+    Pending(String, crate::DenomKey),
+}
+
+/// Pure admission verdict (issue #19), factored out for unit testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmissionVerdict {
+    Admit,
+    Quarantine,
+    Retry,
+}
+
+/// Decide whether a parsed box may be tracked.
+///
+/// - `tracked`: a reserve for the same (owner, denomination) is already tracked.
+/// - `proof`: for a root, whether the creating transaction spends a P2PK input
+///   of the R4 owner key; for a non-root, whether the box verifiably spends the
+///   tracked box (possibly across missed generations). `None` when the node
+///   could not be queried.
+/// - `setup_ok`: the C4 setup checks (R7 == 0, empty R5 tree) pass.
+fn decide_admission(tracked: bool, proof: Option<bool>, setup_ok: bool) -> AdmissionVerdict {
+    if !tracked {
+        // Root candidate: only C4-clean boxes with an owner-key P2PK input in
+        // the creating transaction may open a lineage (issue #19).
+        return match proof {
+            Some(true) if setup_ok => AdmissionVerdict::Admit,
+            Some(_) => AdmissionVerdict::Quarantine,
+            None => AdmissionVerdict::Retry,
+        };
+    }
+    match proof {
+        Some(true) => AdmissionVerdict::Admit,
+        Some(false) => AdmissionVerdict::Quarantine,
+        None => AdmissionVerdict::Retry,
+    }
+}
 
 /// Page size for `POST /blockchain/box/unspent/byAddress`. The node defaults to
 /// 5 boxes (newest first) when no limit is given, which silently dropped older
@@ -704,44 +792,11 @@ impl ServerState {
             }
         };
 
-        // C4: validate setup only when the reserve is first seen. A reserve
-        // created with a pending refund (R7 != 0) can be withdrawn immediately,
-        // and a reserve created with a non-empty tree (R5) can block creditors
-        // from ever redeeming, so neither must be counted as collateral.
-        // "First seen" is per (owner, denomination): an owner adding a reserve in
-        // a new denomination must not skip validation.
-        let denomination = match &reserve_token_id_bytes {
-            Some(id) => crate::DenomKey::Token(id.as_slice().try_into().map_err(|_| {
-                ScannerError::InvalidReserveBox(format!(
-                    "Collateral token id in box {} is not 32 bytes",
-                    box_id
-                ))
-            })?),
-            None => crate::DenomKey::Erg,
-        };
-        let first_seen = self
-            .reserve_tracker
-            .get_reserves_by_owner(&owner_pubkey)
-            .iter()
-            .all(|r| r.denomination().as_ref() != Some(&denomination));
-        if first_seen {
-            if refund_initiation_height != 0 {
-                return Err(ScannerError::InvalidReserveBox(format!(
-                    "Reserve box {} created with a pending refund (R7 = {})",
-                    box_id, refund_initiation_height
-                )));
-            }
-            let empty_tree_register = empty_reserve_tree_register();
-            match scan_box.additional_registers.get("R5") {
-                Some(r5) if r5.eq_ignore_ascii_case(&empty_tree_register) => {}
-                other => {
-                    return Err(ScannerError::InvalidReserveBox(format!(
-                        "Reserve box {} created with a non-empty AVL tree (R5 = {:?})",
-                        box_id, other
-                    )));
-                }
-            }
-        }
+        // NOTE (issue #19): the C4 setup checks (R7 == 0, empty R5 tree) are NOT
+        // done here. They depend on tracker state (they apply only to root boxes,
+        // never to legitimate top-up/redemption successors), so they live in
+        // `admit_reserve_box`. This function is purely per-box structural
+        // validation.
 
         let box_id_bytes = hex::decode(&box_id).unwrap_or_else(|_| box_id.as_bytes().to_vec());
         let mut reserve_info = ExtendedReserveInfo::new(
@@ -760,6 +815,327 @@ impl ServerState {
         Ok(reserve_info)
     }
 
+    /// C4 setup checks for a root candidate (the first box of an
+    /// (owner, denomination) lineage). Returns the violation reason, or `None`
+    /// when the box is a cleanly created reserve.
+    ///
+    /// A reserve created with a pending refund (R7 != 0) can be withdrawn
+    /// immediately, and a reserve created with a non-empty tree (R5) can block
+    /// creditors from ever redeeming, so neither must be counted as collateral.
+    /// These checks must NOT run on successor boxes: a redemption legitimately
+    /// leaves R5 non-empty and refund initiation legitimately sets R7.
+    fn root_setup_violation(
+        scan_box: &ScanBox,
+        reserve_info: &ExtendedReserveInfo,
+    ) -> Option<String> {
+        if reserve_info.base_info.refund_initiation_height != 0 {
+            return Some(format!(
+                "Reserve box {} created with a pending refund (R7 = {})",
+                reserve_info.box_id, reserve_info.base_info.refund_initiation_height
+            ));
+        }
+        let empty_tree_register = empty_reserve_tree_register();
+        match scan_box.additional_registers.get("R5") {
+            Some(r5) if r5.eq_ignore_ascii_case(&empty_tree_register) => None,
+            other => Some(format!(
+                "Reserve box {} created with a non-empty AVL tree (R5 = {:?})",
+                reserve_info.box_id, other
+            )),
+        }
+    }
+
+    /// Fetch the inputs of a transaction as `(box_id, address, creating_tx_id,
+    /// ergo_tree)` tuples via `GET /blockchain/transaction/byId/{txId}`.
+    async fn fetch_tx_inputs(
+        &self,
+        tx_id: &str,
+    ) -> Result<Vec<(String, String, String, String)>, ScannerError> {
+        let url = format!(
+            "{}/blockchain/transaction/byId/{}",
+            self.config.node_url, tx_id
+        );
+
+        let response = self
+            .request_builder(reqwest::Method::GET, &url)
+            .send()
+            .await
+            .map_err(|e| {
+                ScannerError::HttpError(format!("Failed to fetch transaction {}: {}", tx_id, e))
+            })?;
+
+        if !response.status().is_success() {
+            return Err(ScannerError::NodeError(format!(
+                "Node returned status {} for transaction {}",
+                response.status(),
+                tx_id
+            )));
+        }
+
+        let tx: serde_json::Value = crate::http::read_json_capped(response).await.map_err(|e| {
+            ScannerError::JsonError(format!("Failed to parse transaction {}: {}", tx_id, e))
+        })?;
+
+        let inputs = tx.get("inputs").and_then(|i| i.as_array()).ok_or_else(|| {
+            ScannerError::JsonError(format!("Transaction {} has no inputs array", tx_id))
+        })?;
+
+        Ok(inputs
+            .iter()
+            .filter_map(|input| {
+                let box_id = input.get("boxId")?.as_str()?.to_string();
+                let address = input
+                    .get("address")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let creating_tx = input
+                    .get("transactionId")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let ergo_tree = input
+                    .get("ergoTree")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                Some((box_id, address, creating_tx, ergo_tree))
+            })
+            .collect())
+    }
+
+    /// Check whether `scan_box` descends from the tracked reserve box
+    /// `known_box_id`: walk creating transactions backwards until an input is
+    /// the known box (possibly across generations missed while the tracker was
+    /// down), following only inputs at the reserve contract address. The
+    /// reserve contract enforces register continuity for successors
+    /// (`contract/basis.es`: selfOut.R4 == SELF.R4, per-action R5/R7 rules), so
+    /// a verified successor needs no further validation.
+    async fn is_lineage_successor(
+        &self,
+        scan_box: &ScanBox,
+        known_box_id: &str,
+        contract_address: &str,
+    ) -> Result<bool, ScannerError> {
+        let mut tx_id = scan_box.transaction_id.clone();
+        for _ in 0..LINEAGE_WALK_DEPTH {
+            let inputs = self.fetch_tx_inputs(&tx_id).await?;
+            if inputs
+                .iter()
+                .any(|(box_id, _, _, _)| normalized_box_id(box_id) == known_box_id)
+            {
+                return Ok(true);
+            }
+            // Follow the reserve-contract input (the previous generation), if any.
+            match inputs
+                .into_iter()
+                .find(|(_, address, _, _)| address == contract_address)
+            {
+                Some((_, _, parent_tx, _)) if !parent_tx.is_empty() => tx_id = parent_tx,
+                _ => return Ok(false),
+            }
+        }
+        Ok(false)
+    }
+
+    /// Check whether the transaction creating `scan_box` spends an input (at any
+    /// position) locked by P2PK of `owner_pubkey` — ergoTree
+    /// `0008cd || 33-byte pubkey`. Only the holder of the R4 key can produce
+    /// such a transaction, so this authenticates the otherwise-unauthenticated
+    /// R4 register at reserve creation (issue #19).
+    async fn has_owner_p2pk_input(
+        &self,
+        scan_box: &ScanBox,
+        owner_pubkey: &str,
+    ) -> Result<bool, ScannerError> {
+        let expected = p2pk_ergo_tree(owner_pubkey);
+        let inputs = self.fetch_tx_inputs(&scan_box.transaction_id).await?;
+        Ok(inputs
+            .iter()
+            .any(|(_, _, _, tree)| tree.eq_ignore_ascii_case(&expected)))
+    }
+
+    /// Admission control for a parsed reserve box (issue #19).
+    ///
+    /// A box is admitted only when it is
+    /// 1. the currently tracked box itself (refresh), or
+    /// 2. a C4-clean root for an (owner, denomination) with no tracked reserve,
+    ///    whose creating transaction spends a P2PK input of the R4 owner key
+    ///    (authenticating the otherwise-unauthenticated R4 register), or
+    /// 3. a verified successor of the tracked box for its (owner, denomination).
+    ///
+    /// Anything else is quarantined, so a dust duplicate with the victim's key
+    /// in R4 can never turn `resolve_issuer_reserve` ambiguous and block the
+    /// issuer. A box already persisted as quarantined stays quarantined (an
+    /// attacker cannot race a successor into the same scan cycle to get
+    /// re-evaluated).
+    pub async fn admit_reserve_box(
+        &self,
+        scan_box: &ScanBox,
+        reserve_info: &ExtendedReserveInfo,
+        contract_address: &str,
+    ) -> ReserveAdmission {
+        let box_id = reserve_info.box_id.clone();
+
+        // The tracked box itself is always admitted (periodic refresh).
+        if self.reserve_tracker.get_reserve(&box_id).is_ok() {
+            return ReserveAdmission::Admitted;
+        }
+
+        // Once quarantined, always quarantined.
+        match self.reserve_storage.get_quarantined(&box_id) {
+            Ok(Some(record)) => {
+                return ReserveAdmission::Quarantined {
+                    reason: record.reason,
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!("Failed to read quarantine record for {}: {:?}", box_id, e);
+            }
+        }
+
+        let denomination = reserve_info.denomination();
+        let tracked = self
+            .reserve_tracker
+            .get_reserves_by_owner(&reserve_info.owner_pubkey)
+            .into_iter()
+            .find(|r| r.denomination().as_ref() == denomination.as_ref());
+
+        match tracked {
+            None => {
+                // Root candidate: cheap C4 setup checks first, then the P2PK
+                // ownership proof (requires a node call).
+                if let Some(violation) = Self::root_setup_violation(scan_box, reserve_info) {
+                    return ReserveAdmission::Quarantined { reason: violation };
+                }
+                let proof = match self
+                    .has_owner_p2pk_input(scan_box, &reserve_info.owner_pubkey)
+                    .await
+                {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(
+                            "P2PK ownership check for reserve root {} failed ({}); retrying next cycle",
+                            box_id, e
+                        );
+                        None
+                    }
+                };
+                match decide_admission(false, proof, true) {
+                    AdmissionVerdict::Admit => ReserveAdmission::Admitted,
+                    AdmissionVerdict::Quarantine => ReserveAdmission::Quarantined {
+                        reason: format!(
+                            "reserve root {} for owner {} was created by a transaction spending no P2PK input of the R4 key; \
+                             R4 is not authenticated on-chain, so this is likely a dust-box blocking attempt (issue #19)",
+                            box_id, reserve_info.owner_pubkey
+                        ),
+                    },
+                    AdmissionVerdict::Retry => ReserveAdmission::Retry,
+                }
+            }
+            Some(tracked) => {
+                let lineage = match self
+                    .is_lineage_successor(scan_box, &tracked.box_id, contract_address)
+                    .await
+                {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(
+                            "Lineage check for reserve box {} failed ({}); retrying next cycle",
+                            box_id, e
+                        );
+                        None
+                    }
+                };
+                match decide_admission(true, lineage, false) {
+                    AdmissionVerdict::Admit => ReserveAdmission::Admitted,
+                    AdmissionVerdict::Quarantine => ReserveAdmission::Quarantined {
+                        reason: format!(
+                            "duplicate reserve box {} for owner {} in denomination {} does not spend the tracked box {}; \
+                             R4 is not authenticated on-chain, so this is likely a dust-box blocking attempt (issue #19)",
+                            box_id,
+                            reserve_info.owner_pubkey,
+                            denomination
+                                .map(|d| d.denomination_id())
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            tracked.box_id
+                        ),
+                    },
+                    AdmissionVerdict::Retry => ReserveAdmission::Retry,
+                }
+            }
+        }
+    }
+
+    /// Parse, admit, and (when admitted) track and persist one scanned reserve
+    /// box. Both ingestion paths (`process_scan_boxes` and the server's scanner
+    /// sync) go through here so admission control cannot be bypassed
+    /// (issue #19).
+    pub async fn ingest_scan_box(&self, tagged: &TaggedScanBox) -> ScanBoxIngest {
+        let scan_box = &tagged.scan_box;
+        let normalized_id = normalized_box_id(&scan_box.box_id);
+
+        let reserve_info =
+            match self.parse_reserve_box(scan_box, tagged.kind, &tagged.contract_address) {
+                Ok(info) => info,
+                Err(e) => {
+                    warn!(
+                        "Skipping unparseable reserve box {}: {} - registers: {:?}",
+                        scan_box.box_id, e, scan_box.additional_registers
+                    );
+                    return ScanBoxIngest::Rejected(normalized_id);
+                }
+            };
+
+        match self
+            .admit_reserve_box(scan_box, &reserve_info, &tagged.contract_address)
+            .await
+        {
+            ReserveAdmission::Admitted => {
+                if let Err(e) = self.reserve_tracker.update_reserve(reserve_info.clone()) {
+                    warn!("Failed to update reserve {}: {}", scan_box.box_id, e);
+                    return ScanBoxIngest::Rejected(normalized_id);
+                }
+                if let Err(e) = self.reserve_storage.store_reserve(&reserve_info) {
+                    warn!(
+                        "Failed to persist reserve {} to database: {:?}",
+                        scan_box.box_id, e
+                    );
+                } else {
+                    info!("Updated and persisted reserve: {}", scan_box.box_id);
+                }
+                ScanBoxIngest::Tracked(reserve_info.box_id)
+            }
+            ReserveAdmission::Quarantined { reason } => {
+                warn!("Quarantining reserve box {}: {}", scan_box.box_id, reason);
+                let record = QuarantinedReserve {
+                    box_id: reserve_info.box_id.clone(),
+                    owner_pubkey: reserve_info.owner_pubkey.clone(),
+                    denomination: reserve_info
+                        .denomination()
+                        .map(|d| d.denomination_id())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    reason,
+                    quarantined_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                };
+                if let Err(e) = self.reserve_storage.store_quarantined(&record) {
+                    warn!(
+                        "Failed to persist quarantine record for {}: {:?}",
+                        scan_box.box_id, e
+                    );
+                }
+                ScanBoxIngest::Rejected(reserve_info.box_id)
+            }
+            ReserveAdmission::Retry => {
+                let denomination = reserve_info.denomination().unwrap_or(crate::DenomKey::Erg);
+                ScanBoxIngest::Pending(reserve_info.owner_pubkey.clone(), denomination)
+            }
+        }
+    }
+
     /// Process scan boxes and update reserve tracker
     pub async fn process_scan_boxes(&self) -> Result<(), ScannerError> {
         info!("Starting to process scan boxes...");
@@ -767,11 +1143,16 @@ impl ServerState {
         info!("Retrieved {} scan boxes to process", scan_boxes.len());
 
         let mut current_box_ids = Vec::new();
-        // Box IDs that failed to parse, normalized the same way
-        // `ExtendedReserveInfo.box_id` is stored (hex-encoded raw bytes). A
-        // quarantined box is skipped but never triggers removal of itself, and
-        // it must not block removal of OTHER genuinely-spent reserves.
+        // Box IDs that failed admission, normalized the same way
+        // `ExtendedReserveInfo.box_id` is stored. A rejected box is skipped but
+        // never triggers removal of itself, and it must not block removal of
+        // OTHER genuinely-spent reserves.
         let mut quarantined_box_ids: Vec<String> = Vec::new();
+        // (Owner, denomination) pairs with a successor candidate whose lineage
+        // check was inconclusive this cycle (issue #19): the tracked box must
+        // not be removed as spent, or a transient node error would orphan the
+        // lineage and brick the issuer.
+        let mut pending_lineages: Vec<(String, crate::DenomKey)> = Vec::new();
 
         for tagged in &scan_boxes {
             let scan_box = &tagged.scan_box;
@@ -780,40 +1161,16 @@ impl ServerState {
                 scan_box.box_id, scan_box.value, scan_box.additional_registers
             );
 
-            match self.parse_reserve_box(scan_box, tagged.kind, &tagged.contract_address) {
-                Ok(reserve_info) => {
-                    debug!(
-                        "Successfully parsed reserve box: box_id={}, owner={}, collateral={}",
-                        reserve_info.box_id,
-                        reserve_info.owner_pubkey,
-                        reserve_info.base_info.collateral_amount
-                    );
-                    current_box_ids.push(reserve_info.box_id.clone());
-
-                    // Update in-memory tracker
-                    if let Err(e) = self.reserve_tracker.update_reserve(reserve_info.clone()) {
-                        warn!("Failed to update reserve {}: {}", scan_box.box_id, e);
-                    } else {
-                        // Persist to database
-                        if let Err(e) = self.reserve_storage.store_reserve(&reserve_info) {
-                            warn!(
-                                "Failed to persist reserve {} to database: {:?}",
-                                scan_box.box_id, e
-                            );
-                        } else {
-                            info!("Updated and persisted reserve: {}", scan_box.box_id);
-                        }
-                    }
+            match self.ingest_scan_box(tagged).await {
+                ScanBoxIngest::Tracked(box_id) => {
+                    debug!("Successfully tracked reserve box: box_id={}", box_id);
+                    current_box_ids.push(box_id);
                 }
-                Err(e) => {
-                    quarantined_box_ids.push(hex::encode(
-                        hex::decode(&scan_box.box_id)
-                            .unwrap_or_else(|_| scan_box.box_id.as_bytes().to_vec()),
-                    ));
-                    warn!(
-                        "Skipping unparseable reserve box {}: {} - registers: {:?}",
-                        scan_box.box_id, e, scan_box.additional_registers
-                    );
+                ScanBoxIngest::Rejected(box_id) => {
+                    quarantined_box_ids.push(box_id);
+                }
+                ScanBoxIngest::Pending(owner, denomination) => {
+                    pending_lineages.push((owner, denomination));
                 }
             }
         }
@@ -835,6 +1192,20 @@ impl ServerState {
                 if !current_box_ids.contains(&reserve.box_id)
                     && !quarantined_box_ids.contains(&reserve.box_id)
                 {
+                    // A successor candidate is pending a lineage retry for this
+                    // (owner, denomination): keep the tracked box so the lineage
+                    // anchor is not lost (issue #19).
+                    let denomination = reserve.denomination();
+                    if pending_lineages.iter().any(|(owner, pending_denom)| {
+                        *owner == reserve.owner_pubkey
+                            && Some(pending_denom) == denomination.as_ref()
+                    }) {
+                        info!(
+                            "Keeping reserve {} (successor lineage check pending)",
+                            reserve.box_id
+                        );
+                        continue;
+                    }
                     info!(
                         "Removing spent reserve: {} (not found in current scan)",
                         reserve.box_id
@@ -1387,26 +1758,22 @@ mod tests {
             prefixed_pubkey, empty_tree, tracker_nft_id
         );
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let (mut socket, _) = match listener.accept().await {
-                    Ok(s) => s,
-                    Err(_) => return,
-                };
-                let body = body.clone();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 4096];
-                    let _ = socket.read(&mut buf).await;
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        body.len(), body
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                });
-            }
-        });
+        // The scanned box is a root: its creating tx must spend a P2PK input of
+        // the R4 owner key (issue #19).
+        let owner_tree = p2pk_ergo_tree(&VALID_PREFIXED_PUBKEY[2..]);
+        let txs = HashMap::from([(
+            "tx1".to_string(),
+            tx_json(
+                "tx1",
+                &[(
+                    &"33".repeat(32),
+                    "some_address",
+                    &"44".repeat(32),
+                    &owner_tree,
+                )],
+            ),
+        )]);
+        let addr = spawn_mock_node(body, std::sync::Arc::new(txs)).await;
 
         let config = NodeConfig {
             node_url: format!("http://{}", addr),
@@ -1578,27 +1945,22 @@ mod tests {
             prefixed_pubkey, empty_tree, tracker_nft_id
         );
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let (mut socket, _) = match listener.accept().await {
-                    Ok(s) => s,
-                    Err(_) => return,
-                };
-                let body = body.clone();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 4096];
-                    let _ = socket.read(&mut buf).await;
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                });
-            }
-        });
+        // The valid box is a root: its creating tx must spend a P2PK input of
+        // the R4 owner key (issue #19).
+        let owner_tree = p2pk_ergo_tree(&VALID_PREFIXED_PUBKEY[2..]);
+        let txs = HashMap::from([(
+            "tx1".to_string(),
+            tx_json(
+                "tx1",
+                &[(
+                    &"33".repeat(32),
+                    "some_address",
+                    &"44".repeat(32),
+                    &owner_tree,
+                )],
+            ),
+        )]);
+        let addr = spawn_mock_node(body, std::sync::Arc::new(txs)).await;
 
         let config = NodeConfig {
             node_url: format!("http://{}", addr),
@@ -1678,17 +2040,23 @@ mod tests {
         let extra_page = 7usize;
         let total = full_page + extra_page;
 
-        let prefixed_pubkey = VALID_PREFIXED_PUBKEY;
         let tracker_nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
         let empty_tree = empty_reserve_tree_register();
+
+        // Each box gets a distinct owner key: admission control (issue #19)
+        // tracks only one reserve per (owner, denomination), so same-owner
+        // duplicates would be quarantined instead of tracked.
+        let owners: Vec<String> = (0..total)
+            .map(|_| hex::encode(basis_core::impls::generate_keypair().1))
+            .collect();
 
         let box_json = |i: usize| {
             format!(
                 "{{\"boxId\":\"{:064x}\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
                 i
             ) + &format!(
-                "\"transactionId\":\"{:064x}\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
-                i, prefixed_pubkey, empty_tree, tracker_nft_id
+                "\"transactionId\":\"{:064x}\",\"additionalRegisters\":{{\"R4\":\"07{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                i, owners[i], empty_tree, tracker_nft_id
             )
         };
         let page = |from: usize, count: usize| {
@@ -1702,6 +2070,24 @@ mod tests {
         };
         let page1 = page(0, full_page);
         let page2 = page(full_page, extra_page);
+
+        // Every box is a root (distinct owner per box), so its creating tx must
+        // spend a P2PK input of the owner key (issue #19).
+        let txs: std::sync::Arc<HashMap<String, String>> = std::sync::Arc::new(
+            (0..total)
+                .map(|i| {
+                    let tx_id = format!("{:064x}", i);
+                    let tree = p2pk_ergo_tree(&owners[i]);
+                    (
+                        tx_id.clone(),
+                        tx_json(
+                            &tx_id,
+                            &[(&"33".repeat(32), "some_address", &"44".repeat(32), &tree)],
+                        ),
+                    )
+                })
+                .collect(),
+        );
 
         let seen_offsets = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
         let seen_offsets_server = seen_offsets.clone();
@@ -1717,6 +2103,7 @@ mod tests {
                 let page1 = page1.clone();
                 let page2 = page2.clone();
                 let seen_offsets = seen_offsets_server.clone();
+                let txs = txs.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 8192];
                     let n = match socket.read(&mut buf).await {
@@ -1725,6 +2112,29 @@ mod tests {
                     };
                     let request = String::from_utf8_lossy(&buf[..n]);
                     let request_line = request.lines().next().unwrap_or_default();
+                    let path = request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string();
+
+                    // Transaction lookups (issue #19 admission) are answered
+                    // from the tx map; box-list queries are paginated below.
+                    if let Some(tx_id) = path.strip_prefix("/blockchain/transaction/byId/") {
+                        let (status, body) = match txs.get(tx_id) {
+                            Some(body) => ("200 OK", body.clone()),
+                            None => ("404 Not Found", "{}".to_string()),
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            status,
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        return;
+                    }
+
                     let offset: u64 = request_line
                         .split('&')
                         .flat_map(|part| part.split('?'))
@@ -1948,26 +2358,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_reserve_box_rejects_first_seen_pending_refund() {
+    #[tokio::test]
+    async fn test_admission_quarantines_root_with_pending_refund() {
         // R7 = Long 1 (zigzag 2 -> VLQ 0x02): refund pending from creation.
+        // Parsing succeeds (the box is structurally valid); the C4 setup check
+        // rejects it at admission (issue #19).
         let mut scan_box = c4_test_box();
         scan_box
             .additional_registers
             .insert("R7".to_string(), "0502".to_string());
         let state = c4_test_state(NodeConfig::default());
-        let err = state
+        let info = state
             .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("pending refund"),
-            "unexpected error: {}",
-            err
-        );
+            .expect("structurally valid box parses");
+        match state.admit_reserve_box(&scan_box, &info, "test_p2s").await {
+            ReserveAdmission::Quarantined { reason } => {
+                assert!(
+                    reason.contains("pending refund"),
+                    "unexpected reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
     }
 
-    #[test]
-    fn test_parse_reserve_box_rejects_prefilled_tree() {
+    #[tokio::test]
+    async fn test_admission_quarantines_root_with_prefilled_tree() {
         let mut scan_box = c4_test_box();
         scan_box.additional_registers.insert(
             "R5".to_string(),
@@ -1975,14 +2392,140 @@ mod tests {
                 .to_string(),
         );
         let state = c4_test_state(NodeConfig::default());
-        let err = state
+        let info = state
             .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("non-empty AVL tree"),
-            "unexpected error: {}",
-            err
+            .expect("structurally valid box parses");
+        match state.admit_reserve_box(&scan_box, &info, "test_p2s").await {
+            ReserveAdmission::Quarantined { reason } => {
+                assert!(
+                    reason.contains("non-empty AVL tree"),
+                    "unexpected reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admission_admits_clean_root() {
+        // A clean root whose creating transaction spends a P2PK input of the
+        // R4 owner key is admitted (issue #19 ownership proof).
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let scan_box = c4_test_box();
+        let owner_tree = p2pk_ergo_tree(owner);
+        let txs = HashMap::from([(
+            scan_box.transaction_id.clone(),
+            tx_json(
+                &scan_box.transaction_id,
+                &[(
+                    &"33".repeat(32),
+                    "some_address",
+                    &"44".repeat(32),
+                    &owner_tree,
+                )],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        assert_eq!(
+            state.admit_reserve_box(&scan_box, &info, "test_p2s").await,
+            ReserveAdmission::Admitted
         );
+    }
+
+    #[tokio::test]
+    async fn test_admission_quarantines_root_without_owner_p2pk_input() {
+        // Front-run attempt (issue #19): a C4-clean box carrying the victim's
+        // key in R4, but its creating transaction spends no P2PK input of that
+        // key, so the box is never tracked.
+        let scan_box = c4_test_box();
+        let txs = HashMap::from([(
+            scan_box.transaction_id.clone(),
+            tx_json(
+                &scan_box.transaction_id,
+                &[(&"33".repeat(32), "some_address", &"44".repeat(32), "00")],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        match state.admit_reserve_box(&scan_box, &info, "test_p2s").await {
+            ReserveAdmission::Quarantined { reason } => {
+                assert!(
+                    reason.contains("no P2PK input"),
+                    "unexpected reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admission_quarantines_root_with_foreign_p2pk_input() {
+        // The creating tx spends a P2PK input, but of a DIFFERENT key than R4.
+        let scan_box = c4_test_box();
+        let other_key = hex::encode(basis_core::impls::generate_keypair().1);
+        let foreign_tree = p2pk_ergo_tree(&other_key);
+        let txs = HashMap::from([(
+            scan_box.transaction_id.clone(),
+            tx_json(
+                &scan_box.transaction_id,
+                &[(
+                    &"33".repeat(32),
+                    "some_address",
+                    &"44".repeat(32),
+                    &foreign_tree,
+                )],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        match state.admit_reserve_box(&scan_box, &info, "test_p2s").await {
+            ReserveAdmission::Quarantined { reason } => {
+                assert!(
+                    reason.contains("no P2PK input"),
+                    "unexpected reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decide_admission_matrix() {
+        // Root candidates: only C4-clean boxes whose creating tx spends a P2PK
+        // input of the R4 key may open a lineage (issue #19).
+        assert_eq!(
+            decide_admission(false, Some(true), true),
+            AdmissionVerdict::Admit
+        );
+        assert_eq!(
+            decide_admission(false, Some(true), false),
+            AdmissionVerdict::Quarantine
+        );
+        assert_eq!(
+            decide_admission(false, Some(false), true),
+            AdmissionVerdict::Quarantine
+        );
+        assert_eq!(decide_admission(false, None, true), AdmissionVerdict::Retry);
+        // With a tracked reserve: only verified successors are admitted.
+        assert_eq!(
+            decide_admission(true, Some(true), false),
+            AdmissionVerdict::Admit
+        );
+        assert_eq!(
+            decide_admission(true, Some(false), false),
+            AdmissionVerdict::Quarantine
+        );
+        assert_eq!(decide_admission(true, None, false), AdmissionVerdict::Retry);
     }
 
     #[test]
@@ -2036,5 +2579,383 @@ mod tests {
             "unexpected error: {}",
             err
         );
+    }
+
+    /// Spawn a mock node that serves `boxes_body` for box-list queries and
+    /// answers `GET /blockchain/transaction/byId/{txId}` from `txs`
+    /// (404 when the transaction is unknown).
+    async fn spawn_mock_node(
+        boxes_body: String,
+        txs: std::sync::Arc<HashMap<String, String>>,
+    ) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let boxes_body = boxes_body.clone();
+                let txs = txs.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = match socket.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let request_line = request.lines().next().unwrap_or_default();
+                    let path = request_line.split_whitespace().nth(1).unwrap_or_default();
+                    let (status, body) = match path.strip_prefix("/blockchain/transaction/byId/") {
+                        Some(tx_id) => match txs.get(tx_id) {
+                            Some(body) => ("200 OK", body.clone()),
+                            None => ("404 Not Found", "{}".to_string()),
+                        },
+                        None => ("200 OK", boxes_body),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        status,
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        addr
+    }
+
+    fn mock_state(addr: std::net::SocketAddr) -> ServerState {
+        c4_test_state(NodeConfig {
+            node_url: format!("http://{}", addr),
+            reserve_contract_p2s: Some("test_p2s".to_string()),
+            ..Default::default()
+        })
+    }
+
+    /// Insert a tracked reserve (in-memory + persisted), ERG denomination.
+    fn insert_tracked_reserve(state: &ServerState, box_id: &str, owner_pubkey: &str) {
+        let info = ExtendedReserveInfo {
+            base_info: crate::ReserveInfo {
+                collateral_amount: 1_000_000_000,
+                last_updated_height: 0,
+                contract_address: "test_p2s".to_string(),
+                tracker_nft_id: "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304"
+                    .to_string(),
+                refund_initiation_height: 0,
+                reserve_token_id: String::new(),
+            },
+            total_debt: 0,
+            box_id: normalized_box_id(box_id),
+            owner_pubkey: owner_pubkey.to_string(),
+            last_updated_timestamp: 0,
+        };
+        state.reserve_tracker.update_reserve(info.clone()).unwrap();
+        state.reserve_storage.store_reserve(&info).unwrap();
+    }
+
+    fn tx_json(tx_id: &str, inputs: &[(&str, &str, &str, &str)]) -> String {
+        let inputs_json = inputs
+            .iter()
+            .map(|(box_id, address, creating_tx, ergo_tree)| {
+                format!(
+                    "{{\"boxId\":\"{}\",\"address\":\"{}\",\"transactionId\":\"{}\",\"ergoTree\":\"{}\"}}",
+                    box_id, address, creating_tx, ergo_tree
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"id\":\"{}\",\"inputs\":[{}],\"outputs\":[]}}",
+            tx_id, inputs_json
+        )
+    }
+
+    #[tokio::test]
+    async fn test_admission_quarantines_duplicate_dust_box() {
+        // Issue #19: an attacker creates a dust box at the reserve contract
+        // with the victim's key in R4 while the victim's reserve is unspent.
+        // The box is C4-clean, so only the lineage check can reject it.
+        let tracked_box = "11".repeat(32);
+        let attacker_box = "22".repeat(32);
+        let attacker_tx = "aa".repeat(32);
+
+        // The attacker's creating transaction does NOT spend the tracked box.
+        let txs = HashMap::from([(
+            attacker_tx.clone(),
+            tx_json(
+                &attacker_tx,
+                &[(
+                    &"33".repeat(32),
+                    "some_other_address",
+                    &"44".repeat(32),
+                    "00",
+                )],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        insert_tracked_reserve(&state, &tracked_box, owner);
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = attacker_box.clone();
+        scan_box.transaction_id = attacker_tx.clone();
+        scan_box.value = 1_000_000; // dust
+
+        let tagged = TaggedScanBox {
+            scan_box,
+            kind: ReserveContractKind::Erg,
+            contract_address: "test_p2s".to_string(),
+        };
+        assert_eq!(
+            state.ingest_scan_box(&tagged).await,
+            ScanBoxIngest::Rejected(attacker_box.clone()),
+            "the dust duplicate must be quarantined"
+        );
+
+        // The quarantine record is persisted with the reason...
+        let record = state
+            .reserve_storage
+            .get_quarantined(&attacker_box)
+            .unwrap()
+            .expect("quarantine record persisted");
+        assert!(
+            record.reason.contains("does not spend the tracked box"),
+            "unexpected reason: {}",
+            record.reason
+        );
+
+        // ...and the victim's reserve still resolves unambiguously.
+        let resolved = state
+            .reserve_tracker
+            .resolve_issuer_reserve(owner, &crate::DenomKey::Erg);
+        assert!(
+            resolved.is_ok(),
+            "issuer must not be blocked: {:?}",
+            resolved
+        );
+        assert_eq!(resolved.unwrap().box_id, tracked_box);
+
+        // Once quarantined, always quarantined (no re-evaluation).
+        assert_eq!(
+            state.ingest_scan_box(&tagged).await,
+            ScanBoxIngest::Rejected(attacker_box)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admission_admits_lineage_successor() {
+        // A top-up/redemption successor: its creating transaction spends the
+        // tracked box, and the contract guarantees register continuity.
+        let tracked_box = "11".repeat(32);
+        let successor_box = "55".repeat(32);
+        let successor_tx = "bb".repeat(32);
+
+        let txs = HashMap::from([(
+            successor_tx.clone(),
+            tx_json(
+                &successor_tx,
+                &[(&tracked_box, "test_p2s", &"cc".repeat(32), "00")],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        insert_tracked_reserve(&state, &tracked_box, owner);
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = successor_box.clone();
+        scan_box.transaction_id = successor_tx.clone();
+        // A redemption successor legitimately has a non-empty R5 tree.
+        scan_box.additional_registers.insert(
+            "R5".to_string(),
+            "64aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa032000"
+                .to_string(),
+        );
+
+        let tagged = TaggedScanBox {
+            scan_box,
+            kind: ReserveContractKind::Erg,
+            contract_address: "test_p2s".to_string(),
+        };
+        assert_eq!(
+            state.ingest_scan_box(&tagged).await,
+            ScanBoxIngest::Tracked(successor_box)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admission_admits_successor_across_missed_generations() {
+        // The tracker was down while the reserve moved tracked -> mid -> tip;
+        // the lineage walk must follow the reserve-contract inputs backwards.
+        let tracked_box = "11".repeat(32);
+        let mid_box = "66".repeat(32);
+        let tip_box = "77".repeat(32);
+        let tip_tx = "dd".repeat(32);
+        let mid_tx = "ee".repeat(32);
+
+        let txs = HashMap::from([
+            (
+                tip_tx.clone(),
+                tx_json(&tip_tx, &[(&mid_box, "test_p2s", &mid_tx, "00")]),
+            ),
+            (
+                mid_tx.clone(),
+                tx_json(
+                    &mid_tx,
+                    &[(&tracked_box, "test_p2s", &"ff".repeat(32), "00")],
+                ),
+            ),
+        ]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        insert_tracked_reserve(&state, &tracked_box, owner);
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = tip_box.clone();
+        scan_box.transaction_id = tip_tx.clone();
+
+        let tagged = TaggedScanBox {
+            scan_box,
+            kind: ReserveContractKind::Erg,
+            contract_address: "test_p2s".to_string(),
+        };
+        assert_eq!(
+            state.ingest_scan_box(&tagged).await,
+            ScanBoxIngest::Tracked(tip_box)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_scan_boxes_keeps_tracked_reserve_on_lineage_retry() {
+        // The scan returns a would-be successor plus an unrelated valid box
+        // (so the removal loop runs). The successor's tx lookup fails (404),
+        // making it Pending: the tracked box must NOT be removed as spent.
+        let tracked_box = "11".repeat(32);
+        let successor_box = "55".repeat(32);
+        let successor_tx = "bb".repeat(32);
+        let other_box = "99".repeat(32);
+        let other_tx = "12".repeat(32);
+        let other_owner = hex::encode(basis_core::impls::generate_keypair().1);
+        let nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let empty_tree = empty_reserve_tree_register();
+
+        let boxes_body = format!(
+            concat!(
+                "[",
+                "{{\"boxId\":\"{}\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
+                "\"transactionId\":\"{}\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                ",",
+                "{{\"boxId\":\"{}\",\"value\":1000,\"ergoTree\":\"00\",\"creationHeight\":100,",
+                "\"transactionId\":\"{}\",\"additionalRegisters\":{{\"R4\":\"07{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                "]"
+            ),
+            successor_box, successor_tx, VALID_PREFIXED_PUBKEY, empty_tree, nft_id,
+            other_box, other_tx, other_owner, empty_tree, nft_id
+        );
+
+        // The successor's creating tx is unknown (404 -> lineage Retry), while
+        // the unrelated root's tx carries its owner's P2PK input.
+        let other_tree = p2pk_ergo_tree(&other_owner);
+        let txs = HashMap::from([(
+            other_tx.clone(),
+            tx_json(
+                &other_tx,
+                &[(
+                    &"33".repeat(32),
+                    "some_address",
+                    &"44".repeat(32),
+                    &other_tree,
+                )],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node(boxes_body, std::sync::Arc::new(txs)).await);
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        insert_tracked_reserve(&state, &tracked_box, owner);
+
+        state.process_scan_boxes().await.unwrap();
+
+        let remaining: Vec<String> = state
+            .reserve_tracker
+            .get_all_reserves()
+            .into_iter()
+            .map(|r| r.box_id)
+            .collect();
+        assert!(
+            remaining.contains(&tracked_box),
+            "tracked reserve must be kept while the successor lineage check is pending: {:?}",
+            remaining
+        );
+        assert!(
+            !remaining.contains(&successor_box),
+            "unverified successor must not be tracked: {:?}",
+            remaining
+        );
+        assert!(
+            remaining.contains(&other_box),
+            "unrelated root must be admitted: {:?}",
+            remaining
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_scan_boxes_quarantines_duplicate_and_keeps_issuer_working() {
+        // The issue #19 scenario end to end: the scan returns the victim's own
+        // reserve plus the attacker's C4-clean dust duplicate in one cycle.
+        let tracked_box = "11".repeat(32);
+        let attacker_box = "22".repeat(32);
+        let attacker_tx = "aa".repeat(32);
+        let nft_id = "1af23d4e5f6a7b8c9daebfc0d1e2f30415263748596a7b8c9daebfc0d1e2f304";
+        let empty_tree = empty_reserve_tree_register();
+
+        let boxes_body = format!(
+            concat!(
+                "[",
+                "{{\"boxId\":\"{}\",\"value\":1000000000,\"ergoTree\":\"00\",\"creationHeight\":100,",
+                "\"transactionId\":\"{}\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                ",",
+                "{{\"boxId\":\"{}\",\"value\":1000000,\"ergoTree\":\"00\",\"creationHeight\":200,",
+                "\"transactionId\":\"{}\",\"additionalRegisters\":{{\"R4\":\"{}\",\"R5\":\"{}\",\"R6\":\"0e20{}\"}}}}",
+                "]"
+            ),
+            tracked_box, "00".repeat(32), VALID_PREFIXED_PUBKEY, empty_tree, nft_id,
+            attacker_box, attacker_tx, VALID_PREFIXED_PUBKEY, empty_tree, nft_id
+        );
+        let txs = HashMap::from([(
+            attacker_tx.clone(),
+            tx_json(
+                &attacker_tx,
+                &[(
+                    &"33".repeat(32),
+                    "some_other_address",
+                    &"44".repeat(32),
+                    "00",
+                )],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node(boxes_body, std::sync::Arc::new(txs)).await);
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        insert_tracked_reserve(&state, &tracked_box, owner);
+
+        state.process_scan_boxes().await.unwrap();
+
+        // The attacker box is quarantined...
+        assert!(state
+            .reserve_storage
+            .get_quarantined(&attacker_box)
+            .unwrap()
+            .is_some());
+        // ...and the issuer's single reserve still resolves.
+        let resolved = state
+            .reserve_tracker
+            .resolve_issuer_reserve(owner, &crate::DenomKey::Erg)
+            .expect("issuer must keep working");
+        assert_eq!(resolved.box_id, tracked_box);
     }
 }
