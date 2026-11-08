@@ -98,9 +98,10 @@ mod redemption_api_tests {
                     TrackerCommand::AddNote {
                         issuer_pubkey,
                         note,
+                        prior,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                        let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note, prior);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByIssuer {
@@ -522,6 +523,7 @@ mod redemption_api_tests {
         let cmd = TrackerCommand::AddNote {
             issuer_pubkey: issuer_arr,
             note,
+            prior: None,
             response_tx,
         };
 
@@ -1959,6 +1961,7 @@ mod redemption_api_tests {
                     .send(TrackerCommand::AddNote {
                         issuer_pubkey,
                         note,
+                        prior: None,
                         response_tx: tx,
                     })
                     .await
@@ -2154,6 +2157,7 @@ mod redemption_api_tests {
                     .send(TrackerCommand::AddNote {
                         issuer_pubkey,
                         note,
+                        prior: None,
                         response_tx: tx,
                     })
                     .await
@@ -2264,6 +2268,7 @@ mod redemption_api_tests {
                     .send(TrackerCommand::AddNote {
                         issuer_pubkey,
                         note,
+                        prior: None,
                         response_tx: tx,
                     })
                     .await

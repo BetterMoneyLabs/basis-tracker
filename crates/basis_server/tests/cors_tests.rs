@@ -60,9 +60,10 @@ mod cors_tests {
                     TrackerCommand::AddNote {
                         issuer_pubkey,
                         note,
+                        prior,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                        let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note, prior);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByIssuer {

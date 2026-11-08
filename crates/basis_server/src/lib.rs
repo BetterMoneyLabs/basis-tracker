@@ -77,6 +77,9 @@ pub enum TrackerCommand {
     AddNote {
         issuer_pubkey: basis_store::PubKey,
         note: basis_store::IouNote,
+        /// The issuer's prior acknowledgment of a bound note (timestamp residue
+        /// 997); `None` for every other note.
+        prior: Option<basis_store::PriorAck>,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
     },
     GetNotesByIssuer {

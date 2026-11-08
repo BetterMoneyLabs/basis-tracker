@@ -59,6 +59,18 @@ pub struct CreateNoteRequest {
     /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
     #[serde(default)]
     pub denomination: String,
+    /// Bound notes only (a timestamp ending in 997 ms): the issuer's prior
+    /// acknowledgment, its signature (hex, 65 bytes) over the edge's standard
+    /// note message at its CURRENT total and this note's timestamp. The note
+    /// applies only while that total is still the stored one. Must be absent for
+    /// every other note.
+    #[serde(default)]
+    pub prior_signature: Option<String>,
+    /// Optional and diagnostic: the current total the prior acknowledgment
+    /// covers. When present it must equal the stored total (409 `stale_prior`).
+    /// Only valid together with `prior_signature`.
+    #[serde(default)]
+    pub prior_total: Option<u64>,
 }
 
 /// Cross-denomination debt exchange request (off-chain novation / triage).
@@ -161,7 +173,7 @@ pub struct SetOffEdgeRequest {
 }
 
 /// Multilateral set-off (obligation clearing) request: lowers every listed edge
-/// by its decrease at one novation timestamp (ending in 999 ms). For every key,
+/// by its decrease at one set-off timestamp (ending in 998 ms). For every key,
 /// decreases as creditor must equal decreases as issuer (net-neutral).
 #[derive(Debug, Deserialize)]
 pub struct SetOffRequest {
@@ -218,6 +230,11 @@ pub struct ApiResponse<T> {
     pub success: bool,
     pub data: Option<T>,
     pub error: Option<String>,
+    /// Machine-readable error code (POST /notes and the novation routes), such
+    /// as `reserved_timestamp` or `stale_prior`. Omitted from the JSON when
+    /// absent, so every response without a code is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 // Event types for tracker events
@@ -776,6 +793,7 @@ pub fn success_response<T>(data: T) -> ApiResponse<T> {
         success: true,
         data: Some(data),
         error: None,
+        code: None,
     }
 }
 
@@ -785,5 +803,16 @@ pub fn error_response<T>(message: String) -> ApiResponse<T> {
         success: false,
         data: None,
         error: Some(message),
+        code: None,
+    }
+}
+
+/// Error response with a machine-readable `code` (see [`ApiResponse::code`]).
+pub fn error_response_with_code<T>(message: String, code: &str) -> ApiResponse<T> {
+    ApiResponse {
+        success: false,
+        data: None,
+        error: Some(message),
+        code: Some(code.to_string()),
     }
 }

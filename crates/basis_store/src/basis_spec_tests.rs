@@ -1024,7 +1024,7 @@ mod tests {
         .unwrap();
 
         // Insert note into tracker
-        tracker.add_note(&issuer_pk, &note).unwrap();
+        tracker.add_note(&issuer_pk, &note, None).unwrap();
 
         // Generate reserve lookup proof
         let lookup_proof = tracker
@@ -1066,7 +1066,7 @@ mod tests {
             crate::DenomKey::Erg,
         )
         .unwrap();
-        tracker.add_note(&issuer_pk, &note).unwrap();
+        tracker.add_note(&issuer_pk, &note, None).unwrap();
 
         let already_redeemed = tracker
             .get_already_redeemed(&issuer_pk, &recipient_pk, &crate::DenomKey::Erg)
@@ -1097,7 +1097,7 @@ mod tests {
             crate::DenomKey::Erg,
         )
         .unwrap();
-        tracker.add_note(&issuer_pk, &note).unwrap();
+        tracker.add_note(&issuer_pk, &note, None).unwrap();
 
         let lookup_proof = tracker
             .generate_tracker_lookup_proof(&issuer_pk, &recipient_pk, &crate::DenomKey::Erg)

@@ -51,7 +51,17 @@ paths:
   /notes:
     post:
       summary: Create a new IOU note
-      description: Creates a new IOU note with the specified parameters. The note must be signed by the issuer.
+      description: >-
+        Creates a new IOU note with the specified parameters. The note must be
+        signed by the issuer. Timestamps whose millisecond part (timestamp mod
+        1000) is 995-999 are reserved: 999 for transfers, 998 for set-offs, 996
+        and 995 for future operations (all refused with code reserved_timestamp),
+        and 997 for bound notes. A bound note carries prior_signature, the
+        issuer's signature over the edge's note message at its current total and
+        the bound note's timestamp; it applies only while that total is current
+        and is raised. Ordinary notes use 000-994 ms. An edge changed by a
+        transfer or set-off is bound-only and accepts only bound notes
+        (bound_note_required). Errors carry a machine-readable `code`.
       operationId: createNote
       tags:
         - Notes
@@ -69,13 +79,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseEmpty'
         '400':
-          description: Bad request - invalid input parameters (including malformed tracker_nft_id hex or wrong length)
+          description: >-
+            Bad request - invalid input parameters (including malformed tracker_nft_id
+            hex or wrong length). Codes: reserved_timestamp, bound_note_required,
+            invalid_prior_signature, not_an_increase, invalid_request, past_timestamp,
+            future_timestamp, invalid_signature (other refusals carry no code)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
         '409':
-          description: Conflict - note's tracker_nft_id does not match this tracker's configured tracker NFT ID
+          description: >-
+            Conflict - note's tracker_nft_id does not match this tracker's configured
+            tracker NFT ID (code tracker_id_mismatch), or a bound note's prior_total is
+            not the edge's current total (code stale_prior)
           content:
             application/json:
               schema:
@@ -230,8 +247,9 @@ paths:
         note message at the edge's NEW total and `timestamp`: the issuer and the
         creditor. Because only balanced combinations are accepted, a participant's
         signatures can never be used in a set-off that changes its net position.
-        The timestamp must end in 999 ms (novation timestamp domain). At most 64
-        edges; edges with a committed or pending on-chain total are refused.
+        The timestamp must end in 998 ms (the set-off residue, refused by POST
+        /notes). At most 64 edges; edges with a committed or pending on-chain
+        total are refused. Every lowered edge becomes bound-only.
       operationId: setOffNotes
       tags:
         - Notes
@@ -1703,7 +1721,7 @@ components:
         timestamp:
           type: integer
           format: uint64
-          description: One timestamp for every edge (ms); must end in 999 and be newer than every edge
+          description: One timestamp for every edge (ms); must end in 998 and be newer than every edge
         edges:
           type: array
           minItems: 2
@@ -1854,6 +1872,12 @@ components:
             error:
               type: string
               example: "Invalid signature"
+            code:
+              type: string
+              description: >-
+                Machine-readable error code, present on POST /notes refusals that
+                have one (see that operation); omitted otherwise
+              example: "invalid_signature"
 
     ApiResponseString:
       allOf:
@@ -2063,6 +2087,19 @@ components:
             Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
             resolves to the pair's existing note's denomination when unambiguous, else "erg".
           example: "erg"
+        prior_signature:
+          type: string
+          description: >-
+            Bound notes only (timestamp ending in 997 ms): the issuer's Schnorr signature
+            (hex, 65 bytes) over the edge's note message at its current total and this
+            note's timestamp (0 for a new edge). Must be absent for every other note.
+          pattern: '^[0-9a-fA-F]{130}$'
+        prior_total:
+          type: integer
+          format: uint64
+          description: >-
+            Optional, with prior_signature only: the current total the acknowledgment
+            covers; a value other than the stored total is refused (409 stale_prior)
 
     NoteStateRequest:
       type: object

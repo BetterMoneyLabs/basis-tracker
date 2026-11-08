@@ -5,7 +5,7 @@
 
 use crate::{
     reserve_tracker::ExtendedReserveInfo, DenomKey, IouNote, NoteConfirmation, NoteError, NoteKey,
-    PendingExchangeRecord, PendingExchangeStatus, PubKey, TrackerBoxInfo,
+    NoteKeyBytes, PendingExchangeRecord, PendingExchangeStatus, PubKey, TrackerBoxInfo,
 };
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
@@ -33,6 +33,12 @@ pub struct NoteStorage {
     confirmations_partition: fjall::Partition,
     reserve_avl_journal_partition: fjall::Partition,
     pending_exchanges_partition: fjall::Partition,
+    /// `bound_only_edges`: the edges a novation (debt transfer, set-off) has
+    /// changed, keyed by the 32-byte debt key with an empty value. New notes on
+    /// such an edge must be bound notes. The partition is created when missing,
+    /// so data written by older binaries opens unchanged, and older binaries
+    /// ignore it.
+    bound_only_partition: fjall::Partition,
     /// Test-only fault-injection hook: while set, the atomic exchange commit
     /// methods return an error without writing anything (issue #20 tests).
     #[cfg(test)]
@@ -238,6 +244,15 @@ impl NoteStorage {
                 ))
             })?;
 
+        let bound_only_partition = keyspace
+            .open_partition("bound_only_edges", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!(
+                    "Failed to open bound-only edges partition: {}",
+                    e
+                ))
+            })?;
+
         Ok(Self {
             keyspace,
             notes_partition,
@@ -246,6 +261,7 @@ impl NoteStorage {
             confirmations_partition,
             reserve_avl_journal_partition,
             pending_exchanges_partition,
+            bound_only_partition,
             #[cfg(test)]
             fail_exchange_commits: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -708,14 +724,22 @@ impl NoteStorage {
             .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange apply: {}", e)))
     }
 
+    /// Is the edge with this debt key bound-only (changed by a novation)?
+    pub fn is_bound_only(&self, key_bytes: &NoteKeyBytes) -> Result<bool, NoteError> {
+        self.bound_only_partition
+            .contains_key(key_bytes)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read bound-only edges: {}", e)))
+    }
+
     /// Atomically commit a novation (debt transfer, set-off): every note, its
-    /// confirmation record, and the index entries of edges that are new land
-    /// together or not at all (one journaled fjall batch). Index entries for
-    /// several new edges of the same key are merged, so none is lost. On `Err`
-    /// nothing was written.
+    /// confirmation record, the index entries of edges that are new and the
+    /// bound-only marks of `bound_only` (debt keys) land together or not at all
+    /// (one journaled fjall batch). Index entries for several new edges of the
+    /// same key are merged, so none is lost. On `Err` nothing was written.
     pub fn commit_note_batch(
         &self,
         entries: &[(PubKey, IouNote, NoteConfirmation)],
+        bound_only: &[NoteKeyBytes],
     ) -> Result<(), NoteError> {
         #[cfg(test)]
         if self
@@ -750,6 +774,9 @@ impl NoteStorage {
             if let Some(value) = self.index_value_with_keys(&self.recipient_index, pubkey, keys)? {
                 batch.insert(&self.recipient_index, pubkey, value);
             }
+        }
+        for key in bound_only {
+            batch.insert(&self.bound_only_partition, key, Vec::<u8>::new());
         }
         batch
             .commit()

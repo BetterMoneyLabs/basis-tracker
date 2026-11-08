@@ -75,7 +75,7 @@ mod integration_tests {
         .expect("Should be able to create a valid signed note");
 
         // Add the note to the tracker
-        let result = tracker.add_note(&issuer_pubkey, &note);
+        let result = tracker.add_note(&issuer_pubkey, &note, None);
         assert!(
             result.is_ok(),
             "Adding note to tracker should succeed: {:?}",

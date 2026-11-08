@@ -1134,7 +1134,7 @@ mod tests {
         };
         redemption_manager
             .tracker
-            .add_note(&issuer_pubkey, &note)
+            .add_note(&issuer_pubkey, &note, None)
             .expect("add note");
 
         let redeemed: u64 = 100_000_000;
@@ -1260,7 +1260,7 @@ mod tests {
         };
         redemption_manager
             .tracker
-            .add_note(&issuer_pubkey, &note)
+            .add_note(&issuer_pubkey, &note, None)
             .expect("add note");
 
         // A mismatched explicit cumulative value (100M instead of 100M + 100M) is rejected.
@@ -1364,7 +1364,7 @@ mod tests {
         };
         redemption_manager
             .tracker
-            .add_note(&issuer_pubkey, &note)
+            .add_note(&issuer_pubkey, &note, None)
             .expect("add note");
 
         // Zero amount is rejected.
@@ -1473,7 +1473,7 @@ mod tests {
 
         {
             let mut manager = TrackerStateManager::new(&storage_path);
-            manager.add_note(&issuer_pubkey, &note).expect("add note");
+            manager.add_note(&issuer_pubkey, &note, None).expect("add note");
 
             // First redemption: 100M
             manager
@@ -1575,7 +1575,7 @@ mod tests {
                 crate::DenomKey::Erg,
             )
             .expect("sign note");
-            tracker.add_note(&issuer_pubkey, &note).expect("add note");
+            tracker.add_note(&issuer_pubkey, &note, None).expect("add note");
             let proof = crate::NoteProof {
                 note: note.clone(),
                 avl_proof: vec![],

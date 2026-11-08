@@ -519,7 +519,7 @@ mod tests {
             crate::DenomKey::Erg,
         )
         .unwrap();
-        tracker.add_note(&issuer_pk, &note).unwrap();
+        tracker.add_note(&issuer_pk, &note, None).unwrap();
 
         let proof = tracker
             .generate_reserve_lookup_proof(&issuer_pk, &recipient_pk, &crate::DenomKey::Erg)

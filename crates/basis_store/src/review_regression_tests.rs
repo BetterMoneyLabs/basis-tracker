@@ -37,7 +37,7 @@ fn post(
         DenomKey::Erg,
     )
     .unwrap();
-    tracker.add_note(&issuer.1, &note).unwrap();
+    tracker.add_note(&issuer.1, &note, None).unwrap();
 }
 
 /// What the tracker box updater does for one cycle: snapshot the live digest, submit it,

@@ -378,7 +378,7 @@ fn test_timestamp_validation_future_timestamp() -> Result<(), String> {
     );
 
     // Should fail with FutureTimestamp error
-    let result = tracker.add_note(&issuer_pubkey, &note);
+    let result = tracker.add_note(&issuer_pubkey, &note, None);
     match result {
         Err(crate::NoteError::FutureTimestamp) => Ok(()),
         _ => Err("Expected FutureTimestamp error".to_string()),
@@ -407,7 +407,7 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
-    let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1);
+    let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1, None);
     if result1.is_err() {
         return Err(format!("First note should succeed: {:?}", result1.err()));
     }
@@ -423,7 +423,7 @@ fn test_timestamp_validation_increasing_timestamps() -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
-    let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2);
+    let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2, None);
     if result2.is_err() {
         return Err(format!(
             "Second note with higher timestamp should succeed: {:?}",
@@ -456,7 +456,7 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
-    let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1);
+    let result1 = tracker.add_note(&issuer_pubkey_bytes, &note1, None);
     if result1.is_err() {
         return Err(format!("First note should succeed: {:?}", result1.err()));
     }
@@ -472,7 +472,7 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
-    let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2);
+    let result2 = tracker.add_note(&issuer_pubkey_bytes, &note2, None);
     match result2 {
         Err(crate::NoteError::PastTimestamp) => {} // Expected
         _ => {
@@ -494,7 +494,7 @@ fn test_timestamp_validation_non_increasing_timestamps() -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create third note: {:?}", e))?;
 
-    let result3 = tracker.add_note(&issuer_pubkey_bytes, &note3);
+    let result3 = tracker.add_note(&issuer_pubkey_bytes, &note3, None);
     match result3 {
         Err(crate::NoteError::PastTimestamp) => Ok(()), // Expected
         _ => Err(format!(
@@ -528,7 +528,7 @@ fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), S
     )
     .map_err(|e| format!("Failed to create first note: {:?}", e))?;
 
-    let result1 = tracker.add_note(&issuer1_pubkey, &note1);
+    let result1 = tracker.add_note(&issuer1_pubkey, &note1, None);
     if result1.is_err() {
         return Err(format!("First note should succeed: {:?}", result1.err()));
     }
@@ -544,7 +544,7 @@ fn test_different_issuer_recipient_pairs_allow_same_timestamps() -> Result<(), S
     )
     .map_err(|e| format!("Failed to create second note: {:?}", e))?;
 
-    let result2 = tracker.add_note(&issuer2_pubkey, &note2);
+    let result2 = tracker.add_note(&issuer2_pubkey, &note2, None);
     if result2.is_err() {
         return Err("Note with same timestamp but different issuer should succeed".to_string());
     }
@@ -662,7 +662,7 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
         let note = create_note(&issuer_secret, &recipient, 1000, 1);
 
-        manager.add_note(&issuer, &note).unwrap();
+        manager.add_note(&issuer, &note, None).unwrap();
 
         let confirmation = manager
             .get_confirmation(&issuer, &recipient, &crate::DenomKey::Erg)
@@ -680,7 +680,7 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
         let note = create_note(&issuer_secret, &recipient, 1000, 1);
 
-        manager.add_note(&issuer, &note).unwrap();
+        manager.add_note(&issuer, &note, None).unwrap();
 
         let digest = manager.get_state().avl_root_digest;
         let count = manager.mark_notes_pending(digest, "tx123", 100).unwrap();
@@ -702,7 +702,7 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
         let note = create_note(&issuer_secret, &recipient, 1000, 1);
 
-        manager.add_note(&issuer, &note).unwrap();
+        manager.add_note(&issuer, &note, None).unwrap();
         let digest = manager.get_state().avl_root_digest;
         manager.mark_notes_pending(digest, "tx123", 100).unwrap();
         manager
@@ -728,7 +728,7 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
         let note = create_note(&issuer_secret, &recipient, 1000, 1);
 
-        manager.add_note(&issuer, &note).unwrap();
+        manager.add_note(&issuer, &note, None).unwrap();
         let digest = manager.get_state().avl_root_digest;
         manager.mark_notes_pending(digest, "tx123", 100).unwrap();
         manager.revert_pending_notes().unwrap();
@@ -750,7 +750,7 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
         let note = create_note(&issuer_secret, &recipient, 1000, 1);
 
-        manager.add_note(&issuer, &note).unwrap();
+        manager.add_note(&issuer, &note, None).unwrap();
         let digest = manager.get_state().avl_root_digest;
         let count = manager
             .reconcile_with_confirmed_digest(&digest, "box456", 300)
@@ -774,7 +774,7 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
         let note = create_note(&issuer_secret, &recipient, 1000, 1);
 
-        manager.add_note(&issuer, &note).unwrap();
+        manager.add_note(&issuer, &note, None).unwrap();
         let other_digest = [0u8; 33];
         let count = manager
             .reconcile_with_confirmed_digest(&other_digest, "box789", 300)
@@ -795,7 +795,7 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
         let note = create_note(&issuer_secret, &recipient, 1000, 1);
 
-        manager.add_note(&issuer, &note).unwrap();
+        manager.add_note(&issuer, &note, None).unwrap();
         let digest = manager.get_state().avl_root_digest;
         manager.mark_notes_pending(digest, "tx123", 100).unwrap();
 
@@ -838,7 +838,7 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
         let note = create_note(&issuer_secret, &recipient, 1000, 1);
 
-        manager.add_note(&issuer, &note).unwrap();
+        manager.add_note(&issuer, &note, None).unwrap();
 
         let result = manager.generate_committed_tracker_lookup_proof(
             &issuer,
@@ -865,7 +865,7 @@ mod confirmation_state_tests {
         let recipient2 = [3u8; 33];
 
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient1, 1000, 1))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient1, 1000, 1), None)
             .unwrap();
         let digest1 = manager.get_state().avl_root_digest;
         manager.mark_notes_pending(digest1, "tx1", 100).unwrap();
@@ -880,7 +880,7 @@ mod confirmation_state_tests {
 
         // A second note (possibly a self-note from an attacker) changes the live tree.
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient2, 5000, 2))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient2, 5000, 2), None)
             .unwrap();
         assert_ne!(manager.get_state().avl_root_digest, digest1);
 
@@ -921,7 +921,7 @@ mod confirmation_state_tests {
         let recipient = [2u8; 33];
 
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1), None)
             .unwrap();
         let digest = manager.get_state().avl_root_digest;
         manager.mark_notes_pending(digest, "tx1", 100).unwrap();
@@ -993,12 +993,12 @@ mod debt_monotonicity_tests {
         let recipient = [2u8; 33];
 
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1), None)
             .unwrap();
 
         // A debtor restating a lower cumulative total must be rejected.
         let lower = create_note(&issuer_secret, &recipient, 500, 2);
-        let result = manager.add_note(&issuer, &lower);
+        let result = manager.add_note(&issuer, &lower, None);
         assert!(
             matches!(result, Err(NoteError::DebtDecreaseNotPermitted { .. })),
             "expected DebtDecreaseNotPermitted, got {:?}",
@@ -1020,7 +1020,7 @@ mod debt_monotonicity_tests {
         let recipient = [2u8; 33];
 
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1), None)
             .unwrap();
 
         let lower = create_note(&issuer_secret, &recipient, 0, 2);
@@ -1045,16 +1045,16 @@ mod debt_monotonicity_tests {
         let recipient = [2u8; 33];
 
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1), None)
             .unwrap();
 
         // Equal total (e.g. a re-signed note) is accepted.
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 2))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 2), None)
             .unwrap();
         // Higher total is accepted.
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1500, 3))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1500, 3), None)
             .unwrap();
         manager
             .update_note(&issuer, &create_note(&issuer_secret, &recipient, 2000, 4))
@@ -1075,13 +1075,13 @@ mod debt_monotonicity_tests {
 
         let mut note = create_note(&issuer_secret, &recipient, 1000, 1);
         note.amount_redeemed = 400;
-        manager.add_note(&issuer, &note).unwrap();
+        manager.add_note(&issuer, &note, None).unwrap();
 
         // A replacement note from create_and_sign carries amount_redeemed = 0;
         // the tracked redemption progress must survive the update.
         let replacement = create_note(&issuer_secret, &recipient, 1500, 2);
         assert_eq!(replacement.amount_redeemed, 0);
-        manager.add_note(&issuer, &replacement).unwrap();
+        manager.add_note(&issuer, &replacement, None).unwrap();
 
         let stored = manager
             .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
@@ -1146,7 +1146,7 @@ mod contract_range_tests {
         // amount_collected >= 2^63 would come out negative on-chain.
         for amount in [u64::MAX, i64::MAX as u64 + 1] {
             let note = create_note(&issuer_secret, &recipient, amount, 1);
-            let result = manager.add_note(&issuer, &note);
+            let result = manager.add_note(&issuer, &note, None);
             assert!(
                 matches!(
                     result,
@@ -1163,7 +1163,7 @@ mod contract_range_tests {
 
         // The rejected postings must not poison state: a later sane note is accepted.
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 2))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 2), None)
             .unwrap();
         let stored = manager
             .lookup_note(&issuer, &recipient, &crate::DenomKey::Erg)
@@ -1179,7 +1179,7 @@ mod contract_range_tests {
         let recipient = [2u8; 33];
 
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1), None)
             .unwrap();
 
         for amount in [u64::MAX, i64::MAX as u64 + 1] {
@@ -1221,6 +1221,7 @@ mod contract_range_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret, &recipient, i64::MAX as u64, 1),
+                None,
             )
             .unwrap();
         let stored = manager
@@ -1240,7 +1241,7 @@ mod contract_range_tests {
         // fire first: FutureTimestamp alone would not explain the on-chain bricking.
         for timestamp in [u64::MAX, i64::MAX as u64 + 1] {
             let note = create_note(&issuer_secret, &recipient, 1000, timestamp);
-            let result = manager.add_note(&issuer, &note);
+            let result = manager.add_note(&issuer, &note, None);
             assert!(
                 matches!(
                     result,
@@ -1270,7 +1271,7 @@ mod contract_range_tests {
 
         // A later sane note is accepted.
         manager
-            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1))
+            .add_note(&issuer, &create_note(&issuer_secret, &recipient, 1000, 1), None)
             .unwrap();
     }
 }
@@ -1322,6 +1323,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+                None,
             )
             .unwrap();
         manager
@@ -1334,6 +1336,7 @@ mod multi_denomination_tests {
                     1001,
                     DenomKey::Token(TOKEN_A),
                 ),
+                None,
             )
             .unwrap();
         manager
@@ -1346,6 +1349,7 @@ mod multi_denomination_tests {
                     1002,
                     DenomKey::Token(TOKEN_B),
                 ),
+                None,
             )
             .unwrap();
 
@@ -1439,6 +1443,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+                None,
             )
             .unwrap();
         manager
@@ -1451,6 +1456,7 @@ mod multi_denomination_tests {
                     1001,
                     DenomKey::Token(TOKEN_A),
                 ),
+                None,
             )
             .unwrap();
 
@@ -1643,6 +1649,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+                None,
             )
             .unwrap();
         manager
@@ -1655,6 +1662,7 @@ mod multi_denomination_tests {
                     1001,
                     DenomKey::Token(TOKEN_A),
                 ),
+                None,
             )
             .unwrap();
 
@@ -1825,6 +1833,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+                None,
             )
             .unwrap();
         manager
@@ -1837,6 +1846,7 @@ mod multi_denomination_tests {
                     1001,
                     DenomKey::Token(TOKEN_A),
                 ),
+                None,
             )
             .unwrap();
 
@@ -1991,6 +2001,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret(), &recipient, 100, 1000, DenomKey::Erg),
+                None,
             )
             .unwrap();
         manager
@@ -2003,6 +2014,7 @@ mod multi_denomination_tests {
                     1001,
                     DenomKey::Token(TOKEN_A),
                 ),
+                None,
             )
             .unwrap();
 
@@ -2171,6 +2183,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret(), &recipient, 100, 1000, DenomKey::Erg),
+                None,
             )
             .unwrap();
         manager
@@ -2183,6 +2196,7 @@ mod multi_denomination_tests {
                     1001,
                     DenomKey::Token(TOKEN_A),
                 ),
+                None,
             )
             .unwrap();
 
@@ -2266,6 +2280,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret(), &recipient, 100, 1000, DenomKey::Erg),
+                None,
             )
             .unwrap();
 
@@ -2279,6 +2294,7 @@ mod multi_denomination_tests {
         let result = manager.add_note(
             &issuer,
             &create_note(&issuer_secret(), &recipient, 150, 1002, DenomKey::Erg),
+            None,
         );
         assert!(
             matches!(result, Err(NoteError::StorageError(_))),
@@ -2311,6 +2327,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret(), &recipient, 150, 1002, DenomKey::Erg),
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -2334,6 +2351,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret(), &recipient, 80, 2001, DenomKey::Erg),
+                None,
             )
             .unwrap();
         let digest = manager.get_state().avl_root_digest;
@@ -2390,6 +2408,7 @@ mod multi_denomination_tests {
                     2001,
                     DenomKey::Token(TOKEN_A),
                 ),
+                None,
             )
             .unwrap();
         let digest = manager.get_state().avl_root_digest;
@@ -2559,6 +2578,7 @@ mod multi_denomination_tests {
                 .add_note(
                     &issuer,
                     &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+                    None,
                 )
                 .unwrap();
             manager
@@ -2571,6 +2591,7 @@ mod multi_denomination_tests {
                         1001,
                         DenomKey::Token(TOKEN_A),
                     ),
+                    None,
                 )
                 .unwrap();
             let ts = 2000u64;
@@ -2661,6 +2682,7 @@ mod multi_denomination_tests {
             .add_note(
                 &issuer,
                 &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+                None,
             )
             .unwrap();
         manager
@@ -2673,6 +2695,7 @@ mod multi_denomination_tests {
                     1001,
                     DenomKey::Token(TOKEN_A),
                 ),
+                None,
             )
             .unwrap();
 
@@ -2756,6 +2779,7 @@ mod multi_denomination_tests {
                 .add_note(
                     &issuer,
                     &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+                    None,
                 )
                 .unwrap();
             manager
@@ -2768,6 +2792,7 @@ mod multi_denomination_tests {
                         1001,
                         DenomKey::Token(TOKEN_A),
                     ),
+                    None,
                 )
                 .unwrap();
             manager
@@ -2814,8 +2839,8 @@ mod multi_denomination_tests {
 #[cfg(test)]
 mod debt_transfer_tests {
     use crate::{
-        is_novation_timestamp, DenomKey, ExchangeAcceptanceView, IouNote, NoteError, TrackerStateManager,
-        TransferTotals,
+        is_bound_note_timestamp, is_reserved_timestamp, is_setoff_timestamp, is_transfer_timestamp,
+        DenomKey, ExchangeAcceptanceView, IouNote, NoteError, TrackerStateManager, TransferTotals,
     };
     use secp256k1::{Secp256k1, SecretKey};
 
@@ -2884,9 +2909,9 @@ mod debt_transfer_tests {
     /// A owes B 100 (and C `to_before`, if any).
     fn setup(to_before: u64) -> TrackerStateManager {
         let mut m = TrackerStateManager::new_with_temp_storage();
-        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&B), 100, 1000)).unwrap();
+        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&B), 100, 1000), None).unwrap();
         if to_before > 0 {
-            m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&C), to_before, 1001)).unwrap();
+            m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&C), to_before, 1001), None).unwrap();
         }
         m
     }
@@ -2898,9 +2923,22 @@ mod debt_transfer_tests {
     }
 
     #[test]
-    fn novation_timestamps_end_in_999() {
-        assert!(is_novation_timestamp(1999) && is_novation_timestamp(1_730_000_000_999));
-        assert!(!is_novation_timestamp(1998) && !is_novation_timestamp(2000) && !is_novation_timestamp(0));
+    fn transfer_timestamps_end_in_999_and_each_operation_has_its_own_residue() {
+        // Transfers keep 999; set-offs moved to 998 and bound notes use 997 (each residue belongs to one operation).
+        assert!(is_transfer_timestamp(1999) && is_transfer_timestamp(1_730_000_000_999));
+        assert!(!is_transfer_timestamp(1998) && !is_transfer_timestamp(2000) && !is_transfer_timestamp(0));
+        assert!(is_setoff_timestamp(1998) && !is_setoff_timestamp(1999) && !is_setoff_timestamp(1997));
+        assert!(is_bound_note_timestamp(1997) && !is_bound_note_timestamp(1998) && !is_bound_note_timestamp(1996));
+        for ms in 995..=999u64 {
+            assert!(is_reserved_timestamp(1_730_000_000_000 + ms), "{} ms is reserved", ms);
+        }
+        for ms in [0u64, 1, 500, 994] {
+            assert!(!is_reserved_timestamp(1_730_000_000_000 + ms), "{} ms is ordinary", ms);
+        }
+        assert_eq!(
+            (crate::TRANSFER_TS_MS, crate::SETOFF_TS_MS, crate::BOUND_NOTE_TS_MS, crate::COMPRESS_TS_MS, crate::EXCHANGE_TS_MS, crate::RESERVED_FROM_MS),
+            (999, 998, 997, 996, 995, 995)
+        );
     }
 
     #[test]
@@ -3006,10 +3044,11 @@ mod debt_transfer_tests {
             denomination: DenomKey::Token(TOKEN),
         };
         assert!(standalone.verify_signature(&pubkey(&A)).is_ok());
-        assert!(matches!(m.add_note(&pubkey(&A), &standalone), Err(NoteError::ReservedTimestamp)));
+        assert!(matches!(m.add_note(&pubkey(&A), &standalone, None), Err(NoteError::ReservedTimestamp)));
         assert_eq!(total(&m, &C), None);
-        // Ordinary notes at other milliseconds are unaffected.
-        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&C), 5, 1998)).unwrap();
+        // Ordinary notes at other milliseconds are unaffected (995-998 are now reserved too, so the latest
+        // ordinary millisecond before T1 is 994).
+        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&C), 5, 1994), None).unwrap();
     }
 
     #[test]
@@ -3050,7 +3089,7 @@ mod debt_transfer_tests {
         transfer(&mut m, &B, &C, 30, T1, &s).unwrap();
         assert!(transfer(&mut m, &B, &C, 30, T1, &s).is_err());
         assert_eq!((total(&m, &B), total(&m, &C)), (Some(70), Some(40)));
-        assert!(m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&B), 100, 1000)).is_err());
+        assert!(m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&B), 100, 1000), None).is_err());
     }
 
     #[test]
@@ -3071,7 +3110,7 @@ mod debt_transfer_tests {
         let digest = m.get_state().avl_root_digest;
         m.mark_notes_pending(digest, "tx1", 100).unwrap();
         m.confirm_pending_notes(digest, "box1", 101).unwrap();
-        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&E), 50, 1500)).unwrap();
+        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&E), 50, 1500), None).unwrap();
         let totals = transfer(&mut m, &E, &C, 20, T1, &sigs(&E, &C, 50, 10, 20, T1)).unwrap();
         assert_eq!(totals, TransferTotals { from_new_total: 30, to_new_total: 30 });
     }
@@ -3124,6 +3163,34 @@ mod debt_transfer_tests {
         m.update_state();
         assert_eq!(m.get_state().avl_root_digest, live);
     }
+
+    #[test]
+    fn a_transfer_marks_both_edges_bound_only() {
+        // Tracker v3: both edges a transfer changed take only bound notes afterwards. The marks are written in the
+        // transfer's own storage batch, so a transfer that fails to commit leaves none.
+        let mut m = setup(10);
+        let bound = |m: &TrackerStateManager, r: &[u8; 32]| {
+            m.is_bound_only(&pubkey(&A), &pubkey(r), &DenomKey::Token(TOKEN)).unwrap()
+        };
+        let s = sigs(&B, &C, 100, 10, 30, T1);
+        m.storage.fail_exchange_commits.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(transfer(&mut m, &B, &C, 30, T1, &s), Err(NoteError::StorageError(_))));
+        assert!(!bound(&m, &B) && !bound(&m, &C));
+        m.storage.fail_exchange_commits.store(false, std::sync::atomic::Ordering::SeqCst);
+        transfer(&mut m, &B, &C, 30, T1, &s).unwrap();
+        assert!(bound(&m, &B) && bound(&m, &C));
+        // An edge the transfer did not touch is not marked.
+        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&E), 5, 1500), None).unwrap();
+        assert!(!bound(&m, &E));
+        // On a marked edge an ordinary note is refused and a bound note (residue 997, the issuer's acknowledgment
+        // of the current total 40) applies. Timestamps are relative to T1, which ends in 999.
+        let ordinary = create_note(&A, &pubkey(&C), 50, T1 + 1001);
+        assert!(matches!(m.add_note(&pubkey(&A), &ordinary, None), Err(NoteError::BoundNoteRequired)));
+        let ts = T1 + 1998;
+        let prior = crate::PriorAck { signature: sign(&A, &pubkey(&A), &pubkey(&C), 40, ts), prior_total: Some(40) };
+        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&C), 50, ts), Some(prior)).unwrap();
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(70), Some(50)));
+    }
 }
 
 /// Multilateral set-off (obligation clearing), pure-credit edges: lowered edges,
@@ -3139,7 +3206,8 @@ mod setoff_tests {
     const B: [u8; 32] = [2u8; 32];
     const C: [u8; 32] = [3u8; 32];
     const D: [u8; 32] = [4u8; 32];
-    const T: u64 = 5999;
+    // Set-off timestamps end in 998 ms (the set-off residue; 999 belongs to transfers).
+    const T: u64 = 5998;
 
     fn pk(secret: &[u8; 32]) -> [u8; 33] {
         let secp = Secp256k1::new();
@@ -3149,7 +3217,7 @@ mod setoff_tests {
 
     fn note(m: &mut TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32], amount: u64, ts: u64) {
         let n = IouNote::create_and_sign(pk(recipient), amount, ts, issuer, &NFT, DenomKey::Token(TOKEN)).unwrap();
-        m.add_note(&pk(issuer), &n).unwrap();
+        m.add_note(&pk(issuer), &n, None).unwrap();
     }
 
     fn total(m: &TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32]) -> u64 {
@@ -3285,7 +3353,7 @@ mod setoff_tests {
         assert!(invalid(m.set_off(&d, T, &[edge(&A, &B, 10, 0, T), edge(&B, &A, 0, 0, T)])));
         // A decrease larger than the edge.
         assert!(invalid(m.set_off(&d, T, &[edge(&A, &B, 10, 6, T), edge(&B, &C, 7, 6, T), edge(&C, &A, 5, 6, T)])));
-        // Not a novation timestamp.
+        // Not the set-off residue (998 ms).
         assert!(invalid(m.set_off(&d, 6000, &[edge(&A, &B, 10, 5, 6000), edge(&B, &C, 7, 5, 6000), edge(&C, &A, 5, 5, 6000)])));
         // Too many edges.
         let many: Vec<SetOffEdge> = (0..=MAX_SETOFF_EDGES).map(|_| edge(&A, &B, 10, 1, T)).collect();
@@ -3293,7 +3361,7 @@ mod setoff_tests {
         // A missing edge.
         assert!(matches!(m.set_off(&d, T, &[edge(&A, &D, 10, 5, T), edge(&D, &A, 10, 5, T)]), Err(NoteError::NotFound)));
         // Not newer than the edges.
-        assert!(matches!(m.set_off(&d, 999, &[edge(&A, &B, 10, 5, 999), edge(&B, &C, 7, 5, 999), edge(&C, &A, 5, 5, 999)]), Err(NoteError::PastTimestamp)));
+        assert!(matches!(m.set_off(&d, 998, &[edge(&A, &B, 10, 5, 998), edge(&B, &C, 7, 5, 998), edge(&C, &A, 5, 5, 998)]), Err(NoteError::PastTimestamp)));
         unchanged(&m, &digest);
     }
 
@@ -3334,10 +3402,382 @@ mod setoff_tests {
 
     #[test]
     fn ordinary_notes_still_work_after_a_set_off() {
+        // Tracker v3: every edge a set-off lowered is bound-only afterwards, so a new deal on it is a bound note
+        // (residue 997, with the issuer's acknowledgment of the current total) and an ordinary note there is
+        // refused. Edges the set-off did not touch take ordinary notes as before.
         let mut m = triangle();
         m.set_off(&DenomKey::Token(TOKEN), T, &[edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)]).unwrap();
-        // A new deal: A owes B 3 more (cumulative 8), at a later ordinary timestamp.
-        note(&mut m, &A, &B, 8, 7000);
+        // A new deal: A owes B 3 more (cumulative 8), at a later timestamp.
+        let ordinary = IouNote::create_and_sign(pk(&B), 8, 7000, &A, &NFT, DenomKey::Token(TOKEN)).unwrap();
+        assert!(matches!(m.add_note(&pk(&A), &ordinary, None), Err(NoteError::BoundNoteRequired)));
+        let bound = IouNote::create_and_sign(pk(&B), 8, 7997, &A, &NFT, DenomKey::Token(TOKEN)).unwrap();
+        let prior = crate::PriorAck { signature: sign(&A, &A, &B, 5, 7997), prior_total: Some(5) };
+        m.add_note(&pk(&A), &bound, Some(prior)).unwrap();
         assert_eq!(total(&m, &A, &B), 8);
+        // An edge outside the set-off still takes ordinary notes.
+        note(&mut m, &A, &C, 4, 7000);
+        assert_eq!(total(&m, &A, &C), 4);
+    }
+
+    #[test]
+    fn a_set_off_marks_every_edge_bound_only_and_the_marks_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = DenomKey::Token(TOKEN);
+        let cycle = [(A, B), (B, C), (C, A)];
+        let e = [edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)];
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            note(&mut m, &A, &B, 10, 1000);
+            note(&mut m, &B, &C, 7, 1001);
+            note(&mut m, &C, &A, 5, 1002);
+            note(&mut m, &A, &C, 3, 1003); // outside the cycle
+            // A set-off that fails to commit marks nothing (the marks are in its storage batch).
+            m.storage.fail_exchange_commits.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(matches!(m.set_off(&d, T, &e), Err(NoteError::StorageError(_))));
+            for (i, r) in cycle {
+                assert!(!m.is_bound_only(&pk(&i), &pk(&r), &d).unwrap());
+            }
+            m.storage.fail_exchange_commits.store(false, std::sync::atomic::Ordering::SeqCst);
+            m.set_off(&d, T, &e).unwrap();
+            for (i, r) in cycle {
+                assert!(m.is_bound_only(&pk(&i), &pk(&r), &d).unwrap());
+            }
+            assert!(!m.is_bound_only(&pk(&A), &pk(&C), &d).unwrap());
+        }
+        let mut m = TrackerStateManager::new(dir.path());
+        for (i, r) in cycle {
+            assert!(m.is_bound_only(&pk(&i), &pk(&r), &d).unwrap());
+        }
+        assert!(!m.is_bound_only(&pk(&A), &pk(&C), &d).unwrap());
+        // After the restart an ordinary note on a set-off edge is still refused (T ends in 998, so T + 1002 is an
+        // ordinary millisecond), and the untouched edge still takes ordinary notes.
+        let ordinary = IouNote::create_and_sign(pk(&B), 8, T + 1002, &A, &NFT, DenomKey::Token(TOKEN)).unwrap();
+        assert!(matches!(m.add_note(&pk(&A), &ordinary, None), Err(NoteError::BoundNoteRequired)));
+        note(&mut m, &A, &C, 6, T + 1002);
+        assert_eq!((total(&m, &A, &B), total(&m, &A, &C)), (5, 6));
+    }
+
+    #[test]
+    fn set_offs_use_their_own_residue() {
+        // 999 belongs to transfers and 997 to bound notes: a set-off signed at either is refused.
+        let mut m = triangle();
+        let digest = m.get_state().avl_root_digest;
+        for ts in [T + 1, T - 1] {
+            let e = [edge(&A, &B, 10, 5, ts), edge(&B, &C, 7, 5, ts), edge(&C, &A, 5, 5, ts)];
+            assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), ts, &e), Err(NoteError::InvalidSetOff(_))), "ts {}", ts);
+        }
+        unchanged(&m, &digest);
+    }
+}
+
+/// Tracker v3 timestamp residues, bound notes and bound-only edges, for add_note
+/// (POST /notes) and update_note: residues 995-999 are reserved; a note at
+/// residue 997 is a bound note, applied only with the issuer's acknowledgment of
+/// the edge's stored total; an edge a novation changed takes only bound notes.
+#[cfg(test)]
+mod bound_note_tests {
+    use crate::persistence::NoteStorage;
+    use crate::{DenomKey, IouNote, NoteError, NoteKey, PriorAck, TrackerStateManager};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    const NFT: [u8; 32] = [0x42; 32];
+    const TOKEN: [u8; 32] = [0xa5; 32];
+    const A: [u8; 32] = [1u8; 32];
+    const B: [u8; 32] = [2u8; 32];
+    const C: [u8; 32] = [3u8; 32];
+
+    fn pk(secret: &[u8; 32]) -> [u8; 33] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(secret).expect("valid secret key");
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+    }
+
+    fn denom() -> DenomKey {
+        DenomKey::Token(TOKEN)
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// `signer`'s signature over the (issuer -> recipient) note message at `total` and `ts`.
+    fn sign(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> [u8; 65] {
+        let msg = crate::schnorr::signing_message(&pk(issuer), &pk(recipient), &denom(), total, ts, &NFT);
+        crate::schnorr::schnorr_sign(&msg, signer, &pk(signer)).unwrap()
+    }
+
+    /// A's note to `recipient` at the cumulative `total` and `ts`.
+    fn note(recipient: &[u8; 32], total: u64, ts: u64) -> IouNote {
+        IouNote::create_and_sign(pk(recipient), total, ts, &A, &NFT, denom()).unwrap()
+    }
+
+    /// A prior acknowledgment of the A -> recipient total `prior` at `ts`, signed by `signer`.
+    fn ack(signer: &[u8; 32], recipient: &[u8; 32], prior: u64, ts: u64, prior_total: Option<u64>) -> PriorAck {
+        PriorAck { signature: sign(signer, &A, recipient, prior, ts), prior_total }
+    }
+
+    fn add(m: &mut TrackerStateManager, recipient: &[u8; 32], total: u64, ts: u64, prior: Option<PriorAck>) -> Result<(), NoteError> {
+        m.add_note(&pk(&A), &note(recipient, total, ts), prior)
+    }
+
+    fn total(m: &TrackerStateManager, recipient: &[u8; 32]) -> Option<u64> {
+        m.get_note_optional(&pk(&A), &pk(recipient), &denom()).unwrap().map(|n| n.amount_collected)
+    }
+
+    fn key(recipient: &[u8; 32]) -> [u8; 32] {
+        NoteKey::from_assets(&pk(&A), &pk(recipient), &denom()).key_hash
+    }
+
+    fn bound_only(m: &TrackerStateManager, recipient: &[u8; 32]) -> bool {
+        m.is_bound_only(&pk(&A), &pk(recipient), &denom()).unwrap()
+    }
+
+    /// Mark A -> recipient bound-only through the novation commit path, without a novation (the transfer and
+    /// set-off tests check that the novations themselves write the marks).
+    fn mark_bound_only(m: &TrackerStateManager, recipient: &[u8; 32]) {
+        m.storage.commit_note_batch(&[], &[key(recipient)]).unwrap();
+    }
+
+    /// A owes B 10, noted at 1000 ms (residue 000).
+    fn setup() -> TrackerStateManager {
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &B, 10, 1000, None).unwrap();
+        m
+    }
+
+    #[test]
+    fn reserved_residues_are_refused_and_ordinary_ones_accepted() {
+        let mut m = setup(); // its note at residue 000 was accepted
+        let digest = m.get_state().avl_root_digest;
+        for ts in [1995, 1996, 1998, 1999] {
+            let r = add(&mut m, &B, 20, ts, None);
+            assert!(matches!(r, Err(NoteError::ReservedTimestamp)), "ts {}: {:?}", ts, r);
+        }
+        // 997 is the bound-note residue: without a prior acknowledgment it is refused as reserved.
+        assert!(matches!(add(&mut m, &B, 20, 1997, None), Err(NoteError::ReservedTimestamp)));
+        // A new edge's first note too.
+        assert!(matches!(add(&mut m, &C, 5, 1999, None), Err(NoteError::ReservedTimestamp)));
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(10), None));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // The largest ordinary residue (994) and the smallest (000) are accepted.
+        add(&mut m, &B, 20, 1994, None).unwrap();
+        add(&mut m, &B, 30, 2000, None).unwrap();
+        assert_eq!(total(&m, &B), Some(30));
+    }
+
+    #[test]
+    fn the_existing_checks_keep_their_precedence() {
+        let mut m = setup();
+        // Contract range, future timestamp, past timestamp, no decrease and the note's own signature are all
+        // checked before the residue and bound-note rules.
+        assert!(matches!(
+            add(&mut m, &B, i64::MAX as u64 + 1, 1999, None),
+            Err(NoteError::AmountExceedsContractRange { .. })
+        ));
+        let future = now_ms() + 3_600_000;
+        assert!(matches!(add(&mut m, &B, 20, future - future % 1000 + 995, None), Err(NoteError::FutureTimestamp)));
+        assert!(matches!(add(&mut m, &B, 20, 998, None), Err(NoteError::PastTimestamp)));
+        assert!(matches!(
+            add(&mut m, &B, 5, 1997, Some(ack(&A, &B, 10, 1997, Some(10)))),
+            Err(NoteError::DebtDecreaseNotPermitted { .. })
+        ));
+        let mut forged = note(&B, 20, 1999);
+        forged.signature = note(&B, 21, 1999).signature;
+        assert!(matches!(m.add_note(&pk(&A), &forged, None), Err(NoteError::InvalidSignature)));
+        let mut forged = note(&B, 20, 1997);
+        forged.signature = note(&B, 21, 1997).signature;
+        assert!(matches!(m.add_note(&pk(&A), &forged, Some(ack(&A, &B, 10, 1997, Some(9)))), Err(NoteError::InvalidSignature)));
+        assert_eq!(total(&m, &B), Some(10));
+    }
+
+    #[test]
+    fn a_bound_note_applies_only_with_the_issuers_acknowledgment_of_the_current_total() {
+        let mut m = setup(); // P = 10
+        let digest = m.get_state().avl_root_digest;
+        let ts = 1997;
+        // A prior at a wrong total: StalePrior when its total is sent, InvalidPriorSignature when it is not.
+        assert!(matches!(add(&mut m, &B, 15, ts, Some(ack(&A, &B, 9, ts, Some(9)))), Err(NoteError::StalePrior)));
+        assert!(matches!(add(&mut m, &B, 15, ts, Some(ack(&A, &B, 9, ts, None))), Err(NoteError::InvalidPriorSignature)));
+        // Claiming the right total does not help a signature over another total.
+        assert!(matches!(add(&mut m, &B, 15, ts, Some(ack(&A, &B, 9, ts, Some(10)))), Err(NoteError::InvalidPriorSignature)));
+        // The acknowledgment is bound to the note's own timestamp.
+        assert!(matches!(add(&mut m, &B, 15, ts, Some(ack(&A, &B, 10, 1994, Some(10)))), Err(NoteError::InvalidPriorSignature)));
+        assert_eq!(total(&m, &B), Some(10));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // With the issuer's acknowledgment of the stored total the bound note applies.
+        add(&mut m, &B, 15, ts, Some(ack(&A, &B, 10, ts, Some(10)))).unwrap();
+        let stored = m.lookup_note(&pk(&A), &pk(&B), &denom()).unwrap();
+        assert_eq!((stored.amount_collected, stored.timestamp), (15, ts));
+        assert!(stored.verify_signature(&pk(&A)).is_ok());
+        // prior_total is optional; the next bound note acknowledges the new total.
+        add(&mut m, &B, 18, 2997, Some(ack(&A, &B, 15, 2997, None))).unwrap();
+        assert_eq!(total(&m, &B), Some(18));
+        // An acknowledgment of the old total is stale now.
+        assert!(matches!(add(&mut m, &B, 25, 3997, Some(ack(&A, &B, 15, 3997, Some(15)))), Err(NoteError::StalePrior)));
+        assert!(matches!(add(&mut m, &B, 25, 3997, Some(ack(&A, &B, 15, 3997, None))), Err(NoteError::InvalidPriorSignature)));
+        assert_eq!(total(&m, &B), Some(18));
+    }
+
+    #[test]
+    fn a_prior_signed_by_the_recipient_instead_of_the_issuer_is_refused() {
+        let mut m = setup();
+        // B signs the right message (A -> B at 10, at the note's timestamp); it is still not the issuer's
+        // acknowledgment. A third party's signature is refused as well.
+        assert!(matches!(add(&mut m, &B, 15, 1997, Some(ack(&B, &B, 10, 1997, Some(10)))), Err(NoteError::InvalidPriorSignature)));
+        assert!(matches!(add(&mut m, &B, 15, 1997, Some(ack(&C, &B, 10, 1997, None))), Err(NoteError::InvalidPriorSignature)));
+        assert_eq!(total(&m, &B), Some(10));
+    }
+
+    #[test]
+    fn an_equal_total_is_not_an_increase() {
+        let mut m = setup();
+        assert!(matches!(add(&mut m, &B, 10, 1997, Some(ack(&A, &B, 10, 1997, Some(10)))), Err(NoteError::NotAnIncrease)));
+        // On an absent edge P = 0, so a bound note of 0 is not an increase either.
+        assert!(matches!(add(&mut m, &C, 0, 1997, Some(ack(&A, &C, 0, 1997, Some(0)))), Err(NoteError::NotAnIncrease)));
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(10), None));
+    }
+
+    #[test]
+    fn a_first_bound_note_on_an_absent_edge_acknowledges_zero() {
+        let mut m = setup();
+        // On an absent edge P = 0: an acknowledgment of any other total does not fit.
+        assert!(matches!(add(&mut m, &C, 7, 1997, Some(ack(&A, &C, 10, 1997, Some(10)))), Err(NoteError::StalePrior)));
+        assert!(matches!(add(&mut m, &C, 7, 1997, Some(ack(&A, &C, 10, 1997, None))), Err(NoteError::InvalidPriorSignature)));
+        assert_eq!(total(&m, &C), None);
+        add(&mut m, &C, 7, 1997, Some(ack(&A, &C, 0, 1997, Some(0)))).unwrap();
+        assert_eq!(total(&m, &C), Some(7));
+        assert_eq!(m.get_recipient_notes(&pk(&C)).unwrap().len(), 1);
+        assert!(!bound_only(&m, &C), "a bound note does not make its edge bound-only");
+    }
+
+    #[test]
+    fn the_prior_acknowledgment_itself_cannot_be_submitted_as_a_note() {
+        // The acknowledgment is a valid note message at the stored total P with a residue-997 timestamp. As a
+        // note it is refused: without a prior as a reserved residue, with itself as the prior as no increase.
+        let mut m = setup();
+        let digest = m.get_state().avl_root_digest;
+        let prior = ack(&A, &B, 10, 1997, Some(10));
+        let as_note = IouNote {
+            recipient_pubkey: pk(&B),
+            amount_collected: 10,
+            amount_redeemed: 0,
+            timestamp: 1997,
+            signature: prior.signature,
+            tracker_nft_id: NFT,
+            denomination: denom(),
+        };
+        assert!(as_note.verify_signature(&pk(&A)).is_ok());
+        assert!(matches!(m.add_note(&pk(&A), &as_note, None), Err(NoteError::ReservedTimestamp)));
+        assert!(matches!(m.add_note(&pk(&A), &as_note, Some(prior)), Err(NoteError::NotAnIncrease)));
+        // The same for a first bound note's acknowledgment of 0 on an absent edge.
+        let zero = ack(&A, &C, 0, 1997, Some(0));
+        let zero_note = IouNote { recipient_pubkey: pk(&C), amount_collected: 0, signature: zero.signature, ..as_note.clone() };
+        assert!(zero_note.verify_signature(&pk(&A)).is_ok());
+        assert!(matches!(m.add_note(&pk(&A), &zero_note, None), Err(NoteError::ReservedTimestamp)));
+        assert!(matches!(m.add_note(&pk(&A), &zero_note, Some(zero)), Err(NoteError::NotAnIncrease)));
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(10), None));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+    }
+
+    #[test]
+    fn a_prior_on_a_note_that_is_not_a_bound_note_is_an_invalid_request() {
+        let mut m = setup();
+        assert!(matches!(add(&mut m, &B, 20, 2000, Some(ack(&A, &B, 10, 2000, Some(10)))), Err(NoteError::InvalidRequest(_))));
+        assert!(matches!(add(&mut m, &C, 5, 2994, Some(ack(&A, &C, 0, 2994, None))), Err(NoteError::InvalidRequest(_))));
+        // At another operation's residue the reserved-residue refusal comes first.
+        assert!(matches!(add(&mut m, &B, 20, 1999, Some(ack(&A, &B, 10, 1999, None))), Err(NoteError::ReservedTimestamp)));
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(10), None));
+        // Without the prior the same ordinary note applies.
+        add(&mut m, &B, 20, 2000, None).unwrap();
+        assert_eq!(total(&m, &B), Some(20));
+    }
+
+    #[test]
+    fn on_a_bound_only_edge_an_unbound_note_is_refused_and_a_bound_note_accepted() {
+        let mut m = setup();
+        add(&mut m, &C, 4, 1001, None).unwrap();
+        mark_bound_only(&m, &B);
+        assert!(bound_only(&m, &B) && !bound_only(&m, &C));
+        let digest = m.get_state().avl_root_digest;
+        for ts in [2000, 2500, 2994] {
+            let r = add(&mut m, &B, 20, ts, None);
+            assert!(matches!(r, Err(NoteError::BoundNoteRequired)), "ts {}: {:?}", ts, r);
+        }
+        // With a prior at an ordinary residue the bound-only refusal comes first.
+        assert!(matches!(add(&mut m, &B, 20, 2000, Some(ack(&A, &B, 10, 2000, Some(10)))), Err(NoteError::BoundNoteRequired)));
+        // Reserved residues stay reserved.
+        assert!(matches!(add(&mut m, &B, 20, 2999, None), Err(NoteError::ReservedTimestamp)));
+        assert_eq!(total(&m, &B), Some(10));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // A bound note applies, and the edge stays bound-only.
+        add(&mut m, &B, 20, 2997, Some(ack(&A, &B, 10, 2997, Some(10)))).unwrap();
+        assert_eq!(total(&m, &B), Some(20));
+        assert!(bound_only(&m, &B));
+        assert!(matches!(add(&mut m, &B, 30, 3000, None), Err(NoteError::BoundNoteRequired)));
+        // The other edge still takes ordinary notes.
+        add(&mut m, &C, 9, 3000, None).unwrap();
+        assert_eq!(total(&m, &C), Some(9));
+    }
+
+    #[test]
+    fn bound_only_marks_survive_reopening_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            add(&mut m, &B, 10, 1000, None).unwrap();
+            add(&mut m, &C, 4, 1001, None).unwrap();
+            mark_bound_only(&m, &B);
+        }
+        let mut m = TrackerStateManager::new(dir.path());
+        assert!(bound_only(&m, &B) && !bound_only(&m, &C));
+        assert!(matches!(add(&mut m, &B, 20, 2000, None), Err(NoteError::BoundNoteRequired)));
+        add(&mut m, &B, 20, 1997, Some(ack(&A, &B, 10, 1997, Some(10)))).unwrap();
+        add(&mut m, &C, 5, 2000, None).unwrap();
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(20), Some(5)));
+    }
+
+    #[test]
+    fn update_note_refuses_reserved_residues_and_bound_only_edges() {
+        let mut m = setup();
+        // update_note takes no prior acknowledgment, so it refuses all of 995-999, 997 included.
+        for ts in [1995, 1996, 1997, 1998, 1999] {
+            let r = m.update_note(&pk(&A), &note(&B, 20, ts));
+            assert!(matches!(r, Err(NoteError::ReservedTimestamp)), "ts {}: {:?}", ts, r);
+        }
+        assert_eq!(total(&m, &B), Some(10));
+        m.update_note(&pk(&A), &note(&B, 20, 2000)).unwrap();
+        assert_eq!(total(&m, &B), Some(20));
+        mark_bound_only(&m, &B);
+        assert!(matches!(m.update_note(&pk(&A), &note(&B, 30, 3000)), Err(NoteError::BoundNoteRequired)));
+        assert!(matches!(m.update_note(&pk(&A), &note(&B, 30, 3997)), Err(NoteError::ReservedTimestamp)));
+        // The existing refusals keep their priority.
+        assert!(matches!(m.update_note(&pk(&A), &note(&B, 30, 1500)), Err(NoteError::PastTimestamp)));
+        assert!(matches!(m.update_note(&pk(&A), &note(&B, 5, 3000)), Err(NoteError::DebtDecreaseNotPermitted { .. })));
+        assert_eq!(total(&m, &B), Some(20));
+        // An edge that is not bound-only is unaffected.
+        m.update_note(&pk(&A), &note(&C, 3, 3000)).unwrap();
+        assert_eq!(total(&m, &C), Some(3));
+    }
+
+    #[test]
+    fn the_bound_only_partition_is_created_when_missing() {
+        // Data written by an older binary has no bound_only_edges partition: it opens, and no edge is bound-only.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let keyspace = fjall::Config::new(dir.path()).open().unwrap();
+            let _notes = keyspace.open_partition("iou_notes", fjall::PartitionCreateOptions::default()).unwrap();
+            assert!(!keyspace.partition_exists("bound_only_edges"));
+        }
+        let storage = NoteStorage::open(dir.path()).unwrap();
+        assert!(!storage.is_bound_only(&key(&B)).unwrap());
+        storage.commit_note_batch(&[], &[key(&B)]).unwrap();
+        assert!(storage.is_bound_only(&key(&B)).unwrap());
+        assert!(!storage.is_bound_only(&key(&C)).unwrap());
+        drop(storage);
+        let storage = NoteStorage::open(dir.path()).unwrap();
+        assert!(storage.is_bound_only(&key(&B)).unwrap() && !storage.is_bound_only(&key(&C)).unwrap());
     }
 }

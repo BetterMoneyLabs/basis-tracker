@@ -389,7 +389,7 @@ mod property_tests {
 
             // Create and add a note
             let note = IouNote::create_and_sign(recipient_pubkey, initial_amount, 1234567890, &secret, &[0x42; 32], crate::DenomKey::Erg).unwrap();
-            redemption_manager.tracker.add_note(&issuer_pubkey, &note).unwrap();
+            redemption_manager.tracker.add_note(&issuer_pubkey, &note, None).unwrap();
 
             let mut total_redeemed: u64 = 0;
 

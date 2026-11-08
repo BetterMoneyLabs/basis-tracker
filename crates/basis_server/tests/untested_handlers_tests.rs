@@ -79,9 +79,10 @@ mod untested_handlers {
                     TrackerCommand::AddNote {
                         issuer_pubkey,
                         note,
+                        prior,
                         response_tx,
                     } => {
-                        let r = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                        let r = redemption_manager.tracker.add_note(&issuer_pubkey, &note, prior);
                         let _ = response_tx.send(r);
                     }
                     TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -637,6 +638,7 @@ mod untested_handlers {
             .send(TrackerCommand::AddNote {
                 issuer_pubkey: issuer,
                 note,
+                prior: None,
                 response_tx: tokio::sync::oneshot::channel().0,
             })
             .await

@@ -56,9 +56,10 @@ mod http_api_tests {
                     TrackerCommand::AddNote {
                         issuer_pubkey,
                         note,
+                        prior,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                        let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note, prior);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::GetNotesByIssuer {
@@ -633,6 +634,7 @@ mod http_api_tests {
             .send(TrackerCommand::AddNote {
                 issuer_pubkey: issuer,
                 note,
+                prior: None,
                 response_tx: tx,
             })
             .await

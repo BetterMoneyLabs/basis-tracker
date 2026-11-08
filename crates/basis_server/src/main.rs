@@ -295,10 +295,13 @@ async fn main() {
                 TrackerCommand::AddNote {
                     issuer_pubkey,
                     note,
+                    prior,
                     response_tx,
                 } => {
                     // Get mutable access to the tracker for adding a note
-                    let result = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                    let result = redemption_manager
+                        .tracker
+                        .add_note(&issuer_pubkey, &note, prior);
 
                     // Update shared state for tracker box updater if successful
                     if result.is_ok() {

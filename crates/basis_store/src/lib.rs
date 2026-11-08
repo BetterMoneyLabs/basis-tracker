@@ -330,10 +330,31 @@ pub enum NoteError {
     /// this tracker's state: same creditors, zero amount, more than the issuer
     /// owes the old creditor, or an old creditor's edge with on-chain state.
     InvalidTransfer(String),
-    /// The timestamp ends in 999 ms, which is reserved for novations (debt
-    /// transfer, set-off). Ordinary notes may not use it, so a raised edge's
-    /// issuer signature from a novation can never be submitted on its own.
+    /// The timestamp has a reserved residue (see [`TRANSFER_TS_MS`]): 999
+    /// (transfer), 998 (set-off), 996 or 995 (reserved), or 997 (bound note)
+    /// without the issuer's prior acknowledgment. Ordinary notes may not use
+    /// them, so a raised edge's issuer signature from a novation can never be
+    /// submitted on its own.
     ReservedTimestamp,
+    /// The edge was changed by a novation (debt transfer, set-off) and is
+    /// bound-only: a new note on it must be a bound note (residue 997 with the
+    /// issuer's prior acknowledgment of the edge's current total).
+    BoundNoteRequired,
+    /// A bound note's prior acknowledgment is not the issuer's signature over
+    /// the edge's current total at the note's timestamp.
+    InvalidPriorSignature,
+    /// The acknowledged prior total is not the edge's current total.
+    StalePrior,
+    /// A bound note must raise the edge's total above the acknowledged prior
+    /// total; otherwise the acknowledgment itself could be submitted as a note.
+    NotAnIncrease,
+    /// A novation's timestamp is older than the maximum novation age.
+    NovationExpired,
+    /// The request is malformed (for example a prior acknowledgment on a note
+    /// that is not a bound note).
+    InvalidRequest(String),
+    /// The operation needs an edge without committed or pending on-chain state.
+    OnchainScope(String),
     /// A multilateral set-off was malformed or is not possible in this tracker's
     /// state: fewer than two edges, duplicates, a decrease larger than an edge, a
     /// participant whose decreases do not balance, or an edge with on-chain state.
@@ -475,17 +496,71 @@ pub struct TransferTotals {
     pub to_new_total: u64,
 }
 
-/// Novation timestamps (debt transfer, set-off) end in this millisecond value,
-/// and ordinary notes (POST /notes) may not. A raised edge's issuer signature
-/// from a transfer is a valid note message on its own; reserving this timestamp
-/// domain keeps it from being submitted through POST /notes, which would raise
-/// that edge without the matching decrease. With it, a novation's signatures
-/// are only usable inside the novation they were made for.
-pub const NOVATION_TIMESTAMP_MS_SUFFIX: u64 = 999;
+/// Timestamp residues (`timestamp % 1000`, the millisecond part), allocated once
+/// for the whole roadmap. Every operation signs standard note messages, so a
+/// signature is told apart only by the residue of its timestamp: each kind of
+/// operation uses its own residue, and POST /notes refuses the residues of the
+/// other operations. A raised edge's issuer signature from a transfer is a valid
+/// note message on its own; its residue keeps it from being submitted through
+/// POST /notes, which would raise that edge without the matching decrease, and
+/// keeps one operation's signatures out of every other operation.
+///
+/// | residue | operation |
+/// |---|---|
+/// | 999 | debt transfer (POST /notes/transfer) |
+/// | 998 | multilateral set-off (POST /notes/setoff) |
+/// | 997 | bound note (POST /notes with the issuer's prior acknowledgment) |
+/// | 996 | triad compress (reserved, not implemented) |
+/// | 995 | exchange (reserved, not implemented) |
+/// | 000-994 | ordinary note (POST /notes) |
+pub const TRANSFER_TS_MS: u64 = 999;
+/// Residue of a multilateral set-off's timestamp (see [`TRANSFER_TS_MS`]).
+pub const SETOFF_TS_MS: u64 = 998;
+/// Residue of a bound note's timestamp (see [`TRANSFER_TS_MS`] and [`PriorAck`]).
+pub const BOUND_NOTE_TS_MS: u64 = 997;
+/// Residue reserved for a triad compress (not implemented; refused by POST /notes).
+pub const COMPRESS_TS_MS: u64 = 996;
+/// Residue reserved for an exchange (not implemented; refused by POST /notes).
+pub const EXCHANGE_TS_MS: u64 = 995;
+/// The lowest reserved residue: residues `RESERVED_FROM_MS..=999` are never
+/// ordinary notes, and ordinary notes use 000-994.
+pub const RESERVED_FROM_MS: u64 = 995;
 
-/// Is `timestamp` in the novation timestamp domain (ends in 999 ms)?
-pub fn is_novation_timestamp(timestamp: u64) -> bool {
-    timestamp % 1000 == NOVATION_TIMESTAMP_MS_SUFFIX
+/// Does `timestamp` have a reserved residue (995-999 ms)? Ordinary notes may not.
+pub fn is_reserved_timestamp(timestamp: u64) -> bool {
+    timestamp % 1000 >= RESERVED_FROM_MS
+}
+
+/// Does `timestamp` have the debt-transfer residue (999 ms)?
+pub fn is_transfer_timestamp(timestamp: u64) -> bool {
+    timestamp % 1000 == TRANSFER_TS_MS
+}
+
+/// Does `timestamp` have the set-off residue (998 ms)?
+pub fn is_setoff_timestamp(timestamp: u64) -> bool {
+    timestamp % 1000 == SETOFF_TS_MS
+}
+
+/// Does `timestamp` have the bound-note residue (997 ms)?
+pub fn is_bound_note_timestamp(timestamp: u64) -> bool {
+    timestamp % 1000 == BOUND_NOTE_TS_MS
+}
+
+/// An issuer prior acknowledgment, sent with a bound note (POST /notes at
+/// residue 997): the issuer's signature over the edge's standard note message at
+/// its CURRENT total P and the bound note's own timestamp,
+/// `signing_message(issuer, recipient, denomination, P, timestamp, nft)`, where
+/// P is the stored total (0 for an edge that does not exist yet). The tracker
+/// applies the bound note only while P is still the stored total and the note
+/// raises it, so a note signed against a stale total can never apply: the issuer
+/// pays exactly `new - P`, both values it signed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriorAck {
+    /// The issuer's signature over the prior message (65 bytes).
+    pub signature: Signature,
+    /// Optional and diagnostic: the prior total the issuer acknowledged. When
+    /// present it must equal the stored total, else [`NoteError::StalePrior`].
+    pub prior_total: Option<u64>,
 }
 
 /// Upper bound on the edges of one set-off (keeps verification and the storage
@@ -815,7 +890,18 @@ impl TrackerStateManager {
 
     /// Add a new note to the tracker state
     /// Updates the AVL tree with hash(issuer||receiver) -> totalDebt mapping
-    pub fn add_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+    ///
+    /// `prior` is the issuer's prior acknowledgment of a bound note (timestamp
+    /// residue 997, see [`PriorAck`]); it must be `None` for every other note.
+    /// Every check that existed before bound notes runs first, in its original
+    /// order, so existing error precedence is kept; then the residue and
+    /// bound-note rules (see [`Self::check_residue_and_binding`]).
+    pub fn add_note(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        note: &IouNote,
+        prior: Option<PriorAck>,
+    ) -> Result<(), NoteError> {
         Self::validate_contract_range(note)?;
 
         // Validate that timestamp is not in the future
@@ -839,6 +925,8 @@ impl TrackerStateManager {
         // which the contract pins, so the signed message and the on-chain commitment are unchanged.
         // The per-issuer reserve AVL tree (which is what the contract actually reads) is untouched.
         let mut note_to_store = note.clone();
+        // The edge's stored total (P for a bound note): 0 when the edge is absent.
+        let mut stored_total = 0u64;
 
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing).
@@ -870,6 +958,7 @@ impl TrackerStateManager {
                         requested: note.amount_collected,
                     });
                 }
+                stored_total = existing_note.amount_collected;
             }
             Err(NoteError::NotFound) => {}
             Err(e) => return Err(e),
@@ -881,16 +970,13 @@ impl TrackerStateManager {
             NoteError::InvalidSignature
         })?;
 
-        // Timestamps ending in 999 ms belong to novations (see NOVATION_TIMESTAMP_MS_SUFFIX): an issuer signature
-        // made for a transfer's raised edge must not be accepted here on its own. Checked last, so every other
-        // validation error keeps its priority.
-        if is_novation_timestamp(note.timestamp) {
-            return Err(NoteError::ReservedTimestamp);
-        }
-
         // Prepare AVL tree key: the denomination-derived debt key
         let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
+
+        // Timestamp residues, bound notes and bound-only edges. Checked after
+        // every other validation, so every existing error keeps its priority.
+        self.check_residue_and_binding(issuer_pubkey, note, &key.key_hash, stored_total, prior)?;
 
         // Value is just the totalDebt (amount_collected) as 8-byte big-endian
         // This matches the contract spec: hash(A||B) -> totalDebt
@@ -925,6 +1011,81 @@ impl TrackerStateManager {
         self.recompute_confirmation_status(&key32, note.amount_collected);
 
         Ok(())
+    }
+
+    /// The timestamp-residue and bound-note rules of POST /notes, in this order
+    /// (each refusal is checked only if the ones before it passed):
+    /// 1. residue 995, 996, 998 or 999 (another operation's) -> `ReservedTimestamp`;
+    /// 2. residue 997 (bound note) without `prior` -> `ReservedTimestamp`;
+    /// 3. residue 997 with `prior`, where P = `stored_total` (0 for an absent edge):
+    ///    a `prior_total` other than P -> `StalePrior`; the issuer's signature over
+    ///    `signing_message(issuer, recipient, denomination, P, timestamp, nft)` must
+    ///    verify, else `InvalidPriorSignature`; the new total must be strictly
+    ///    greater than P, else `NotAnIncrease` (so the acknowledgment itself, a
+    ///    valid note message at P, can never be submitted as a note);
+    /// 4. any other residue on a bound-only edge -> `BoundNoteRequired`;
+    /// 5. a `prior` on a note that is not a bound note -> `InvalidRequest`.
+    fn check_residue_and_binding(
+        &self,
+        issuer_pubkey: &PubKey,
+        note: &IouNote,
+        key: &NoteKeyBytes,
+        stored_total: u64,
+        prior: Option<PriorAck>,
+    ) -> Result<(), NoteError> {
+        let bound_note = is_bound_note_timestamp(note.timestamp);
+        if is_reserved_timestamp(note.timestamp) && !bound_note {
+            return Err(NoteError::ReservedTimestamp);
+        }
+        if bound_note {
+            let prior = prior.ok_or(NoteError::ReservedTimestamp)?;
+            if let Some(acknowledged) = prior.prior_total {
+                if acknowledged != stored_total {
+                    return Err(NoteError::StalePrior);
+                }
+            }
+            let prior_message = schnorr::signing_message(
+                issuer_pubkey,
+                &note.recipient_pubkey,
+                &note.denomination,
+                stored_total,
+                note.timestamp,
+                &note.tracker_nft_id,
+            );
+            if SchnorrVerifier
+                .verify_signature(&prior.signature, &prior_message, issuer_pubkey)
+                .is_err()
+            {
+                return Err(NoteError::InvalidPriorSignature);
+            }
+            if note.amount_collected <= stored_total {
+                return Err(NoteError::NotAnIncrease);
+            }
+            return Ok(());
+        }
+        if self.storage.is_bound_only(key)? {
+            return Err(NoteError::BoundNoteRequired);
+        }
+        if prior.is_some() {
+            return Err(NoteError::InvalidRequest(
+                "prior_signature is only valid on a bound note (timestamp ending in 997 ms)"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Is the (issuer, recipient, denomination) edge bound-only, i.e. changed by
+    /// a novation (debt transfer, set-off)? New notes on a bound-only edge must
+    /// be bound notes. A storage error is returned, never read as "not bound".
+    pub fn is_bound_only(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
+    ) -> Result<bool, NoteError> {
+        let key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
+        self.storage.is_bound_only(&key.key_hash)
     }
 
     /// Convert an issuer/recipient/denomination triple into the fixed-size confirmation key.
@@ -1266,6 +1427,16 @@ impl TrackerStateManager {
         // Prepare AVL tree key: the denomination-derived debt key
         let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
+
+        // The residue and bound-only rules of `add_note`, after every existing
+        // check. This path takes no prior acknowledgment, so it can write
+        // neither a bound note (residue 997) nor any note on a bound-only edge.
+        if is_reserved_timestamp(note.timestamp) {
+            return Err(NoteError::ReservedTimestamp);
+        }
+        if self.storage.is_bound_only(&key.key_hash)? {
+            return Err(NoteError::BoundNoteRequired);
+        }
 
         // Value is just the totalDebt (amount_collected) as 8-byte big-endian
         // This matches the contract spec: hash(A||B) -> totalDebt
@@ -1660,9 +1831,9 @@ impl TrackerStateManager {
     ///   old creditor's from-edge signature and redirect the debt to themselves.
     /// All five are verified BEFORE any state changes.
     ///
-    /// TIMESTAMP: must end in 999 ms (the novation timestamp domain), which
-    /// POST /notes refuses, so the issuer's signature on the raised edge cannot be
-    /// submitted on its own as an ordinary note.
+    /// TIMESTAMP: must end in 999 ms (the transfer residue, [`TRANSFER_TS_MS`]),
+    /// which POST /notes refuses, so the issuer's signature on the raised edge
+    /// cannot be submitted on its own as an ordinary note.
     ///
     /// SCOPE: the from-edge must have no committed or pending on-chain total
     /// (always the case on a pure-credit tracker). Then no tracker box holds an
@@ -1672,8 +1843,9 @@ impl TrackerStateManager {
     /// #17), the decrease would have to be committed before the increase
     /// applies, and that two-phase path is not implemented yet.
     ///
-    /// ATOMICITY: both notes, both confirmation records and the index entries
-    /// of a new to-edge are committed in one storage batch.
+    /// ATOMICITY: both notes, both confirmation records, the index entries of a
+    /// new to-edge and the bound-only marks of both edges are committed in one
+    /// storage batch. Afterwards new notes on either edge must be bound notes.
     #[allow(clippy::too_many_arguments)]
     pub fn transfer_debt(
         &mut self,
@@ -1704,7 +1876,7 @@ impl TrackerStateManager {
                 "the transfer amount must be positive".to_string(),
             ));
         }
-        if !is_novation_timestamp(timestamp) {
+        if !is_transfer_timestamp(timestamp) {
             return Err(NoteError::InvalidTransfer(
                 "a transfer's timestamp must end in 999 ms (the novation timestamp domain)".to_string(),
             ));
@@ -1846,10 +2018,13 @@ impl TrackerStateManager {
         let to_key = NoteKey::from_assets(issuer_pubkey, to_recipient_pubkey, denomination);
         let from_confirmation = self.recomputed_confirmation(&from_key.key_hash, from_new_total);
         let to_confirmation = self.recomputed_confirmation(&to_key.key_hash, to_new_total);
-        self.storage.commit_note_batch(&[
-            (*issuer_pubkey, from_note_new, from_confirmation.clone()),
-            (*issuer_pubkey, to_note_new, to_confirmation.clone()),
-        ])?;
+        self.storage.commit_note_batch(
+            &[
+                (*issuer_pubkey, from_note_new, from_confirmation.clone()),
+                (*issuer_pubkey, to_note_new, to_confirmation.clone()),
+            ],
+            &[from_key.key_hash, to_key.key_hash],
+        )?;
         self.confirmations.insert(from_key.key_hash, from_confirmation);
         self.confirmations.insert(to_key.key_hash, to_confirmation);
 
@@ -1941,8 +2116,9 @@ impl TrackerStateManager {
     ///
     /// SCOPE and ATOMICITY as for [`Self::transfer_debt`]: an edge with a committed
     /// or pending on-chain total is refused (the two-phase path is future work);
-    /// the timestamp must be a novation timestamp; all notes and confirmation
-    /// records land in one storage batch.
+    /// the timestamp must end in 998 ms (the set-off residue, [`SETOFF_TS_MS`]);
+    /// all notes, confirmation records and the bound-only marks of every edge
+    /// land in one storage batch.
     pub fn set_off(
         &mut self,
         denomination: &DenomKey,
@@ -1960,9 +2136,9 @@ impl TrackerStateManager {
                 MAX_SETOFF_EDGES
             )));
         }
-        if !is_novation_timestamp(timestamp) {
+        if !is_setoff_timestamp(timestamp) {
             return Err(NoteError::InvalidSetOff(
-                "a set-off's timestamp must end in 999 ms (the novation timestamp domain)".to_string(),
+                "a set-off's timestamp must end in 998 ms (the set-off timestamp residue)".to_string(),
             ));
         }
         let current_time = std::time::SystemTime::now()
@@ -2094,7 +2270,7 @@ impl TrackerStateManager {
             new_totals.push((e.issuer_pubkey, e.recipient_pubkey, new_total));
         }
 
-        self.storage.commit_note_batch(&entries)?;
+        self.storage.commit_note_batch(&entries, &keys)?;
         for (key, (_, _, confirmation)) in keys.iter().zip(entries.into_iter()) {
             self.confirmations.insert(*key, confirmation);
         }

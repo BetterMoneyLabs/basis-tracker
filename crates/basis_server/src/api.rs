@@ -155,6 +155,62 @@ pub async fn root() -> &'static str {
     "Hello, Basis Tracker API!"
 }
 
+const BOUND_NOTE_REQUIRED_MESSAGE: &str = "this edge was changed by a debt transfer or set-off and is bound-only: a new note on it must be a bound note (a timestamp ending in 997 ms, with prior_signature)";
+const INVALID_PRIOR_SIGNATURE_MESSAGE: &str = "prior_signature is not the issuer's signature over the edge's current total at this note's timestamp";
+const STALE_PRIOR_MESSAGE: &str = "prior_total is not the edge's current total";
+const NOT_AN_INCREASE_MESSAGE: &str =
+    "a bound note must raise the edge's total above the acknowledged prior total";
+const NOVATION_EXPIRED_MESSAGE: &str =
+    "the novation's timestamp is older than the maximum novation age";
+
+/// POST /notes message for `NoteError::ReservedTimestamp`, by the timestamp's
+/// residue. The 999 ms text is the one returned before the other residues were
+/// reserved, unchanged.
+fn reserved_timestamp_message(timestamp: u64) -> String {
+    match timestamp % 1000 {
+        basis_store::BOUND_NOTE_TS_MS => "a bound note needs prior_signature: timestamps ending in 997 ms are bound notes, accepted only with the issuer's acknowledgment of the edge's current total".to_string(),
+        basis_store::SETOFF_TS_MS => "timestamps ending in 998 ms are reserved for set-offs (POST /notes/setoff); ordinary notes use 000-994 ms".to_string(),
+        basis_store::COMPRESS_TS_MS => "timestamps ending in 996 ms are reserved (triad compress); ordinary notes use 000-994 ms".to_string(),
+        basis_store::EXCHANGE_TS_MS => "timestamps ending in 995 ms are reserved (exchange); ordinary notes use 000-994 ms".to_string(),
+        _ => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+    }
+}
+
+/// HTTP status and machine-readable `code` of a POST /notes store error.
+/// Errors without a code keep their earlier response exactly (400, no `code`).
+fn create_note_error_status(e: &NoteError) -> (StatusCode, Option<&'static str>) {
+    match e {
+        NoteError::ReservedTimestamp => (StatusCode::BAD_REQUEST, Some("reserved_timestamp")),
+        NoteError::BoundNoteRequired => (StatusCode::BAD_REQUEST, Some("bound_note_required")),
+        NoteError::InvalidPriorSignature => {
+            (StatusCode::BAD_REQUEST, Some("invalid_prior_signature"))
+        }
+        NoteError::StalePrior => (StatusCode::CONFLICT, Some("stale_prior")),
+        NoteError::NotAnIncrease => (StatusCode::BAD_REQUEST, Some("not_an_increase")),
+        NoteError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, Some("invalid_request")),
+        NoteError::PastTimestamp => (StatusCode::BAD_REQUEST, Some("past_timestamp")),
+        NoteError::FutureTimestamp => (StatusCode::BAD_REQUEST, Some("future_timestamp")),
+        NoteError::InvalidSignature => (StatusCode::BAD_REQUEST, Some("invalid_signature")),
+        NoteError::TrackerIdMismatch => (StatusCode::CONFLICT, Some("tracker_id_mismatch")),
+        NoteError::AmountOverflow
+        | NoteError::DebtDecreaseNotPermitted { .. }
+        | NoteError::AmountExceedsContractRange { .. }
+        | NoteError::NotFound
+        | NoteError::NoteNotConfirmed
+        | NoteError::InvalidExchange(_)
+        | NoteError::InvalidTransfer(_)
+        | NoteError::InvalidSetOff(_)
+        | NoteError::NovationExpired
+        | NoteError::OnchainScope(_)
+        | NoteError::AcceptancePolicy(_)
+        | NoteError::StaleCommittedDebt { .. }
+        | NoteError::RedemptionTooEarly
+        | NoteError::InsufficientCollateral
+        | NoteError::StorageError(_)
+        | NoteError::UnsupportedOperation => (StatusCode::BAD_REQUEST, None),
+    }
+}
+
 // Create a new IOU note
 #[axum::debug_handler]
 pub async fn create_note(
@@ -271,10 +327,13 @@ pub async fn create_note(
         if !configured_nft.eq_ignore_ascii_case(&payload.tracker_nft_id) {
             return (
                 StatusCode::CONFLICT,
-                Json(crate::models::error_response(format!(
-                    "Note is bound to tracker NFT {}, this tracker is {}",
-                    payload.tracker_nft_id, configured_nft
-                ))),
+                Json(crate::models::error_response_with_code(
+                    format!(
+                        "Note is bound to tracker NFT {}, this tracker is {}",
+                        payload.tracker_nft_id, configured_nft
+                    ),
+                    "tracker_id_mismatch",
+                )),
             );
         }
     }
@@ -303,6 +362,52 @@ pub async fn create_note(
         }
     };
 
+    // Bound notes (timestamp residue 997): the issuer's prior acknowledgment of
+    // the edge's current total. Decoded after every existing request check, so
+    // their precedence is unchanged; the store decides whether a prior is allowed.
+    let prior = match (&payload.prior_signature, payload.prior_total) {
+        (None, None) => None,
+        (None, Some(_)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response_with_code(
+                    "prior_total is only valid together with prior_signature".to_string(),
+                    "invalid_request",
+                )),
+            )
+        }
+        (Some(prior_hex), prior_total) => {
+            let bytes = match hex::decode(prior_hex) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(crate::models::error_response_with_code(
+                            "prior_signature must be hex-encoded".to_string(),
+                            "invalid_request",
+                        )),
+                    )
+                }
+            };
+            let prior_signature: Signature = match bytes.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(crate::models::error_response_with_code(
+                            "prior_signature must be 65 bytes".to_string(),
+                            "invalid_request",
+                        )),
+                    )
+                }
+            };
+            Some(basis_store::PriorAck {
+                signature: prior_signature,
+                prior_total,
+            })
+        }
+    };
+
     // Create the IOU note
     let note = IouNote::new(
         recipient_pubkey,
@@ -322,6 +427,7 @@ pub async fn create_note(
         .send(crate::TrackerCommand::AddNote {
             issuer_pubkey,
             note,
+            prior,
             response_tx,
         })
         .await
@@ -374,6 +480,7 @@ pub async fn create_note(
         }
         Ok(Err(e)) => {
             tracing::error!("Failed to create note: {:?}", e);
+            let (status, code) = create_note_error_status(&e);
             let error_message = match e {
                 NoteError::InvalidSignature => "Invalid signature".to_string(),
                 NoteError::AmountOverflow => "Amount overflow".to_string(),
@@ -401,7 +508,14 @@ pub async fn create_note(
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
-                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+                NoteError::ReservedTimestamp => reserved_timestamp_message(payload.timestamp),
+                NoteError::BoundNoteRequired => BOUND_NOTE_REQUIRED_MESSAGE.to_string(),
+                NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
+                NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),
+                NoteError::NotAnIncrease => NOT_AN_INCREASE_MESSAGE.to_string(),
+                NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
+                NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
+                NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -410,10 +524,11 @@ pub async fn create_note(
                     committed, local
                 ),
             };
-            (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(error_message)),
-            )
+            let body = match code {
+                Some(code) => crate::models::error_response_with_code(error_message, code),
+                None => crate::models::error_response(error_message),
+            };
+            (status, Json(body))
         }
         Err(_) => {
             tracing::error!("Tracker thread response channel closed");
@@ -1326,6 +1441,13 @@ pub async fn get_notes_by_issuer(
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
                 NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+                NoteError::BoundNoteRequired => BOUND_NOTE_REQUIRED_MESSAGE.to_string(),
+                NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
+                NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),
+                NoteError::NotAnIncrease => NOT_AN_INCREASE_MESSAGE.to_string(),
+                NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
+                NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
+                NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1465,6 +1587,13 @@ pub async fn get_notes_by_recipient(
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
                 NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+                NoteError::BoundNoteRequired => BOUND_NOTE_REQUIRED_MESSAGE.to_string(),
+                NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
+                NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),
+                NoteError::NotAnIncrease => NOT_AN_INCREASE_MESSAGE.to_string(),
+                NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
+                NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
+                NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1667,6 +1796,13 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
                 NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+                NoteError::BoundNoteRequired => BOUND_NOTE_REQUIRED_MESSAGE.to_string(),
+                NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
+                NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),
+                NoteError::NotAnIncrease => NOT_AN_INCREASE_MESSAGE.to_string(),
+                NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
+                NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
+                NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1790,6 +1926,13 @@ pub async fn get_all_notes(
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
                 NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+                NoteError::BoundNoteRequired => BOUND_NOTE_REQUIRED_MESSAGE.to_string(),
+                NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
+                NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),
+                NoteError::NotAnIncrease => NOT_AN_INCREASE_MESSAGE.to_string(),
+                NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
+                NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
+                NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
