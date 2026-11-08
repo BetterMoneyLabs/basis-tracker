@@ -364,11 +364,16 @@ pub struct TrackerCapabilities {
     pub novations_disabled_reason: Option<String>,
 }
 
-/// Bound notes: residue 997, version 1.
+/// Bound notes: residue 997, version 2 (tracker v3.1): a bound note older than
+/// `max_age_ms` is refused (`novation_expired`), like a novation. Version 1
+/// (tracker v3) had no maximum age.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundNotesCapability {
     pub ms: u64,
     pub version: u32,
+    /// The maximum age of a bound note's timestamp (one hour, the novation
+    /// maximum age).
+    pub max_age_ms: u64,
 }
 
 /// The novation routes and their shared maximum age.
@@ -432,7 +437,8 @@ impl TrackerCapabilities {
             ],
             bound_notes: BoundNotesCapability {
                 ms: basis_store::BOUND_NOTE_TS_MS,
-                version: 1,
+                version: 2,
+                max_age_ms: basis_store::NOVATION_MAX_AGE_MS,
             },
             bound_only_edges: true,
             novation: NovationCapabilities {
@@ -611,7 +617,8 @@ pub struct KeyStatusDenomination {
 }
 
 // Redemption request
-#[derive(Debug, Deserialize)]
+// `Debug` is implemented by hand (redacted): `initiate_redemption` debug-logs the request.
+#[derive(Deserialize)]
 pub struct RedeemRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
@@ -632,6 +639,25 @@ pub struct RedeemRequest {
     /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
     #[serde(default)]
     pub denomination: String,
+}
+
+/// Redacted (see [`crate::redact`]): the issuer's signature appears only as its
+/// fingerprint, and free-text fields only up to 72 characters (else by length).
+impl std::fmt::Debug for RedeemRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{Denom, HexField, SigHex, Text};
+        f.debug_struct("RedeemRequest")
+            .field("issuer_pubkey", &HexField(&self.issuer_pubkey, 33))
+            .field("recipient_pubkey", &HexField(&self.recipient_pubkey, 33))
+            .field("amount", &self.amount)
+            .field("timestamp", &self.timestamp)
+            .field("reserve_box_id", &Text(&self.reserve_box_id))
+            .field("recipient_address", &Text(&self.recipient_address))
+            .field("issuer_signature", &SigHex(&self.issuer_signature))
+            .field("emergency", &self.emergency)
+            .field("denomination", &Denom(&self.denomination))
+            .finish()
+    }
 }
 
 // Redemption completion request

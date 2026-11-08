@@ -112,12 +112,13 @@ fn setoff_body(ab: u64, ba: u64, d: u64, ts: u64) -> Value {
     json!({"denomination": "erg", "timestamp": ts, "edges": [edge(&A, &B, ab), edge(&B, &A, ba)]})
 }
 
-/// The exact GET /capabilities body of this build (design §3.6) with the run-time values filled in.
+/// The exact GET /capabilities body of this build (design §3.6, with decision D-1: bound notes version 2 with their
+/// one-hour maximum age, tracker v3.1) with the run-time values filled in.
 fn expected_capabilities(pure_credit: bool, onchain_edges: u64, novations_disabled_reason: Value) -> Value {
     json!({"success": true, "data": {
         "tracker": "basis", "build": "valun-circulating-credit/3", "commit": commit(),
         "pure_credit": pure_credit, "reserved_ms": [995, 996, 997, 998, 999],
-        "bound_notes": {"ms": 997, "version": 1}, "bound_only_edges": true,
+        "bound_notes": {"ms": 997, "version": 2, "max_age_ms": 3600000}, "bound_only_edges": true,
         "novation": {"max_age_ms": 3600000,
             "transfer": {"ms": 999, "version": 3, "signatures": ["issuer_from", "issuer_to",
                 "from_recipient_prior", "from_recipient", "from_recipient_to", "to_recipient_prior", "to_recipient"]},
@@ -340,7 +341,7 @@ async fn capabilities_report_the_exact_v3_contract() {
     let exact = format!(
         concat!(
             r#"{{"success":true,"data":{{"tracker":"basis","build":"valun-circulating-credit/3","commit":"{}","#,
-            r#""pure_credit":true,"reserved_ms":[995,996,997,998,999],"bound_notes":{{"ms":997,"version":1}},"#,
+            r#""pure_credit":true,"reserved_ms":[995,996,997,998,999],"bound_notes":{{"ms":997,"version":2,"max_age_ms":3600000}},"#,
             r#""bound_only_edges":true,"novation":{{"max_age_ms":3600000,"transfer":{{"ms":999,"version":3,"#,
             r#""signatures":["issuer_from","issuer_to","from_recipient_prior","from_recipient","from_recipient_to","#,
             r#""to_recipient_prior","to_recipient"]}},"setoff":{{"ms":998,"version":3,"max_edges":64,"#,

@@ -59,9 +59,11 @@ paths:
         and 997 for bound notes. A bound note carries prior_signature, the
         issuer's signature over the edge's note message at its current total and
         the bound note's timestamp; it applies only while that total is current
-        and is raised. Ordinary notes use 000-994 ms. An edge changed by a
-        transfer or set-off is bound-only and accepts only bound notes
-        (bound_note_required). Errors carry a machine-readable `code`.
+        and is raised, and only while its timestamp is at most one hour old
+        (novation_expired; bound notes version 2, tracker v3.1). Ordinary notes
+        use 000-994 ms and have no maximum age. An edge changed by a transfer or
+        set-off is bound-only and accepts only bound notes (bound_note_required).
+        Errors carry a machine-readable `code`.
       operationId: createNote
       tags:
         - Notes
@@ -83,7 +85,8 @@ paths:
             Bad request - invalid input parameters (including malformed tracker_nft_id
             hex or wrong length). Codes: reserved_timestamp, bound_note_required,
             invalid_prior_signature, not_an_increase, invalid_request, past_timestamp,
-            future_timestamp, invalid_signature (other refusals carry no code)
+            future_timestamp, novation_expired (a bound note older than one hour),
+            invalid_signature (other refusals carry no code)
           content:
             application/json:
               schema:
@@ -1984,13 +1987,21 @@ components:
           description: Why debt transfers and set-offs are refused (503 novations_disabled), or null
     BoundNotesCapability:
       type: object
+      description: >-
+        Bound notes (POST /notes at residue 997 with prior_signature). Version 2
+        (tracker v3.1) refuses a bound note older than max_age_ms (novation_expired);
+        version 1 had no maximum age.
       properties:
         ms:
           type: integer
           example: 997
         version:
           type: integer
-          example: 1
+          example: 2
+        max_age_ms:
+          type: integer
+          format: uint64
+          example: 3600000
     NovationCapabilities:
       type: object
       properties:
@@ -2370,7 +2381,10 @@ components:
           format: uint64
           description: >-
             Optional, with prior_signature only: the current total the acknowledgment
-            covers; a value other than the stored total is refused (409 stale_prior)
+            covers; a value other than the stored total is refused (409 stale_prior).
+            Without prior_signature it is refused at an ordinary residue (400
+            invalid_request); at a reserved residue (995-999) the note is refused with
+            400 reserved_timestamp (at 997: a bound note needs prior_signature)
 
     NoteStateRequest:
       type: object

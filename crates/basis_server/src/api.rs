@@ -205,17 +205,28 @@ const NOT_AN_INCREASE_MESSAGE: &str =
     "a bound note must raise the edge's total above the acknowledged prior total";
 const NOVATION_EXPIRED_MESSAGE: &str =
     "the novation's timestamp is older than the maximum novation age";
+/// POST /notes message for `NoteError::NovationExpired` (a bound note older than
+/// the maximum age).
+const BOUND_NOTE_EXPIRED_MESSAGE: &str =
+    "the bound note's timestamp is older than the maximum age (one hour): an unapplied bound note expires like a novation";
+
+/// The `NoteError::ReservedTimestamp` message where no timestamp is at hand
+/// (the read routes, which never produce it): every reserved residue and its
+/// operation.
+const RESERVED_TIMESTAMPS_MESSAGE: &str = "timestamps ending in 995-999 ms are reserved: 999 for debt transfers (POST /notes/transfer), 998 for set-offs (POST /notes/setoff), 997 for bound notes (they need prior_signature), 996 and 995 reserved; ordinary notes use 000-994 ms";
 
 /// POST /notes message for `NoteError::ReservedTimestamp`, by the timestamp's
-/// residue. The 999 ms text is the one returned before the other residues were
-/// reserved, unchanged.
+/// residue: it names the operation the residue belongs to (999 debt transfer,
+/// 998 set-off, 997 bound note, which needs prior_signature, 996 and 995
+/// reserved).
 fn reserved_timestamp_message(timestamp: u64) -> String {
     match timestamp % 1000 {
-        basis_store::BOUND_NOTE_TS_MS => "a bound note needs prior_signature: timestamps ending in 997 ms are bound notes, accepted only with the issuer's acknowledgment of the edge's current total".to_string(),
+        basis_store::TRANSFER_TS_MS => "timestamps ending in 999 ms are reserved for debt transfers (POST /notes/transfer); ordinary notes use 000-994 ms".to_string(),
         basis_store::SETOFF_TS_MS => "timestamps ending in 998 ms are reserved for set-offs (POST /notes/setoff); ordinary notes use 000-994 ms".to_string(),
+        basis_store::BOUND_NOTE_TS_MS => "a bound note needs prior_signature: timestamps ending in 997 ms are bound notes, accepted only with the issuer's acknowledgment of the edge's current total".to_string(),
         basis_store::COMPRESS_TS_MS => "timestamps ending in 996 ms are reserved (triad compress); ordinary notes use 000-994 ms".to_string(),
         basis_store::EXCHANGE_TS_MS => "timestamps ending in 995 ms are reserved (exchange); ordinary notes use 000-994 ms".to_string(),
-        _ => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+        _ => RESERVED_TIMESTAMPS_MESSAGE.to_string(),
     }
 }
 
@@ -235,6 +246,8 @@ fn create_note_error_status(e: &NoteError) -> (StatusCode, Option<&'static str>)
         NoteError::FutureTimestamp => (StatusCode::BAD_REQUEST, Some("future_timestamp")),
         NoteError::InvalidSignature => (StatusCode::BAD_REQUEST, Some("invalid_signature")),
         NoteError::TrackerIdMismatch => (StatusCode::CONFLICT, Some("tracker_id_mismatch")),
+        // A bound note older than the maximum age (tracker v3.1).
+        NoteError::NovationExpired => (StatusCode::BAD_REQUEST, Some("novation_expired")),
         NoteError::AmountOverflow
         | NoteError::DebtDecreaseNotPermitted { .. }
         | NoteError::AmountExceedsContractRange { .. }
@@ -243,7 +256,6 @@ fn create_note_error_status(e: &NoteError) -> (StatusCode, Option<&'static str>)
         | NoteError::InvalidExchange(_)
         | NoteError::InvalidTransfer(_)
         | NoteError::InvalidSetOff(_)
-        | NoteError::NovationExpired
         | NoteError::OnchainScope(_)
         | NoteError::AcceptancePolicy(_)
         | NoteError::StaleCommittedDebt { .. }
@@ -597,6 +609,12 @@ pub async fn create_note(
     // their precedence is unchanged; the store decides whether a prior is allowed.
     let prior = match (&payload.prior_signature, payload.prior_total) {
         (None, None) => None,
+        // prior_total without prior_signature at a reserved residue (995-999):
+        // the note goes to the store without a prior, which refuses it after its
+        // existing checks with reserved_timestamp (design §3.2: a bound note at
+        // 997 without prior_signature is reserved_timestamp; 995, 996, 998 and
+        // 999 are reserved for every note). prior_total is diagnostic only.
+        (None, Some(_)) if basis_store::is_reserved_timestamp(payload.timestamp) => None,
         (None, Some(_)) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -743,7 +761,7 @@ pub async fn create_note(
                 NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
                 NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),
                 NoteError::NotAnIncrease => NOT_AN_INCREASE_MESSAGE.to_string(),
-                NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
+                NoteError::NovationExpired => BOUND_NOTE_EXPIRED_MESSAGE.to_string(),
                 NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
                 NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
                 NoteError::StagedExchange(msg) => format!("Staged exchange: {}", msg),
@@ -1700,7 +1718,7 @@ pub async fn get_notes_by_issuer(
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
-                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+                NoteError::ReservedTimestamp => RESERVED_TIMESTAMPS_MESSAGE.to_string(),
                 NoteError::BoundNoteRequired => BOUND_NOTE_REQUIRED_MESSAGE.to_string(),
                 NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
                 NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),
@@ -1847,7 +1865,7 @@ pub async fn get_notes_by_recipient(
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
-                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+                NoteError::ReservedTimestamp => RESERVED_TIMESTAMPS_MESSAGE.to_string(),
                 NoteError::BoundNoteRequired => BOUND_NOTE_REQUIRED_MESSAGE.to_string(),
                 NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
                 NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),
@@ -2057,7 +2075,7 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
-                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+                NoteError::ReservedTimestamp => RESERVED_TIMESTAMPS_MESSAGE.to_string(),
                 NoteError::BoundNoteRequired => BOUND_NOTE_REQUIRED_MESSAGE.to_string(),
                 NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
                 NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),
@@ -2188,7 +2206,7 @@ pub async fn get_all_notes(
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
-                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
+                NoteError::ReservedTimestamp => RESERVED_TIMESTAMPS_MESSAGE.to_string(),
                 NoteError::BoundNoteRequired => BOUND_NOTE_REQUIRED_MESSAGE.to_string(),
                 NoteError::InvalidPriorSignature => INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
                 NoteError::StalePrior => STALE_PRIOR_MESSAGE.to_string(),

@@ -3765,6 +3765,45 @@ mod setoff_tests {
     }
 
     #[test]
+    fn the_same_pair_twice_at_different_edge_timestamps_is_refused() {
+        // Per-edge timestamps must not let one pair count as two edges. A owes B 10 and B owes A 10. The request
+        // lowers A->B by 5 twice, at two different timestamps (each copy validly signed by both parties from the
+        // stored total 10), and B->A by 10 once. On its own numbers it balances: A and B each lose 10 as creditor
+        // and 10 as issuer. Applied, both copies would be written from the same stored total, so A->B would fall by
+        // only 5 while B->A falls by 10: A's net position would change. The distinct-pair check refuses it.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        let d = DenomKey::Token(TOKEN);
+        note(&mut m, &A, &B, 10, base() + 1000);
+        note(&mut m, &B, &A, 10, base() + 1001);
+        let digest = m.get_state().avl_root_digest;
+        let t = ts0();
+        let (first, second, back) = (edge(&A, &B, 10, 5, t), edge(&A, &B, 10, 5, t + 1000), edge(&B, &A, 10, 10, t));
+        assert_ne!(first.timestamp, second.timestamp);
+        for request in [
+            vec![first.clone(), second.clone(), back.clone()],
+            vec![first.clone(), back.clone(), second.clone()],
+            vec![back.clone(), second.clone(), first.clone()],
+        ] {
+            // Not vacuous: the request balances for every key, so only the pair check can refuse it.
+            let mut net = std::collections::HashMap::new();
+            for e in &request {
+                *net.entry(e.recipient_pubkey).or_insert(0i64) += e.decrease as i64;
+                *net.entry(e.issuer_pubkey).or_insert(0i64) -= e.decrease as i64;
+            }
+            assert!(net.values().all(|v| *v == 0), "{:?}", net);
+            match m.set_off(&d, &request) {
+                Err(NoteError::InvalidSetOff(msg)) => assert!(msg.contains("more than once"), "{}", msg),
+                other => panic!("expected InvalidSetOff, got {:?}", other),
+            }
+            assert_eq!((total(&m, &A, &B), total(&m, &B, &A)), (10, 10));
+            assert_eq!(m.get_state().avl_root_digest, digest);
+        }
+        // The signatures are genuine: one copy with its matching decrease of B->A is an honest set-off and applies.
+        m.set_off(&d, &[second, edge(&B, &A, 10, 5, t + 1000)]).unwrap();
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A)), (5, 5));
+    }
+
+    #[test]
     fn a_set_off_cannot_be_replayed() {
         let mut m = triangle();
         let t = ts0();
@@ -3804,7 +3843,8 @@ mod setoff_tests {
     }
 
     #[test]
-    fn ordinary_notes_still_work_after_a_set_off() {
+    fn set_off_edges_take_only_bound_notes_and_other_edges_take_ordinary_notes() {
+        // (Named ordinary_notes_still_work_after_a_set_off before tracker v3.1; renamed for what it checks.)
         // Tracker v3: every edge a set-off lowered is bound-only afterwards, so a new deal on it is a bound note
         // (residue 997, with the issuer's acknowledgment of the current total) and an ordinary note there is
         // refused. Edges the set-off did not touch take ordinary notes as before.
@@ -4190,11 +4230,12 @@ mod setoff_tests {
 /// Tracker v3 timestamp residues, bound notes and bound-only edges, for add_note
 /// (POST /notes) and update_note: residues 995-999 are reserved; a note at
 /// residue 997 is a bound note, applied only with the issuer's acknowledgment of
-/// the edge's stored total; an edge a novation changed takes only bound notes.
+/// the edge's stored total and, since v3.1, only within the maximum age; an
+/// edge a novation changed takes only bound notes.
 #[cfg(test)]
 mod bound_note_tests {
     use crate::persistence::NoteStorage;
-    use crate::{DenomKey, IouNote, NoteError, NoteKey, PriorAck, TrackerStateManager};
+    use crate::{DenomKey, IouNote, NoteError, NoteKey, PriorAck, TrackerStateManager, NOVATION_MAX_AGE_MS};
     use secp256k1::{Secp256k1, SecretKey};
 
     const NFT: [u8; 32] = [0x42; 32];
@@ -4218,6 +4259,30 @@ mod bound_note_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64
+    }
+
+    /// A whole second ten minutes before this module's first test started. Tracker v3.1 refuses bound notes older
+    /// than NOVATION_MAX_AGE_MS (design decision D-1), so the timestamps here are offsets from it (they were fixed
+    /// 1970-era values before): the largest offset is a few seconds, so every one of them is in the past and well
+    /// inside the maximum age, and each keeps its residue (`at(1997)` ends in 997 ms).
+    fn base() -> u64 {
+        static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *BASE.get_or_init(|| (now_ms() - 600_000) / 1000 * 1000)
+    }
+
+    /// `offset` milliseconds after [`base`].
+    fn at(offset: u64) -> u64 {
+        base() + offset
+    }
+
+    /// The latest timestamp at or before `t` whose residue (`ts % 1000`) is `ms`.
+    fn at_residue(t: u64, ms: u64) -> u64 {
+        let candidate = t - t % 1000 + ms;
+        if candidate <= t {
+            candidate
+        } else {
+            candidate - 1000
+        }
     }
 
     /// `signer`'s signature over the (issuer -> recipient) note message at `total` and `ts`.
@@ -4258,10 +4323,10 @@ mod bound_note_tests {
         m.storage.commit_note_batch(&[], &[key(recipient)]).unwrap();
     }
 
-    /// A owes B 10, noted at 1000 ms (residue 000).
+    /// A owes B 10, noted at at(1000) (residue 000).
     fn setup() -> TrackerStateManager {
         let mut m = TrackerStateManager::new_with_temp_storage();
-        add(&mut m, &B, 10, 1000, None).unwrap();
+        add(&mut m, &B, 10, at(1000), None).unwrap();
         m
     }
 
@@ -4270,18 +4335,18 @@ mod bound_note_tests {
         let mut m = setup(); // its note at residue 000 was accepted
         let digest = m.get_state().avl_root_digest;
         for ts in [1995, 1996, 1998, 1999] {
-            let r = add(&mut m, &B, 20, ts, None);
+            let r = add(&mut m, &B, 20, at(ts), None);
             assert!(matches!(r, Err(NoteError::ReservedTimestamp)), "ts {}: {:?}", ts, r);
         }
         // 997 is the bound-note residue: without a prior acknowledgment it is refused as reserved.
-        assert!(matches!(add(&mut m, &B, 20, 1997, None), Err(NoteError::ReservedTimestamp)));
+        assert!(matches!(add(&mut m, &B, 20, at(1997), None), Err(NoteError::ReservedTimestamp)));
         // A new edge's first note too.
-        assert!(matches!(add(&mut m, &C, 5, 1999, None), Err(NoteError::ReservedTimestamp)));
+        assert!(matches!(add(&mut m, &C, 5, at(1999), None), Err(NoteError::ReservedTimestamp)));
         assert_eq!((total(&m, &B), total(&m, &C)), (Some(10), None));
         assert_eq!(m.get_state().avl_root_digest, digest);
         // The largest ordinary residue (994) and the smallest (000) are accepted.
-        add(&mut m, &B, 20, 1994, None).unwrap();
-        add(&mut m, &B, 30, 2000, None).unwrap();
+        add(&mut m, &B, 20, at(1994), None).unwrap();
+        add(&mut m, &B, 30, at(2000), None).unwrap();
         assert_eq!(total(&m, &B), Some(30));
     }
 
@@ -4291,22 +4356,22 @@ mod bound_note_tests {
         // Contract range, future timestamp, past timestamp, no decrease and the note's own signature are all
         // checked before the residue and bound-note rules.
         assert!(matches!(
-            add(&mut m, &B, i64::MAX as u64 + 1, 1999, None),
+            add(&mut m, &B, i64::MAX as u64 + 1, at(1999), None),
             Err(NoteError::AmountExceedsContractRange { .. })
         ));
         let future = now_ms() + 3_600_000;
         assert!(matches!(add(&mut m, &B, 20, future - future % 1000 + 995, None), Err(NoteError::FutureTimestamp)));
-        assert!(matches!(add(&mut m, &B, 20, 998, None), Err(NoteError::PastTimestamp)));
+        assert!(matches!(add(&mut m, &B, 20, at(998), None), Err(NoteError::PastTimestamp)));
         assert!(matches!(
-            add(&mut m, &B, 5, 1997, Some(ack(&A, &B, 10, 1997, Some(10)))),
+            add(&mut m, &B, 5, at(1997), Some(ack(&A, &B, 10, at(1997), Some(10)))),
             Err(NoteError::DebtDecreaseNotPermitted { .. })
         ));
-        let mut forged = note(&B, 20, 1999);
-        forged.signature = note(&B, 21, 1999).signature;
+        let mut forged = note(&B, 20, at(1999));
+        forged.signature = note(&B, 21, at(1999)).signature;
         assert!(matches!(m.add_note(&pk(&A), &forged, None), Err(NoteError::InvalidSignature)));
-        let mut forged = note(&B, 20, 1997);
-        forged.signature = note(&B, 21, 1997).signature;
-        assert!(matches!(m.add_note(&pk(&A), &forged, Some(ack(&A, &B, 10, 1997, Some(9)))), Err(NoteError::InvalidSignature)));
+        let mut forged = note(&B, 20, at(1997));
+        forged.signature = note(&B, 21, at(1997)).signature;
+        assert!(matches!(m.add_note(&pk(&A), &forged, Some(ack(&A, &B, 10, at(1997), Some(9)))), Err(NoteError::InvalidSignature)));
         assert_eq!(total(&m, &B), Some(10));
     }
 
@@ -4314,14 +4379,14 @@ mod bound_note_tests {
     fn a_bound_note_applies_only_with_the_issuers_acknowledgment_of_the_current_total() {
         let mut m = setup(); // P = 10
         let digest = m.get_state().avl_root_digest;
-        let ts = 1997;
+        let ts = at(1997);
         // A prior at a wrong total: StalePrior when its total is sent, InvalidPriorSignature when it is not.
         assert!(matches!(add(&mut m, &B, 15, ts, Some(ack(&A, &B, 9, ts, Some(9)))), Err(NoteError::StalePrior)));
         assert!(matches!(add(&mut m, &B, 15, ts, Some(ack(&A, &B, 9, ts, None))), Err(NoteError::InvalidPriorSignature)));
         // Claiming the right total does not help a signature over another total.
         assert!(matches!(add(&mut m, &B, 15, ts, Some(ack(&A, &B, 9, ts, Some(10)))), Err(NoteError::InvalidPriorSignature)));
         // The acknowledgment is bound to the note's own timestamp.
-        assert!(matches!(add(&mut m, &B, 15, ts, Some(ack(&A, &B, 10, 1994, Some(10)))), Err(NoteError::InvalidPriorSignature)));
+        assert!(matches!(add(&mut m, &B, 15, ts, Some(ack(&A, &B, 10, at(1994), Some(10)))), Err(NoteError::InvalidPriorSignature)));
         assert_eq!(total(&m, &B), Some(10));
         assert_eq!(m.get_state().avl_root_digest, digest);
         // With the issuer's acknowledgment of the stored total the bound note applies.
@@ -4330,11 +4395,11 @@ mod bound_note_tests {
         assert_eq!((stored.amount_collected, stored.timestamp), (15, ts));
         assert!(stored.verify_signature(&pk(&A)).is_ok());
         // prior_total is optional; the next bound note acknowledges the new total.
-        add(&mut m, &B, 18, 2997, Some(ack(&A, &B, 15, 2997, None))).unwrap();
+        add(&mut m, &B, 18, at(2997), Some(ack(&A, &B, 15, at(2997), None))).unwrap();
         assert_eq!(total(&m, &B), Some(18));
         // An acknowledgment of the old total is stale now.
-        assert!(matches!(add(&mut m, &B, 25, 3997, Some(ack(&A, &B, 15, 3997, Some(15)))), Err(NoteError::StalePrior)));
-        assert!(matches!(add(&mut m, &B, 25, 3997, Some(ack(&A, &B, 15, 3997, None))), Err(NoteError::InvalidPriorSignature)));
+        assert!(matches!(add(&mut m, &B, 25, at(3997), Some(ack(&A, &B, 15, at(3997), Some(15)))), Err(NoteError::StalePrior)));
+        assert!(matches!(add(&mut m, &B, 25, at(3997), Some(ack(&A, &B, 15, at(3997), None))), Err(NoteError::InvalidPriorSignature)));
         assert_eq!(total(&m, &B), Some(18));
     }
 
@@ -4343,17 +4408,17 @@ mod bound_note_tests {
         let mut m = setup();
         // B signs the right message (A -> B at 10, at the note's timestamp); it is still not the issuer's
         // acknowledgment. A third party's signature is refused as well.
-        assert!(matches!(add(&mut m, &B, 15, 1997, Some(ack(&B, &B, 10, 1997, Some(10)))), Err(NoteError::InvalidPriorSignature)));
-        assert!(matches!(add(&mut m, &B, 15, 1997, Some(ack(&C, &B, 10, 1997, None))), Err(NoteError::InvalidPriorSignature)));
+        assert!(matches!(add(&mut m, &B, 15, at(1997), Some(ack(&B, &B, 10, at(1997), Some(10)))), Err(NoteError::InvalidPriorSignature)));
+        assert!(matches!(add(&mut m, &B, 15, at(1997), Some(ack(&C, &B, 10, at(1997), None))), Err(NoteError::InvalidPriorSignature)));
         assert_eq!(total(&m, &B), Some(10));
     }
 
     #[test]
     fn an_equal_total_is_not_an_increase() {
         let mut m = setup();
-        assert!(matches!(add(&mut m, &B, 10, 1997, Some(ack(&A, &B, 10, 1997, Some(10)))), Err(NoteError::NotAnIncrease)));
+        assert!(matches!(add(&mut m, &B, 10, at(1997), Some(ack(&A, &B, 10, at(1997), Some(10)))), Err(NoteError::NotAnIncrease)));
         // On an absent edge P = 0, so a bound note of 0 is not an increase either.
-        assert!(matches!(add(&mut m, &C, 0, 1997, Some(ack(&A, &C, 0, 1997, Some(0)))), Err(NoteError::NotAnIncrease)));
+        assert!(matches!(add(&mut m, &C, 0, at(1997), Some(ack(&A, &C, 0, at(1997), Some(0)))), Err(NoteError::NotAnIncrease)));
         assert_eq!((total(&m, &B), total(&m, &C)), (Some(10), None));
     }
 
@@ -4361,10 +4426,10 @@ mod bound_note_tests {
     fn a_first_bound_note_on_an_absent_edge_acknowledges_zero() {
         let mut m = setup();
         // On an absent edge P = 0: an acknowledgment of any other total does not fit.
-        assert!(matches!(add(&mut m, &C, 7, 1997, Some(ack(&A, &C, 10, 1997, Some(10)))), Err(NoteError::StalePrior)));
-        assert!(matches!(add(&mut m, &C, 7, 1997, Some(ack(&A, &C, 10, 1997, None))), Err(NoteError::InvalidPriorSignature)));
+        assert!(matches!(add(&mut m, &C, 7, at(1997), Some(ack(&A, &C, 10, at(1997), Some(10)))), Err(NoteError::StalePrior)));
+        assert!(matches!(add(&mut m, &C, 7, at(1997), Some(ack(&A, &C, 10, at(1997), None))), Err(NoteError::InvalidPriorSignature)));
         assert_eq!(total(&m, &C), None);
-        add(&mut m, &C, 7, 1997, Some(ack(&A, &C, 0, 1997, Some(0)))).unwrap();
+        add(&mut m, &C, 7, at(1997), Some(ack(&A, &C, 0, at(1997), Some(0)))).unwrap();
         assert_eq!(total(&m, &C), Some(7));
         assert_eq!(m.get_recipient_notes(&pk(&C)).unwrap().len(), 1);
         assert!(!bound_only(&m, &C), "a bound note does not make its edge bound-only");
@@ -4376,12 +4441,12 @@ mod bound_note_tests {
         // note it is refused: without a prior as a reserved residue, with itself as the prior as no increase.
         let mut m = setup();
         let digest = m.get_state().avl_root_digest;
-        let prior = ack(&A, &B, 10, 1997, Some(10));
+        let prior = ack(&A, &B, 10, at(1997), Some(10));
         let as_note = IouNote {
             recipient_pubkey: pk(&B),
             amount_collected: 10,
             amount_redeemed: 0,
-            timestamp: 1997,
+            timestamp: at(1997),
             signature: prior.signature,
             tracker_nft_id: NFT,
             denomination: denom(),
@@ -4390,7 +4455,7 @@ mod bound_note_tests {
         assert!(matches!(m.add_note(&pk(&A), &as_note, None), Err(NoteError::ReservedTimestamp)));
         assert!(matches!(m.add_note(&pk(&A), &as_note, Some(prior)), Err(NoteError::NotAnIncrease)));
         // The same for a first bound note's acknowledgment of 0 on an absent edge.
-        let zero = ack(&A, &C, 0, 1997, Some(0));
+        let zero = ack(&A, &C, 0, at(1997), Some(0));
         let zero_note = IouNote { recipient_pubkey: pk(&C), amount_collected: 0, signature: zero.signature, ..as_note.clone() };
         assert!(zero_note.verify_signature(&pk(&A)).is_ok());
         assert!(matches!(m.add_note(&pk(&A), &zero_note, None), Err(NoteError::ReservedTimestamp)));
@@ -4402,40 +4467,40 @@ mod bound_note_tests {
     #[test]
     fn a_prior_on_a_note_that_is_not_a_bound_note_is_an_invalid_request() {
         let mut m = setup();
-        assert!(matches!(add(&mut m, &B, 20, 2000, Some(ack(&A, &B, 10, 2000, Some(10)))), Err(NoteError::InvalidRequest(_))));
-        assert!(matches!(add(&mut m, &C, 5, 2994, Some(ack(&A, &C, 0, 2994, None))), Err(NoteError::InvalidRequest(_))));
+        assert!(matches!(add(&mut m, &B, 20, at(2000), Some(ack(&A, &B, 10, at(2000), Some(10)))), Err(NoteError::InvalidRequest(_))));
+        assert!(matches!(add(&mut m, &C, 5, at(2994), Some(ack(&A, &C, 0, at(2994), None))), Err(NoteError::InvalidRequest(_))));
         // At another operation's residue the reserved-residue refusal comes first.
-        assert!(matches!(add(&mut m, &B, 20, 1999, Some(ack(&A, &B, 10, 1999, None))), Err(NoteError::ReservedTimestamp)));
+        assert!(matches!(add(&mut m, &B, 20, at(1999), Some(ack(&A, &B, 10, at(1999), None))), Err(NoteError::ReservedTimestamp)));
         assert_eq!((total(&m, &B), total(&m, &C)), (Some(10), None));
         // Without the prior the same ordinary note applies.
-        add(&mut m, &B, 20, 2000, None).unwrap();
+        add(&mut m, &B, 20, at(2000), None).unwrap();
         assert_eq!(total(&m, &B), Some(20));
     }
 
     #[test]
     fn on_a_bound_only_edge_an_unbound_note_is_refused_and_a_bound_note_accepted() {
         let mut m = setup();
-        add(&mut m, &C, 4, 1001, None).unwrap();
+        add(&mut m, &C, 4, at(1001), None).unwrap();
         mark_bound_only(&m, &B);
         assert!(bound_only(&m, &B) && !bound_only(&m, &C));
         let digest = m.get_state().avl_root_digest;
         for ts in [2000, 2500, 2994] {
-            let r = add(&mut m, &B, 20, ts, None);
+            let r = add(&mut m, &B, 20, at(ts), None);
             assert!(matches!(r, Err(NoteError::BoundNoteRequired)), "ts {}: {:?}", ts, r);
         }
         // With a prior at an ordinary residue the bound-only refusal comes first.
-        assert!(matches!(add(&mut m, &B, 20, 2000, Some(ack(&A, &B, 10, 2000, Some(10)))), Err(NoteError::BoundNoteRequired)));
+        assert!(matches!(add(&mut m, &B, 20, at(2000), Some(ack(&A, &B, 10, at(2000), Some(10)))), Err(NoteError::BoundNoteRequired)));
         // Reserved residues stay reserved.
-        assert!(matches!(add(&mut m, &B, 20, 2999, None), Err(NoteError::ReservedTimestamp)));
+        assert!(matches!(add(&mut m, &B, 20, at(2999), None), Err(NoteError::ReservedTimestamp)));
         assert_eq!(total(&m, &B), Some(10));
         assert_eq!(m.get_state().avl_root_digest, digest);
         // A bound note applies, and the edge stays bound-only.
-        add(&mut m, &B, 20, 2997, Some(ack(&A, &B, 10, 2997, Some(10)))).unwrap();
+        add(&mut m, &B, 20, at(2997), Some(ack(&A, &B, 10, at(2997), Some(10)))).unwrap();
         assert_eq!(total(&m, &B), Some(20));
         assert!(bound_only(&m, &B));
-        assert!(matches!(add(&mut m, &B, 30, 3000, None), Err(NoteError::BoundNoteRequired)));
+        assert!(matches!(add(&mut m, &B, 30, at(3000), None), Err(NoteError::BoundNoteRequired)));
         // The other edge still takes ordinary notes.
-        add(&mut m, &C, 9, 3000, None).unwrap();
+        add(&mut m, &C, 9, at(3000), None).unwrap();
         assert_eq!(total(&m, &C), Some(9));
     }
 
@@ -4444,15 +4509,15 @@ mod bound_note_tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let mut m = TrackerStateManager::new(dir.path());
-            add(&mut m, &B, 10, 1000, None).unwrap();
-            add(&mut m, &C, 4, 1001, None).unwrap();
+            add(&mut m, &B, 10, at(1000), None).unwrap();
+            add(&mut m, &C, 4, at(1001), None).unwrap();
             mark_bound_only(&m, &B);
         }
         let mut m = TrackerStateManager::new(dir.path());
         assert!(bound_only(&m, &B) && !bound_only(&m, &C));
-        assert!(matches!(add(&mut m, &B, 20, 2000, None), Err(NoteError::BoundNoteRequired)));
-        add(&mut m, &B, 20, 1997, Some(ack(&A, &B, 10, 1997, Some(10)))).unwrap();
-        add(&mut m, &C, 5, 2000, None).unwrap();
+        assert!(matches!(add(&mut m, &B, 20, at(2000), None), Err(NoteError::BoundNoteRequired)));
+        add(&mut m, &B, 20, at(1997), Some(ack(&A, &B, 10, at(1997), Some(10)))).unwrap();
+        add(&mut m, &C, 5, at(2000), None).unwrap();
         assert_eq!((total(&m, &B), total(&m, &C)), (Some(20), Some(5)));
     }
 
@@ -4461,21 +4526,21 @@ mod bound_note_tests {
         let mut m = setup();
         // update_note takes no prior acknowledgment, so it refuses all of 995-999, 997 included.
         for ts in [1995, 1996, 1997, 1998, 1999] {
-            let r = m.update_note(&pk(&A), &note(&B, 20, ts));
+            let r = m.update_note(&pk(&A), &note(&B, 20, at(ts)));
             assert!(matches!(r, Err(NoteError::ReservedTimestamp)), "ts {}: {:?}", ts, r);
         }
         assert_eq!(total(&m, &B), Some(10));
-        m.update_note(&pk(&A), &note(&B, 20, 2000)).unwrap();
+        m.update_note(&pk(&A), &note(&B, 20, at(2000))).unwrap();
         assert_eq!(total(&m, &B), Some(20));
         mark_bound_only(&m, &B);
-        assert!(matches!(m.update_note(&pk(&A), &note(&B, 30, 3000)), Err(NoteError::BoundNoteRequired)));
-        assert!(matches!(m.update_note(&pk(&A), &note(&B, 30, 3997)), Err(NoteError::ReservedTimestamp)));
+        assert!(matches!(m.update_note(&pk(&A), &note(&B, 30, at(3000))), Err(NoteError::BoundNoteRequired)));
+        assert!(matches!(m.update_note(&pk(&A), &note(&B, 30, at(3997))), Err(NoteError::ReservedTimestamp)));
         // The existing refusals keep their priority.
-        assert!(matches!(m.update_note(&pk(&A), &note(&B, 30, 1500)), Err(NoteError::PastTimestamp)));
-        assert!(matches!(m.update_note(&pk(&A), &note(&B, 5, 3000)), Err(NoteError::DebtDecreaseNotPermitted { .. })));
+        assert!(matches!(m.update_note(&pk(&A), &note(&B, 30, at(1500))), Err(NoteError::PastTimestamp)));
+        assert!(matches!(m.update_note(&pk(&A), &note(&B, 5, at(3000))), Err(NoteError::DebtDecreaseNotPermitted { .. })));
         assert_eq!(total(&m, &B), Some(20));
         // An edge that is not bound-only is unaffected.
-        m.update_note(&pk(&A), &note(&C, 3, 3000)).unwrap();
+        m.update_note(&pk(&A), &note(&C, 3, at(3000))).unwrap();
         assert_eq!(total(&m, &C), Some(3));
     }
 
@@ -4496,6 +4561,43 @@ mod bound_note_tests {
         drop(storage);
         let storage = NoteStorage::open(dir.path()).unwrap();
         assert!(storage.is_bound_only(&key(&B)).unwrap() && !storage.is_bound_only(&key(&C)).unwrap());
+    }
+
+    #[test]
+    fn a_bound_note_older_than_the_maximum_age_is_refused_and_a_fresh_one_accepted() {
+        // Tracker v3.1 (design decision D-1): a bound note is a payment attempt and expires like a novation, so an
+        // unapplied one is dead an hour after its timestamp. A owes B 10, noted two hours ago: an expired bound
+        // note's timestamp is still newer than the edge's.
+        let old = (now_ms() - 2 * NOVATION_MAX_AGE_MS) / 1000 * 1000;
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &B, 10, old, None).unwrap();
+        let digest = m.get_state().avl_root_digest;
+        let expired = at_residue(now_ms() - NOVATION_MAX_AGE_MS - 1_000, 997);
+        assert!(expired > old);
+        // With the issuer's acknowledgment of the stored total, which would apply a fresh note.
+        let r = add(&mut m, &B, 15, expired, Some(ack(&A, &B, 10, expired, Some(10))));
+        assert!(matches!(r, Err(NoteError::NovationExpired)), "{:?}", r);
+        // The age is the first bound-note rule: before a stale prior_total, a wrong acknowledgment, no increase.
+        assert!(matches!(add(&mut m, &B, 15, expired, Some(ack(&A, &B, 9, expired, Some(9)))), Err(NoteError::NovationExpired)));
+        assert!(matches!(add(&mut m, &B, 15, expired, Some(ack(&B, &B, 10, expired, None))), Err(NoteError::NovationExpired)));
+        assert!(matches!(add(&mut m, &B, 10, expired, Some(ack(&A, &B, 10, expired, Some(10)))), Err(NoteError::NovationExpired)));
+        // ...and after the prior requirement: without a prior the residue is refused as reserved, at any age.
+        assert!(matches!(add(&mut m, &B, 15, expired, None), Err(NoteError::ReservedTimestamp)));
+        // The existing checks still come first: a bound note older than the edge's note is a past timestamp.
+        let older = old - 3; // ends in 997 ms
+        assert!(matches!(add(&mut m, &B, 15, older, Some(ack(&A, &B, 10, older, Some(10)))), Err(NoteError::PastTimestamp)));
+        // An expired first bound note on an absent edge.
+        assert!(matches!(add(&mut m, &C, 5, expired, Some(ack(&A, &C, 0, expired, Some(0)))), Err(NoteError::NovationExpired)));
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(10), None));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // Just inside the maximum age the same bound note applies, and a fresh one after it.
+        let inside = at_residue(now_ms() - NOVATION_MAX_AGE_MS + 10_000, 997);
+        add(&mut m, &B, 15, inside, Some(ack(&A, &B, 10, inside, Some(10)))).unwrap();
+        let fresh = at_residue(now_ms() - 60_000, 997);
+        add(&mut m, &B, 18, fresh, Some(ack(&A, &B, 15, fresh, None))).unwrap();
+        add(&mut m, &C, 5, fresh, Some(ack(&A, &C, 0, fresh, Some(0)))).unwrap();
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(18), Some(5)));
+        // Ordinary notes have no maximum age: A -> B's own note above was two hours old.
     }
 }
 
@@ -4760,5 +4862,145 @@ mod pure_credit_startup_tests {
         assert_eq!(m.check_pure_credit(), Ok(()));
         m.set_off(&DenomKey::Erg, &setoff_edges(100, 100, 30, base() + 3998)).unwrap();
         assert_eq!((total(&m, &A, &B), total(&m, &B, &A)), (70, 70));
+    }
+
+    /// The key of the confirmation record of the edge issuer -> recipient in `denomination`.
+    fn record_key(issuer: &[u8; 32], recipient: &[u8; 32], denomination: &DenomKey) -> [u8; 32] {
+        crate::NoteKey::from_assets(&pk(issuer), &pk(recipient), denomination).key_hash
+    }
+
+    /// The raw stored confirmation records of `keys` (`None` where there is none).
+    fn stored_records(m: &TrackerStateManager, keys: &[[u8; 32]]) -> Vec<Option<Vec<u8>>> {
+        keys.iter().map(|k| m.storage.raw_confirmation_record(k)).collect()
+    }
+
+    #[test]
+    fn stored_confirmation_evidence_is_not_written_back_while_the_records_failed_to_load() {
+        // Tracker v3.1. Outside pure_credit a store whose confirmation records fail to load still opens, with
+        // novations refused. Its in-memory records are then built without the stored ones (every note local-only),
+        // so writing one back would replace stored evidence of on-chain state with a readable local-only record:
+        // after a restart the load would succeed and a committed edge would look pure-credit. Here a tracker box
+        // committed A->B 100, B->A 100 and A->C 50 (each has a stored confirmed total), and then A->C's own record
+        // was damaged.
+        let dir = tempfile::tempdir().unwrap();
+        let erg = DenomKey::Erg;
+        let (ab, ba, ac, cb) = (record_key(&A, &B, &erg), record_key(&B, &A, &erg), record_key(&A, &C, &erg), record_key(&C, &B, &erg));
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            seed(&mut m);
+            let digest = m.get_state().avl_root_digest;
+            assert_eq!(m.reconcile_with_confirmed_digest(&digest, "box1", 100).unwrap(), 3);
+            m.storage.insert_raw_confirmation_record(&ac, b"not json");
+        }
+        let mut m = TrackerStateManager::new(dir.path());
+        assert!(m.load_report().confirmations_error.is_some());
+        let before = stored_records(&m, &[ab, ba, ac, cb]);
+        let committed: NoteConfirmation = serde_json::from_slice(before[0].as_ref().unwrap()).unwrap();
+        assert_eq!(committed.confirmed_total_debt, Some(100), "A->B's stored record is the committed one");
+        assert_eq!(before[2].as_deref(), Some(&b"not json"[..]));
+        assert_eq!(before[3], None, "C->B is not an edge yet");
+
+        // add_note on the committed edge, on the edge whose record is corrupt, and on a new edge: the notes apply,
+        // and no stored record is written (the new edge's record exists in memory only).
+        note(&mut m, &A, &B, 110, base() + 1500);
+        note(&mut m, &A, &C, 60, base() + 1501);
+        note(&mut m, &C, &B, 5, base() + 1502);
+        assert_eq!((total(&m, &A, &B), total(&m, &A, &C), total(&m, &C, &B)), (110, 60, 5));
+        assert_eq!(stored_records(&m, &[ab, ba, ac, cb]), before);
+
+        // The tracker box updater's write-backs update the in-memory records only: pending, reverted, pending
+        // again, confirmed, and a reconciliation after a further note.
+        let digest = m.get_state().avl_root_digest;
+        assert_eq!(m.mark_notes_pending(digest, "tx1", 101).unwrap(), 4);
+        assert_eq!(m.revert_pending_notes().unwrap(), 4);
+        assert_eq!(m.mark_notes_pending(digest, "tx2", 102).unwrap(), 4);
+        assert_eq!(m.confirm_pending_notes(digest, "box2", 103).unwrap(), 4);
+        assert_eq!(m.onchain_edge_count(), 4);
+        note(&mut m, &A, &B, 120, base() + 1503);
+        let digest = m.get_state().avl_root_digest;
+        assert_eq!(m.reconcile_with_confirmed_digest(&digest, "box3", 104).unwrap(), 1);
+        assert_eq!(stored_records(&m, &[ab, ba, ac, cb]), before);
+
+        // Novations stay refused, and their refusal writes nothing either.
+        assert!(matches!(transfer(&mut m, 120, 60, 20, base() + 2999), Err(NoteError::OnchainScope(_))));
+        assert!(matches!(m.set_off(&erg, &setoff_edges(120, 100, 30, base() + 3998)), Err(NoteError::OnchainScope(_))));
+        assert_eq!(stored_records(&m, &[ab, ba, ac, cb]), before);
+
+        // After a restart all the evidence is still there: the load fails again, novations stay refused, and a
+        // pure-credit tracker still refuses to start (two stored committed totals and the unreadable record).
+        drop(m);
+        let mut m = TrackerStateManager::new(dir.path());
+        assert!(m.load_report().confirmations_error.is_some());
+        assert_eq!(m.novations_disabled_reason().as_deref(), Some(NOVATIONS_DISABLED_CONFIRMATIONS));
+        let refusal = m.check_pure_credit().unwrap_err();
+        assert!(refusal.load_errors.iter().any(|e| e.starts_with("confirmation records: ")), "{refusal:?}");
+        assert!(matches!(
+            m.set_off(&erg, &setoff_edges(120, 100, 30, base() + 3998)),
+            Err(NoteError::OnchainScope(msg)) if msg == NOVATIONS_DISABLED_CONFIRMATIONS
+        ));
+        assert_eq!(stored_records(&m, &[ab, ba, ac, cb]), before);
+        assert_eq!((total(&m, &A, &B), total(&m, &A, &C), total(&m, &C, &B)), (120, 60, 5));
+
+        // Once the damaged record is readable again (repaired by hand), the rebuild succeeds and the write-backs
+        // resume: A->B's committed record still holds its confirmed total, so the edge is still on-chain scope.
+        m.storage.store_confirmation(&ac, &NoteConfirmation::local_only()).unwrap();
+        assert_eq!(m.rebuild_confirmations().unwrap(), 4);
+        assert_eq!(m.get_confirmation(&pk(&A), &pk(&B), &erg).unwrap().confirmed_total_debt, Some(100));
+        assert!(matches!(transfer(&mut m, 120, 60, 20, base() + 2999), Err(NoteError::OnchainScope(msg)) if msg != NOVATIONS_DISABLED_CONFIRMATIONS));
+        note(&mut m, &C, &B, 6, base() + 1504);
+        assert!(m.storage.raw_confirmation_record(&cb).is_some(), "written back again once the records load");
+    }
+
+    #[test]
+    fn an_exchange_does_not_write_confirmation_records_back_while_they_failed_to_load() {
+        // Both phases of a cross-denomination exchange write the confirmation record of the edge they change. While
+        // the stored records failed to load, neither does: the committed records of both edges stay as they are.
+        let dir = tempfile::tempdir().unwrap();
+        let (erg, token) = (DenomKey::Erg, DenomKey::Token([0xa5; 32]));
+        let (from_key, to_key) = (record_key(&A, &B, &erg), record_key(&A, &B, &token));
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            seed(&mut m);
+            let n = IouNote::create_and_sign(pk(&B), 40, base() + 1003, &A, &NFT, token).unwrap();
+            m.add_note(&pk(&A), &n, None).unwrap();
+            let digest = m.get_state().avl_root_digest;
+            assert_eq!(m.reconcile_with_confirmed_digest(&digest, "box1", 100).unwrap(), 4);
+            m.storage.insert_raw_confirmation_record(&CORRUPT_CONFIRMATION_KEY, b"not json");
+        }
+        let mut m = TrackerStateManager::new(dir.path());
+        assert!(m.load_report().confirmations_error.is_some());
+        let before = stored_records(&m, &[from_key, to_key, CORRUPT_CONFIRMATION_KEY]);
+        assert!(before.iter().all(Option::is_some));
+
+        // Phase 1: A->B ERG falls from 100 to 90; the token increase (40 -> 50) is staged.
+        let xts = base() + 1500;
+        let sig = |secret: &[u8; 32], denomination: &DenomKey, total: u64| {
+            let msg = crate::schnorr::signing_message(&pk(&A), &pk(&B), denomination, total, xts, &NFT);
+            crate::schnorr::schnorr_sign(&msg, secret, &pk(secret)).unwrap()
+        };
+        m.exchange_debt(
+            &pk(&A), &pk(&B), &erg, 10, &token, 10, xts,
+            &sig(&A, &erg, 90), &sig(&B, &erg, 90), &sig(&A, &token, 50), &sig(&B, &token, 50),
+            "reserve_box",
+        )
+        .unwrap();
+        assert_eq!(total(&m, &A, &B), 90);
+        assert_eq!(stored_records(&m, &[from_key, to_key, CORRUPT_CONFIRMATION_KEY]), before);
+
+        // Phase 2, once a tracker box commits the decrease (in memory) and the reserve is intact: the token
+        // increase applies, and its record is not written back either.
+        let digest = m.get_state().avl_root_digest;
+        m.mark_notes_pending(digest, "tx1", 101).unwrap();
+        m.confirm_pending_notes(digest, "box2", 102).unwrap();
+        let staged = m.list_pending_exchanges(None, None).unwrap();
+        assert_eq!(staged.len(), 1);
+        let observation = crate::ExchangeObservation {
+            key: staged[0].0,
+            reserve_r5_digest: Some(m.reserve_state_digest(&pk(&A), &erg).try_into().unwrap()),
+        };
+        let processed = m.process_staged_exchanges(&[observation]).unwrap();
+        assert_eq!((processed.applied, processed.cancelled), (1, 0));
+        assert_eq!(m.lookup_note(&pk(&A), &pk(&B), &token).unwrap().amount_collected, 50);
+        assert_eq!(stored_records(&m, &[from_key, to_key, CORRUPT_CONFIRMATION_KEY]), before);
     }
 }

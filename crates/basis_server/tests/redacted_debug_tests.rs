@@ -3,7 +3,9 @@
 //! request structs implement Debug by hand: public keys, totals and timestamps are shown, each signature only as
 //! its fingerprint `sha256:<8 hex>` (the first 4 bytes of the SHA-256 of its bytes).
 
-use basis_server::{redact, CreateNoteRequest, ExchangeAcceptanceCheck, SetOffRequest, TrackerCommand, TransferNotesRequest};
+use basis_server::{
+    redact, CreateNoteRequest, ExchangeAcceptanceCheck, RedeemRequest, SetOffRequest, TrackerCommand, TransferNotesRequest,
+};
 use basis_store::{DenomKey, IouNote, PriorAck, RedemptionRequest, SetOffEdge, TransferSignatures};
 use secp256k1::{Secp256k1, SecretKey};
 use serde_json::json;
@@ -98,11 +100,145 @@ fn all(s: &TransferSignatures) -> [[u8; 65]; 7] {
 
 #[test]
 fn the_detectors_see_a_signature_in_the_derived_debug() {
-    // Not vacuous: the store's derived Debug of the same signatures prints each as a byte list, and the hex of a
-    // signature is a 130-character run.
+    // Not vacuous: a derived Debug of signatures prints each as a byte list, and the hex of a signature is a
+    // 130-character run. (Until tracker v3.1 the witness was the store's own TransferSignatures, whose derived Debug
+    // did exactly this; the store types are redacted now, so a struct with the same derive stands in for it.)
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    struct DerivedDebug {
+        issuer_from: [u8; 65],
+        issuer_to: [u8; 65],
+    }
     let s = transfer_signatures();
-    assert!(has_byte_list(&format!("{:?}", s)) && has_byte_list(&format!("{:#?}", s)));
+    let derived = DerivedDebug { issuer_from: s.issuer_from, issuer_to: s.issuer_to };
+    assert!(has_byte_list(&format!("{:?}", derived)) && has_byte_list(&format!("{:#?}", derived)));
     assert_eq!(longest_hex_run(&hex::encode(s.issuer_from)), 130);
+}
+
+#[test]
+fn the_store_types_with_signatures_are_redacted_on_their_own() {
+    // Tracker v3.1: IouNote, PriorAck, TransferSignatures and SetOffEdge implement Debug by hand as well, so a direct
+    // {:?} of any of them (or of a type that contains one) never prints a signature, not only the TrackerCommand
+    // rendering. Their output is the same as the server's redact wrappers'.
+    let token = DenomKey::Token([0xa5; 32]);
+    let note = IouNote::create_and_sign(pk(&B), 100, TS - 2, &A, &NFT, token).unwrap();
+    for out in both(&note) {
+        assert_redacted(&out, &[note.signature]);
+        for shown in [hex::encode(pk(&B)), "amount_collected: 100".to_string(), format!("token:{}", hex::encode([0xa5u8; 32]))] {
+            assert!(out.contains(&shown), "{shown} is missing: {out}");
+        }
+    }
+    assert_eq!(format!("{:?}", note), format!("{:?}", redact::Note(&note)));
+
+    let prior = PriorAck { signature: sig(&A, 27), prior_total: Some(60) };
+    for out in both(&prior) {
+        assert_redacted(&out, &[prior.signature]);
+    }
+    assert_eq!(format!("{:?}", prior), format!("PriorAck {{ signature: {}, prior_total: Some(60) }}", fp(&prior.signature)));
+    assert_eq!(format!("{:?}", prior), format!("{:?}", redact::Prior(&prior)));
+
+    let s = transfer_signatures();
+    for out in both(&s) {
+        assert_redacted(&out, &all(&s));
+    }
+    assert_eq!(format!("{:?}", s), format!("{:?}", redact::TransferSigs(&s)));
+
+    let edge = SetOffEdge {
+        issuer_pubkey: pk(&A),
+        recipient_pubkey: pk(&B),
+        decrease: 30,
+        timestamp: TS - 1,
+        issuer_signature: sig(&A, 28),
+        recipient_signature: sig(&B, 29),
+    };
+    let edge_sigs = [edge.issuer_signature, edge.recipient_signature];
+    for out in both(&edge) {
+        assert_redacted(&out, &edge_sigs);
+        assert!(out.contains("decrease: 30") && out.contains("timestamp: 1762570000998"), "{out}");
+    }
+    assert_eq!(format!("{:?}", edge), format!("{:?}", redact::Edge(&edge)));
+
+    // Types that contain them inherit the redaction: a list of set-off edges, an optional prior, and a staged
+    // exchange record (its to-edge note).
+    for out in both(&vec![edge.clone(), edge.clone()]) {
+        assert_redacted(&out, &edge_sigs);
+    }
+    for out in both(&Some(prior)) {
+        assert_redacted(&out, &[prior.signature]);
+    }
+    let record = basis_store::PendingExchangeRecord {
+        issuer_pubkey: pk(&A),
+        recipient_pubkey: pk(&B),
+        from_denomination: DenomKey::Erg,
+        from_old_total: 100,
+        from_new_total: 90,
+        to_denomination: token,
+        to_note: note.clone(),
+        to_base_collected: None,
+        reserve_box_id: "bb".repeat(32),
+        created_at: TS,
+        status: basis_store::PendingExchangeStatus::Staged,
+    };
+    for out in both(&record) {
+        // The record's own derived Debug prints its token denomination as a list of 32 bytes (no secret), so the
+        // generic byte-list detector does not apply; no run of 8 of the signature's bytes may appear.
+        assert!(longest_hex_run(&out) <= 66, "{out}");
+        let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
+        let bytes_shown = note.signature.windows(8).any(|w| {
+            flat.contains(&w.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", "))
+        });
+        assert!(!bytes_shown, "the signature's bytes: {out}");
+        let lower = hex::encode(note.signature);
+        assert!((0..=lower.len() - 16).all(|i| !out.contains(&lower[i..i + 16])), "a piece of the signature: {out}");
+        assert!(out.contains(&fp(&note.signature)), "{out}");
+    }
+}
+
+#[test]
+fn the_redemption_request_is_redacted() {
+    // initiate_redemption debug-logs its RedeemRequest; the issuer's signature appears only as its fingerprint.
+    let signature = sig(&A, 30);
+    let body = json!({
+        "issuer_pubkey": hex::encode(pk(&A)),
+        "recipient_pubkey": hex::encode(pk(&B)),
+        "amount": 100,
+        "timestamp": TS,
+        "reserve_box_id": "bb".repeat(32),
+        "recipient_address": "test-recipient-address-for-redaction",
+        "issuer_signature": hex::encode(signature),
+        "emergency": true,
+        "denomination": "erg",
+    });
+    let request: RedeemRequest = serde_json::from_value(body.clone()).unwrap();
+    for out in both(&request) {
+        assert_redacted(&out, &[signature]);
+        for shown in [
+            hex::encode(pk(&A)),
+            hex::encode(pk(&B)),
+            "amount: 100".to_string(),
+            "timestamp: 1762570000999".to_string(),
+            "bb".repeat(32),
+            "test-recipient-address-for-redaction".to_string(),
+            "emergency: true".to_string(),
+            "\"erg\"".to_string(),
+        ] {
+            assert!(out.contains(&shown), "{shown} is missing: {out}");
+        }
+    }
+    // A signature pasted into a free-text or key field is shown only by its length.
+    let mut pasted = body;
+    pasted["recipient_address"] = json!(hex::encode(signature));
+    pasted["recipient_pubkey"] = json!(hex::encode(signature));
+    pasted["issuer_signature"] = json!("zz");
+    let out = format!("{:?}", serde_json::from_value::<RedeemRequest>(pasted).unwrap());
+    assert!(longest_hex_run(&out) <= 66, "{out}");
+    for shown in [
+        "recipient_address: <130 chars>",
+        "recipient_pubkey: <not 33 bytes of hex, 130 chars>",
+        "issuer_signature: <not a 65-byte hex signature, 2 chars>",
+    ] {
+        assert!(out.contains(shown), "{shown} is missing: {out}");
+    }
 }
 
 #[test]

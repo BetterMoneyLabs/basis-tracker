@@ -636,13 +636,15 @@ impl NoteStorage {
     /// record, the decreased from-edge note, and its recomputed confirmation
     /// record land together or not at all (a single journaled fjall batch).
     /// The from-edge key already exists, so the issuer/recipient indices are
-    /// unchanged. On `Err` nothing was written.
+    /// unchanged. On `Err` nothing was written. `from_confirmation` is `None`
+    /// while confirmation records must not be written back (the stored records
+    /// failed to load); the stored record is then left as it is.
     pub fn commit_exchange_staged(
         &self,
         issuer_pubkey: &PubKey,
         staged_record: &PendingExchangeRecord,
         from_note: &IouNote,
-        from_confirmation: &NoteConfirmation,
+        from_confirmation: Option<&NoteConfirmation>,
     ) -> Result<(), NoteError> {
         #[cfg(test)]
         if self
@@ -661,9 +663,13 @@ impl NoteStorage {
         );
         let staged_value = Self::serialize_pending_exchange(staged_record)?;
         let note_value = Self::serialize_note_value(issuer_pubkey, from_note);
-        let confirmation_value = serde_json::to_vec(from_confirmation).map_err(|e| {
-            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
-        })?;
+        let confirmation_value = from_confirmation
+            .map(|c| {
+                serde_json::to_vec(c).map_err(|e| {
+                    NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+                })
+            })
+            .transpose()?;
 
         let mut batch = self.keyspace.batch();
         batch.insert(
@@ -672,11 +678,13 @@ impl NoteStorage {
             staged_value,
         );
         batch.insert(&self.notes_partition, from_key.to_bytes(), note_value);
-        batch.insert(
-            &self.confirmations_partition,
-            &from_key.key_hash,
-            confirmation_value,
-        );
+        if let Some(confirmation_value) = confirmation_value {
+            batch.insert(
+                &self.confirmations_partition,
+                &from_key.key_hash,
+                confirmation_value,
+            );
+        }
         batch
             .commit()
             .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange: {}", e)))
@@ -687,11 +695,14 @@ impl NoteStorage {
     /// confirmation record, and the removal of the staged record land together
     /// or not at all. On `Err` nothing was written, so the staged record
     /// survives and the apply is retried on the next confirmation cycle.
+    /// `to_confirmation` is `None` while confirmation records must not be
+    /// written back (the stored records failed to load); the stored record is
+    /// then left as it is.
     pub fn commit_exchange_apply(
         &self,
         issuer_pubkey: &PubKey,
         to_note: &IouNote,
-        to_confirmation: &NoteConfirmation,
+        to_confirmation: Option<&NoteConfirmation>,
         staged_key: &[u8; 32],
     ) -> Result<(), NoteError> {
         #[cfg(test)]
@@ -710,9 +721,13 @@ impl NoteStorage {
             &to_note.denomination,
         );
         let note_value = Self::serialize_note_value(issuer_pubkey, to_note);
-        let confirmation_value = serde_json::to_vec(to_confirmation).map_err(|e| {
-            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
-        })?;
+        let confirmation_value = to_confirmation
+            .map(|c| {
+                serde_json::to_vec(c).map_err(|e| {
+                    NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+                })
+            })
+            .transpose()?;
         let issuer_index_value =
             self.index_value_with_key(&self.issuer_index, issuer_pubkey, &to_key)?;
         let recipient_index_value =
@@ -726,11 +741,13 @@ impl NoteStorage {
         if let Some(value) = recipient_index_value {
             batch.insert(&self.recipient_index, &to_note.recipient_pubkey, value);
         }
-        batch.insert(
-            &self.confirmations_partition,
-            &to_key.key_hash,
-            confirmation_value,
-        );
+        if let Some(confirmation_value) = confirmation_value {
+            batch.insert(
+                &self.confirmations_partition,
+                &to_key.key_hash,
+                confirmation_value,
+            );
+        }
         batch.remove(&self.pending_exchanges_partition, staged_key);
         batch
             .commit()
@@ -1231,6 +1248,13 @@ impl NoteStorage {
     #[cfg(test)]
     pub(crate) fn insert_raw_confirmation_record(&self, key: &[u8], value: &[u8]) {
         self.confirmations_partition.insert(key, value).unwrap();
+    }
+
+    /// Test-only: the raw bytes of a stored confirmation record, if there is one
+    /// (it need not parse).
+    #[cfg(test)]
+    pub(crate) fn raw_confirmation_record(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.confirmations_partition.get(key).unwrap().map(|v| v.to_vec())
     }
 
     /// Retrieve an IOU note by its 32-byte note key.

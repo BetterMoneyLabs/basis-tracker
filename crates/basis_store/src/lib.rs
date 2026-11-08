@@ -58,7 +58,10 @@ pub type PubKey = [u8; 33];
 pub type Signature = [u8; 65];
 
 /// IOU Note representing debt from A to B
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is redacted (signatures are never logged): the issuer's signature
+/// appears only as its fingerprint, see [`signature_fingerprint`].
+#[derive(Clone, PartialEq, Eq)]
 pub struct IouNote {
     /// Recipient's public key
     pub recipient_pubkey: PubKey,
@@ -349,7 +352,8 @@ pub enum NoteError {
     /// A bound note must raise the edge's total above the acknowledged prior
     /// total; otherwise the acknowledgment itself could be submitted as a note.
     NotAnIncrease,
-    /// A novation's timestamp is older than the maximum novation age.
+    /// A novation's timestamp (a debt transfer's, a set-off edge's) or a bound
+    /// note's is older than the maximum age, [`NOVATION_MAX_AGE_MS`].
     NovationExpired,
     /// The request is malformed (for example a prior acknowledgment on a note
     /// that is not a bound note).
@@ -530,7 +534,10 @@ pub struct TransferTotals {
 ///
 /// The two `_prior` signatures are the creditors' prior acknowledgments: the
 /// transfer applies only while X and Y are still the stored totals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Debug` is redacted (signatures are never logged): each signature appears
+/// only as its fingerprint, see [`signature_fingerprint`].
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct TransferSignatures {
     pub issuer_from: Signature,
     pub issuer_to: Signature,
@@ -599,13 +606,15 @@ pub fn is_bound_note_timestamp(timestamp: u64) -> bool {
     timestamp % 1000 == BOUND_NOTE_TS_MS
 }
 
-/// The maximum age of a novation's timestamp, in milliseconds (one hour). A
-/// debt transfer whose timestamp, or a set-off with any edge whose timestamp,
-/// is older than `now - NOVATION_MAX_AGE_MS` is refused with
-/// [`NoteError::NovationExpired`]. This bounds how long unapplied
-/// novation signatures stay usable: an attempt that has not applied by its
-/// timestamp plus this age never will, which is what lets a payer fall back to
-/// another payment safely. Compiled in, not configurable.
+/// The maximum age of a novation's or a bound note's timestamp, in
+/// milliseconds (one hour). A debt transfer whose timestamp, a set-off with any
+/// edge whose timestamp, or a bound note (POST /notes at residue 997, see
+/// [`PriorAck`]) whose timestamp is older than `now - NOVATION_MAX_AGE_MS` is
+/// refused with [`NoteError::NovationExpired`]. This bounds how long unapplied
+/// signatures stay usable: a payment attempt (a transfer or a bound note) that
+/// has not applied by its timestamp plus this age never will, which is what
+/// lets a payer fall back to another kind of payment safely. Compiled in, not
+/// configurable.
 pub const NOVATION_MAX_AGE_MS: u64 = 3_600_000;
 
 /// An issuer prior acknowledgment, sent with a bound note (POST /notes at
@@ -615,8 +624,13 @@ pub const NOVATION_MAX_AGE_MS: u64 = 3_600_000;
 /// P is the stored total (0 for an edge that does not exist yet). The tracker
 /// applies the bound note only while P is still the stored total and the note
 /// raises it, so a note signed against a stale total can never apply: the issuer
-/// pays exactly `new - P`, both values it signed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// pays exactly `new - P`, both values it signed. Like a novation, a bound note
+/// expires: one whose timestamp is older than [`NOVATION_MAX_AGE_MS`] is
+/// refused, so an unapplied bound note is dead an hour after its timestamp.
+///
+/// `Debug` is redacted (signatures are never logged): the signature appears
+/// only as its fingerprint, see [`signature_fingerprint`].
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PriorAck {
     /// The issuer's signature over the prior message (65 bytes).
     pub signature: Signature,
@@ -633,7 +647,10 @@ pub const MAX_SETOFF_EDGES: usize = 64;
 /// signatures over the edge's standard note message at its new total and its
 /// own timestamp: `M(I,R,P-d,ts_e) = signing_message(I, R, denomination, P - d,
 /// ts_e, nft)`, where P is the edge's stored total and d its `decrease`.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is redacted (signatures are never logged): both signatures appear
+/// only as fingerprints, see [`signature_fingerprint`].
+#[derive(Clone)]
 pub struct SetOffEdge {
     pub issuer_pubkey: PubKey,
     pub recipient_pubkey: PubKey,
@@ -665,6 +682,100 @@ pub struct SetOffEdgeTotal {
 pub struct SetOffResult {
     pub new_totals: Vec<SetOffEdgeTotal>,
     pub total_cleared: u64,
+}
+
+/// The 8-hex-character fingerprint of a signature: the first 4 bytes of the
+/// SHA-256 of its bytes, as lowercase hex. Debug output shows a signature only
+/// as `sha256:<fingerprint>` (design §3.8: signatures are never logged). A
+/// fingerprint identifies a signature its holder already knows without
+/// revealing any of it. basis_server's `redact` module uses the same
+/// fingerprint, so a request's log line and its command's can be matched.
+pub fn signature_fingerprint(signature: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(signature)[..4])
+}
+
+/// Field renderings for the redacted `Debug` impls of the store types that
+/// carry signatures ([`IouNote`], [`PriorAck`], [`TransferSignatures`],
+/// [`SetOffEdge`]): their derived `Debug` printed every signature as a list of
+/// 65 numbers, and any `{:?}` of them would put it in a log.
+mod redacted_debug {
+    use std::fmt;
+
+    /// A signature, as `sha256:<fingerprint>`.
+    pub(crate) struct Sig<'a>(pub(crate) &'a [u8]);
+
+    impl fmt::Debug for Sig<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "sha256:{}", super::signature_fingerprint(self.0))
+        }
+    }
+
+    /// Bytes (a public key, an NFT id) as lowercase hex.
+    pub(crate) struct Hex<'a>(pub(crate) &'a [u8]);
+
+    impl fmt::Debug for Hex<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&hex::encode(self.0))
+        }
+    }
+}
+
+/// Redacted: the signature only as its fingerprint, the denomination as its id.
+impl std::fmt::Debug for IouNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use redacted_debug::{Hex, Sig};
+        f.debug_struct("IouNote")
+            .field("recipient_pubkey", &Hex(&self.recipient_pubkey))
+            .field("amount_collected", &self.amount_collected)
+            .field("amount_redeemed", &self.amount_redeemed)
+            .field("timestamp", &self.timestamp)
+            .field("signature", &Sig(&self.signature))
+            .field("tracker_nft_id", &Hex(&self.tracker_nft_id))
+            .field("denomination", &self.denomination.denomination_id())
+            .finish()
+    }
+}
+
+/// Redacted: the signature only as its fingerprint.
+impl std::fmt::Debug for PriorAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PriorAck")
+            .field("signature", &redacted_debug::Sig(&self.signature))
+            .field("prior_total", &self.prior_total)
+            .finish()
+    }
+}
+
+/// Redacted: each of the seven signatures only as its fingerprint.
+impl std::fmt::Debug for TransferSignatures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use redacted_debug::Sig;
+        f.debug_struct("TransferSignatures")
+            .field("issuer_from", &Sig(&self.issuer_from))
+            .field("issuer_to", &Sig(&self.issuer_to))
+            .field("from_recipient_prior", &Sig(&self.from_recipient_prior))
+            .field("from_recipient", &Sig(&self.from_recipient))
+            .field("from_recipient_to", &Sig(&self.from_recipient_to))
+            .field("to_recipient_prior", &Sig(&self.to_recipient_prior))
+            .field("to_recipient", &Sig(&self.to_recipient))
+            .finish()
+    }
+}
+
+/// Redacted: both signatures only as fingerprints.
+impl std::fmt::Debug for SetOffEdge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use redacted_debug::{Hex, Sig};
+        f.debug_struct("SetOffEdge")
+            .field("issuer_pubkey", &Hex(&self.issuer_pubkey))
+            .field("recipient_pubkey", &Hex(&self.recipient_pubkey))
+            .field("decrease", &self.decrease)
+            .field("timestamp", &self.timestamp)
+            .field("issuer_signature", &Sig(&self.issuer_signature))
+            .field("recipient_signature", &Sig(&self.recipient_signature))
+            .finish()
+    }
 }
 
 /// Boxed acceptance-policy check for an exchange (see
@@ -1159,9 +1270,17 @@ impl TrackerStateManager {
         let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
 
-        // Timestamp residues, bound notes and bound-only edges. Checked after
-        // every other validation, so every existing error keeps its priority.
-        self.check_residue_and_binding(issuer_pubkey, note, &key.key_hash, stored_total, prior)?;
+        // Timestamp residues, bound notes (with their maximum age) and
+        // bound-only edges. Checked after every other validation, so every
+        // existing error keeps its priority.
+        self.check_residue_and_binding(
+            issuer_pubkey,
+            note,
+            &key.key_hash,
+            stored_total,
+            prior,
+            current_time,
+        )?;
 
         // Value is just the totalDebt (amount_collected) as 8-byte big-endian
         // This matches the contract spec: hash(A||B) -> totalDebt
@@ -1203,7 +1322,10 @@ impl TrackerStateManager {
     /// 1. residue 995, 996, 998 or 999 (another operation's) -> `ReservedTimestamp`;
     /// 2. residue 997 (bound note) without `prior` -> `ReservedTimestamp`;
     /// 3. residue 997 with `prior`, where P = `stored_total` (0 for an absent edge):
-    ///    a `prior_total` other than P -> `StalePrior`; the issuer's signature over
+    ///    a timestamp older than `now` - [`NOVATION_MAX_AGE_MS`] -> `NovationExpired`
+    ///    (a bound note is a payment attempt and expires like a novation, so an
+    ///    unapplied one is dead an hour after its timestamp); a `prior_total`
+    ///    other than P -> `StalePrior`; the issuer's signature over
     ///    `signing_message(issuer, recipient, denomination, P, timestamp, nft)` must
     ///    verify, else `InvalidPriorSignature`; the new total must be strictly
     ///    greater than P, else `NotAnIncrease` (so the acknowledgment itself, a
@@ -1217,6 +1339,7 @@ impl TrackerStateManager {
         key: &NoteKeyBytes,
         stored_total: u64,
         prior: Option<PriorAck>,
+        now: u64,
     ) -> Result<(), NoteError> {
         let bound_note = is_bound_note_timestamp(note.timestamp);
         if is_reserved_timestamp(note.timestamp) && !bound_note {
@@ -1224,6 +1347,9 @@ impl TrackerStateManager {
         }
         if bound_note {
             let prior = prior.ok_or(NoteError::ReservedTimestamp)?;
+            if note.timestamp < now.saturating_sub(NOVATION_MAX_AGE_MS) {
+                return Err(NoteError::NovationExpired);
+            }
             if let Some(acknowledged) = prior.prior_total {
                 if acknowledged != stored_total {
                     return Err(NoteError::StalePrior);
@@ -1287,8 +1413,11 @@ impl TrackerStateManager {
     }
 
     /// Recompute a single note's confirmation status from its local value versus
-    /// the cached confirmed/pending values. Persists the result best-effort.
+    /// the cached confirmed/pending values. Persists the result best-effort,
+    /// unless confirmation write-backs are suspended
+    /// ([`Self::confirmation_write_back_allowed`]).
     fn recompute_confirmation_status(&mut self, key: &NoteKeyBytes, local_value: u64) {
+        let write_back = self.confirmation_write_back_allowed();
         let entry = self
             .confirmations
             .entry(*key)
@@ -1305,7 +1434,41 @@ impl TrackerStateManager {
             NoteConfirmationStatus::LocalOnly
         };
 
-        let _ = self.storage.store_confirmation(key, entry);
+        if write_back {
+            let _ = self.storage.store_confirmation(key, entry);
+        } else {
+            Self::log_write_back_suspended("add_note", 1);
+        }
+    }
+
+    /// Whether confirmation records may be written back to storage: not while
+    /// the stored records failed to load ([`StoreLoadReport::confirmations_error`]).
+    /// The in-memory records are then built without them (every note
+    /// local-only), so writing one back would replace stored evidence of
+    /// on-chain state (a committed or pending total, or a record that does not
+    /// parse) with a readable local-only record: the evidence would be erased,
+    /// and after a restart the load would succeed and the edge would look
+    /// pure-credit, so novations would be allowed on it again. While this is
+    /// false, every write-back (a note's recomputed status, the tracker box
+    /// updater's pending, confirmed, reverted and reconciled totals, an
+    /// exchange's confirmation records) updates the in-memory record only, and
+    /// storage keeps what it had until a rebuild succeeds. Novations never get
+    /// as far as their write: their scope check refuses them first. A
+    /// pure-credit tracker never runs in this state (it refuses to start).
+    fn confirmation_write_back_allowed(&self) -> bool {
+        self.load_report.confirmations_error.is_none()
+    }
+
+    /// The warning for confirmation records `source` did not write back
+    /// (see [`Self::confirmation_write_back_allowed`]).
+    fn log_write_back_suspended(source: &str, count: usize) {
+        if count > 0 {
+            tracing::warn!(
+                "{}: {} confirmation record(s) updated in memory only, not written back: the stored confirmation records failed to load and are kept as they are until a rebuild succeeds",
+                source,
+                count
+            );
+        }
     }
 
     /// Rebuild the in-memory confirmation map from storage. Called on startup.
@@ -1497,6 +1660,7 @@ impl TrackerStateManager {
     ) -> Result<usize, NoteError> {
         let _ = (digest, submitted_height);
         let notes = self.storage.get_all_notes_with_issuer()?;
+        let write_back = self.confirmation_write_back_allowed();
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
@@ -1512,9 +1676,14 @@ impl TrackerStateManager {
                 entry.pending_total_debt = Some(local_value);
                 entry.pending_tx_id = Some(tx_id.to_string());
                 entry.status = NoteConfirmationStatus::Pending;
-                let _ = self.storage.store_confirmation(&key, entry);
+                if write_back {
+                    let _ = self.storage.store_confirmation(&key, entry);
+                }
                 count += 1;
             }
+        }
+        if !write_back {
+            Self::log_write_back_suspended("mark_notes_pending", count);
         }
 
         tracing::info!(
@@ -1539,6 +1708,7 @@ impl TrackerStateManager {
     ) -> Result<usize, NoteError> {
         self.confirmed_digest = Some(digest);
         let keys: Vec<NoteKeyBytes> = self.confirmations.keys().copied().collect();
+        let write_back = self.confirmation_write_back_allowed();
         let mut count = 0usize;
 
         for key in keys {
@@ -1556,10 +1726,15 @@ impl TrackerStateManager {
                     entry.confirmed_box_id = Some(box_id.to_string());
                     entry.confirmed_height = Some(height);
                     entry.status = NoteConfirmationStatus::Confirmed;
-                    let _ = self.storage.store_confirmation(&key, entry);
+                    if write_back {
+                        let _ = self.storage.store_confirmation(&key, entry);
+                    }
                     count += 1;
                 }
             }
+        }
+        if !write_back {
+            Self::log_write_back_suspended("confirm_pending_notes", count);
         }
 
         tracing::info!(
@@ -1577,6 +1752,7 @@ impl TrackerStateManager {
     /// number of notes reverted.
     pub fn revert_pending_notes(&mut self) -> Result<usize, NoteError> {
         let notes = self.storage.get_all_notes_with_issuer()?;
+        let write_back = self.confirmation_write_back_allowed();
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
@@ -1598,10 +1774,15 @@ impl TrackerStateManager {
                     } else {
                         NoteConfirmationStatus::LocalOnly
                     };
-                    let _ = self.storage.store_confirmation(&key, entry);
+                    if write_back {
+                        let _ = self.storage.store_confirmation(&key, entry);
+                    }
                     count += 1;
                 }
             }
+        }
+        if !write_back {
+            Self::log_write_back_suspended("revert_pending_notes", count);
         }
 
         tracing::info!("Reverted {} pending notes to local state", count);
@@ -1627,6 +1808,7 @@ impl TrackerStateManager {
         }
 
         let notes = self.storage.get_all_notes_with_issuer()?;
+        let write_back = self.confirmation_write_back_allowed();
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
@@ -1647,9 +1829,14 @@ impl TrackerStateManager {
                 entry.confirmed_box_id = Some(box_id.to_string());
                 entry.confirmed_height = Some(height);
                 entry.status = NoteConfirmationStatus::Confirmed;
-                let _ = self.storage.store_confirmation(&key, entry);
+                if write_back {
+                    let _ = self.storage.store_confirmation(&key, entry);
+                }
                 count += 1;
             }
+        }
+        if !write_back {
+            Self::log_write_back_suspended("reconcile_with_confirmed_digest", count);
         }
 
         if count > 0 {
@@ -1956,12 +2143,18 @@ impl TrackerStateManager {
             denomination: *from_denomination,
         };
         let new_confirmation = self.recomputed_confirmation(&from_key.key_hash, from_new_total);
+        // Not written back while the stored confirmation records failed to load
+        // (see `confirmation_write_back_allowed`): the stored record stays.
+        let write_back = self.confirmation_write_back_allowed();
         self.storage.commit_exchange_staged(
             issuer_pubkey,
             &staged,
             &from_note_new,
-            &new_confirmation,
+            write_back.then_some(&new_confirmation),
         )?;
+        if !write_back {
+            Self::log_write_back_suspended("exchange_debt", 1);
+        }
         self.confirmations
             .insert(from_key.key_hash, new_confirmation);
 
@@ -2959,12 +3152,18 @@ impl TrackerStateManager {
         );
         let new_confirmation =
             self.recomputed_confirmation(&to_key.key_hash, to_note.amount_collected);
+        // Not written back while the stored confirmation records failed to load
+        // (see `confirmation_write_back_allowed`): the stored record stays.
+        let write_back = self.confirmation_write_back_allowed();
         self.storage.commit_exchange_apply(
             &record.issuer_pubkey,
             &to_note,
-            &new_confirmation,
+            write_back.then_some(&new_confirmation),
             key,
         )?;
+        if !write_back {
+            Self::log_write_back_suspended("apply_staged_exchange", 1);
+        }
         self.confirmations.insert(to_key.key_hash, new_confirmation);
 
         tracing::info!(

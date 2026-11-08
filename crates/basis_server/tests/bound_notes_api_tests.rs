@@ -231,18 +231,23 @@ async fn post_notes_refuses_reserved_residues_and_accepts_994_and_000() {
     for ms in [995, 996, 998, 999] {
         let r = t.note(&note_body(&A, &B, 20, at_residue(later, ms))).await;
         assert_refused(&r, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
-        if ms == 999 {
-            // The message of the residue that was already reserved is unchanged.
-            assert_eq!(
-                r.1["error"],
-                "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond"
-            );
-        }
+        // The message names the operation the residue belongs to. (Tracker v3.1: the 999 text used to say
+        // "reserved for novations (debt transfer, set-off)", although set-offs use 998.)
+        let want = match ms {
+            999 => "timestamps ending in 999 ms are reserved for debt transfers (POST /notes/transfer); ordinary notes use 000-994 ms",
+            998 => "timestamps ending in 998 ms are reserved for set-offs (POST /notes/setoff); ordinary notes use 000-994 ms",
+            996 => "timestamps ending in 996 ms are reserved (triad compress); ordinary notes use 000-994 ms",
+            _ => "timestamps ending in 995 ms are reserved (exchange); ordinary notes use 000-994 ms",
+        };
+        assert_eq!(r.1["error"], want, "ms {}", ms);
     }
     // 997 without prior_signature is a bound note missing its acknowledgment.
     let r = t.note(&note_body(&A, &B, 20, at_residue(later, 997))).await;
     assert_refused(&r, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
-    assert!(r.1["error"].as_str().unwrap().contains("prior_signature"), "{}", r.1);
+    assert_eq!(
+        r.1["error"],
+        "a bound note needs prior_signature: timestamps ending in 997 ms are bound notes, accepted only with the issuer's acknowledgment of the edge's current total"
+    );
     // A transfer's raised-edge signature submitted alone (999) is refused on a new edge too.
     assert_refused(&t.note(&note_body(&A, &C, 5, at_residue(later, 999))).await, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(10), None));
@@ -399,6 +404,67 @@ async fn existing_refusals_get_codes_and_keep_their_messages() {
         t.post_raw("/notes", &bad_hex).await,
         (StatusCode::BAD_REQUEST, r#"{"success":false,"data":null,"error":"recipient_pubkey must be hex-encoded"}"#.to_string())
     );
+    assert_eq!(t.total(&A, &B).await, Some(10));
+}
+
+#[tokio::test]
+async fn a_bound_note_older_than_the_maximum_age_is_refused_with_novation_expired() {
+    // Tracker v3.1 (design decision D-1): a bound note is a payment attempt and expires like a novation. A owes B 10,
+    // noted two hours ago, so an expired bound note is still newer than the edge's note.
+    let t = tracker().await;
+    let max_age = basis_store::NOVATION_MAX_AGE_MS;
+    assert_created(&t.note(&note_body(&A, &B, 10, at_residue(now_ms() - 2 * max_age, 0))).await);
+    let expired = at_residue(now_ms() - max_age - 1_000, 997);
+    let r = t.note(&with_prior(note_body(&A, &B, 15, expired), &A, &A, &B, 10, Some(10))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("novation_expired"));
+    assert_eq!(
+        r.1["error"],
+        "the bound note's timestamp is older than the maximum age (one hour): an unapplied bound note expires like a novation"
+    );
+    // The age comes before the other bound-note rules (here a stale prior_total, else 409 stale_prior).
+    let r = t.note(&with_prior(note_body(&A, &B, 15, expired), &A, &A, &B, 9, Some(9))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("novation_expired"));
+    // An expired first bound note on an absent edge.
+    let r = t.note(&with_prior(note_body(&A, &C, 5, expired), &A, &A, &C, 0, Some(0))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("novation_expired"));
+    assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(10), None));
+    // Fresh bound notes apply.
+    let fresh = at_residue(now_ms() - 60_000, 997);
+    assert_created(&t.note(&with_prior(note_body(&A, &B, 15, fresh), &A, &A, &B, 10, Some(10))).await);
+    assert_created(&t.note(&with_prior(note_body(&A, &C, 5, fresh), &A, &A, &C, 0, None)).await);
+    assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(15), Some(5)));
+}
+
+#[tokio::test]
+async fn prior_total_without_prior_signature_at_a_reserved_residue_is_reserved_timestamp() {
+    // Design §3.2: a note at 997 needs prior_signature, else 400 reserved_timestamp, and 995, 996, 998 and 999 are
+    // refused for every note; prior_total alone (diagnostic only) changes neither. Tracker v3 answered
+    // invalid_request here.
+    let t = tracker().await;
+    let base = now_ms() - 60_000;
+    assert_created(&t.note(&note_body(&A, &B, 10, at_residue(base, 0))).await);
+    let later = base + 2_000;
+    for ms in [997, 995, 996, 998, 999] {
+        let mut body = note_body(&A, &B, 20, at_residue(later, ms));
+        body["prior_total"] = json!(10);
+        let r = t.note(&body).await;
+        assert_refused(&r, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
+        if ms == 997 {
+            assert!(r.1["error"].as_str().unwrap().starts_with("a bound note needs prior_signature"), "{}", r.1);
+        }
+    }
+    // As for every reserved residue, the existing checks come first: a note signature over another total.
+    let ts = at_residue(later, 997);
+    let mut forged = note_body(&A, &B, 20, ts);
+    forged["signature"] = note_body(&A, &B, 21, ts)["signature"].clone();
+    forged["prior_total"] = json!(10);
+    assert_refused(&t.note(&forged).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
+    // At an ordinary residue prior_total alone is still a malformed request.
+    let mut body = note_body(&A, &B, 20, at_residue(later, 500));
+    body["prior_total"] = json!(10);
+    let r = t.note(&body).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_request"));
+    assert_eq!(r.1["error"], "prior_total is only valid together with prior_signature");
     assert_eq!(t.total(&A, &B).await, Some(10));
 }
 

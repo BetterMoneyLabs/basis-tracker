@@ -89,12 +89,12 @@ pub fn tracker_startup(
 /// fingerprint `sha256:<8 hex>`, the first 4 bytes of the SHA-256 of its bytes. A fingerprint
 /// identifies a signature its holder already knows without revealing it.
 pub mod redact {
-    use sha2::{Digest, Sha256};
     use std::fmt;
 
-    /// The 8-hex-character fingerprint of a signature's bytes: the first 4 bytes of their SHA-256.
+    /// The 8-hex-character fingerprint of a signature's bytes: the first 4 bytes of their SHA-256
+    /// ([`basis_store::signature_fingerprint`], which the store types' redacted `Debug` uses too).
     pub fn fingerprint(signature: &[u8]) -> String {
-        hex::encode(&Sha256::digest(signature)[..4])
+        basis_store::signature_fingerprint(signature)
     }
 
     /// A signature, as `sha256:<fingerprint>`.
