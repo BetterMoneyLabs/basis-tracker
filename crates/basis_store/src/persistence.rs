@@ -708,17 +708,14 @@ impl NoteStorage {
             .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange apply: {}", e)))
     }
 
-    /// Atomically commit a debt transfer (pure-credit trackers): the lowered
-    /// from-edge note, the raised to-edge note, both confirmation records and
-    /// the index entries of a new to-edge land together or not at all. On `Err`
+    /// Atomically commit a novation (debt transfer, set-off): every note, its
+    /// confirmation record, and the index entries of edges that are new land
+    /// together or not at all (one journaled fjall batch). Index entries for
+    /// several new edges of the same key are merged, so none is lost. On `Err`
     /// nothing was written.
-    pub fn commit_transfer(
+    pub fn commit_note_batch(
         &self,
-        issuer_pubkey: &PubKey,
-        from_note: &IouNote,
-        from_confirmation: &NoteConfirmation,
-        to_note: &IouNote,
-        to_confirmation: &NoteConfirmation,
+        entries: &[(PubKey, IouNote, NoteConfirmation)],
     ) -> Result<(), NoteError> {
         #[cfg(test)]
         if self
@@ -726,55 +723,63 @@ impl NoteStorage {
             .load(std::sync::atomic::Ordering::SeqCst)
         {
             return Err(NoteError::StorageError(
-                "injected transfer commit failure".to_string(),
+                "injected novation commit failure".to_string(),
             ));
         }
 
-        let from_key = NoteKey::from_assets(
-            issuer_pubkey,
-            &from_note.recipient_pubkey,
-            &from_note.denomination,
-        );
-        let to_key = NoteKey::from_assets(
-            issuer_pubkey,
-            &to_note.recipient_pubkey,
-            &to_note.denomination,
-        );
-        let from_value = Self::serialize_note_value(issuer_pubkey, from_note);
-        let to_value = Self::serialize_note_value(issuer_pubkey, to_note);
-        let from_confirmation_value = serde_json::to_vec(from_confirmation).map_err(|e| {
-            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
-        })?;
-        let to_confirmation_value = serde_json::to_vec(to_confirmation).map_err(|e| {
-            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
-        })?;
-        let issuer_index_value =
-            self.index_value_with_key(&self.issuer_index, issuer_pubkey, &to_key)?;
-        let recipient_index_value =
-            self.index_value_with_key(&self.recipient_index, &to_note.recipient_pubkey, &to_key)?;
-
         let mut batch = self.keyspace.batch();
-        batch.insert(&self.notes_partition, from_key.to_bytes(), from_value);
-        batch.insert(&self.notes_partition, to_key.to_bytes(), to_value);
-        if let Some(value) = issuer_index_value {
-            batch.insert(&self.issuer_index, issuer_pubkey, value);
+        let mut issuer_new: std::collections::BTreeMap<PubKey, Vec<NoteKey>> = std::collections::BTreeMap::new();
+        let mut recipient_new: std::collections::BTreeMap<PubKey, Vec<NoteKey>> = std::collections::BTreeMap::new();
+        for (issuer_pubkey, note, confirmation) in entries {
+            let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
+            let note_value = Self::serialize_note_value(issuer_pubkey, note);
+            let confirmation_value = serde_json::to_vec(confirmation).map_err(|e| {
+                NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+            })?;
+            batch.insert(&self.notes_partition, key.to_bytes(), note_value);
+            batch.insert(&self.confirmations_partition, &key.key_hash, confirmation_value);
+            issuer_new.entry(*issuer_pubkey).or_default().push(key.clone());
+            recipient_new.entry(note.recipient_pubkey).or_default().push(key);
         }
-        if let Some(value) = recipient_index_value {
-            batch.insert(&self.recipient_index, &to_note.recipient_pubkey, value);
+        for (pubkey, keys) in &issuer_new {
+            if let Some(value) = self.index_value_with_keys(&self.issuer_index, pubkey, keys)? {
+                batch.insert(&self.issuer_index, pubkey, value);
+            }
         }
-        batch.insert(
-            &self.confirmations_partition,
-            &from_key.key_hash,
-            from_confirmation_value,
-        );
-        batch.insert(
-            &self.confirmations_partition,
-            &to_key.key_hash,
-            to_confirmation_value,
-        );
+        for (pubkey, keys) in &recipient_new {
+            if let Some(value) = self.index_value_with_keys(&self.recipient_index, pubkey, keys)? {
+                batch.insert(&self.recipient_index, pubkey, value);
+            }
+        }
         batch
             .commit()
-            .map_err(|e| NoteError::StorageError(format!("Failed to commit transfer: {}", e)))
+            .map_err(|e| NoteError::StorageError(format!("Failed to commit novation: {}", e)))
+    }
+
+    /// Like `index_value_with_key` for several keys at once: `None` if all are
+    /// already listed, otherwise the serialized list with the missing ones added.
+    fn index_value_with_keys(
+        &self,
+        index: &fjall::Partition,
+        pubkey: &PubKey,
+        note_keys: &[NoteKey],
+    ) -> Result<Option<Vec<u8>>, NoteError> {
+        let existing = index
+            .get(pubkey)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read index: {}", e)))?;
+        let mut keys = match existing {
+            Some(bytes) => Self::deserialize_note_keys(&bytes)?,
+            None => Vec::new(),
+        };
+        let mut changed = false;
+        for note_key in note_keys {
+            let key_bytes = note_key.to_bytes();
+            if !keys.iter().any(|k| k.to_bytes() == key_bytes) {
+                keys.push(note_key.clone());
+                changed = true;
+            }
+        }
+        Ok(if changed { Some(Self::serialize_note_keys(&keys)) } else { None })
     }
 
     /// Serialize a denomination as a tag byte plus a fixed 32-byte token id

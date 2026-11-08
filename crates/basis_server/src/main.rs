@@ -405,6 +405,7 @@ async fn main() {
                     timestamp,
                     issuer_from_signature,
                     from_recipient_signature,
+                    from_recipient_to_signature,
                     issuer_to_signature,
                     to_recipient_signature,
                     acceptance_check,
@@ -419,10 +420,24 @@ async fn main() {
                         timestamp,
                         &issuer_from_signature,
                         &from_recipient_signature,
+                        &from_recipient_to_signature,
                         &issuer_to_signature,
                         &to_recipient_signature,
                         acceptance_check.map(|check| check.0),
                     );
+                    if result.is_ok() {
+                        let current_root = redemption_manager.tracker.get_state().avl_root_digest;
+                        shared_state_for_tracker.set_avl_root_digest(current_root);
+                    }
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::SetOff {
+                    denomination,
+                    timestamp,
+                    edges,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.set_off(&denomination, timestamp, &edges);
                     if result.is_ok() {
                         let current_root = redemption_manager.tracker.get_state().avl_root_digest;
                         shared_state_for_tracker.set_avl_root_digest(current_root);
@@ -965,6 +980,7 @@ async fn main() {
             post(exchange_notes).options(handle_options),
         )
         .route("/notes/transfer", post(transfer_notes).options(handle_options))
+        .route("/notes/setoff", post(setoff_notes).options(handle_options))
         .route(
             "/exchanges/pending",
             get(list_pending_exchanges).options(handle_options),

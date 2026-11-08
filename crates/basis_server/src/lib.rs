@@ -152,11 +152,23 @@ pub enum TrackerCommand {
         timestamp: u64,
         issuer_from_signature: basis_store::Signature,
         from_recipient_signature: basis_store::Signature,
+        from_recipient_to_signature: basis_store::Signature,
         issuer_to_signature: basis_store::Signature,
         to_recipient_signature: basis_store::Signature,
         acceptance_check: Option<ExchangeAcceptanceCheck>,
         response_tx: tokio::sync::oneshot::Sender<
             Result<basis_store::TransferTotals, basis_store::NoteError>,
+        >,
+    },
+    /// Multilateral set-off (obligation clearing): lower several edges at once,
+    /// net-neutral for every participant. The store verifies both signatures of
+    /// every edge and the per-participant balance before mutating.
+    SetOff {
+        denomination: basis_store::DenomKey,
+        timestamp: u64,
+        edges: Vec<basis_store::SetOffEdge>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<basis_store::SetOffResult, basis_store::NoteError>,
         >,
     },
     /// List staged two-phase exchanges whose to-edge increase awaits the

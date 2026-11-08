@@ -129,6 +129,9 @@ pub struct TransferNotesRequest {
     pub issuer_from_signature: String,
     /// Old creditor's signature over the from-edge's new note message (consent)
     pub from_recipient_signature: String,
+    /// Old creditor's signature over the to-edge's new note message: binds its
+    /// consent to this destination and amount
+    pub from_recipient_to_signature: String,
     /// Issuer signature over the to-edge's new note message (hex, 65 bytes)
     pub issuer_to_signature: String,
     /// New creditor's signature over the to-edge's new note message (acceptance)
@@ -142,6 +145,46 @@ pub struct TransferNotesResponse {
     pub from_new_total: u64,
     pub to_new_total: u64,
     pub timestamp: u64,
+}
+
+/// One edge of a multilateral set-off request.
+#[derive(Debug, Deserialize)]
+pub struct SetOffEdgeRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    /// How much this edge's cumulative total falls.
+    pub decrease: u64,
+    /// Issuer's signature over the edge's note message at its new total (hex, 65 bytes)
+    pub issuer_signature: String,
+    /// Creditor's signature over the same message (consent to lowering)
+    pub recipient_signature: String,
+}
+
+/// Multilateral set-off (obligation clearing) request: lowers every listed edge
+/// by its decrease at one novation timestamp (ending in 999 ms). For every key,
+/// decreases as creditor must equal decreases as issuer (net-neutral).
+#[derive(Debug, Deserialize)]
+pub struct SetOffRequest {
+    #[serde(default)]
+    pub denomination: String,
+    pub timestamp: u64,
+    pub edges: Vec<SetOffEdgeRequest>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetOffEdgeResult {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub new_total: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetOffResponse {
+    pub cleared: bool,
+    pub denomination: String,
+    pub timestamp: u64,
+    pub total_cleared: u64,
+    pub edges: Vec<SetOffEdgeResult>,
 }
 
 /// One pending (staged or cancelled) cross-denomination exchange, as returned

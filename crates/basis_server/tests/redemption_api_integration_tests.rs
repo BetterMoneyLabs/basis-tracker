@@ -342,6 +342,46 @@ mod redemption_api_tests {
                         );
                         let _ = response_tx.send(result);
                     }
+                    TrackerCommand::TransferNotes {
+                        issuer_pubkey,
+                        from_recipient_pubkey,
+                        to_recipient_pubkey,
+                        denomination,
+                        amount,
+                        timestamp,
+                        issuer_from_signature,
+                        from_recipient_signature,
+                        from_recipient_to_signature,
+                        issuer_to_signature,
+                        to_recipient_signature,
+                        acceptance_check,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.transfer_debt_checked(
+                            &issuer_pubkey,
+                            &from_recipient_pubkey,
+                            &to_recipient_pubkey,
+                            &denomination,
+                            amount,
+                            timestamp,
+                            &issuer_from_signature,
+                            &from_recipient_signature,
+                            &from_recipient_to_signature,
+                            &issuer_to_signature,
+                            &to_recipient_signature,
+                            acceptance_check.map(|check| check.0),
+                        );
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::SetOff {
+                        denomination,
+                        timestamp,
+                        edges,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.set_off(&denomination, timestamp, &edges);
+                        let _ = response_tx.send(result);
+                    }
                     TrackerCommand::ListStagedExchanges { response_tx } => {
                         let result = redemption_manager.tracker.list_staged_exchanges();
                         let _ = response_tx.send(result);

@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::{
     models::{
         ApiResponse, Asset, CheckAcceptanceRequest, CheckAcceptanceResponse,
-        CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, ExchangeNotesRequest, TransferNotesRequest, TransferNotesResponse,
+        CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, ExchangeNotesRequest, TransferNotesRequest, TransferNotesResponse, SetOffRequest, SetOffResponse, SetOffEdgeResult,
         ExchangeNotesResponse, KeyStatusDenomination, KeyStatusResponse, NoteConfirmationSummary,
         NoteStateRequest, NoteStateResponse, PendingExchangeView, PendingTxResponse, ProofResponse,
         RedeemRequest, RedeemResponse, RedemptionPreparationRequest, RedemptionPreparationResponse,
@@ -400,6 +400,8 @@ pub async fn create_note(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
+                NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
+                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -796,6 +798,11 @@ pub async fn transfer_notes(
             Ok(s) => s,
             Err(msg) => return bad_request(msg),
         };
+    let from_recipient_to_signature =
+        match decode_sig("from_recipient_to_signature", &payload.from_recipient_to_signature) {
+            Ok(s) => s,
+            Err(msg) => return bad_request(msg),
+        };
     let issuer_to_signature = match decode_sig("issuer_to_signature", &payload.issuer_to_signature)
     {
         Ok(s) => s,
@@ -868,6 +875,7 @@ pub async fn transfer_notes(
             timestamp: payload.timestamp,
             issuer_from_signature,
             from_recipient_signature,
+            from_recipient_to_signature,
             issuer_to_signature,
             to_recipient_signature,
             acceptance_check,
@@ -884,7 +892,28 @@ pub async fn transfer_notes(
         );
     }
     match response_rx.await {
-        Ok(Ok(totals)) => (
+        Ok(Ok(totals)) => {
+            for (recipient, total) in [
+                (from_recipient_pubkey, totals.from_new_total),
+                (to_recipient_pubkey, totals.to_new_total),
+            ] {
+                let event = TrackerEvent {
+                    id: 0,
+                    event_type: crate::models::EventType::NoteUpdated,
+                    timestamp: payload.timestamp,
+                    issuer_pubkey: Some(hex::encode(issuer_pubkey)),
+                    recipient_pubkey: Some(hex::encode(recipient)),
+                    amount: Some(total),
+                    reserve_box_id: None,
+                    collateral_amount: None,
+                    redeemed_amount: None,
+                    height: None,
+                };
+                if let Err(e) = state.event_store.add_event(event).await {
+                    tracing::warn!("Failed to store transfer event: {:?}", e);
+                }
+            }
+            (
             StatusCode::OK,
             Json(crate::models::success_response(TransferNotesResponse {
                 transferred: true,
@@ -893,7 +922,8 @@ pub async fn transfer_notes(
                 to_new_total: totals.to_new_total,
                 timestamp: payload.timestamp,
             })),
-        ),
+            )
+        }
         Ok(Err(e)) => {
             let (status, message) = match e {
                 NoteError::InvalidTransfer(msg) => (StatusCode::BAD_REQUEST, format!("Invalid transfer: {}", msg)),
@@ -909,6 +939,144 @@ pub async fn transfer_notes(
                 ),
                 NoteError::FutureTimestamp => (StatusCode::BAD_REQUEST, "timestamp is in the future".to_string()),
                 other => (StatusCode::BAD_REQUEST, format!("Transfer rejected: {:?}", other)),
+            };
+            (status, Json(crate::models::error_response(message)))
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread did not respond".to_string(),
+            )),
+        ),
+    }
+}
+
+/// `POST /notes/setoff`: multilateral set-off (obligation clearing). See
+/// [`SetOffRequest`]. Net-neutral for every participant; pure-credit edges only.
+pub async fn setoff_notes(
+    State(state): State<AppState>,
+    Json(payload): Json<SetOffRequest>,
+) -> (StatusCode, Json<ApiResponse<SetOffResponse>>) {
+    let bad_request = |msg: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(msg)),
+        )
+    };
+    let denomination = match state.config.parse_served_denomination(&payload.denomination) {
+        Ok(d) => d,
+        Err(msg) => return bad_request(format!("invalid denomination: {}", msg)),
+    };
+    if payload.edges.len() > basis_store::MAX_SETOFF_EDGES {
+        return bad_request(format!(
+            "a set-off lowers at most {} edges",
+            basis_store::MAX_SETOFF_EDGES
+        ));
+    }
+    let decode_sig = |name: &str, hex_str: &str| -> Result<Signature, String> {
+        let bytes = hex::decode(hex_str).map_err(|_| format!("{} must be hex-encoded", name))?;
+        bytes
+            .try_into()
+            .map_err(|_| format!("{} must be 65 bytes", name))
+    };
+    let mut edges = Vec::with_capacity(payload.edges.len());
+    for (i, e) in payload.edges.iter().enumerate() {
+        let issuer_pubkey: PubKey = match parse_pubkey(&e.issuer_pubkey) {
+            Ok(pk) => pk,
+            Err(msg) => return bad_request(format!("edge {}: {}", i, msg)),
+        };
+        let recipient_pubkey: PubKey = match parse_pubkey(&e.recipient_pubkey) {
+            Ok(pk) => pk,
+            Err(msg) => return bad_request(format!("edge {}: {}", i, msg)),
+        };
+        let issuer_signature = match decode_sig("issuer_signature", &e.issuer_signature) {
+            Ok(s) => s,
+            Err(msg) => return bad_request(format!("edge {}: {}", i, msg)),
+        };
+        let recipient_signature = match decode_sig("recipient_signature", &e.recipient_signature) {
+            Ok(s) => s,
+            Err(msg) => return bad_request(format!("edge {}: {}", i, msg)),
+        };
+        edges.push(basis_store::SetOffEdge {
+            issuer_pubkey,
+            recipient_pubkey,
+            decrease: e.decrease,
+            issuer_signature,
+            recipient_signature,
+        });
+    }
+
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(TrackerCommand::SetOff {
+            denomination,
+            timestamp: payload.timestamp,
+            edges,
+            response_tx,
+        })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+    match response_rx.await {
+        Ok(Ok(result)) => {
+            for (issuer, recipient, total) in &result.new_totals {
+                let event = TrackerEvent {
+                    id: 0,
+                    event_type: crate::models::EventType::NoteUpdated,
+                    timestamp: payload.timestamp,
+                    issuer_pubkey: Some(hex::encode(issuer)),
+                    recipient_pubkey: Some(hex::encode(recipient)),
+                    amount: Some(*total),
+                    reserve_box_id: None,
+                    collateral_amount: None,
+                    redeemed_amount: None,
+                    height: None,
+                };
+                if let Err(e) = state.event_store.add_event(event).await {
+                    tracing::warn!("Failed to store set-off event: {:?}", e);
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(crate::models::success_response(SetOffResponse {
+                    cleared: true,
+                    denomination: denomination.denomination_id(),
+                    timestamp: payload.timestamp,
+                    total_cleared: result.total_cleared,
+                    edges: result
+                        .new_totals
+                        .iter()
+                        .map(|(i, r, t)| SetOffEdgeResult {
+                            issuer_pubkey: hex::encode(i),
+                            recipient_pubkey: hex::encode(r),
+                            new_total: *t,
+                        })
+                        .collect(),
+                })),
+            )
+        }
+        Ok(Err(e)) => {
+            let (status, message) = match e {
+                NoteError::InvalidSetOff(msg) => (StatusCode::BAD_REQUEST, format!("Invalid set-off: {}", msg)),
+                NoteError::NotFound => (
+                    StatusCode::NOT_FOUND,
+                    "one of the edges does not exist in this denomination".to_string(),
+                ),
+                NoteError::InvalidSignature => (StatusCode::BAD_REQUEST, "Invalid signature".to_string()),
+                NoteError::PastTimestamp => (
+                    StatusCode::BAD_REQUEST,
+                    "timestamp must be newer than every edge's current timestamp".to_string(),
+                ),
+                NoteError::FutureTimestamp => (StatusCode::BAD_REQUEST, "timestamp is in the future".to_string()),
+                other => (StatusCode::BAD_REQUEST, format!("Set-off rejected: {:?}", other)),
             };
             (status, Json(crate::models::error_response(message)))
         }
@@ -1156,6 +1324,8 @@ pub async fn get_notes_by_issuer(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
+                NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
+                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1293,6 +1463,8 @@ pub async fn get_notes_by_recipient(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
+                NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
+                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1493,6 +1665,8 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
+                NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
+                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1614,6 +1788,8 @@ pub async fn get_all_notes(
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
                 NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
+                NoteError::InvalidSetOff(msg) => format!("Invalid set-off: {}", msg),
+                NoteError::ReservedTimestamp => "timestamps ending in 999 ms are reserved for novations (debt transfer, set-off); use another millisecond".to_string(),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \

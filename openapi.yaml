@@ -161,6 +161,111 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
+  /notes/transfer:
+    post:
+      summary: Transfer debt to a new creditor (triad novation, pure-credit edges)
+      description: >-
+        Moves `amount` of the issuer's cumulative debt from the edge
+        (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
+        denomination, atomically: the old creditor is paid by the transfer and the
+        new creditor is owed by the issuer instead. Five signatures, each over the
+        standard 80-byte note message at the edge's NEW total and `timestamp`: the
+        issuer over both edges, the old creditor over both edges (consent to the
+        decrease, bound to this destination and amount), and the new creditor over
+        the raised edge (acceptance). The timestamp must end in 999 ms (the
+        novation timestamp domain, refused by POST /notes), so the issuer's
+        signature on the raised edge cannot be submitted on its own. Refused when
+        the lowered edge has a committed or pending on-chain total (the two-phase
+        path is not implemented yet). The new creditor's acceptance policy is
+        evaluated against the pre-mutation state, atomically with the mutation.
+      operationId: transferNotes
+      tags:
+        - Notes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferNotesRequest'
+      responses:
+        '200':
+          description: Both edges updated atomically
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseTransferNotes'
+        '400':
+          description: Invalid request, invalid or missing signature, timestamp not newer or not a novation timestamp, amount above the old edge, or an edge with on-chain state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '403':
+          description: Rejected by the new creditor's acceptance policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '404':
+          description: The issuer has no note to the old creditor in this denomination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+  /notes/setoff:
+    post:
+      summary: Multilateral set-off (obligation clearing, pure-credit edges)
+      description: >-
+        Lowers every listed edge by its decrease at one timestamp, atomically. For
+        every key, the decreases on edges where it is the creditor must equal the
+        decreases on edges where it is the issuer, so the set-off is net-neutral
+        for every participant (a cycle A->B->C->A cleared by the same amount is
+        the typical case). Two signatures per edge, both over the standard 80-byte
+        note message at the edge's NEW total and `timestamp`: the issuer and the
+        creditor. Because only balanced combinations are accepted, a participant's
+        signatures can never be used in a set-off that changes its net position.
+        The timestamp must end in 999 ms (novation timestamp domain). At most 64
+        edges; edges with a committed or pending on-chain total are refused.
+      operationId: setOffNotes
+      tags:
+        - Notes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetOffRequest'
+      responses:
+        '200':
+          description: All edges lowered atomically
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseSetOff'
+        '400':
+          description: Invalid request, unbalanced decreases, invalid or missing signature, timestamp not newer or not a novation timestamp, a decrease above an edge, or an edge with on-chain state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '404':
+          description: One of the edges does not exist in this denomination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
   /exchanges/pending:
     get:
       summary: List staged and cancelled cross-denomination exchanges
@@ -1473,6 +1578,173 @@ components:
           example: true
         data:
           $ref: '#/components/schemas/ExchangeNotesResponse'
+        error:
+          type: string
+          nullable: true
+
+    TransferNotesRequest:
+      type: object
+      description: >-
+        Debt transfer request. All five signatures are over the respective edge's
+        standard 80-byte note message (debtKey | totalDebt | timestamp |
+        trackerNftId) at the NEW cumulative total and timestamp.
+      required:
+        - issuer_pubkey
+        - from_recipient_pubkey
+        - to_recipient_pubkey
+        - amount
+        - timestamp
+        - issuer_from_signature
+        - from_recipient_signature
+        - from_recipient_to_signature
+        - issuer_to_signature
+        - to_recipient_signature
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer (debtor) public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+        from_recipient_pubkey:
+          type: string
+          description: Hex-encoded old creditor public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+        to_recipient_pubkey:
+          type: string
+          description: Hex-encoded new creditor public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+        denomination:
+          type: string
+          description: '"erg" or "token:<64-hex>"; empty means the default'
+        amount:
+          type: integer
+          format: uint64
+          description: Debt moved from the old creditor's edge to the new creditor's edge
+        timestamp:
+          type: integer
+          format: uint64
+          description: New timestamp for both edges (ms); must end in 999 and be newer than both edges
+        issuer_from_signature:
+          type: string
+          description: Issuer over the lowered edge's new note message (hex, 65 bytes)
+        from_recipient_signature:
+          type: string
+          description: Old creditor over the lowered edge's new note message (consent)
+        from_recipient_to_signature:
+          type: string
+          description: Old creditor over the raised edge's new note message (binds the destination)
+        issuer_to_signature:
+          type: string
+          description: Issuer over the raised edge's new note message (hex, 65 bytes)
+        to_recipient_signature:
+          type: string
+          description: New creditor over the raised edge's new note message (acceptance)
+    TransferNotesResponse:
+      type: object
+      properties:
+        transferred:
+          type: boolean
+          example: true
+        denomination:
+          type: string
+        from_new_total:
+          type: integer
+          format: uint64
+        to_new_total:
+          type: integer
+          format: uint64
+        timestamp:
+          type: integer
+          format: uint64
+    ApiResponseTransferNotes:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/TransferNotesResponse'
+        error:
+          type: string
+          nullable: true
+    SetOffEdge:
+      type: object
+      required:
+        - issuer_pubkey
+        - recipient_pubkey
+        - decrease
+        - issuer_signature
+        - recipient_signature
+      properties:
+        issuer_pubkey:
+          type: string
+          pattern: '^[0-9a-fA-F]{66}$'
+        recipient_pubkey:
+          type: string
+          pattern: '^[0-9a-fA-F]{66}$'
+        decrease:
+          type: integer
+          format: uint64
+          description: How much this edge's cumulative total falls
+        issuer_signature:
+          type: string
+          description: Issuer over the edge's new note message (hex, 65 bytes)
+        recipient_signature:
+          type: string
+          description: Creditor over the same message (consent to lowering)
+    SetOffRequest:
+      type: object
+      required:
+        - timestamp
+        - edges
+      properties:
+        denomination:
+          type: string
+          description: '"erg" or "token:<64-hex>"; empty means the default'
+        timestamp:
+          type: integer
+          format: uint64
+          description: One timestamp for every edge (ms); must end in 999 and be newer than every edge
+        edges:
+          type: array
+          minItems: 2
+          maxItems: 64
+          items:
+            $ref: '#/components/schemas/SetOffEdge'
+    SetOffResponse:
+      type: object
+      properties:
+        cleared:
+          type: boolean
+          example: true
+        denomination:
+          type: string
+        timestamp:
+          type: integer
+          format: uint64
+        total_cleared:
+          type: integer
+          format: uint64
+          description: Sum of all decreases (gross debt cleared)
+        edges:
+          type: array
+          items:
+            type: object
+            properties:
+              issuer_pubkey:
+                type: string
+              recipient_pubkey:
+                type: string
+              new_total:
+                type: integer
+                format: uint64
+    ApiResponseSetOff:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/SetOffResponse'
         error:
           type: string
           nullable: true

@@ -258,6 +258,8 @@ mod http_api_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::ExchangeNotes { .. } => {}
+                    TrackerCommand::TransferNotes { .. } => {}
+                    TrackerCommand::SetOff { .. } => {}
                     TrackerCommand::ListStagedExchanges { response_tx } => {
                         let result = redemption_manager.tracker.list_staged_exchanges();
                         let _ = response_tx.send(result);
