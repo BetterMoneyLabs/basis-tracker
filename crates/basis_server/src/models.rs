@@ -189,26 +189,39 @@ pub struct TransferNotesResponse {
     pub to_prior_total: u64,
 }
 
-/// One edge of a multilateral set-off request.
+/// One edge of a multilateral set-off request (set-off version 3). Unknown
+/// fields are refused.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetOffEdgeRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     /// How much this edge's cumulative total falls.
     pub decrease: u64,
-    /// Issuer's signature over the edge's note message at its new total (hex, 65 bytes)
+    /// Optional: this edge's own timestamp ts_e (per-edge timestamps), which
+    /// must end in 998 ms, be at most an hour old and be newer than the edge's
+    /// current timestamp. Absent (or null), the request's `timestamp` applies.
+    #[serde(default)]
+    pub timestamp: Option<u64>,
+    /// Issuer's signature over the edge's note message at its new total and
+    /// the edge's timestamp (hex, 65 bytes)
     pub issuer_signature: String,
     /// Creditor's signature over the same message (consent to lowering)
     pub recipient_signature: String,
 }
 
-/// Multilateral set-off (obligation clearing) request: lowers every listed edge
-/// by its decrease at one set-off timestamp (ending in 998 ms). For every key,
-/// decreases as creditor must equal decreases as issuer (net-neutral).
+/// Multilateral set-off (obligation clearing) request, version 3: lowers every
+/// listed edge by its decrease, each at its own timestamp (the edge's
+/// `timestamp`, else this request's `timestamp`), all ending in 998 ms. For
+/// every key, decreases as creditor must equal decreases as issuer
+/// (net-neutral). Unknown fields are refused, so a field this tracker does not
+/// know is never silently dropped.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetOffRequest {
     #[serde(default)]
     pub denomination: String,
+    /// The timestamp of every edge that does not carry its own.
     pub timestamp: u64,
     pub edges: Vec<SetOffEdgeRequest>,
 }
@@ -218,6 +231,8 @@ pub struct SetOffEdgeResult {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub new_total: u64,
+    /// The edge's new timestamp: its own `timestamp`, else the request's.
+    pub timestamp: u64,
 }
 
 #[derive(Debug, Serialize)]

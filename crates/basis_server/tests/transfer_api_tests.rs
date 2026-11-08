@@ -163,8 +163,8 @@ async fn tracker_with(acceptance_predicate: Option<Arc<dyn basis_server::accepta
                         acceptance_check.map(|check| check.0),
                     ));
                 }
-                TrackerCommand::SetOff { denomination, timestamp, edges, response_tx } => {
-                    let _ = response_tx.send(tracker.set_off(&denomination, timestamp, &edges));
+                TrackerCommand::SetOff { denomination, edges, response_tx } => {
+                    let _ = response_tx.send(tracker.set_off(&denomination, &edges));
                 }
                 TrackerCommand::ExchangeNotes {
                     issuer_pubkey,

@@ -372,11 +372,10 @@ mod redemption_api_tests {
                     }
                     TrackerCommand::SetOff {
                         denomination,
-                        timestamp,
                         edges,
                         response_tx,
                     } => {
-                        let result = redemption_manager.tracker.set_off(&denomination, timestamp, &edges);
+                        let result = redemption_manager.tracker.set_off(&denomination, &edges);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::ListStagedExchanges { response_tx } => {

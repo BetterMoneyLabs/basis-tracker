@@ -271,17 +271,23 @@ paths:
     post:
       summary: Multilateral set-off (obligation clearing, pure-credit edges)
       description: >-
-        Lowers every listed edge by its decrease at one timestamp, atomically. For
-        every key, the decreases on edges where it is the creditor must equal the
-        decreases on edges where it is the issuer, so the set-off is net-neutral
-        for every participant (a cycle A->B->C->A cleared by the same amount is
-        the typical case). Two signatures per edge, both over the standard 80-byte
-        note message at the edge's NEW total and `timestamp`: the issuer and the
-        creditor. Because only balanced combinations are accepted, a participant's
-        signatures can never be used in a set-off that changes its net position.
-        The timestamp must end in 998 ms (the set-off residue, refused by POST
-        /notes). At most 64 edges; edges with a committed or pending on-chain
-        total are refused. Every lowered edge becomes bound-only.
+        Version 3. Lowers every listed edge by its decrease, atomically, each at
+        its own timestamp (the edge's `timestamp`, else the request's
+        `timestamp`). For every key, the decreases on edges where it is the
+        creditor must equal the decreases on edges where it is the issuer, so the
+        set-off is net-neutral for every participant (a cycle A->B->C->A cleared
+        by the same amount is the typical case). Two signatures per edge, both
+        over the standard 80-byte note message at the edge's NEW total and the
+        edge's timestamp: the issuer and the creditor. Because only balanced
+        combinations are accepted, a participant's signatures can never be used
+        in a set-off that changes its net position. Every edge's timestamp must
+        end in 998 ms (the set-off residue, refused by POST /notes and by
+        transfers), be at most one hour old (novation_expired) and be newer than
+        the edge's current timestamp; per-edge timestamps let a moved edge be
+        re-signed on its own. At most 64 edges; edges with a committed or pending
+        on-chain total are refused. Every lowered edge becomes bound-only.
+        Unknown request fields are refused. Store refusals carry a
+        machine-readable `code`.
       operationId: setOffNotes
       tags:
         - Notes
@@ -299,19 +305,42 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseSetOff'
         '400':
-          description: Invalid request, unbalanced decreases, invalid or missing signature, timestamp not newer or not a novation timestamp, a decrease above an edge, or an edge with on-chain state
+          description: >-
+            invalid_setoff (malformed: fewer than 2 or more than 64 edges, a
+            self-edge, a zero decrease, a repeated edge, unbalanced decreases, an
+            edge's timestamp not ending in 998 ms, a decrease above an edge's
+            total or below its redeemed amount), invalid_signature (either
+            signature of any edge), past_timestamp (an edge's timestamp not newer
+            than that edge's current one), future_timestamp, novation_expired (an
+            edge's timestamp older than one hour); a malformed key, signature or
+            denomination is refused without a code
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
         '404':
-          description: One of the edges does not exist in this denomination
+          description: not_found, one of the edges does not exist in this denomination
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
+        '409':
+          description: >-
+            tracker_id_mismatch (the edges are bound to different tracker NFTs),
+            staged_exchange (an exchange is staged on one of the pairs),
+            onchain_scope (an edge has a committed or pending on-chain total)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '422':
+          description: The body does not match the request schema (an unknown field, or a missing required one)
+          content:
+            text/plain:
+              schema:
+                type: string
         '500':
-          description: Internal server error
+          description: storage_error, or an unexpected tracker error (a fixed message, no code)
           content:
             application/json:
               schema:
@@ -1748,6 +1777,11 @@ components:
           nullable: true
     SetOffEdge:
       type: object
+      additionalProperties: false
+      description: >-
+        One edge of a set-off (version 3): both signatures are over the standard
+        80-byte note message at the edge's NEW total and the edge's timestamp.
+        Unknown fields are refused.
       required:
         - issuer_pubkey
         - recipient_pubkey
@@ -1765,14 +1799,24 @@ components:
           type: integer
           format: uint64
           description: How much this edge's cumulative total falls
+        timestamp:
+          type: integer
+          format: uint64
+          nullable: true
+          description: >-
+            Optional: this edge's own timestamp (ms; per-edge timestamps). Must
+            end in 998, be at most one hour old and be newer than the edge's
+            current timestamp. Absent or null, the request's timestamp applies.
         issuer_signature:
           type: string
-          description: Issuer over the edge's new note message (hex, 65 bytes)
+          description: Issuer over the edge's new note message at the edge's timestamp (hex, 65 bytes)
         recipient_signature:
           type: string
           description: Creditor over the same message (consent to lowering)
     SetOffRequest:
       type: object
+      additionalProperties: false
+      description: Set-off request (version 3, per-edge timestamps). Unknown fields are refused.
       required:
         - timestamp
         - edges
@@ -1783,7 +1827,10 @@ components:
         timestamp:
           type: integer
           format: uint64
-          description: One timestamp for every edge (ms); must end in 998 and be newer than every edge
+          description: >-
+            The timestamp (ms) of every edge that does not carry its own, checked
+            for each such edge like an edge's own timestamp; when every edge
+            carries its own, it is only echoed in the response
         edges:
           type: array
           minItems: 2
@@ -1801,6 +1848,7 @@ components:
         timestamp:
           type: integer
           format: uint64
+          description: The request's timestamp (the default for edges without their own)
         total_cleared:
           type: integer
           format: uint64
@@ -1817,6 +1865,10 @@ components:
               new_total:
                 type: integer
                 format: uint64
+              timestamp:
+                type: integer
+                format: uint64
+                description: The edge's new timestamp (its own, or the request's)
     ApiResponseSetOff:
       type: object
       properties:

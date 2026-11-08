@@ -103,8 +103,8 @@ async fn tracker() -> Tracker {
                 TrackerCommand::GetNoteByIssuerAndRecipient { issuer_pubkey, recipient_pubkey, denomination, response_tx } => {
                     let _ = response_tx.send(tracker.get_note_optional(&issuer_pubkey, &recipient_pubkey, &denomination));
                 }
-                TrackerCommand::SetOff { denomination, timestamp, edges, response_tx } => {
-                    let _ = response_tx.send(tracker.set_off(&denomination, timestamp, &edges));
+                TrackerCommand::SetOff { denomination, edges, response_tx } => {
+                    let _ = response_tx.send(tracker.set_off(&denomination, &edges));
                 }
                 _ => {}
             }

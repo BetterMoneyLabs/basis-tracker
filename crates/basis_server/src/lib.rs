@@ -166,12 +166,14 @@ pub enum TrackerCommand {
             Result<basis_store::TransferTotals, basis_store::NoteError>,
         >,
     },
-    /// Multilateral set-off (obligation clearing): lower several edges at once,
-    /// net-neutral for every participant. The store verifies both signatures of
-    /// every edge and the per-participant balance before mutating.
+    /// Multilateral set-off (obligation clearing), version 3: lower several
+    /// edges at once, net-neutral for every participant. Each edge carries its
+    /// own timestamp (per-edge timestamps; the API fills in the request's
+    /// timestamp for edges without one). The store verifies every edge's
+    /// timestamp rules, both signatures of every edge and the per-participant
+    /// balance before mutating.
     SetOff {
         denomination: basis_store::DenomKey,
-        timestamp: u64,
         edges: Vec<basis_store::SetOffEdge>,
         response_tx: tokio::sync::oneshot::Sender<
             Result<basis_store::SetOffResult, basis_store::NoteError>,

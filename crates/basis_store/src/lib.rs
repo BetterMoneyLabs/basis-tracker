@@ -362,8 +362,11 @@ pub enum NoteError {
     /// wait until the exchange resolves.
     StagedExchange(String),
     /// A multilateral set-off was malformed or is not possible in this tracker's
-    /// state: fewer than two edges, duplicates, a decrease larger than an edge, a
-    /// participant whose decreases do not balance, or an edge with on-chain state.
+    /// state: fewer than two or more than [`MAX_SETOFF_EDGES`] edges, duplicates,
+    /// an edge's timestamp without the set-off residue, a decrease larger than an
+    /// edge, or a participant whose decreases do not balance (an edge with
+    /// on-chain state is [`NoteError::OnchainScope`], a staged exchange
+    /// [`NoteError::StagedExchange`]).
     InvalidSetOff(String),
     /// The exchange was rejected by the recipient's acceptance policy in the
     /// target denomination. Evaluated inside the tracker thread against the
@@ -597,8 +600,9 @@ pub fn is_bound_note_timestamp(timestamp: u64) -> bool {
 }
 
 /// The maximum age of a novation's timestamp, in milliseconds (one hour). A
-/// debt transfer whose timestamp is older than `now - NOVATION_MAX_AGE_MS` is
-/// refused with [`NoteError::NovationExpired`]. This bounds how long unapplied
+/// debt transfer whose timestamp, or a set-off with any edge whose timestamp,
+/// is older than `now - NOVATION_MAX_AGE_MS` is refused with
+/// [`NoteError::NovationExpired`]. This bounds how long unapplied
 /// novation signatures stay usable: an attempt that has not applied by its
 /// timestamp plus this age never will, which is what lets a payer fall back to
 /// another payment safely. Compiled in, not configurable.
@@ -625,21 +629,41 @@ pub struct PriorAck {
 /// batch small).
 pub const MAX_SETOFF_EDGES: usize = 64;
 
-/// One edge lowered by a multilateral set-off, with both parties' signatures
-/// over the edge's standard note message at its new total.
+/// One edge lowered by a multilateral set-off (version 3), with both parties'
+/// signatures over the edge's standard note message at its new total and its
+/// own timestamp: `M(I,R,P-d,ts_e) = signing_message(I, R, denomination, P - d,
+/// ts_e, nft)`, where P is the edge's stored total and d its `decrease`.
 #[derive(Debug, Clone)]
 pub struct SetOffEdge {
     pub issuer_pubkey: PubKey,
     pub recipient_pubkey: PubKey,
     pub decrease: u64,
+    /// This edge's timestamp ts_e (per-edge timestamps): it must end in 998 ms
+    /// ([`SETOFF_TS_MS`]), be at most now and at most [`NOVATION_MAX_AGE_MS`]
+    /// old, and be newer than the edge's stored timestamp. The lowered note is
+    /// stored at it. Edges of one set-off may have different timestamps, so a
+    /// moved edge can be re-signed on its own.
+    pub timestamp: u64,
     pub issuer_signature: Signature,
     pub recipient_signature: Signature,
 }
 
-/// Result of a set-off: every lowered edge's new total, and the gross debt cleared.
+/// One edge as a set-off left it: its new total and its new timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetOffEdgeTotal {
+    pub issuer_pubkey: PubKey,
+    pub recipient_pubkey: PubKey,
+    /// The edge's total after the set-off (its stored total minus the decrease).
+    pub new_total: u64,
+    /// The edge's timestamp after the set-off (the edge's ts_e).
+    pub timestamp: u64,
+}
+
+/// Result of a set-off: every lowered edge's new total and timestamp, in the
+/// order of the request's edges, and the gross debt cleared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetOffResult {
-    pub new_totals: Vec<(PubKey, PubKey, u64)>,
+    pub new_totals: Vec<SetOffEdgeTotal>,
     pub total_cleared: u64,
 }
 
@@ -2266,15 +2290,20 @@ impl TrackerStateManager {
         Ok(totals)
     }
 
-    /// Multilateral set-off (obligation clearing): lower several edges at once so
-    /// that every participant's net position is unchanged while gross debt falls.
-    /// Typical use: a cycle (A owes B, B owes C, C owes A) cancelled by lowering
-    /// each edge by the same amount; any circulation of decreases is accepted.
+    /// Multilateral set-off (obligation clearing), version 3: lower several
+    /// edges at once so that every participant's net position is unchanged
+    /// while gross debt falls. Typical use: a cycle (A owes B, B owes C, C owes
+    /// A) cancelled by lowering each edge by the same amount; any circulation
+    /// of decreases is accepted.
     ///
-    /// SIGNATURES: two per edge, both over the standard 80-byte note message at the
-    /// edge's NEW total and `timestamp`: the issuer (so the lowered total is still a
-    /// note the issuer signed, redeemable as before) and the creditor (the consent
-    /// the S3 rule requires for lowering an edge).
+    /// SIGNATURES: two per edge, both over the standard 80-byte note message
+    /// M(I,R,P-d,ts_e) at the edge's NEW total (its stored total P minus its
+    /// decrease d) and the edge's own timestamp ts_e (see [`SetOffEdge`]): the
+    /// issuer (so the lowered total is still a note the issuer signed,
+    /// redeemable as before) and the creditor (the consent the S3 rule requires
+    /// for lowering an edge). There are no prior acknowledgments: balance
+    /// already makes every accepted set-off net-neutral for every key, and the
+    /// signatures pin each edge's final total.
     ///
     /// BALANCE (flow conservation): for every key, the decreases on edges where it
     /// is the creditor sum exactly to the decreases on edges where it is the
@@ -2283,17 +2312,45 @@ impl TrackerStateManager {
     /// signatures can only ever be used in combinations that leave its net
     /// position unchanged.
     ///
-    /// SCOPE and ATOMICITY as for [`Self::transfer_debt`]: an edge with a committed
-    /// or pending on-chain total is refused (the two-phase path is future work);
-    /// the timestamp must end in 998 ms (the set-off residue, [`SETOFF_TS_MS`]);
-    /// all notes, confirmation records and the bound-only marks of every edge
-    /// land in one storage batch.
+    /// PER-EDGE TIMESTAMPS: each edge carries its own timestamp, so an edge that
+    /// moved after the set-off was signed is re-signed on its own by its two
+    /// parties while the other edges keep their signatures. Every edge's
+    /// timestamp ends in 998 ms, the set-off residue [`SETOFF_TS_MS`], which
+    /// POST /notes and transfers refuse: set-off signatures are never usable in
+    /// another operation, and no other operation's signatures in a set-off.
+    /// Each edge's timestamp strictly increases, so a set-off cannot be
+    /// replayed, and the maximum age bounds how long unapplied signatures stay
+    /// usable.
+    ///
+    /// CHECKS, all before anything is written, in this order:
+    /// 1. 2 to [`MAX_SETOFF_EDGES`] edges (`InvalidSetOff`);
+    /// 2. edge by edge, its timestamp: ends in 998 ms (`InvalidSetOff`), is at
+    ///    most now (`FutureTimestamp`) and at least now - [`NOVATION_MAX_AGE_MS`]
+    ///    (`NovationExpired`);
+    /// 3. no self-edges, positive decreases, distinct (issuer, creditor) pairs
+    ///    (`InvalidSetOff`);
+    /// 4. balance for every key (`InvalidSetOff`);
+    /// 5. no exchange is staged on any of the pairs (`StagedExchange`);
+    /// 6. edge by edge: the edge exists (`NotFound`); it has no committed or
+    ///    pending on-chain total (`OnchainScope`); the decrease is at most its
+    ///    total and leaves at least its redeemed amount (`InvalidSetOff`); its
+    ///    timestamp is newer than the edge's stored one (`PastTimestamp`); it
+    ///    is bound to the same tracker NFT as the other edges
+    ///    (`TrackerIdMismatch`); both signatures verify (`InvalidSignature`; the
+    ///    failing edge and slot are logged at warn, never a signature).
+    ///
+    /// SCOPE and ATOMICITY as for [`Self::transfer_debt`]: an edge with a
+    /// committed or pending on-chain total is refused (the two-phase path is
+    /// future work); all notes (each with its issuer's signature, at the edge's
+    /// timestamp), confirmation records and the bound-only marks of every edge
+    /// land in one storage batch. Afterwards new notes on any of the edges must
+    /// be bound notes.
     pub fn set_off(
         &mut self,
         denomination: &DenomKey,
-        timestamp: u64,
         edges: &[SetOffEdge],
     ) -> Result<SetOffResult, NoteError> {
+        // 1. Size.
         if edges.len() < 2 {
             return Err(NoteError::InvalidSetOff(
                 "a set-off lowers at least two edges".to_string(),
@@ -2305,20 +2362,28 @@ impl TrackerStateManager {
                 MAX_SETOFF_EDGES
             )));
         }
-        if !is_setoff_timestamp(timestamp) {
-            return Err(NoteError::InvalidSetOff(
-                "a set-off's timestamp must end in 998 ms (the set-off timestamp residue)".to_string(),
-            ));
-        }
+
+        // 2. Every edge's own timestamp: the set-off residue, not in the future,
+        // not older than the maximum novation age.
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
             .as_millis() as u64;
-        if timestamp > current_time {
-            return Err(NoteError::FutureTimestamp);
+        for e in edges {
+            if !is_setoff_timestamp(e.timestamp) {
+                return Err(NoteError::InvalidSetOff(
+                    "every edge's timestamp must end in 998 ms (the set-off timestamp residue)".to_string(),
+                ));
+            }
+            if e.timestamp > current_time {
+                return Err(NoteError::FutureTimestamp);
+            }
+            if e.timestamp < current_time.saturating_sub(NOVATION_MAX_AGE_MS) {
+                return Err(NoteError::NovationExpired);
+            }
         }
 
-        // Distinct edges, no self-edges, positive decreases.
+        // 3. Distinct edges, no self-edges, positive decreases.
         let mut seen = std::collections::HashSet::new();
         for e in edges {
             if e.issuer_pubkey == e.recipient_pubkey {
@@ -2338,7 +2403,7 @@ impl TrackerStateManager {
             }
         }
 
-        // Balance: for every key, decreases as creditor == decreases as issuer.
+        // 4. Balance: for every key, decreases as creditor == decreases as issuer.
         let mut as_creditor: std::collections::HashMap<PubKey, u128> = std::collections::HashMap::new();
         let mut as_issuer: std::collections::HashMap<PubKey, u128> = std::collections::HashMap::new();
         for e in edges {
@@ -2356,8 +2421,8 @@ impl TrackerStateManager {
             }
         }
 
-        // A staged exchange on any of these pairs would compute its totals against
-        // the state this set-off is about to change.
+        // 5. A staged exchange on any of these pairs would compute its totals
+        // against the state this set-off is about to change.
         for (_, existing) in self.storage.get_all_pending_exchanges()? {
             if matches!(existing.status, PendingExchangeStatus::Staged)
                 && edges.iter().any(|e| {
@@ -2365,25 +2430,25 @@ impl TrackerStateManager {
                         && e.recipient_pubkey == existing.recipient_pubkey
                 })
             {
-                return Err(NoteError::InvalidSetOff(
+                return Err(NoteError::StagedExchange(
                     "an exchange on one of these pairs is staged".to_string(),
                 ));
             }
         }
 
-        // Per edge: current note, scope, new total, time, tracker binding, range,
-        // and both signatures, all BEFORE any state changes.
+        // 6. Per edge: current note, scope, new total, time, tracker binding and
+        // both signatures, all BEFORE any state changes.
         let verifier = SchnorrVerifier;
         let mut tracker_nft_id: Option<[u8; 32]> = None;
         let mut entries: Vec<(PubKey, IouNote, NoteConfirmation)> = Vec::with_capacity(edges.len());
         let mut keys: Vec<NoteKeyBytes> = Vec::with_capacity(edges.len());
         let mut new_totals = Vec::with_capacity(edges.len());
-        for e in edges {
+        for (index, e) in edges.iter().enumerate() {
             let note = self.lookup_note(&e.issuer_pubkey, &e.recipient_pubkey, denomination)?;
             let key = NoteKey::from_assets(&e.issuer_pubkey, &e.recipient_pubkey, denomination);
             if let Some(c) = self.confirmations.get(&key.key_hash) {
                 if c.confirmed_total_debt.is_some() || c.pending_total_debt.is_some() {
-                    return Err(NoteError::InvalidSetOff(
+                    return Err(NoteError::OnchainScope(
                         "an edge has a committed or pending on-chain total; lowering it needs the two-phase path, which is not implemented yet".to_string(),
                     ));
                 }
@@ -2400,7 +2465,7 @@ impl TrackerStateManager {
                     new_total, note.amount_redeemed
                 )));
             }
-            if timestamp <= note.timestamp {
+            if e.timestamp <= note.timestamp {
                 return Err(NoteError::PastTimestamp);
             }
             match tracker_nft_id {
@@ -2413,14 +2478,20 @@ impl TrackerStateManager {
                 &e.recipient_pubkey,
                 denomination,
                 new_total,
-                timestamp,
+                e.timestamp,
                 &note.tracker_nft_id,
             );
-            for (sig, signer) in [
-                (&e.issuer_signature, &e.issuer_pubkey),
-                (&e.recipient_signature, &e.recipient_pubkey),
+            for (slot, sig, signer) in [
+                ("issuer", &e.issuer_signature, &e.issuer_pubkey),
+                ("recipient", &e.recipient_signature, &e.recipient_pubkey),
             ] {
                 if verifier.verify_signature(sig, &msg, signer).is_err() {
+                    // The edge's index and the slot name only: never a signature or a message.
+                    tracing::warn!(
+                        "Set-off refused: the {} signature of edge {} does not verify",
+                        slot,
+                        index
+                    );
                     return Err(NoteError::InvalidSignature);
                 }
             }
@@ -2428,7 +2499,7 @@ impl TrackerStateManager {
                 recipient_pubkey: e.recipient_pubkey,
                 amount_collected: new_total,
                 amount_redeemed: note.amount_redeemed,
-                timestamp,
+                timestamp: e.timestamp,
                 signature: e.issuer_signature,
                 tracker_nft_id: note.tracker_nft_id,
                 denomination: *denomination,
@@ -2436,7 +2507,12 @@ impl TrackerStateManager {
             let confirmation = self.recomputed_confirmation(&key.key_hash, new_total);
             entries.push((e.issuer_pubkey, new_note, confirmation));
             keys.push(key.key_hash);
-            new_totals.push((e.issuer_pubkey, e.recipient_pubkey, new_total));
+            new_totals.push(SetOffEdgeTotal {
+                issuer_pubkey: e.issuer_pubkey,
+                recipient_pubkey: e.recipient_pubkey,
+                new_total,
+                timestamp: e.timestamp,
+            });
         }
 
         self.storage.commit_note_batch(&entries, &keys)?;

@@ -3129,10 +3129,11 @@ mod debt_transfer_tests {
             issuer_pubkey: pubkey(issuer),
             recipient_pubkey: pubkey(recipient),
             decrease: 5,
+            timestamp: setoff_ts,
             issuer_signature: sign(issuer, &pubkey(issuer), &pubkey(recipient), new_total, setoff_ts),
             recipient_signature: sign(recipient, &pubkey(issuer), &pubkey(recipient), new_total, setoff_ts),
         };
-        m.set_off(&DenomKey::Token(TOKEN), setoff_ts, &[edge(&A, &C, 5), edge(&C, &A, 0)]).unwrap();
+        m.set_off(&DenomKey::Token(TOKEN), &[edge(&A, &C, 5), edge(&C, &A, 0)]).unwrap();
         assert!(setoff_ts < t);
         assert_eq!((total(&m, &B), total(&m, &C)), (Some(105), Some(5)));
         let digest = m.get_state().avl_root_digest;
@@ -3527,21 +3528,56 @@ mod debt_transfer_tests {
     }
 }
 
-/// Multilateral set-off (obligation clearing), pure-credit edges: lowered edges,
-/// two signatures each, balanced for every participant.
+/// Multilateral set-off (obligation clearing), version 3, pure-credit edges:
+/// lowered edges, two signatures each at the edge's own timestamp (residue 998,
+/// at most an hour old, newer than the edge), balanced for every participant.
 #[cfg(test)]
 mod setoff_tests {
-    use crate::{DenomKey, IouNote, NoteError, SetOffEdge, TrackerStateManager, MAX_SETOFF_EDGES};
+    use crate::{
+        DenomKey, IouNote, NoteError, SetOffEdge, SetOffEdgeTotal, TrackerStateManager, TransferSignatures,
+        MAX_SETOFF_EDGES, NOVATION_MAX_AGE_MS,
+    };
     use secp256k1::{Secp256k1, SecretKey};
 
     const NFT: [u8; 32] = [0x42; 32];
+    const OTHER_NFT: [u8; 32] = [0x43; 32];
     const TOKEN: [u8; 32] = [0xa5; 32];
     const A: [u8; 32] = [1u8; 32];
     const B: [u8; 32] = [2u8; 32];
     const C: [u8; 32] = [3u8; 32];
     const D: [u8; 32] = [4u8; 32];
-    // Set-off timestamps end in 998 ms (the set-off residue; 999 belongs to transfers).
-    const T: u64 = 5998;
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// A whole second ten minutes before this module's first test started. Tracker v3 refuses set-off
+    /// timestamps older than NOVATION_MAX_AGE_MS, so the timestamps here are offsets from it (they were fixed
+    /// 1970-era values before): the largest offset is a few seconds, so every one of them is in the past and
+    /// well inside the maximum age.
+    fn base() -> u64 {
+        static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *BASE.get_or_init(|| (now_ms() - 600_000) / 1000 * 1000)
+    }
+
+    /// The set-off timestamp most tests sign at. Set-off timestamps end in 998 ms (the set-off residue; 999
+    /// belongs to transfers).
+    fn ts0() -> u64 {
+        base() + 5998
+    }
+
+    /// The latest timestamp at or before `t` whose residue (`ts % 1000`) is `ms`.
+    fn at_residue(t: u64, ms: u64) -> u64 {
+        let candidate = t - t % 1000 + ms;
+        if candidate <= t {
+            candidate
+        } else {
+            candidate - 1000
+        }
+    }
 
     fn pk(secret: &[u8; 32]) -> [u8; 33] {
         let secp = Secp256k1::new();
@@ -3558,20 +3594,41 @@ mod setoff_tests {
         m.get_note_optional(&pk(issuer), &pk(recipient), &DenomKey::Token(TOKEN)).unwrap().map(|n| n.amount_collected).unwrap()
     }
 
+    /// The stored timestamp of the edge issuer -> recipient.
+    fn stamp(m: &TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32]) -> u64 {
+        m.lookup_note(&pk(issuer), &pk(recipient), &DenomKey::Token(TOKEN)).unwrap().timestamp
+    }
+
     fn sign(secret: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> [u8; 65] {
         let msg = crate::schnorr::signing_message(&pk(issuer), &pk(recipient), &DenomKey::Token(TOKEN), total, ts, &NFT);
         crate::schnorr::schnorr_sign(&msg, secret, &pk(secret)).unwrap()
     }
 
-    /// An edge lowered from `before` by `decrease`, signed by both parties at `ts`.
+    /// An edge lowered from `before` by `decrease`, signed by both parties at its own timestamp `ts`.
     fn edge(issuer: &[u8; 32], recipient: &[u8; 32], before: u64, decrease: u64, ts: u64) -> SetOffEdge {
         let new_total = before.saturating_sub(decrease);
         SetOffEdge {
             issuer_pubkey: pk(issuer),
             recipient_pubkey: pk(recipient),
             decrease,
+            timestamp: ts,
             issuer_signature: sign(issuer, issuer, recipient, new_total, ts),
             recipient_signature: sign(recipient, issuer, recipient, new_total, ts),
+        }
+    }
+
+    /// The seven signatures of a transfer of `amount` of A's debt from A->B (stored total `from_before`) to A->C
+    /// (stored total `to_before`), by A, B and C at `ts`.
+    fn transfer_sigs(from_before: u64, to_before: u64, amount: u64, ts: u64) -> TransferSignatures {
+        let (from_total, to_total) = (from_before - amount, to_before + amount);
+        TransferSignatures {
+            issuer_from: sign(&A, &A, &B, from_total, ts),
+            issuer_to: sign(&A, &A, &C, to_total, ts),
+            from_recipient_prior: sign(&B, &A, &B, from_before, ts),
+            from_recipient: sign(&B, &A, &B, from_total, ts),
+            from_recipient_to: sign(&B, &A, &C, to_total, ts),
+            to_recipient_prior: sign(&C, &A, &C, to_before, ts),
+            to_recipient: sign(&C, &A, &C, to_total, ts),
         }
     }
 
@@ -3589,18 +3646,19 @@ mod setoff_tests {
     /// A owes B 10, B owes C 7, C owes A 5.
     fn triangle() -> TrackerStateManager {
         let mut m = TrackerStateManager::new_with_temp_storage();
-        note(&mut m, &A, &B, 10, 1000);
-        note(&mut m, &B, &C, 7, 1001);
-        note(&mut m, &C, &A, 5, 1002);
+        note(&mut m, &A, &B, 10, base() + 1000);
+        note(&mut m, &B, &C, 7, base() + 1001);
+        note(&mut m, &C, &A, 5, base() + 1002);
         m
     }
 
     #[test]
     fn a_cycle_is_cleared_and_every_net_position_is_unchanged() {
         let mut m = triangle();
+        let t = ts0();
         let all = [A, B, C];
         let nets: Vec<i64> = all.iter().map(|w| net(&m, w, &all)).collect();
-        let r = m.set_off(&DenomKey::Token(TOKEN), T, &[edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)]).unwrap();
+        let r = m.set_off(&DenomKey::Token(TOKEN), &[edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)]).unwrap();
         assert_eq!(r.total_cleared, 15);
         assert_eq!((total(&m, &A, &B), total(&m, &B, &C), total(&m, &C, &A)), (5, 2, 0));
         let after: Vec<i64> = all.iter().map(|w| net(&m, w, &all)).collect();
@@ -3608,23 +3666,24 @@ mod setoff_tests {
         // The lowered notes still carry their issuers' signatures over the new totals.
         let n = m.lookup_note(&pk(&A), &pk(&B), &DenomKey::Token(TOKEN)).unwrap();
         assert!(n.verify_signature(&pk(&A)).is_ok());
-        assert_eq!(n.timestamp, T);
+        assert_eq!(n.timestamp, t);
     }
 
     #[test]
     fn a_bilateral_pair_and_a_figure_eight_clear() {
+        let t = ts0();
         let mut m = TrackerStateManager::new_with_temp_storage();
-        note(&mut m, &A, &B, 8, 1000);
-        note(&mut m, &B, &A, 3, 1001);
-        m.set_off(&DenomKey::Token(TOKEN), T, &[edge(&A, &B, 8, 3, T), edge(&B, &A, 3, 3, T)]).unwrap();
+        note(&mut m, &A, &B, 8, base() + 1000);
+        note(&mut m, &B, &A, 3, base() + 1001);
+        m.set_off(&DenomKey::Token(TOKEN), &[edge(&A, &B, 8, 3, t), edge(&B, &A, 3, 3, t)]).unwrap();
         assert_eq!((total(&m, &A, &B), total(&m, &B, &A)), (5, 0));
         // Two cycles through B: A<->B and B<->C, cleared together.
         let mut m = TrackerStateManager::new_with_temp_storage();
-        note(&mut m, &A, &B, 4, 1000);
-        note(&mut m, &B, &A, 4, 1001);
-        note(&mut m, &B, &C, 2, 1002);
-        note(&mut m, &C, &B, 2, 1003);
-        let r = m.set_off(&DenomKey::Token(TOKEN), T, &[edge(&A, &B, 4, 4, T), edge(&B, &A, 4, 4, T), edge(&B, &C, 2, 2, T), edge(&C, &B, 2, 2, T)]).unwrap();
+        note(&mut m, &A, &B, 4, base() + 1000);
+        note(&mut m, &B, &A, 4, base() + 1001);
+        note(&mut m, &B, &C, 2, base() + 1002);
+        note(&mut m, &C, &B, 2, base() + 1003);
+        let r = m.set_off(&DenomKey::Token(TOKEN), &[edge(&A, &B, 4, 4, t), edge(&B, &A, 4, 4, t), edge(&B, &C, 2, 2, t), edge(&C, &B, 2, 2, t)]).unwrap();
         assert_eq!(r.total_cleared, 12);
     }
 
@@ -3636,9 +3695,10 @@ mod setoff_tests {
     #[test]
     fn unbalanced_decreases_are_refused() {
         let mut m = triangle();
+        let t = ts0();
         let digest = m.get_state().avl_root_digest;
         // B would lose 5 of its claim on A while its own debt to C falls by only 4.
-        let r = m.set_off(&DenomKey::Token(TOKEN), T, &[edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 4, T), edge(&C, &A, 5, 5, T)]);
+        let r = m.set_off(&DenomKey::Token(TOKEN), &[edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 4, t), edge(&C, &A, 5, 5, t)]);
         assert!(matches!(r, Err(NoteError::InvalidSetOff(_))));
         unchanged(&m, &digest);
     }
@@ -3648,86 +3708,95 @@ mod setoff_tests {
         // Everyone signed the full cycle. Submitting only two of its edges (dropping C->A) would leave A paying
         // B without being paid by C: the balance check refuses it.
         let mut m = triangle();
+        let t = ts0();
         let digest = m.get_state().avl_root_digest;
-        let full = [edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)];
-        let r = m.set_off(&DenomKey::Token(TOKEN), T, &full[..2]);
+        let full = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
+        let r = m.set_off(&DenomKey::Token(TOKEN), &full[..2]);
         assert!(matches!(r, Err(NoteError::InvalidSetOff(_))));
         unchanged(&m, &digest);
-        m.set_off(&DenomKey::Token(TOKEN), T, &full).unwrap();
+        m.set_off(&DenomKey::Token(TOKEN), &full).unwrap();
     }
 
     #[test]
     fn both_parties_of_every_edge_must_sign() {
         let mut m = triangle();
+        let t = ts0();
         let digest = m.get_state().avl_root_digest;
-        let mut e = [edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)];
-        e[0].recipient_signature = sign(&A, &A, &B, 5, T); // the issuer signs in the creditor's place
-        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), T, &e), Err(NoteError::InvalidSignature)));
-        let mut e = [edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)];
-        e[1].issuer_signature = sign(&C, &B, &C, 2, T);
-        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), T, &e), Err(NoteError::InvalidSignature)));
+        let mut e = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
+        e[0].recipient_signature = sign(&A, &A, &B, 5, t); // the issuer signs in the creditor's place
+        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), &e), Err(NoteError::InvalidSignature)));
+        let mut e = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
+        e[1].issuer_signature = sign(&C, &B, &C, 2, t);
+        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), &e), Err(NoteError::InvalidSignature)));
         // Signatures over other totals do not verify.
-        let mut e = [edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)];
+        let mut e = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
         e[2].decrease = 4;
         e[0].decrease = 4;
         e[1].decrease = 4;
-        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), T, &e), Err(NoteError::InvalidSignature)));
+        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), &e), Err(NoteError::InvalidSignature)));
         unchanged(&m, &digest);
     }
 
     #[test]
     fn malformed_set_offs_are_refused() {
         let mut m = triangle();
+        let t = ts0();
         let digest = m.get_state().avl_root_digest;
         let d = DenomKey::Token(TOKEN);
         let invalid = |r: Result<crate::SetOffResult, NoteError>| matches!(r, Err(NoteError::InvalidSetOff(_)));
-        assert!(invalid(m.set_off(&d, T, &[edge(&A, &B, 10, 5, T)])));
-        assert!(invalid(m.set_off(&d, T, &[edge(&A, &B, 10, 5, T), edge(&A, &B, 10, 5, T)])));
-        assert!(invalid(m.set_off(&d, T, &[edge(&A, &A, 10, 5, T), edge(&B, &C, 7, 5, T)])));
-        assert!(invalid(m.set_off(&d, T, &[edge(&A, &B, 10, 0, T), edge(&B, &A, 0, 0, T)])));
+        assert!(invalid(m.set_off(&d, &[edge(&A, &B, 10, 5, t)])));
+        assert!(invalid(m.set_off(&d, &[edge(&A, &B, 10, 5, t), edge(&A, &B, 10, 5, t)])));
+        assert!(invalid(m.set_off(&d, &[edge(&A, &A, 10, 5, t), edge(&B, &C, 7, 5, t)])));
+        assert!(invalid(m.set_off(&d, &[edge(&A, &B, 10, 0, t), edge(&B, &A, 0, 0, t)])));
         // A decrease larger than the edge.
-        assert!(invalid(m.set_off(&d, T, &[edge(&A, &B, 10, 6, T), edge(&B, &C, 7, 6, T), edge(&C, &A, 5, 6, T)])));
+        assert!(invalid(m.set_off(&d, &[edge(&A, &B, 10, 6, t), edge(&B, &C, 7, 6, t), edge(&C, &A, 5, 6, t)])));
         // Not the set-off residue (998 ms).
-        assert!(invalid(m.set_off(&d, 6000, &[edge(&A, &B, 10, 5, 6000), edge(&B, &C, 7, 5, 6000), edge(&C, &A, 5, 5, 6000)])));
+        let t6 = base() + 6000;
+        assert!(invalid(m.set_off(&d, &[edge(&A, &B, 10, 5, t6), edge(&B, &C, 7, 5, t6), edge(&C, &A, 5, 5, t6)])));
         // Too many edges.
-        let many: Vec<SetOffEdge> = (0..=MAX_SETOFF_EDGES).map(|_| edge(&A, &B, 10, 1, T)).collect();
-        assert!(invalid(m.set_off(&d, T, &many)));
+        let many: Vec<SetOffEdge> = (0..=MAX_SETOFF_EDGES).map(|_| edge(&A, &B, 10, 1, t)).collect();
+        assert!(invalid(m.set_off(&d, &many)));
         // A missing edge.
-        assert!(matches!(m.set_off(&d, T, &[edge(&A, &D, 10, 5, T), edge(&D, &A, 10, 5, T)]), Err(NoteError::NotFound)));
+        assert!(matches!(m.set_off(&d, &[edge(&A, &D, 10, 5, t), edge(&D, &A, 10, 5, t)]), Err(NoteError::NotFound)));
         // Not newer than the edges.
-        assert!(matches!(m.set_off(&d, 998, &[edge(&A, &B, 10, 5, 998), edge(&B, &C, 7, 5, 998), edge(&C, &A, 5, 5, 998)]), Err(NoteError::PastTimestamp)));
+        let early = base() + 998;
+        assert!(matches!(m.set_off(&d, &[edge(&A, &B, 10, 5, early), edge(&B, &C, 7, 5, early), edge(&C, &A, 5, 5, early)]), Err(NoteError::PastTimestamp)));
         unchanged(&m, &digest);
     }
 
     #[test]
     fn a_set_off_cannot_be_replayed() {
         let mut m = triangle();
-        let e = [edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)];
-        m.set_off(&DenomKey::Token(TOKEN), T, &e).unwrap();
-        assert!(m.set_off(&DenomKey::Token(TOKEN), T, &e).is_err());
+        let t = ts0();
+        let e = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
+        m.set_off(&DenomKey::Token(TOKEN), &e).unwrap();
+        assert!(m.set_off(&DenomKey::Token(TOKEN), &e).is_err());
         assert_eq!((total(&m, &A, &B), total(&m, &B, &C), total(&m, &C, &A)), (5, 2, 0));
     }
 
     #[test]
     fn edges_with_on_chain_state_are_refused() {
+        // Tracker v3 reports the scope refusal as OnchainScope (it was InvalidSetOff): 409 onchain_scope.
         let mut m = triangle();
+        let t = ts0();
         let digest = m.get_state().avl_root_digest;
         m.mark_notes_pending(digest, "tx1", 100).unwrap();
-        let e = [edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)];
-        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), T, &e), Err(NoteError::InvalidSetOff(_))));
+        let e = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
+        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), &e), Err(NoteError::OnchainScope(_))));
         unchanged(&m, &digest);
     }
 
     #[test]
     fn a_storage_failure_leaves_state_unchanged_and_the_tree_stays_reproducible() {
         let mut m = triangle();
+        let t = ts0();
         let digest = m.get_state().avl_root_digest;
-        let e = [edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)];
+        let e = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
         m.storage.fail_exchange_commits.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), T, &e), Err(NoteError::StorageError(_))));
+        assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), &e), Err(NoteError::StorageError(_))));
         unchanged(&m, &digest);
         m.storage.fail_exchange_commits.store(false, std::sync::atomic::Ordering::SeqCst);
-        m.set_off(&DenomKey::Token(TOKEN), T, &e).unwrap();
+        m.set_off(&DenomKey::Token(TOKEN), &e).unwrap();
         let live = m.get_state().avl_root_digest;
         m.rebuild_tree_canonically().unwrap();
         m.update_state();
@@ -3740,16 +3809,17 @@ mod setoff_tests {
         // (residue 997, with the issuer's acknowledgment of the current total) and an ordinary note there is
         // refused. Edges the set-off did not touch take ordinary notes as before.
         let mut m = triangle();
-        m.set_off(&DenomKey::Token(TOKEN), T, &[edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)]).unwrap();
+        let t = ts0();
+        m.set_off(&DenomKey::Token(TOKEN), &[edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)]).unwrap();
         // A new deal: A owes B 3 more (cumulative 8), at a later timestamp.
-        let ordinary = IouNote::create_and_sign(pk(&B), 8, 7000, &A, &NFT, DenomKey::Token(TOKEN)).unwrap();
+        let ordinary = IouNote::create_and_sign(pk(&B), 8, base() + 7000, &A, &NFT, DenomKey::Token(TOKEN)).unwrap();
         assert!(matches!(m.add_note(&pk(&A), &ordinary, None), Err(NoteError::BoundNoteRequired)));
-        let bound = IouNote::create_and_sign(pk(&B), 8, 7997, &A, &NFT, DenomKey::Token(TOKEN)).unwrap();
-        let prior = crate::PriorAck { signature: sign(&A, &A, &B, 5, 7997), prior_total: Some(5) };
+        let bound = IouNote::create_and_sign(pk(&B), 8, base() + 7997, &A, &NFT, DenomKey::Token(TOKEN)).unwrap();
+        let prior = crate::PriorAck { signature: sign(&A, &A, &B, 5, base() + 7997), prior_total: Some(5) };
         m.add_note(&pk(&A), &bound, Some(prior)).unwrap();
         assert_eq!(total(&m, &A, &B), 8);
         // An edge outside the set-off still takes ordinary notes.
-        note(&mut m, &A, &C, 4, 7000);
+        note(&mut m, &A, &C, 4, base() + 7000);
         assert_eq!(total(&m, &A, &C), 4);
     }
 
@@ -3757,22 +3827,23 @@ mod setoff_tests {
     fn a_set_off_marks_every_edge_bound_only_and_the_marks_survive_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let d = DenomKey::Token(TOKEN);
+        let t = ts0();
         let cycle = [(A, B), (B, C), (C, A)];
-        let e = [edge(&A, &B, 10, 5, T), edge(&B, &C, 7, 5, T), edge(&C, &A, 5, 5, T)];
+        let e = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
         {
             let mut m = TrackerStateManager::new(dir.path());
-            note(&mut m, &A, &B, 10, 1000);
-            note(&mut m, &B, &C, 7, 1001);
-            note(&mut m, &C, &A, 5, 1002);
-            note(&mut m, &A, &C, 3, 1003); // outside the cycle
+            note(&mut m, &A, &B, 10, base() + 1000);
+            note(&mut m, &B, &C, 7, base() + 1001);
+            note(&mut m, &C, &A, 5, base() + 1002);
+            note(&mut m, &A, &C, 3, base() + 1003); // outside the cycle
             // A set-off that fails to commit marks nothing (the marks are in its storage batch).
             m.storage.fail_exchange_commits.store(true, std::sync::atomic::Ordering::SeqCst);
-            assert!(matches!(m.set_off(&d, T, &e), Err(NoteError::StorageError(_))));
+            assert!(matches!(m.set_off(&d, &e), Err(NoteError::StorageError(_))));
             for (i, r) in cycle {
                 assert!(!m.is_bound_only(&pk(&i), &pk(&r), &d).unwrap());
             }
             m.storage.fail_exchange_commits.store(false, std::sync::atomic::Ordering::SeqCst);
-            m.set_off(&d, T, &e).unwrap();
+            m.set_off(&d, &e).unwrap();
             for (i, r) in cycle {
                 assert!(m.is_bound_only(&pk(&i), &pk(&r), &d).unwrap());
             }
@@ -3783,11 +3854,11 @@ mod setoff_tests {
             assert!(m.is_bound_only(&pk(&i), &pk(&r), &d).unwrap());
         }
         assert!(!m.is_bound_only(&pk(&A), &pk(&C), &d).unwrap());
-        // After the restart an ordinary note on a set-off edge is still refused (T ends in 998, so T + 1002 is an
+        // After the restart an ordinary note on a set-off edge is still refused (t ends in 998, so t + 1002 is an
         // ordinary millisecond), and the untouched edge still takes ordinary notes.
-        let ordinary = IouNote::create_and_sign(pk(&B), 8, T + 1002, &A, &NFT, DenomKey::Token(TOKEN)).unwrap();
+        let ordinary = IouNote::create_and_sign(pk(&B), 8, t + 1002, &A, &NFT, DenomKey::Token(TOKEN)).unwrap();
         assert!(matches!(m.add_note(&pk(&A), &ordinary, None), Err(NoteError::BoundNoteRequired)));
-        note(&mut m, &A, &C, 6, T + 1002);
+        note(&mut m, &A, &C, 6, t + 1002);
         assert_eq!((total(&m, &A, &B), total(&m, &A, &C)), (5, 6));
     }
 
@@ -3795,12 +3866,324 @@ mod setoff_tests {
     fn set_offs_use_their_own_residue() {
         // 999 belongs to transfers and 997 to bound notes: a set-off signed at either is refused.
         let mut m = triangle();
+        let t = ts0();
         let digest = m.get_state().avl_root_digest;
-        for ts in [T + 1, T - 1] {
+        for ts in [t + 1, t - 1] {
             let e = [edge(&A, &B, 10, 5, ts), edge(&B, &C, 7, 5, ts), edge(&C, &A, 5, 5, ts)];
-            assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), ts, &e), Err(NoteError::InvalidSetOff(_))), "ts {}", ts);
+            assert!(matches!(m.set_off(&DenomKey::Token(TOKEN), &e), Err(NoteError::InvalidSetOff(_))), "ts {}", ts);
         }
         unchanged(&m, &digest);
+    }
+
+    #[test]
+    fn a_moved_edge_is_re_signed_on_its_own_while_the_other_edges_keep_their_timestamp() {
+        // Everyone signs the cycle A->B->C->A, 5 each, at t. Before it is submitted, a new deal raises B->C from 7
+        // to 9 (after t). B->C's signatures are stale now (the edge is newer than t and its total moved), so the
+        // signed set-off is refused and changes nothing. Only B and C re-sign B->C, at a newer timestamp t2 and the
+        // new total 9 - 5 = 4; A->B and C->A keep the signatures they made at t, and the set-off applies.
+        let mut m = triangle();
+        let d = DenomKey::Token(TOKEN);
+        let t = ts0();
+        let signed = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
+        note(&mut m, &B, &C, 9, t + 500); // ends in 498 ms: an ordinary note
+        let digest = m.get_state().avl_root_digest;
+        assert!(matches!(m.set_off(&d, &signed), Err(NoteError::PastTimestamp)));
+        // Re-signed at t, B->C is still not newer than its stored note.
+        let r = m.set_off(&d, &[signed[0].clone(), edge(&B, &C, 9, 5, t), signed[2].clone()]);
+        assert!(matches!(r, Err(NoteError::PastTimestamp)), "{:?}", r);
+        // At the newer timestamp, signatures over the old new total (7 - 5 = 2) do not verify.
+        let t2 = t + 1000;
+        let r = m.set_off(&d, &[signed[0].clone(), edge(&B, &C, 7, 5, t2), signed[2].clone()]);
+        assert!(matches!(r, Err(NoteError::InvalidSignature)), "{:?}", r);
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &C), total(&m, &C, &A)), (10, 9, 5));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+
+        let all = [A, B, C];
+        let nets: Vec<i64> = all.iter().map(|w| net(&m, w, &all)).collect();
+        let r = m.set_off(&d, &[signed[0].clone(), edge(&B, &C, 9, 5, t2), signed[2].clone()]).unwrap();
+        assert_eq!(r.total_cleared, 15);
+        // The result reports every edge's new total and its own timestamp, in request order.
+        assert_eq!(
+            r.new_totals,
+            vec![
+                SetOffEdgeTotal { issuer_pubkey: pk(&A), recipient_pubkey: pk(&B), new_total: 5, timestamp: t },
+                SetOffEdgeTotal { issuer_pubkey: pk(&B), recipient_pubkey: pk(&C), new_total: 4, timestamp: t2 },
+                SetOffEdgeTotal { issuer_pubkey: pk(&C), recipient_pubkey: pk(&A), new_total: 0, timestamp: t },
+            ]
+        );
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &C), total(&m, &C, &A)), (5, 4, 0));
+        let after: Vec<i64> = all.iter().map(|w| net(&m, w, &all)).collect();
+        assert_eq!(nets, after);
+        // Each lowered note is stored at its own edge's timestamp with its issuer's signature, and is bound-only.
+        assert_eq!((stamp(&m, &A, &B), stamp(&m, &B, &C), stamp(&m, &C, &A)), (t, t2, t));
+        for (i, r) in [(A, B), (B, C), (C, A)] {
+            assert!(m.lookup_note(&pk(&i), &pk(&r), &d).unwrap().verify_signature(&pk(&i)).is_ok());
+            assert!(m.is_bound_only(&pk(&i), &pk(&r), &d).unwrap());
+        }
+        // The live tree is the canonical one.
+        let live = m.get_state().avl_root_digest;
+        m.rebuild_tree_canonically().unwrap();
+        m.update_state();
+        assert_eq!(m.get_state().avl_root_digest, live);
+    }
+
+    #[test]
+    fn no_two_edges_of_a_signed_triangle_can_be_assembled_into_a_set_off() {
+        // Every participant signed the cycle A->B->C->A (B->C at its own, later timestamp). Any two of its three
+        // edges leave a participant paying without being paid: the balance check refuses every pair, in either
+        // order, and nothing changes. Only the whole cycle applies.
+        let mut m = triangle();
+        let d = DenomKey::Token(TOKEN);
+        let t = ts0();
+        let full = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t + 1000), edge(&C, &A, 5, 5, t)];
+        let digest = m.get_state().avl_root_digest;
+        for (i, j) in [(0, 1), (1, 2), (0, 2), (1, 0), (2, 1), (2, 0)] {
+            match m.set_off(&d, &[full[i].clone(), full[j].clone()]) {
+                Err(NoteError::InvalidSetOff(msg)) => assert!(msg.contains("do not balance"), "edges {} and {}: {}", i, j, msg),
+                other => panic!("edges {} and {}: {:?}", i, j, other),
+            }
+        }
+        unchanged(&m, &digest);
+        m.set_off(&d, &full).unwrap();
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &C), total(&m, &C, &A)), (5, 2, 0));
+    }
+
+    #[test]
+    fn transfer_signatures_are_not_set_off_edges_and_set_off_signatures_are_not_a_transfer() {
+        // A owes B 100 and B owes A 30. In a transfer of 30 from A->B to A->C at T (999 ms), A and B sign
+        // M(A,B,70,T): exactly the pair a set-off lowering A->B by 30 at T needs. In a set-off lowering A->B and
+        // B->A by 30 at S (998 ms), A and B sign M(A,B,70,S): exactly a transfer's issuer_from and from_recipient
+        // signatures at S. The residues keep each kind out of the other operation.
+        let d = DenomKey::Token(TOKEN);
+        let fresh = || {
+            let mut m = TrackerStateManager::new_with_temp_storage();
+            note(&mut m, &A, &B, 100, base() + 1000);
+            note(&mut m, &B, &A, 30, base() + 1001);
+            m
+        };
+        let mut m = fresh();
+        let digest = m.get_state().avl_root_digest;
+        let is_unchanged = |m: &TrackerStateManager| {
+            (total(m, &A, &B), total(m, &B, &A)) == (100, 30)
+                && m.get_state().avl_root_digest == digest
+                && m.get_note_optional(&pk(&A), &pk(&C), &d).unwrap().is_none()
+        };
+        // The transfer's A->B signatures as a set-off edge, balanced by B->A signed at T as well or at 998 ms.
+        let t = base() + 2999;
+        let transfer = transfer_sigs(100, 0, 30, t);
+        let from_edge = SetOffEdge {
+            issuer_pubkey: pk(&A),
+            recipient_pubkey: pk(&B),
+            decrease: 30,
+            timestamp: t,
+            issuer_signature: transfer.issuer_from,
+            recipient_signature: transfer.from_recipient,
+        };
+        for back_ts in [t, base() + 2998] {
+            let r = m.set_off(&d, &[from_edge.clone(), edge(&B, &A, 30, 30, back_ts)]);
+            assert!(matches!(r, Err(NoteError::InvalidSetOff(_))), "{:?}", r);
+        }
+        assert!(is_unchanged(&m));
+        // The set-off's A->B signatures as a transfer's from-edge signatures, every other slot validly signed at S.
+        let s = base() + 3998;
+        let setoff = [edge(&A, &B, 100, 30, s), edge(&B, &A, 30, 30, s)];
+        let at_s = TransferSignatures {
+            issuer_from: setoff[0].issuer_signature,
+            from_recipient: setoff[0].recipient_signature,
+            ..transfer_sigs(100, 0, 30, s)
+        };
+        let r = m.transfer_debt(&pk(&A), &pk(&B), &pk(&C), &d, 30, s, &at_s, None, None);
+        assert!(matches!(r, Err(NoteError::InvalidTransfer(_))), "{:?}", r);
+        assert!(is_unchanged(&m));
+        // Both sets of signatures are genuine on their own routes.
+        m.set_off(&d, &setoff).unwrap();
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A)), (70, 0));
+        let mut other = fresh();
+        other.transfer_debt(&pk(&A), &pk(&B), &pk(&C), &d, 30, t, &transfer, None, None).unwrap();
+        assert_eq!((total(&other, &A, &B), total(&other, &A, &C)), (70, 30));
+    }
+
+    #[test]
+    fn a_set_off_issuer_signature_cannot_be_submitted_as_a_note() {
+        // A and B sign a set-off lowering A->B from 100 to 70 at S. Before it applies, a transfer at an earlier T
+        // lowers A->B to 40. A's set-off signature is a valid note message that would now RAISE A->B from 40 to
+        // 70 at a newer timestamp: its residue (998) keeps it out of POST /notes. The set-off itself no longer
+        // verifies (A->B would fall to 10, not to the signed 70).
+        let d = DenomKey::Token(TOKEN);
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        note(&mut m, &A, &B, 100, base() + 1000);
+        note(&mut m, &B, &A, 30, base() + 1001);
+        let s = base() + 3998;
+        let setoff = [edge(&A, &B, 100, 30, s), edge(&B, &A, 30, 30, s)];
+        let t = base() + 2999;
+        m.transfer_debt(&pk(&A), &pk(&B), &pk(&C), &d, 60, t, &transfer_sigs(100, 0, 60, t), None, None).unwrap();
+        assert_eq!(total(&m, &A, &B), 40);
+        let as_note = IouNote {
+            recipient_pubkey: pk(&B),
+            amount_collected: 70,
+            amount_redeemed: 0,
+            timestamp: s,
+            signature: setoff[0].issuer_signature,
+            tracker_nft_id: NFT,
+            denomination: d,
+        };
+        assert!(as_note.verify_signature(&pk(&A)).is_ok());
+        assert!(matches!(m.add_note(&pk(&A), &as_note, None), Err(NoteError::ReservedTimestamp)));
+        assert!(matches!(m.set_off(&d, &setoff), Err(NoteError::InvalidSignature)));
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A), total(&m, &A, &C)), (40, 30, 60));
+    }
+
+    #[test]
+    fn every_edge_needs_the_set_off_residue() {
+        // One edge at another operation's residue (999 transfer, 997 bound note, 996 and 995 reserved) or at an
+        // ordinary millisecond refuses the whole set-off, wherever it is and even when every other edge is at 998.
+        let mut m = triangle();
+        let d = DenomKey::Token(TOKEN);
+        let t = ts0();
+        let digest = m.get_state().avl_root_digest;
+        for wrong in [t + 1, t - 1, t - 2, t - 3, t + 2, t - 498] {
+            for position in 0..3 {
+                let mut stamps = [t, t, t];
+                stamps[position] = wrong;
+                let e = [edge(&A, &B, 10, 5, stamps[0]), edge(&B, &C, 7, 5, stamps[1]), edge(&C, &A, 5, 5, stamps[2])];
+                let r = m.set_off(&d, &e);
+                assert!(matches!(r, Err(NoteError::InvalidSetOff(_))), "{} at edge {}: {:?}", wrong, position, r);
+            }
+        }
+        unchanged(&m, &digest);
+    }
+
+    #[test]
+    fn every_edges_timestamp_must_be_inside_the_maximum_age_and_not_in_the_future() {
+        // The edges were noted two hours ago. Each edge's own timestamp is checked: one edge older than the
+        // maximum age, or in the future, refuses the set-off whichever edge it is.
+        let old = (now_ms() - 2 * NOVATION_MAX_AGE_MS) / 1000 * 1000;
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        note(&mut m, &A, &B, 10, old);
+        note(&mut m, &B, &A, 4, old + 1);
+        let d = DenomKey::Token(TOKEN);
+        let digest = m.get_state().avl_root_digest;
+        let fresh = at_residue(now_ms() - 60_000, 998);
+        let expired = at_residue(now_ms() - NOVATION_MAX_AGE_MS - 1_000, 998);
+        let future = at_residue(now_ms() + NOVATION_MAX_AGE_MS, 998);
+        for (ab, ba, expected) in [(expired, fresh, "expired"), (fresh, expired, "expired"), (fresh, future, "future"), (future, fresh, "future")] {
+            let r = m.set_off(&d, &[edge(&A, &B, 10, 4, ab), edge(&B, &A, 4, 4, ba)]);
+            match (expected, &r) {
+                ("expired", Err(NoteError::NovationExpired)) | ("future", Err(NoteError::FutureTimestamp)) => {}
+                _ => panic!("{} ({}, {}): {:?}", expected, ab, ba, r),
+            }
+        }
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A)), (10, 4));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // Just inside the maximum age, next to a fresh edge: the set-off applies, each edge at its own timestamp.
+        let inside = at_residue(now_ms() - NOVATION_MAX_AGE_MS + 10_000, 998);
+        let r = m.set_off(&d, &[edge(&A, &B, 10, 4, inside), edge(&B, &A, 4, 4, fresh)]).unwrap();
+        assert_eq!((r.new_totals[0].timestamp, r.new_totals[1].timestamp), (inside, fresh));
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A)), (6, 0));
+        assert_eq!((stamp(&m, &A, &B), stamp(&m, &B, &A)), (inside, fresh));
+    }
+
+    #[test]
+    fn a_staged_exchange_on_any_pair_refuses_the_set_off() {
+        // An ERG -> TOKEN exchange staged on one of the cycle's pairs (its ERG decrease applies, its TOKEN increase
+        // waits for a tracker box) blocks the TOKEN set-off with StagedExchange (it was InvalidSetOff): 409
+        // staged_exchange. The guard runs after the balance check and before any edge is read.
+        let token = DenomKey::Token(TOKEN);
+        for (issuer, creditor, token_before) in [(A, B, 10u64), (B, C, 7), (C, A, 5)] {
+            let mut m = triangle();
+            let t = ts0();
+            let (i, r) = (pk(&issuer), pk(&creditor));
+            m.add_note(&i, &IouNote::create_and_sign(r, 50, base() + 1003, &issuer, &NFT, DenomKey::Erg).unwrap(), None)
+                .unwrap();
+            let xts = base() + 1500;
+            let sig = |secret: &[u8; 32], denomination: &DenomKey, total: u64| {
+                let msg = crate::schnorr::signing_message(&i, &r, denomination, total, xts, &NFT);
+                crate::schnorr::schnorr_sign(&msg, secret, &pk(secret)).unwrap()
+            };
+            m.exchange_debt(
+                &i, &r, &DenomKey::Erg, 10, &token, 10, xts,
+                &sig(&issuer, &DenomKey::Erg, 40), &sig(&creditor, &DenomKey::Erg, 40),
+                &sig(&issuer, &token, token_before + 10), &sig(&creditor, &token, token_before + 10),
+                "reserve_box",
+            )
+            .unwrap();
+            assert_eq!(m.list_staged_exchanges().unwrap().len(), 1);
+            let digest = m.get_state().avl_root_digest;
+            let cycle = [edge(&A, &B, 10, 5, t), edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)];
+            let result = m.set_off(&token, &cycle);
+            assert!(matches!(result, Err(NoteError::StagedExchange(_))), "{:?}", result);
+            // Balance first: an unbalanced set-off is InvalidSetOff even with the exchange staged.
+            let result = m.set_off(&token, &cycle[..2]);
+            assert!(matches!(result, Err(NoteError::InvalidSetOff(_))), "{:?}", result);
+            // Before the edges are read: with an edge that does not exist it is still StagedExchange.
+            let back = [edge(&issuer, &creditor, token_before, 5, t), edge(&creditor, &issuer, 0, 5, t)];
+            let result = m.set_off(&token, &back);
+            assert!(matches!(result, Err(NoteError::StagedExchange(_))), "{:?}", result);
+            unchanged(&m, &digest);
+        }
+    }
+
+    #[test]
+    fn the_checks_run_in_the_documented_order() {
+        // Each set-off fails two checks; the earlier one (numbered as in set_off's documentation) decides.
+        let mut m = triangle();
+        let d = DenomKey::Token(TOKEN);
+        let t = ts0();
+        let digest = m.get_state().avl_root_digest;
+        let invalid_set_off = |r: Result<crate::SetOffResult, NoteError>| match r {
+            Err(NoteError::InvalidSetOff(msg)) => msg,
+            other => panic!("expected InvalidSetOff, got {:?}", other),
+        };
+        let future = at_residue(now_ms() + NOVATION_MAX_AGE_MS, 998);
+        let expired = at_residue(now_ms() - NOVATION_MAX_AGE_MS - 1_000, 998);
+        // 1 before 2: a single edge, at an ordinary millisecond.
+        assert!(invalid_set_off(m.set_off(&d, &[edge(&A, &B, 10, 5, t + 2)])).contains("at least two edges"));
+        // 2, for one edge: the residue before the time; an ordinary millisecond in the future.
+        let r = m.set_off(&d, &[edge(&A, &B, 10, 5, t), edge(&B, &A, 0, 5, future + 2)]);
+        assert!(invalid_set_off(r).contains("998 ms"));
+        // 2 before 3: an expired edge next to a self-edge.
+        let r = m.set_off(&d, &[edge(&A, &A, 10, 5, t), edge(&B, &C, 7, 5, expired)]);
+        assert!(matches!(r, Err(NoteError::NovationExpired)), "{:?}", r);
+        // 2 before 4: an edge in the future, unbalanced.
+        let r = m.set_off(&d, &[edge(&A, &B, 10, 5, future), edge(&B, &C, 7, 4, t)]);
+        assert!(matches!(r, Err(NoteError::FutureTimestamp)), "{:?}", r);
+        // 3 before 4: a repeated edge, unbalanced.
+        assert!(invalid_set_off(m.set_off(&d, &[edge(&A, &B, 10, 5, t), edge(&A, &B, 10, 4, t)])).contains("more than once"));
+        // 4 before 6: unbalanced, with an edge that does not exist.
+        assert!(invalid_set_off(m.set_off(&d, &[edge(&A, &D, 10, 5, t), edge(&B, &C, 7, 5, t)])).contains("do not balance"));
+        // 6 runs edge by edge: the first edge's signature is checked before the second edge is read.
+        let mut bad_first = edge(&A, &B, 10, 5, t);
+        bad_first.issuer_signature = [0u8; 65];
+        let r = m.set_off(&d, &[bad_first, edge(&B, &A, 0, 5, t)]);
+        assert!(matches!(r, Err(NoteError::InvalidSignature)), "{:?}", r);
+        // 6, for one edge: the amounts before the time; a decrease above the total at a timestamp older than the edge.
+        let early = base() + 998;
+        let r = m.set_off(&d, &[edge(&A, &B, 10, 11, early), edge(&B, &A, 0, 11, early)]);
+        assert!(invalid_set_off(r).contains("exceeds"));
+        // 6, for one edge: the time before the signatures.
+        let mut bad_early = edge(&A, &B, 10, 5, early);
+        bad_early.recipient_signature = [0u8; 65];
+        let r = m.set_off(&d, &[bad_early, edge(&B, &C, 7, 5, t), edge(&C, &A, 5, 5, t)]);
+        assert!(matches!(r, Err(NoteError::PastTimestamp)), "{:?}", r);
+        unchanged(&m, &digest);
+    }
+
+    #[test]
+    fn the_edges_must_share_one_tracker_nft_and_it_is_checked_before_their_signatures() {
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        let d = DenomKey::Token(TOKEN);
+        let t = ts0();
+        note(&mut m, &A, &B, 10, base() + 1000);
+        // B -> A is bound to another tracker NFT (stored directly; POST /notes would refuse it).
+        let foreign = IouNote::create_and_sign(pk(&A), 10, base() + 1001, &B, &OTHER_NFT, d).unwrap();
+        m.add_note(&pk(&B), &foreign, None).unwrap();
+        let digest = m.get_state().avl_root_digest;
+        let mut back = edge(&B, &A, 10, 4, t);
+        back.recipient_signature = [0u8; 65];
+        let r = m.set_off(&d, &[edge(&A, &B, 10, 4, t), back]);
+        assert!(matches!(r, Err(NoteError::TrackerIdMismatch)), "{:?}", r);
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A)), (10, 10));
+        assert_eq!(m.get_state().avl_root_digest, digest);
     }
 }
 

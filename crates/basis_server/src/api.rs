@@ -315,6 +315,89 @@ fn transfer_error_response(e: NoteError) -> (StatusCode, Option<&'static str>, S
     }
 }
 
+/// POST /notes/setoff message for a store error the set-off path never
+/// produces. Fixed, so no internal state reaches the response.
+const SETOFF_UNEXPECTED_ERROR_MESSAGE: &str =
+    "the set-off failed with an unexpected tracker error; nothing was changed";
+
+/// HTTP status, machine-readable `code` and message of a POST /notes/setoff
+/// refusal (see `TrackerStateManager::set_off` for the order of the checks).
+/// Exhaustive, so a new store error needs a decision here; errors the set-off
+/// path does not produce answer 500 with a fixed message and never a Debug
+/// rendering.
+fn setoff_error_response(e: NoteError) -> (StatusCode, Option<&'static str>, String) {
+    match e {
+        NoteError::InvalidSetOff(msg) => (
+            StatusCode::BAD_REQUEST,
+            Some("invalid_setoff"),
+            format!("Invalid set-off: {}", msg),
+        ),
+        NoteError::InvalidSignature => (
+            StatusCode::BAD_REQUEST,
+            Some("invalid_signature"),
+            "Invalid signature".to_string(),
+        ),
+        NoteError::PastTimestamp => (
+            StatusCode::BAD_REQUEST,
+            Some("past_timestamp"),
+            "every edge's timestamp must be newer than that edge's current timestamp".to_string(),
+        ),
+        NoteError::FutureTimestamp => (
+            StatusCode::BAD_REQUEST,
+            Some("future_timestamp"),
+            "timestamp is in the future".to_string(),
+        ),
+        NoteError::NovationExpired => (
+            StatusCode::BAD_REQUEST,
+            Some("novation_expired"),
+            NOVATION_EXPIRED_MESSAGE.to_string(),
+        ),
+        NoteError::NotFound => (
+            StatusCode::NOT_FOUND,
+            Some("not_found"),
+            "one of the edges does not exist in this denomination".to_string(),
+        ),
+        NoteError::TrackerIdMismatch => (
+            StatusCode::CONFLICT,
+            Some("tracker_id_mismatch"),
+            "the edges are bound to different tracker NFTs".to_string(),
+        ),
+        NoteError::StagedExchange(msg) => (StatusCode::CONFLICT, Some("staged_exchange"), msg),
+        NoteError::OnchainScope(msg) => (StatusCode::CONFLICT, Some("onchain_scope"), msg),
+        NoteError::StorageError(msg) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some("storage_error"),
+            format!("Storage error: {}", msg),
+        ),
+        unexpected @ (NoteError::AmountOverflow
+        | NoteError::DebtDecreaseNotPermitted { .. }
+        | NoteError::AmountExceedsContractRange { .. }
+        | NoteError::NoteNotConfirmed
+        | NoteError::InvalidExchange(_)
+        | NoteError::InvalidTransfer(_)
+        | NoteError::ReservedTimestamp
+        | NoteError::BoundNoteRequired
+        | NoteError::InvalidPriorSignature
+        | NoteError::StalePrior
+        | NoteError::NotAnIncrease
+        | NoteError::InvalidRequest(_)
+        | NoteError::AcceptancePolicy(_)
+        | NoteError::StaleCommittedDebt { .. }
+        | NoteError::RedemptionTooEarly
+        | NoteError::InsufficientCollateral
+        | NoteError::UnsupportedOperation) => {
+            // Store errors carry no signatures, so the log may name the variant;
+            // the response does not.
+            tracing::error!("Set-off failed with an unexpected store error: {:?}", unexpected);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                None,
+                SETOFF_UNEXPECTED_ERROR_MESSAGE.to_string(),
+            )
+        }
+    }
+}
+
 // Create a new IOU note
 #[axum::debug_handler]
 pub async fn create_note(
@@ -1188,8 +1271,11 @@ pub async fn transfer_notes(
     }
 }
 
-/// `POST /notes/setoff`: multilateral set-off (obligation clearing). See
-/// [`SetOffRequest`]. Net-neutral for every participant; pure-credit edges only.
+/// `POST /notes/setoff`: multilateral set-off (obligation clearing), version 3
+/// with per-edge timestamps. See [`SetOffRequest`]. Net-neutral for every
+/// participant; pure-credit edges only. Refusals carry a machine-readable
+/// `code` (see `setoff_error_response`), except the request-format ones (400,
+/// as before).
 pub async fn setoff_notes(
     State(state): State<AppState>,
     Json(payload): Json<SetOffRequest>,
@@ -1205,10 +1291,18 @@ pub async fn setoff_notes(
         Err(msg) => return bad_request(format!("invalid denomination: {}", msg)),
     };
     if payload.edges.len() > basis_store::MAX_SETOFF_EDGES {
-        return bad_request(format!(
-            "a set-off lowers at most {} edges",
-            basis_store::MAX_SETOFF_EDGES
-        ));
+        // The store's own size rule (code invalid_setoff), checked before
+        // anything is decoded; the message is unchanged.
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response_with_code(
+                format!(
+                    "a set-off lowers at most {} edges",
+                    basis_store::MAX_SETOFF_EDGES
+                ),
+                "invalid_setoff",
+            )),
+        );
     }
     let decode_sig = |name: &str, hex_str: &str| -> Result<Signature, String> {
         let bytes = hex::decode(hex_str).map_err(|_| format!("{} must be hex-encoded", name))?;
@@ -1238,6 +1332,8 @@ pub async fn setoff_notes(
             issuer_pubkey,
             recipient_pubkey,
             decrease: e.decrease,
+            // Per-edge timestamps: the edge's own, else the request's.
+            timestamp: e.timestamp.unwrap_or(payload.timestamp),
             issuer_signature,
             recipient_signature,
         });
@@ -1248,7 +1344,6 @@ pub async fn setoff_notes(
         .tx
         .send(TrackerCommand::SetOff {
             denomination,
-            timestamp: payload.timestamp,
             edges,
             response_tx,
         })
@@ -1264,14 +1359,14 @@ pub async fn setoff_notes(
     }
     match response_rx.await {
         Ok(Ok(result)) => {
-            for (issuer, recipient, total) in &result.new_totals {
+            for edge in &result.new_totals {
                 let event = TrackerEvent {
                     id: 0,
                     event_type: crate::models::EventType::NoteUpdated,
-                    timestamp: payload.timestamp,
-                    issuer_pubkey: Some(hex::encode(issuer)),
-                    recipient_pubkey: Some(hex::encode(recipient)),
-                    amount: Some(*total),
+                    timestamp: edge.timestamp,
+                    issuer_pubkey: Some(hex::encode(edge.issuer_pubkey)),
+                    recipient_pubkey: Some(hex::encode(edge.recipient_pubkey)),
+                    amount: Some(edge.new_total),
                     reserve_box_id: None,
                     collateral_amount: None,
                     redeemed_amount: None,
@@ -1291,31 +1386,23 @@ pub async fn setoff_notes(
                     edges: result
                         .new_totals
                         .iter()
-                        .map(|(i, r, t)| SetOffEdgeResult {
-                            issuer_pubkey: hex::encode(i),
-                            recipient_pubkey: hex::encode(r),
-                            new_total: *t,
+                        .map(|edge| SetOffEdgeResult {
+                            issuer_pubkey: hex::encode(edge.issuer_pubkey),
+                            recipient_pubkey: hex::encode(edge.recipient_pubkey),
+                            new_total: edge.new_total,
+                            timestamp: edge.timestamp,
                         })
                         .collect(),
                 })),
             )
         }
         Ok(Err(e)) => {
-            let (status, message) = match e {
-                NoteError::InvalidSetOff(msg) => (StatusCode::BAD_REQUEST, format!("Invalid set-off: {}", msg)),
-                NoteError::NotFound => (
-                    StatusCode::NOT_FOUND,
-                    "one of the edges does not exist in this denomination".to_string(),
-                ),
-                NoteError::InvalidSignature => (StatusCode::BAD_REQUEST, "Invalid signature".to_string()),
-                NoteError::PastTimestamp => (
-                    StatusCode::BAD_REQUEST,
-                    "timestamp must be newer than every edge's current timestamp".to_string(),
-                ),
-                NoteError::FutureTimestamp => (StatusCode::BAD_REQUEST, "timestamp is in the future".to_string()),
-                other => (StatusCode::BAD_REQUEST, format!("Set-off rejected: {:?}", other)),
+            let (status, code, message) = setoff_error_response(e);
+            let body = match code {
+                Some(code) => crate::models::error_response_with_code(message, code),
+                None => crate::models::error_response(message),
             };
-            (status, Json(crate::models::error_response(message)))
+            (status, Json(body))
         }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6557,6 +6644,67 @@ mod transfer_error_mapping_tests {
             assert_eq!((status, code), (StatusCode::INTERNAL_SERVER_ERROR, None), "{}", label);
             assert_eq!(message, TRANSFER_UNEXPECTED_ERROR_MESSAGE, "{}", label);
             assert!(!message.contains("detail") && !message.contains("Transfer rejected"), "{}", label);
+        }
+    }
+}
+
+#[cfg(test)]
+mod setoff_error_mapping_tests {
+    use super::{setoff_error_response, SETOFF_UNEXPECTED_ERROR_MESSAGE};
+    use axum::http::StatusCode;
+    use basis_store::NoteError;
+
+    /// Every store error has an explicit POST /notes/setoff status and code; the ones the set-off path does not
+    /// produce answer 500 with one fixed message, never a Debug rendering of the error (the old catch-all was
+    /// `400 "Set-off rejected: {:?}"`).
+    #[test]
+    fn every_store_error_maps_to_a_status_code_and_message() {
+        let mapped: Vec<(NoteError, StatusCode, Option<&str>, &str)> = vec![
+            (NoteError::InvalidSetOff("x".into()), StatusCode::BAD_REQUEST, Some("invalid_setoff"), "Invalid set-off: x"),
+            (NoteError::InvalidSignature, StatusCode::BAD_REQUEST, Some("invalid_signature"), "Invalid signature"),
+            (
+                NoteError::PastTimestamp,
+                StatusCode::BAD_REQUEST,
+                Some("past_timestamp"),
+                "every edge's timestamp must be newer than that edge's current timestamp",
+            ),
+            (NoteError::FutureTimestamp, StatusCode::BAD_REQUEST, Some("future_timestamp"), "timestamp is in the future"),
+            (NoteError::NovationExpired, StatusCode::BAD_REQUEST, Some("novation_expired"), "the novation's timestamp is older than the maximum novation age"),
+            (NoteError::NotFound, StatusCode::NOT_FOUND, Some("not_found"), "one of the edges does not exist in this denomination"),
+            (NoteError::TrackerIdMismatch, StatusCode::CONFLICT, Some("tracker_id_mismatch"), "the edges are bound to different tracker NFTs"),
+            (NoteError::StagedExchange("staged".into()), StatusCode::CONFLICT, Some("staged_exchange"), "staged"),
+            (NoteError::OnchainScope("on-chain".into()), StatusCode::CONFLICT, Some("onchain_scope"), "on-chain"),
+            (NoteError::StorageError("disk".into()), StatusCode::INTERNAL_SERVER_ERROR, Some("storage_error"), "Storage error: disk"),
+        ];
+        for (error, status, code, message) in mapped {
+            let label = format!("{:?}", error);
+            assert_eq!(setoff_error_response(error), (status, code, message.to_string()), "{}", label);
+        }
+        let unexpected = vec![
+            NoteError::AmountOverflow,
+            NoteError::DebtDecreaseNotPermitted { previous: 2, requested: 1 },
+            NoteError::AmountExceedsContractRange { field: "detail", value: 7 },
+            NoteError::NoteNotConfirmed,
+            NoteError::InvalidExchange("detail".into()),
+            NoteError::InvalidTransfer("detail".into()),
+            NoteError::ReservedTimestamp,
+            NoteError::BoundNoteRequired,
+            NoteError::InvalidPriorSignature,
+            NoteError::StalePrior,
+            NoteError::NotAnIncrease,
+            NoteError::InvalidRequest("detail".into()),
+            NoteError::AcceptancePolicy("detail".into()),
+            NoteError::StaleCommittedDebt { committed: 2, local: 1 },
+            NoteError::RedemptionTooEarly,
+            NoteError::InsufficientCollateral,
+            NoteError::UnsupportedOperation,
+        ];
+        for error in unexpected {
+            let label = format!("{:?}", error);
+            let (status, code, message) = setoff_error_response(error);
+            assert_eq!((status, code), (StatusCode::INTERNAL_SERVER_ERROR, None), "{}", label);
+            assert_eq!(message, SETOFF_UNEXPECTED_ERROR_MESSAGE, "{}", label);
+            assert!(!message.contains("detail") && !message.contains("Set-off rejected"), "{}", label);
         }
     }
 }

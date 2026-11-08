@@ -432,11 +432,10 @@ async fn main() {
                 }
                 TrackerCommand::SetOff {
                     denomination,
-                    timestamp,
                     edges,
                     response_tx,
                 } => {
-                    let result = redemption_manager.tracker.set_off(&denomination, timestamp, &edges);
+                    let result = redemption_manager.tracker.set_off(&denomination, &edges);
                     if result.is_ok() {
                         let current_root = redemption_manager.tracker.get_state().avl_root_digest;
                         shared_state_for_tracker.set_avl_root_digest(current_root);
