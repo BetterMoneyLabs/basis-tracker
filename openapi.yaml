@@ -185,16 +185,25 @@ paths:
         Moves `amount` of the issuer's cumulative debt from the edge
         (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
         denomination, atomically: the old creditor is paid by the transfer and the
-        new creditor is owed by the issuer instead. Five signatures, each over the
-        standard 80-byte note message at the edge's NEW total and `timestamp`: the
-        issuer over both edges, the old creditor over both edges (consent to the
-        decrease, bound to this destination and amount), and the new creditor over
-        the raised edge (acceptance). The timestamp must end in 999 ms (the
-        novation timestamp domain, refused by POST /notes), so the issuer's
-        signature on the raised edge cannot be submitted on its own. Refused when
-        the lowered edge has a committed or pending on-chain total (the two-phase
-        path is not implemented yet). The new creditor's acceptance policy is
-        evaluated against the pre-mutation state, atomically with the mutation.
+        new creditor is owed by the issuer instead. Version 3: seven signatures,
+        each over the standard 80-byte note message at `timestamp`. With A the
+        issuer, B the old creditor, C the new creditor, a the amount, X the stored
+        A->B total and Y the stored A->C total (0 for a new edge): A signs
+        M(A,B,X-a) and M(A,C,Y+a); B signs M(A,B,X) (its prior acknowledgment),
+        M(A,B,X-a) (consent to the decrease) and M(A,C,Y+a) (bound to this
+        destination); C signs M(A,C,Y) (its prior acknowledgment) and M(A,C,Y+a)
+        (acceptance). The prior acknowledgments make the amount exact: the
+        transfer applies only while both edges are still at the acknowledged
+        totals, so two attempts of the same payment exclude each other. The
+        timestamp must end in 999 ms (the transfer residue, refused by POST
+        /notes), so the issuer's signature on the raised edge cannot be submitted
+        on its own; it must be newer than both edges and at most one hour old
+        (novation_expired). Refused when the lowered edge has a committed or
+        pending on-chain total (the two-phase path is not implemented yet). The
+        new creditor's acceptance policy is evaluated after every other check,
+        against the pre-mutation state, atomically with the mutation. Both edges
+        become bound-only. Unknown request fields are refused. Store refusals
+        carry a machine-readable `code`.
       operationId: transferNotes
       tags:
         - Notes
@@ -212,25 +221,48 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseTransferNotes'
         '400':
-          description: Invalid request, invalid or missing signature, timestamp not newer or not a novation timestamp, amount above the old edge, or an edge with on-chain state
+          description: >-
+            invalid_transfer (malformed: equal creditors, zero amount, not the
+            transfer residue, more than the issuer owes the old creditor, below the
+            redeemed amount, or a total out of the contract's range),
+            invalid_signature (any of the seven), past_timestamp (not newer than
+            both edges), future_timestamp, novation_expired (older than one hour);
+            a malformed key, signature or denomination is refused without a code
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
         '403':
-          description: Rejected by the new creditor's acceptance policy
+          description: Rejected by the new creditor's acceptance policy (no code)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
         '404':
-          description: The issuer has no note to the old creditor in this denomination
+          description: not_found, the issuer has no note to the old creditor in this denomination
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
+        '409':
+          description: >-
+            stale_prior (from_prior_total or to_prior_total is not the edge's
+            current total), tracker_id_mismatch (the edges are bound to different
+            tracker NFTs), staged_exchange (an exchange is staged on one of the
+            pairs), onchain_scope (the lowered edge has a committed or pending
+            on-chain total)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '422':
+          description: The body does not match the request schema (an unknown field, or a missing required one)
+          content:
+            text/plain:
+              schema:
+                type: string
         '500':
-          description: Internal server error
+          description: storage_error, or an unexpected tracker error (a fixed message, no code)
           content:
             application/json:
               schema:
@@ -1602,20 +1634,26 @@ components:
 
     TransferNotesRequest:
       type: object
+      additionalProperties: false
       description: >-
-        Debt transfer request. All five signatures are over the respective edge's
+        Debt transfer request (version 3). All seven signatures are over the
         standard 80-byte note message (debtKey | totalDebt | timestamp |
-        trackerNftId) at the NEW cumulative total and timestamp.
+        trackerNftId) at the timestamp: five at an edge's NEW cumulative total,
+        and the two creditors' prior acknowledgments at their edge's CURRENT
+        total. Unknown fields are refused.
       required:
         - issuer_pubkey
         - from_recipient_pubkey
         - to_recipient_pubkey
+        - denomination
         - amount
         - timestamp
         - issuer_from_signature
+        - from_recipient_prior_signature
         - from_recipient_signature
         - from_recipient_to_signature
         - issuer_to_signature
+        - to_recipient_prior_signature
         - to_recipient_signature
       properties:
         issuer_pubkey:
@@ -1632,7 +1670,7 @@ components:
           pattern: '^[0-9a-fA-F]{66}$'
         denomination:
           type: string
-          description: '"erg" or "token:<64-hex>"; empty means the default'
+          description: '"erg" or "token:<64-hex>", a denomination this tracker serves; there is no default'
         amount:
           type: integer
           format: uint64
@@ -1640,10 +1678,13 @@ components:
         timestamp:
           type: integer
           format: uint64
-          description: New timestamp for both edges (ms); must end in 999 and be newer than both edges
+          description: New timestamp for both edges (ms); must end in 999, be newer than both edges and be at most one hour old
         issuer_from_signature:
           type: string
           description: Issuer over the lowered edge's new note message (hex, 65 bytes)
+        from_recipient_prior_signature:
+          type: string
+          description: Old creditor over the lowered edge's note message at its CURRENT total (prior acknowledgment; hex, 65 bytes)
         from_recipient_signature:
           type: string
           description: Old creditor over the lowered edge's new note message (consent)
@@ -1653,9 +1694,22 @@ components:
         issuer_to_signature:
           type: string
           description: Issuer over the raised edge's new note message (hex, 65 bytes)
+        to_recipient_prior_signature:
+          type: string
+          description: New creditor over the raised edge's note message at its CURRENT total, 0 for a new edge (prior acknowledgment; hex, 65 bytes)
         to_recipient_signature:
           type: string
           description: New creditor over the raised edge's new note message (acceptance)
+        from_prior_total:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Optional and diagnostic; when present it must equal the lowered edge's current total (409 stale_prior)
+        to_prior_total:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Optional and diagnostic; when present it must equal the raised edge's current total, 0 for a new edge (409 stale_prior)
     TransferNotesResponse:
       type: object
       properties:
@@ -1673,6 +1727,14 @@ components:
         timestamp:
           type: integer
           format: uint64
+        from_prior_total:
+          type: integer
+          format: uint64
+          description: The lowered edge's total before the transfer (the old creditor's acknowledged prior)
+        to_prior_total:
+          type: integer
+          format: uint64
+          description: The raised edge's total before the transfer, 0 for a new edge (the new creditor's acknowledged prior)
     ApiResponseTransferNotes:
       type: object
       properties:
@@ -1875,8 +1937,9 @@ components:
             code:
               type: string
               description: >-
-                Machine-readable error code, present on POST /notes refusals that
-                have one (see that operation); omitted otherwise
+                Machine-readable error code, present on POST /notes and POST
+                /notes/transfer refusals that have one (see those operations);
+                omitted otherwise
               example: "invalid_signature"
 
     ApiResponseString:

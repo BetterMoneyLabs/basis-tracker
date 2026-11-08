@@ -140,12 +140,13 @@ pub enum TrackerCommand {
         acceptance_check: Option<ExchangeAcceptanceCheck>,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
     },
-    /// Debt transfer (triad novation, specs/spec.md "Debt Transfer"): move
-    /// `amount` of the issuer's debt from the edge to `from_recipient` to the
-    /// edge to `to_recipient`, in one denomination. Pure-credit trackers only
-    /// (the store refuses on a tracker with on-chain state). The store
-    /// re-verifies all four signatures; `acceptance_check` (the new creditor's
-    /// policy) runs atomically with the mutation, as for exchanges.
+    /// Debt transfer (triad novation, specs/spec.md "Debt Transfer"), version 3:
+    /// move `amount` of the issuer's debt from the edge to `from_recipient` to
+    /// the edge to `to_recipient`, in one denomination. Pure-credit trackers
+    /// only (the store refuses on a tracker with on-chain state). The store
+    /// verifies all seven signatures, including both creditors' prior
+    /// acknowledgments, before mutating; `acceptance_check` (the new creditor's
+    /// policy) runs after them, atomically with the mutation, as for exchanges.
     TransferNotes {
         issuer_pubkey: basis_store::PubKey,
         from_recipient_pubkey: basis_store::PubKey,
@@ -153,11 +154,13 @@ pub enum TrackerCommand {
         denomination: basis_store::DenomKey,
         amount: u64,
         timestamp: u64,
-        issuer_from_signature: basis_store::Signature,
-        from_recipient_signature: basis_store::Signature,
-        from_recipient_to_signature: basis_store::Signature,
-        issuer_to_signature: basis_store::Signature,
-        to_recipient_signature: basis_store::Signature,
+        signatures: basis_store::TransferSignatures,
+        /// Optional and diagnostic: the from-edge total the old creditor
+        /// acknowledged; when present it must equal the stored total.
+        from_prior_total: Option<u64>,
+        /// Optional and diagnostic: the to-edge total the new creditor
+        /// acknowledged (0 for a new edge); when present it must equal the stored total.
+        to_prior_total: Option<u64>,
         acceptance_check: Option<ExchangeAcceptanceCheck>,
         response_tx: tokio::sync::oneshot::Sender<
             Result<basis_store::TransferTotals, basis_store::NoteError>,

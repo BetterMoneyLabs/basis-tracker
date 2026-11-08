@@ -206,8 +206,112 @@ fn create_note_error_status(e: &NoteError) -> (StatusCode, Option<&'static str>)
         | NoteError::StaleCommittedDebt { .. }
         | NoteError::RedemptionTooEarly
         | NoteError::InsufficientCollateral
+        | NoteError::StagedExchange(_)
         | NoteError::StorageError(_)
         | NoteError::UnsupportedOperation => (StatusCode::BAD_REQUEST, None),
+    }
+}
+
+/// POST /notes/transfer message for a store error the transfer path never
+/// produces. Fixed, so no internal state reaches the response.
+const TRANSFER_UNEXPECTED_ERROR_MESSAGE: &str =
+    "the transfer failed with an unexpected tracker error; nothing was changed";
+
+/// HTTP status, machine-readable `code` and message of a POST /notes/transfer
+/// refusal (see `TrackerStateManager::transfer_debt` for the order of the
+/// checks). Exhaustive, so a new store error needs a decision here; errors the
+/// transfer path does not produce answer 500 with a fixed message and never a
+/// Debug rendering.
+fn transfer_error_response(e: NoteError) -> (StatusCode, Option<&'static str>, String) {
+    match e {
+        NoteError::InvalidTransfer(msg) => (
+            StatusCode::BAD_REQUEST,
+            Some("invalid_transfer"),
+            format!("Invalid transfer: {}", msg),
+        ),
+        // Arithmetic and contract-range refusals are malformed transfers too.
+        NoteError::AmountOverflow => (
+            StatusCode::BAD_REQUEST,
+            Some("invalid_transfer"),
+            "Invalid transfer: the new to-edge total overflows".to_string(),
+        ),
+        NoteError::AmountExceedsContractRange { field, value } => (
+            StatusCode::BAD_REQUEST,
+            Some("invalid_transfer"),
+            format!(
+                "Invalid transfer: {} exceeds the range the on-chain contract can represent: {}",
+                field, value
+            ),
+        ),
+        NoteError::InvalidSignature => (
+            StatusCode::BAD_REQUEST,
+            Some("invalid_signature"),
+            "Invalid signature".to_string(),
+        ),
+        NoteError::InvalidPriorSignature => (
+            StatusCode::BAD_REQUEST,
+            Some("invalid_prior_signature"),
+            "a prior acknowledgment is not the creditor's signature over its edge's current total".to_string(),
+        ),
+        NoteError::StalePrior => (
+            StatusCode::CONFLICT,
+            Some("stale_prior"),
+            "from_prior_total or to_prior_total is not the edge's current total".to_string(),
+        ),
+        NoteError::PastTimestamp => (
+            StatusCode::BAD_REQUEST,
+            Some("past_timestamp"),
+            "timestamp must be newer than both edges' current timestamps".to_string(),
+        ),
+        NoteError::FutureTimestamp => (
+            StatusCode::BAD_REQUEST,
+            Some("future_timestamp"),
+            "timestamp is in the future".to_string(),
+        ),
+        NoteError::NovationExpired => (
+            StatusCode::BAD_REQUEST,
+            Some("novation_expired"),
+            NOVATION_EXPIRED_MESSAGE.to_string(),
+        ),
+        NoteError::NotFound => (
+            StatusCode::NOT_FOUND,
+            Some("not_found"),
+            "the issuer has no note to the old creditor in this denomination".to_string(),
+        ),
+        NoteError::TrackerIdMismatch => (
+            StatusCode::CONFLICT,
+            Some("tracker_id_mismatch"),
+            "the two edges are bound to different tracker NFTs".to_string(),
+        ),
+        NoteError::StagedExchange(msg) => (StatusCode::CONFLICT, Some("staged_exchange"), msg),
+        NoteError::OnchainScope(msg) => (StatusCode::CONFLICT, Some("onchain_scope"), msg),
+        NoteError::AcceptancePolicy(msg) => (StatusCode::FORBIDDEN, None, msg),
+        NoteError::StorageError(msg) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some("storage_error"),
+            format!("Storage error: {}", msg),
+        ),
+        unexpected @ (NoteError::DebtDecreaseNotPermitted { .. }
+        | NoteError::NoteNotConfirmed
+        | NoteError::InvalidExchange(_)
+        | NoteError::InvalidSetOff(_)
+        | NoteError::ReservedTimestamp
+        | NoteError::BoundNoteRequired
+        | NoteError::NotAnIncrease
+        | NoteError::InvalidRequest(_)
+        | NoteError::StaleCommittedDebt { .. }
+        | NoteError::RedemptionTooEarly
+        | NoteError::InsufficientCollateral
+        | NoteError::UnsupportedOperation) => {
+            // Store errors carry no signatures, so the log may name the variant;
+            // the response does not.
+            tracing::error!("Transfer failed with an unexpected store error: {:?}", unexpected);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                None,
+                TRANSFER_UNEXPECTED_ERROR_MESSAGE.to_string(),
+            )
+        }
     }
 }
 
@@ -516,6 +620,7 @@ pub async fn create_note(
                 NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
                 NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
                 NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
+                NoteError::StagedExchange(msg) => format!("Staged exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -869,8 +974,11 @@ pub async fn exchange_notes(
     }
 }
 
-/// `POST /notes/transfer`: debt transfer (triad novation). See
-/// [`TransferNotesRequest`]. Pure-credit trackers only.
+/// `POST /notes/transfer`: debt transfer (triad novation), version 3 with seven
+/// signatures. See [`TransferNotesRequest`]. Pure-credit trackers only.
+/// Refusals carry a machine-readable `code` (see `transfer_error_response`),
+/// except the request-format ones (400, as before) and the new creditor's
+/// acceptance policy (403).
 pub async fn transfer_notes(
     State(state): State<AppState>,
     Json(payload): Json<TransferNotesRequest>,
@@ -928,12 +1036,36 @@ pub async fn transfer_notes(
             Ok(s) => s,
             Err(msg) => return bad_request(msg),
         };
+    let from_recipient_prior_signature = match decode_sig(
+        "from_recipient_prior_signature",
+        &payload.from_recipient_prior_signature,
+    ) {
+        Ok(s) => s,
+        Err(msg) => return bad_request(msg),
+    };
+    let to_recipient_prior_signature = match decode_sig(
+        "to_recipient_prior_signature",
+        &payload.to_recipient_prior_signature,
+    ) {
+        Ok(s) => s,
+        Err(msg) => return bad_request(msg),
+    };
+    let signatures = basis_store::TransferSignatures {
+        issuer_from: issuer_from_signature,
+        issuer_to: issuer_to_signature,
+        from_recipient_prior: from_recipient_prior_signature,
+        from_recipient: from_recipient_signature,
+        from_recipient_to: from_recipient_to_signature,
+        to_recipient_prior: to_recipient_prior_signature,
+        to_recipient: to_recipient_signature,
+    };
 
     // The NEW creditor's acceptance policy, evaluated inside the tracker
-    // thread against the pre-mutation state, atomically with the mutation
-    // (finding #8). The issuer's gross debt is counted with the to-edge raised
-    // and the from-edge NOT lowered, which overstates it by `amount`: a
-    // collateralization predicate can only be stricter here, never looser.
+    // thread against the pre-mutation state, after every other check and
+    // atomically with the mutation (finding #8). The issuer's gross debt is
+    // counted with the to-edge raised and the from-edge NOT lowered, which
+    // overstates it by `amount`: a collateralization predicate can only be
+    // stricter here, never looser.
     let amount = payload.amount;
     let acceptance_check = match &state.acceptance_predicate {
         Some(predicate) => {
@@ -988,11 +1120,9 @@ pub async fn transfer_notes(
             denomination,
             amount,
             timestamp: payload.timestamp,
-            issuer_from_signature,
-            from_recipient_signature,
-            from_recipient_to_signature,
-            issuer_to_signature,
-            to_recipient_signature,
+            signatures,
+            from_prior_total: payload.from_prior_total,
+            to_prior_total: payload.to_prior_total,
             acceptance_check,
             response_tx,
         })
@@ -1036,26 +1166,18 @@ pub async fn transfer_notes(
                 from_new_total: totals.from_new_total,
                 to_new_total: totals.to_new_total,
                 timestamp: payload.timestamp,
+                from_prior_total: totals.from_prior_total,
+                to_prior_total: totals.to_prior_total,
             })),
             )
         }
         Ok(Err(e)) => {
-            let (status, message) = match e {
-                NoteError::InvalidTransfer(msg) => (StatusCode::BAD_REQUEST, format!("Invalid transfer: {}", msg)),
-                NoteError::AcceptancePolicy(msg) => (StatusCode::FORBIDDEN, msg),
-                NoteError::NotFound => (
-                    StatusCode::NOT_FOUND,
-                    "the issuer has no note to the old creditor in this denomination".to_string(),
-                ),
-                NoteError::InvalidSignature => (StatusCode::BAD_REQUEST, "Invalid signature".to_string()),
-                NoteError::PastTimestamp => (
-                    StatusCode::BAD_REQUEST,
-                    "timestamp must be newer than both edges' current timestamps".to_string(),
-                ),
-                NoteError::FutureTimestamp => (StatusCode::BAD_REQUEST, "timestamp is in the future".to_string()),
-                other => (StatusCode::BAD_REQUEST, format!("Transfer rejected: {:?}", other)),
+            let (status, code, message) = transfer_error_response(e);
+            let body = match code {
+                Some(code) => crate::models::error_response_with_code(message, code),
+                None => crate::models::error_response(message),
             };
-            (status, Json(crate::models::error_response(message)))
+            (status, Json(body))
         }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1448,6 +1570,7 @@ pub async fn get_notes_by_issuer(
                 NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
                 NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
                 NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
+                NoteError::StagedExchange(msg) => format!("Staged exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1594,6 +1717,7 @@ pub async fn get_notes_by_recipient(
                 NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
                 NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
                 NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
+                NoteError::StagedExchange(msg) => format!("Staged exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1803,6 +1927,7 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
                 NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
                 NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
+                NoteError::StagedExchange(msg) => format!("Staged exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1933,6 +2058,7 @@ pub async fn get_all_notes(
                 NoteError::NovationExpired => NOVATION_EXPIRED_MESSAGE.to_string(),
                 NoteError::InvalidRequest(msg) => format!("Invalid request: {}", msg),
                 NoteError::OnchainScope(msg) => format!("On-chain scope: {}", msg),
+                NoteError::StagedExchange(msg) => format!("Staged exchange: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -6368,4 +6494,69 @@ pub(crate) async fn resolve_denomination(
         [only] => *only,
         _ => basis_store::DenomKey::Erg,
     })
+}
+
+#[cfg(test)]
+mod transfer_error_mapping_tests {
+    use super::{transfer_error_response, TRANSFER_UNEXPECTED_ERROR_MESSAGE};
+    use axum::http::StatusCode;
+    use basis_store::NoteError;
+
+    /// Every store error has an explicit POST /notes/transfer status and code; the ones the transfer path does
+    /// not produce answer 500 with one fixed message, never a Debug rendering of the error.
+    #[test]
+    fn every_store_error_maps_to_a_status_code_and_message() {
+        let mapped: Vec<(NoteError, StatusCode, Option<&str>, &str)> = vec![
+            (NoteError::InvalidTransfer("x".into()), StatusCode::BAD_REQUEST, Some("invalid_transfer"), "Invalid transfer: x"),
+            (NoteError::AmountOverflow, StatusCode::BAD_REQUEST, Some("invalid_transfer"), "Invalid transfer: the new to-edge total overflows"),
+            (
+                NoteError::AmountExceedsContractRange { field: "to_new_total", value: 7 },
+                StatusCode::BAD_REQUEST,
+                Some("invalid_transfer"),
+                "Invalid transfer: to_new_total exceeds the range the on-chain contract can represent: 7",
+            ),
+            (NoteError::InvalidSignature, StatusCode::BAD_REQUEST, Some("invalid_signature"), "Invalid signature"),
+            (
+                NoteError::InvalidPriorSignature,
+                StatusCode::BAD_REQUEST,
+                Some("invalid_prior_signature"),
+                "a prior acknowledgment is not the creditor's signature over its edge's current total",
+            ),
+            (NoteError::StalePrior, StatusCode::CONFLICT, Some("stale_prior"), "from_prior_total or to_prior_total is not the edge's current total"),
+            (NoteError::PastTimestamp, StatusCode::BAD_REQUEST, Some("past_timestamp"), "timestamp must be newer than both edges' current timestamps"),
+            (NoteError::FutureTimestamp, StatusCode::BAD_REQUEST, Some("future_timestamp"), "timestamp is in the future"),
+            (NoteError::NovationExpired, StatusCode::BAD_REQUEST, Some("novation_expired"), "the novation's timestamp is older than the maximum novation age"),
+            (NoteError::NotFound, StatusCode::NOT_FOUND, Some("not_found"), "the issuer has no note to the old creditor in this denomination"),
+            (NoteError::TrackerIdMismatch, StatusCode::CONFLICT, Some("tracker_id_mismatch"), "the two edges are bound to different tracker NFTs"),
+            (NoteError::StagedExchange("staged".into()), StatusCode::CONFLICT, Some("staged_exchange"), "staged"),
+            (NoteError::OnchainScope("on-chain".into()), StatusCode::CONFLICT, Some("onchain_scope"), "on-chain"),
+            (NoteError::AcceptancePolicy("policy".into()), StatusCode::FORBIDDEN, None, "policy"),
+            (NoteError::StorageError("disk".into()), StatusCode::INTERNAL_SERVER_ERROR, Some("storage_error"), "Storage error: disk"),
+        ];
+        for (error, status, code, message) in mapped {
+            let label = format!("{:?}", error);
+            assert_eq!(transfer_error_response(error), (status, code, message.to_string()), "{}", label);
+        }
+        let unexpected = vec![
+            NoteError::DebtDecreaseNotPermitted { previous: 2, requested: 1 },
+            NoteError::NoteNotConfirmed,
+            NoteError::InvalidExchange("detail".into()),
+            NoteError::InvalidSetOff("detail".into()),
+            NoteError::ReservedTimestamp,
+            NoteError::BoundNoteRequired,
+            NoteError::NotAnIncrease,
+            NoteError::InvalidRequest("detail".into()),
+            NoteError::StaleCommittedDebt { committed: 2, local: 1 },
+            NoteError::RedemptionTooEarly,
+            NoteError::InsufficientCollateral,
+            NoteError::UnsupportedOperation,
+        ];
+        for error in unexpected {
+            let label = format!("{:?}", error);
+            let (status, code, message) = transfer_error_response(error);
+            assert_eq!((status, code), (StatusCode::INTERNAL_SERVER_ERROR, None), "{}", label);
+            assert_eq!(message, TRANSFER_UNEXPECTED_ERROR_MESSAGE, "{}", label);
+            assert!(!message.contains("detail") && !message.contains("Transfer rejected"), "{}", label);
+        }
+    }
 }

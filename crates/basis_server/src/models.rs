@@ -118,27 +118,42 @@ pub struct ExchangeNotesResponse {
     pub to_edge_status: String,
 }
 
-/// Debt transfer request (triad novation, specs/spec.md "Debt Transfer").
+/// Debt transfer request (triad novation, specs/spec.md "Debt Transfer"),
+/// version 3.
 ///
 /// Moves `amount` of the issuer's cumulative debt from the edge
 /// (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
-/// denomination. All four signatures are over the respective edge's standard
-/// 80-byte note message at the NEW cumulative total and `timestamp`: the issuer
-/// re-signs both edges, the old creditor's signature is the consent the S3 rule
-/// requires for lowering its edge, and the new creditor's is its acceptance.
-/// Pure-credit trackers only: a tracker with on-chain state refuses.
+/// denomination. Seven signatures (hex, 65 bytes each), all over the standard
+/// 80-byte note message at `timestamp` (see `basis_store::TransferSignatures`):
+/// the issuer re-signs both edges at their new totals; the old creditor
+/// acknowledges its edge's current total and signs both new totals (the consent
+/// the S3 rule requires for lowering its edge, bound to this destination); the
+/// new creditor acknowledges its edge's current total (0 for a new edge) and
+/// signs its new total (its acceptance). The prior acknowledgments make the
+/// amount exact: the transfer applies only while both edges are still at the
+/// acknowledged totals. Pure-credit trackers only: a tracker with on-chain
+/// state refuses. Unknown fields are refused, so a field this tracker does not
+/// know is never silently dropped.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransferNotesRequest {
     pub issuer_pubkey: String,
     pub from_recipient_pubkey: String,
     pub to_recipient_pubkey: String,
+    /// Required, and a denomination this tracker serves ("erg" or
+    /// "token:<64-hex>"); there is no default. A missing value reads as empty
+    /// and is refused like one (400 `invalid denomination`).
     #[serde(default)]
     pub denomination: String,
     pub amount: u64,
-    /// New timestamp for both edges; must be newer than both edges' current ones.
+    /// New timestamp for both edges; must end in 999 ms, be newer than both
+    /// edges' current ones and be at most an hour old.
     pub timestamp: u64,
     /// Issuer signature over the from-edge's new note message (hex, 65 bytes)
     pub issuer_from_signature: String,
+    /// Old creditor's prior acknowledgment: its signature over the from-edge's
+    /// note message at the edge's CURRENT total (hex, 65 bytes)
+    pub from_recipient_prior_signature: String,
     /// Old creditor's signature over the from-edge's new note message (consent)
     pub from_recipient_signature: String,
     /// Old creditor's signature over the to-edge's new note message: binds its
@@ -146,8 +161,19 @@ pub struct TransferNotesRequest {
     pub from_recipient_to_signature: String,
     /// Issuer signature over the to-edge's new note message (hex, 65 bytes)
     pub issuer_to_signature: String,
+    /// New creditor's prior acknowledgment: its signature over the to-edge's
+    /// note message at the edge's CURRENT total, 0 for a new edge (hex, 65 bytes)
+    pub to_recipient_prior_signature: String,
     /// New creditor's signature over the to-edge's new note message (acceptance)
     pub to_recipient_signature: String,
+    /// Optional and diagnostic: the from-edge total the old creditor
+    /// acknowledged. When present it must equal the stored total (409 `stale_prior`).
+    #[serde(default)]
+    pub from_prior_total: Option<u64>,
+    /// Optional and diagnostic: the to-edge total the new creditor acknowledged
+    /// (0 for a new edge). When present it must equal the stored total (409 `stale_prior`).
+    #[serde(default)]
+    pub to_prior_total: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -157,6 +183,10 @@ pub struct TransferNotesResponse {
     pub from_new_total: u64,
     pub to_new_total: u64,
     pub timestamp: u64,
+    /// The from-edge's total before the transfer (the old creditor's acknowledged prior).
+    pub from_prior_total: u64,
+    /// The to-edge's total before the transfer, 0 for a new edge (the new creditor's acknowledged prior).
+    pub to_prior_total: u64,
 }
 
 /// One edge of a multilateral set-off request.
