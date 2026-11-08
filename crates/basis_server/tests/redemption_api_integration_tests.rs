@@ -378,6 +378,9 @@ mod redemption_api_tests {
                         let result = redemption_manager.tracker.set_off(&denomination, &edges);
                         let _ = response_tx.send(result);
                     }
+                    TrackerCommand::OnchainEdgeCount { response_tx } => {
+                        let _ = response_tx.send(redemption_manager.tracker.onchain_edge_count());
+                    }
                     TrackerCommand::ListStagedExchanges { response_tx } => {
                         let result = redemption_manager.tracker.list_staged_exchanges();
                         let _ = response_tx.send(result);
@@ -418,6 +421,7 @@ mod redemption_api_tests {
                 auth: basis_server::config::AuthConfig::default(),
                 reserve_creation_max_erg_nano: 10_000_000_000,
                 reserve_creation_max_token_amount: 1_000_000_000,
+                pure_credit: false,
                 redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: basis_server::config::ErgoConfig {
@@ -483,6 +487,7 @@ mod redemption_api_tests {
             pending_redemptions: std::sync::Arc::new(
                 basis_server::redemption_build::PendingRedemptionRegistry::new(),
             ),
+            novations_disabled_reason: None,
             redemption_build_rate: std::sync::Arc::new(
                 basis_server::redemption_build::BuildRateLimiter::new(),
             ),

@@ -67,6 +67,7 @@ mod create_reserve_tests {
                 auth: crate::config::AuthConfig::default(),
                 reserve_creation_max_erg_nano: 10_000_000_000,
                 reserve_creation_max_token_amount: 1_000_000_000,
+                pure_credit: false,
                 redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: crate::config::ErgoConfig {
@@ -139,6 +140,7 @@ mod create_reserve_tests {
             pending_redemptions: std::sync::Arc::new(
                 crate::redemption_build::PendingRedemptionRegistry::new(),
             ),
+            novations_disabled_reason: None,
             redemption_build_rate: std::sync::Arc::new(
                 crate::redemption_build::BuildRateLimiter::new(),
             ),

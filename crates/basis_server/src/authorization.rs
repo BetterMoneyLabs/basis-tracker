@@ -65,6 +65,8 @@ fn required_role(path: &str, method: &str) -> ClientRole {
             // `/acceptance/policy` upload is signed by the recipient it applies to, so both are
             // ordinary client operations; with the admin key now mandatory in `api_key` mode,
             // keeping them Admin would force operators to hand the admin key to every client.
+            // The novation routes (debt transfer, set-off) carry every affected party's
+            // signatures, like /notes/exchange, so they are Write, not Admin.
             "/reserves/create"
             | "/acceptance/policy"
             | "/notes"
@@ -73,7 +75,9 @@ fn required_role(path: &str, method: &str) -> ClientRole {
             | "/redemption/build"
             | "/redemption/submit"
             | "/tracker/signature"
-            | "/notes/exchange" => ClientRole::Write,
+            | "/notes/exchange"
+            | "/notes/transfer"
+            | "/notes/setoff" => ClientRole::Write,
             // Read-like POSTs: querying state without mutation.
             "/notes/state" | "/acceptance/check" => ClientRole::Read,
             // Unknown POSTs default to Admin for safety.
@@ -148,5 +152,14 @@ mod tests {
         assert_eq!(required_role("/reserves/create", "POST"), ClientRole::Write);
         assert_eq!(required_role("/notes/state", "POST"), ClientRole::Read);
         assert_eq!(required_role("/acceptance/check", "POST"), ClientRole::Read);
+        // The novation routes are Write (they used to fall through to the
+        // unknown-POST Admin default), like /notes/exchange.
+        assert_eq!(required_role("/notes/exchange", "POST"), ClientRole::Write);
+        assert_eq!(required_role("/notes/transfer", "POST"), ClientRole::Write);
+        assert_eq!(required_role("/notes/setoff", "POST"), ClientRole::Write);
+        // GET /capabilities is Read.
+        assert_eq!(required_role("/capabilities", "GET"), ClientRole::Read);
+        // Unknown POSTs still default to Admin.
+        assert_eq!(required_role("/notes/compress", "POST"), ClientRole::Admin);
     }
 }

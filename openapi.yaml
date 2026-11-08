@@ -267,6 +267,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
+        '503':
+          description: >-
+            novations_disabled: the tracker's confirmation records failed to load
+            at startup, so it cannot tell which edges carry on-chain state; every
+            transfer is refused until it restarts with readable records (see GET
+            /capabilities novations_disabled_reason)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
   /notes/setoff:
     post:
       summary: Multilateral set-off (obligation clearing, pure-credit edges)
@@ -341,6 +351,16 @@ paths:
                 type: string
         '500':
           description: storage_error, or an unexpected tracker error (a fixed message, no code)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '503':
+          description: >-
+            novations_disabled: the tracker's confirmation records failed to load
+            at startup, so it cannot tell which edges carry on-chain state; every
+            set-off is refused until it restarts with readable records (see GET
+            /capabilities novations_disabled_reason)
           content:
             application/json:
               schema:
@@ -1155,6 +1175,37 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
+  /capabilities:
+    get:
+      summary: Tracker capabilities (the rules this build enforces)
+      description: >-
+        The build identity and the rules this tracker enforces (Valun
+        circulating-credit tracker v3). A client enables a feature only when the
+        response matches what it expects exactly: every route answers OPTIONS
+        whatever it enforces, so probing routes proves nothing. Trackers without
+        this route answer 404. Read role; no credentials are needed when
+        auth.mode is none. The body has `success` and `data` only.
+        `onchain_edges` counts the edges with a committed or pending on-chain
+        total (always 0 on a pure-credit tracker); `novations_disabled_reason` is
+        null unless debt transfers and set-offs are refused (503
+        novations_disabled) because the confirmation records failed to load.
+      operationId: getCapabilities
+      tags:
+        - Tracker
+      responses:
+        '200':
+          description: The capabilities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseCapabilities'
+        '500':
+          description: The tracker thread is unavailable (no capabilities are reported then)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
   /tracker/latest-box-id:
     get:
       summary: Get latest tracker box ID
@@ -1880,6 +1931,111 @@ components:
         error:
           type: string
           nullable: true
+
+    ApiResponseCapabilities:
+      type: object
+      description: GET /capabilities body (`success` and `data` only)
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/TrackerCapabilities'
+    TrackerCapabilities:
+      type: object
+      required: [tracker, build, commit, pure_credit, reserved_ms, bound_notes, bound_only_edges, novation, onchain_edges, novations_disabled_reason]
+      properties:
+        tracker:
+          type: string
+          example: basis
+        build:
+          type: string
+          description: The rule set
+          example: valun-circulating-credit/3
+        commit:
+          type: string
+          description: The git commit the binary was built from (BASIS_GIT_COMMIT at build time), or "unknown"
+        pure_credit:
+          type: boolean
+          description: The `[server] pure_credit` setting
+        reserved_ms:
+          type: array
+          description: Timestamp residues (ts mod 1000) reserved for operations; ordinary notes use 000-994
+          items:
+            type: integer
+          example: [995, 996, 997, 998, 999]
+        bound_notes:
+          $ref: '#/components/schemas/BoundNotesCapability'
+        bound_only_edges:
+          type: boolean
+          description: Every edge a debt transfer or set-off changes becomes bound-only
+          example: true
+        novation:
+          $ref: '#/components/schemas/NovationCapabilities'
+        onchain_edges:
+          type: integer
+          format: uint64
+          description: Edges with a committed or pending on-chain total
+          example: 0
+        novations_disabled_reason:
+          type: string
+          nullable: true
+          description: Why debt transfers and set-offs are refused (503 novations_disabled), or null
+    BoundNotesCapability:
+      type: object
+      properties:
+        ms:
+          type: integer
+          example: 997
+        version:
+          type: integer
+          example: 1
+    NovationCapabilities:
+      type: object
+      properties:
+        max_age_ms:
+          type: integer
+          format: uint64
+          example: 3600000
+        transfer:
+          $ref: '#/components/schemas/TransferCapability'
+        setoff:
+          $ref: '#/components/schemas/SetOffCapability'
+    TransferCapability:
+      type: object
+      properties:
+        ms:
+          type: integer
+          example: 999
+        version:
+          type: integer
+          example: 3
+        signatures:
+          type: array
+          items:
+            type: string
+          example: [issuer_from, issuer_to, from_recipient_prior, from_recipient, from_recipient_to, to_recipient_prior, to_recipient]
+    SetOffCapability:
+      type: object
+      properties:
+        ms:
+          type: integer
+          example: 998
+        version:
+          type: integer
+          example: 3
+        max_edges:
+          type: integer
+          example: 64
+        per_edge_timestamps:
+          type: boolean
+          example: true
+        signatures_per_edge:
+          type: array
+          items:
+            type: string
+          example: [issuer, recipient]
 
     ServedTokenInfo:
       type: object

@@ -45,7 +45,8 @@ fn status_to_string(status: basis_store::NoteConfirmationStatus) -> String {
 
 // Request structure for creating a new IOU note
 // Using hex-encoded strings for public keys and signature
-#[derive(Debug, Deserialize)]
+// `Debug` is implemented by hand (redacted): `create_note` debug-logs the request.
+#[derive(Deserialize)]
 pub struct CreateNoteRequest {
     pub recipient_pubkey: String,
     pub amount: u64,
@@ -71,6 +72,24 @@ pub struct CreateNoteRequest {
     /// Only valid together with `prior_signature`.
     #[serde(default)]
     pub prior_total: Option<u64>,
+}
+
+/// Redacted (see [`crate::redact`]): signatures appear only as fingerprints.
+impl std::fmt::Debug for CreateNoteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{Denom, HexField, SigHex};
+        f.debug_struct("CreateNoteRequest")
+            .field("recipient_pubkey", &HexField(&self.recipient_pubkey, 33))
+            .field("amount", &self.amount)
+            .field("timestamp", &self.timestamp)
+            .field("signature", &SigHex(&self.signature))
+            .field("issuer_pubkey", &HexField(&self.issuer_pubkey, 33))
+            .field("tracker_nft_id", &HexField(&self.tracker_nft_id, 32))
+            .field("denomination", &Denom(&self.denomination))
+            .field("prior_signature", &self.prior_signature.as_deref().map(SigHex))
+            .field("prior_total", &self.prior_total)
+            .finish()
+    }
 }
 
 /// Cross-denomination debt exchange request (off-chain novation / triage).
@@ -133,8 +152,9 @@ pub struct ExchangeNotesResponse {
 /// amount exact: the transfer applies only while both edges are still at the
 /// acknowledged totals. Pure-credit trackers only: a tracker with on-chain
 /// state refuses. Unknown fields are refused, so a field this tracker does not
-/// know is never silently dropped.
-#[derive(Debug, Deserialize)]
+/// know is never silently dropped. `Debug` is redacted (signatures appear only
+/// as fingerprints, see [`crate::redact`]).
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransferNotesRequest {
     pub issuer_pubkey: String,
@@ -176,6 +196,39 @@ pub struct TransferNotesRequest {
     pub to_prior_total: Option<u64>,
 }
 
+/// Redacted (see [`crate::redact`]): signatures appear only as fingerprints.
+impl std::fmt::Debug for TransferNotesRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{Denom, HexField, SigHex};
+        f.debug_struct("TransferNotesRequest")
+            .field("issuer_pubkey", &HexField(&self.issuer_pubkey, 33))
+            .field("from_recipient_pubkey", &HexField(&self.from_recipient_pubkey, 33))
+            .field("to_recipient_pubkey", &HexField(&self.to_recipient_pubkey, 33))
+            .field("denomination", &Denom(&self.denomination))
+            .field("amount", &self.amount)
+            .field("timestamp", &self.timestamp)
+            .field("issuer_from_signature", &SigHex(&self.issuer_from_signature))
+            .field(
+                "from_recipient_prior_signature",
+                &SigHex(&self.from_recipient_prior_signature),
+            )
+            .field("from_recipient_signature", &SigHex(&self.from_recipient_signature))
+            .field(
+                "from_recipient_to_signature",
+                &SigHex(&self.from_recipient_to_signature),
+            )
+            .field("issuer_to_signature", &SigHex(&self.issuer_to_signature))
+            .field(
+                "to_recipient_prior_signature",
+                &SigHex(&self.to_recipient_prior_signature),
+            )
+            .field("to_recipient_signature", &SigHex(&self.to_recipient_signature))
+            .field("from_prior_total", &self.from_prior_total)
+            .field("to_prior_total", &self.to_prior_total)
+            .finish()
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct TransferNotesResponse {
     pub transferred: bool,
@@ -190,8 +243,9 @@ pub struct TransferNotesResponse {
 }
 
 /// One edge of a multilateral set-off request (set-off version 3). Unknown
-/// fields are refused.
-#[derive(Debug, Deserialize)]
+/// fields are refused. `Debug` is redacted (signatures appear only as
+/// fingerprints, see [`crate::redact`]).
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetOffEdgeRequest {
     pub issuer_pubkey: String,
@@ -210,13 +264,29 @@ pub struct SetOffEdgeRequest {
     pub recipient_signature: String,
 }
 
+/// Redacted (see [`crate::redact`]): signatures appear only as fingerprints.
+impl std::fmt::Debug for SetOffEdgeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{HexField, SigHex};
+        f.debug_struct("SetOffEdgeRequest")
+            .field("issuer_pubkey", &HexField(&self.issuer_pubkey, 33))
+            .field("recipient_pubkey", &HexField(&self.recipient_pubkey, 33))
+            .field("decrease", &self.decrease)
+            .field("timestamp", &self.timestamp)
+            .field("issuer_signature", &SigHex(&self.issuer_signature))
+            .field("recipient_signature", &SigHex(&self.recipient_signature))
+            .finish()
+    }
+}
+
 /// Multilateral set-off (obligation clearing) request, version 3: lowers every
 /// listed edge by its decrease, each at its own timestamp (the edge's
 /// `timestamp`, else this request's `timestamp`), all ending in 998 ms. For
 /// every key, decreases as creditor must equal decreases as issuer
 /// (net-neutral). Unknown fields are refused, so a field this tracker does not
-/// know is never silently dropped.
-#[derive(Debug, Deserialize)]
+/// know is never silently dropped. `Debug` is redacted (the edges'
+/// signatures appear only as fingerprints).
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetOffRequest {
     #[serde(default)]
@@ -224,6 +294,17 @@ pub struct SetOffRequest {
     /// The timestamp of every edge that does not carry its own.
     pub timestamp: u64,
     pub edges: Vec<SetOffEdgeRequest>,
+}
+
+/// Redacted: each edge as [`SetOffEdgeRequest`]'s redacted `Debug`.
+impl std::fmt::Debug for SetOffRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetOffRequest")
+            .field("denomination", &crate::redact::Denom(&self.denomination))
+            .field("timestamp", &self.timestamp)
+            .field("edges", &self.edges)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +323,145 @@ pub struct SetOffResponse {
     pub timestamp: u64,
     pub total_cleared: u64,
     pub edges: Vec<SetOffEdgeResult>,
+}
+
+/// `GET /capabilities` body: `{"success": true, "data": {...}}`. A client
+/// enables a feature only when `data` is exactly what it expects (design
+/// §3.6): routes answer OPTIONS whatever they enforce, so probing them proves
+/// nothing. Trackers without this route (3df7ed93, caa2e86, a00233d) answer
+/// 404.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilitiesResponse {
+    pub success: bool,
+    pub data: TrackerCapabilities,
+}
+
+/// The build identity and the rules this tracker enforces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerCapabilities {
+    /// Always `"basis"`.
+    pub tracker: String,
+    /// The rule set: `"valun-circulating-credit/3"` ([`CAPABILITIES_BUILD`]).
+    pub build: String,
+    /// The git commit the binary was built from (`BASIS_GIT_COMMIT` at build
+    /// time), or `"unknown"`.
+    pub commit: String,
+    /// `[server] pure_credit`.
+    pub pure_credit: bool,
+    /// The timestamp residues (`ts % 1000`) reserved for operations; ordinary
+    /// notes use 000-994: `[995, 996, 997, 998, 999]`.
+    pub reserved_ms: Vec<u64>,
+    /// Bound notes (POST /notes with `prior_signature`).
+    pub bound_notes: BoundNotesCapability,
+    /// Every edge a novation changes becomes bound-only.
+    pub bound_only_edges: bool,
+    pub novation: NovationCapabilities,
+    /// Edges whose confirmation record has a committed or pending on-chain
+    /// total (0 on a pure-credit tracker).
+    pub onchain_edges: u64,
+    /// Why debt transfers and set-offs are refused (503 `novations_disabled`),
+    /// or `null`.
+    pub novations_disabled_reason: Option<String>,
+}
+
+/// Bound notes: residue 997, version 1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundNotesCapability {
+    pub ms: u64,
+    pub version: u32,
+}
+
+/// The novation routes and their shared maximum age.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NovationCapabilities {
+    /// The maximum age of a novation's timestamp (one hour).
+    pub max_age_ms: u64,
+    pub transfer: TransferCapability,
+    pub setoff: SetOffCapability,
+}
+
+/// POST /notes/transfer: residue 999, version 3, its seven signature slots in
+/// request order of `basis_store::TransferSignatures`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferCapability {
+    pub ms: u64,
+    pub version: u32,
+    pub signatures: Vec<String>,
+}
+
+/// POST /notes/setoff: residue 998, version 3, at most 64 edges, per-edge
+/// timestamps, two signatures per edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetOffCapability {
+    pub ms: u64,
+    pub version: u32,
+    pub max_edges: u64,
+    pub per_edge_timestamps: bool,
+    pub signatures_per_edge: Vec<String>,
+}
+
+/// The `build` of [`TrackerCapabilities`]: the Valun circulating-credit rule
+/// set, tracker v3.
+pub const CAPABILITIES_BUILD: &str = "valun-circulating-credit/3";
+
+impl TrackerCapabilities {
+    /// This build's capabilities, with the run-time values: the `pure_credit`
+    /// setting, the number of on-chain edges and the novations-disabled reason.
+    /// Every rule value comes from the store's constants, so a changed rule
+    /// changes the response.
+    pub fn current(
+        pure_credit: bool,
+        onchain_edges: u64,
+        novations_disabled_reason: Option<String>,
+    ) -> Self {
+        let names = |slots: &[&str]| slots.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        Self {
+            tracker: "basis".to_string(),
+            build: CAPABILITIES_BUILD.to_string(),
+            commit: option_env!("BASIS_GIT_COMMIT")
+                .filter(|c| !c.is_empty())
+                .unwrap_or("unknown")
+                .to_string(),
+            pure_credit,
+            reserved_ms: vec![
+                basis_store::EXCHANGE_TS_MS,
+                basis_store::COMPRESS_TS_MS,
+                basis_store::BOUND_NOTE_TS_MS,
+                basis_store::SETOFF_TS_MS,
+                basis_store::TRANSFER_TS_MS,
+            ],
+            bound_notes: BoundNotesCapability {
+                ms: basis_store::BOUND_NOTE_TS_MS,
+                version: 1,
+            },
+            bound_only_edges: true,
+            novation: NovationCapabilities {
+                max_age_ms: basis_store::NOVATION_MAX_AGE_MS,
+                transfer: TransferCapability {
+                    ms: basis_store::TRANSFER_TS_MS,
+                    version: 3,
+                    signatures: names(&[
+                        "issuer_from",
+                        "issuer_to",
+                        "from_recipient_prior",
+                        "from_recipient",
+                        "from_recipient_to",
+                        "to_recipient_prior",
+                        "to_recipient",
+                    ]),
+                },
+                setoff: SetOffCapability {
+                    ms: basis_store::SETOFF_TS_MS,
+                    version: 3,
+                    max_edges: basis_store::MAX_SETOFF_EDGES as u64,
+                    per_edge_timestamps: true,
+                    signatures_per_edge: names(&["issuer", "recipient"]),
+                },
+            },
+            onchain_edges,
+            novations_disabled_reason,
+        }
+    }
 }
 
 /// One pending (staged or cancelled) cross-denomination exchange, as returned

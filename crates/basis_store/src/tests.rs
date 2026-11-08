@@ -799,7 +799,7 @@ mod confirmation_state_tests {
         let digest = manager.get_state().avl_root_digest;
         manager.mark_notes_pending(digest, "tx123", 100).unwrap();
 
-        manager.rebuild_confirmations();
+        assert_eq!(manager.rebuild_confirmations().unwrap(), 1);
 
         let confirmation = manager
             .get_confirmation(&issuer, &recipient, &crate::DenomKey::Erg)
@@ -4496,5 +4496,269 @@ mod bound_note_tests {
         drop(storage);
         let storage = NoteStorage::open(dir.path()).unwrap();
         assert!(storage.is_bound_only(&key(&B)).unwrap() && !storage.is_bound_only(&key(&C)).unwrap());
+    }
+}
+
+/// Pure-credit mode and fail-closed loading (tracker v3, design §3.7): undecodable note records are counted
+/// instead of dropped silently, a failed confirmation load is reported and makes the store refuse novations,
+/// and the pure-credit startup check refuses a store with a stored on-chain total, an undecodable record or a
+/// failed load.
+#[cfg(test)]
+mod pure_credit_startup_tests {
+    use crate::persistence::NoteRecordScan;
+    use crate::{
+        DenomKey, IouNote, NoteConfirmation, NoteError, PureCreditRefusal, SetOffEdge, StoreLoadReport,
+        TrackerStateManager, TransferSignatures, TransferTotals, NOVATIONS_DISABLED_CONFIRMATIONS,
+    };
+    use secp256k1::{Secp256k1, SecretKey};
+
+    const NFT: [u8; 32] = [0x42; 32];
+    const A: [u8; 32] = [1u8; 32];
+    const B: [u8; 32] = [2u8; 32];
+    const C: [u8; 32] = [3u8; 32];
+    /// Keys of planted records that do not decode.
+    const BAD_DENOMINATION_KEY: [u8; 32] = [0x77; 32];
+    const SHORT_RECORD_KEY: [u8; 32] = [0x78; 32];
+    const CORRUPT_CONFIRMATION_KEY: [u8; 32] = [0x79; 32];
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// A whole second ten minutes before this module's first test started. Every timestamp here is an offset of
+    /// a few seconds from it: in the past, and well inside the maximum novation age.
+    fn base() -> u64 {
+        static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *BASE.get_or_init(|| (now_ms() - 600_000) / 1000 * 1000)
+    }
+
+    fn pk(secret: &[u8; 32]) -> [u8; 33] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(secret).expect("valid secret key");
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+    }
+
+    /// `signer`'s signature over the ERG note message (issuer -> recipient, `total`, `ts`).
+    fn sign(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> [u8; 65] {
+        let msg = crate::schnorr::signing_message(&pk(issuer), &pk(recipient), &DenomKey::Erg, total, ts, &NFT);
+        crate::schnorr::schnorr_sign(&msg, signer, &pk(signer)).unwrap()
+    }
+
+    fn note(m: &mut TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) {
+        let n = IouNote::create_and_sign(pk(recipient), total, ts, issuer, &NFT, DenomKey::Erg).unwrap();
+        m.add_note(&pk(issuer), &n, None).unwrap();
+    }
+
+    fn total(m: &TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32]) -> u64 {
+        m.lookup_note(&pk(issuer), &pk(recipient), &DenomKey::Erg).unwrap().amount_collected
+    }
+
+    /// A owes B 100, B owes A 100 (a two-edge cycle) and A owes C 50.
+    fn seed(m: &mut TrackerStateManager) {
+        note(m, &A, &B, 100, base() + 1000);
+        note(m, &B, &A, 100, base() + 1001);
+        note(m, &A, &C, 50, base() + 1002);
+    }
+
+    /// A set-off of the cycle A->B (stored total `ab`) and B->A (`ba`) by `d`, both edges signed by both parties
+    /// at `ts` (residue 998).
+    fn setoff_edges(ab: u64, ba: u64, d: u64, ts: u64) -> Vec<SetOffEdge> {
+        [(A, B, ab), (B, A, ba)]
+            .iter()
+            .map(|(issuer, recipient, before)| SetOffEdge {
+                issuer_pubkey: pk(issuer),
+                recipient_pubkey: pk(recipient),
+                decrease: d,
+                timestamp: ts,
+                issuer_signature: sign(issuer, issuer, recipient, before - d, ts),
+                recipient_signature: sign(recipient, issuer, recipient, before - d, ts),
+            })
+            .collect()
+    }
+
+    /// A transfer of `amount` of A's debt from A->B (stored total `x`) to A->C (`y`) at `ts` (residue 999), with
+    /// all seven signatures.
+    fn transfer(m: &mut TrackerStateManager, x: u64, y: u64, amount: u64, ts: u64) -> Result<TransferTotals, NoteError> {
+        let s = TransferSignatures {
+            issuer_from: sign(&A, &A, &B, x - amount, ts),
+            issuer_to: sign(&A, &A, &C, y + amount, ts),
+            from_recipient_prior: sign(&B, &A, &B, x, ts),
+            from_recipient: sign(&B, &A, &B, x - amount, ts),
+            from_recipient_to: sign(&B, &A, &C, y + amount, ts),
+            to_recipient_prior: sign(&C, &A, &C, y, ts),
+            to_recipient: sign(&C, &A, &C, y + amount, ts),
+        };
+        m.transfer_debt(&pk(&A), &pk(&B), &pk(&C), &DenomKey::Erg, amount, ts, &s, None, None)
+    }
+
+    #[test]
+    fn undecodable_note_records_are_counted_not_dropped_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            seed(&mut m);
+            // A record of the right length with an unknown denomination byte, and a record of the wrong length.
+            let mut bad_denomination = vec![0u8; 220];
+            bad_denomination[187] = 0x02;
+            m.storage.insert_raw_note_record(&BAD_DENOMINATION_KEY, &bad_denomination);
+            m.storage.insert_raw_note_record(&SHORT_RECORD_KEY, &[0u8; 10]);
+
+            assert_eq!(m.storage.rebuild_indices().unwrap(), NoteRecordScan { decoded: 3, skipped: 2 });
+            let (notes, skipped) = m.storage.get_all_notes_with_issuer_counted().unwrap();
+            assert_eq!((notes.len(), skipped), (3, 2));
+            // The other readers still skip them, as before.
+            assert_eq!(m.get_all_notes_with_issuer().unwrap().len(), 3);
+        }
+        // Reopened, the store records the count, and it serves the notes that decode as before.
+        let m = TrackerStateManager::new(dir.path());
+        assert_eq!(
+            m.load_report(),
+            &StoreLoadReport { undecodable_note_records: 2, load_errors: vec![], confirmations_error: None }
+        );
+        assert_eq!(m.get_all_notes_with_issuer().unwrap().len(), 3);
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A), total(&m, &A, &C)), (100, 100, 50));
+    }
+
+    #[test]
+    fn a_pure_credit_store_passes_the_check_also_after_novations() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            seed(&mut m);
+            assert_eq!(m.check_pure_credit(), Ok(()));
+            transfer(&mut m, 100, 50, 20, base() + 2999).unwrap();
+            m.set_off(&DenomKey::Erg, &setoff_edges(80, 100, 30, base() + 3998)).unwrap();
+            assert_eq!(m.check_pure_credit(), Ok(()));
+        }
+        let m = TrackerStateManager::new(dir.path());
+        assert_eq!(m.load_report(), &StoreLoadReport::default());
+        assert_eq!(m.check_pure_credit(), Ok(()));
+        assert_eq!((m.onchain_edge_count(), m.novations_disabled_reason()), (0, None));
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A), total(&m, &A, &C)), (50, 70, 70));
+    }
+
+    #[test]
+    fn pure_credit_refuses_a_stored_committed_total() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            seed(&mut m);
+            assert_eq!(m.onchain_edge_count(), 0);
+            // A tracker box committed the current tree on-chain: every edge now has a confirmed total.
+            let digest = m.get_state().avl_root_digest;
+            assert_eq!(m.reconcile_with_confirmed_digest(&digest, "box1", 100).unwrap(), 3);
+            assert_eq!(m.onchain_edge_count(), 3);
+        }
+        let m = TrackerStateManager::new(dir.path());
+        let refusal = m.check_pure_credit().unwrap_err();
+        assert_eq!(refusal, PureCreditRefusal { onchain_confirmations: 3, undecodable_note_records: 0, load_errors: vec![] });
+        let message = refusal.to_string();
+        assert!(
+            message.starts_with(
+                "refusing to start in pure_credit mode: 3 stored confirmation record(s) carry a committed or pending on-chain total."
+            ),
+            "{message}"
+        );
+        // Outside pure-credit mode the store opens as before: its on-chain edges are counted, and novations are not
+        // disabled (the scope check refuses those edges one by one).
+        assert_eq!(m.load_report(), &StoreLoadReport::default());
+        assert_eq!((m.onchain_edge_count(), m.novations_disabled_reason()), (3, None));
+    }
+
+    #[test]
+    fn pure_credit_refuses_a_stored_pending_total_although_a_restart_clears_it_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            note(&mut m, &A, &B, 100, base() + 1000);
+            // A tracker box update covering the edge was submitted and has not confirmed.
+            let digest = m.get_state().avl_root_digest;
+            assert_eq!(m.mark_notes_pending(digest, "tx1", 100).unwrap(), 1);
+            assert_eq!(m.onchain_edge_count(), 1);
+        }
+        let m = TrackerStateManager::new(dir.path());
+        // The restart clears the pending total in memory; the stored record keeps it, and the transaction may still
+        // confirm.
+        assert_eq!(m.onchain_edge_count(), 0);
+        assert_eq!(m.check_pure_credit(), Err(PureCreditRefusal { onchain_confirmations: 1, ..Default::default() }));
+    }
+
+    #[test]
+    fn pure_credit_refuses_an_undecodable_note_record() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            seed(&mut m);
+            assert_eq!(m.check_pure_credit(), Ok(()));
+            m.storage.insert_raw_note_record(&SHORT_RECORD_KEY, &[0u8; 10]);
+            // The check reads the records again, so it refuses at once, before any restart.
+            assert_eq!(m.check_pure_credit(), Err(PureCreditRefusal { undecodable_note_records: 1, ..Default::default() }));
+        }
+        let m = TrackerStateManager::new(dir.path());
+        assert_eq!(m.load_report().undecodable_note_records, 1);
+        let refusal = m.check_pure_credit().unwrap_err();
+        assert_eq!(refusal, PureCreditRefusal { undecodable_note_records: 1, ..Default::default() });
+        assert!(
+            refusal
+                .to_string()
+                .starts_with("refusing to start in pure_credit mode: 1 note record(s) could not be decoded."),
+            "{refusal}"
+        );
+        // Outside pure-credit mode the notes that decode are served and novations are not disabled.
+        assert_eq!((m.novations_disabled_reason(), total(&m, &A, &B)), (None, 100));
+    }
+
+    #[test]
+    fn a_confirmation_load_failure_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut m = TrackerStateManager::new(dir.path());
+            seed(&mut m);
+            m.storage.insert_raw_confirmation_record(&CORRUPT_CONFIRMATION_KEY, b"not json");
+        }
+        let mut m = TrackerStateManager::new(dir.path());
+        let digest = m.get_state().avl_root_digest;
+
+        // rebuild_confirmations returns the error (it used to log it and continue); the failure is recorded.
+        let recorded = m.load_report().confirmations_error.clone().expect("the failure is recorded");
+        assert!(
+            recorded.starts_with("confirmation rebuild: StorageError(\"Failed to parse confirmation"),
+            "{recorded}"
+        );
+        assert!(matches!(m.rebuild_confirmations(), Err(NoteError::StorageError(_))));
+        assert_eq!(m.novations_disabled_reason().as_deref(), Some(NOVATIONS_DISABLED_CONFIRMATIONS));
+
+        // A pure-credit tracker refuses to start on it.
+        let refusal = m.check_pure_credit().unwrap_err();
+        assert_eq!((refusal.onchain_confirmations, refusal.undecodable_note_records), (0, 0));
+        assert!(refusal.load_errors.iter().any(|e| e.starts_with("confirmation rebuild: ")), "{refusal:?}");
+        assert!(refusal.to_string().contains("loading failed (confirmation rebuild: "), "{refusal}");
+
+        // Any other tracker refuses every novation: it cannot tell which edges carry on-chain state.
+        assert!(matches!(
+            transfer(&mut m, 100, 50, 20, base() + 2999),
+            Err(NoteError::OnchainScope(msg)) if msg == NOVATIONS_DISABLED_CONFIRMATIONS
+        ));
+        assert!(matches!(
+            m.set_off(&DenomKey::Erg, &setoff_edges(100, 100, 30, base() + 3998)),
+            Err(NoteError::OnchainScope(msg)) if msg == NOVATIONS_DISABLED_CONFIRMATIONS
+        ));
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A), total(&m, &A, &C)), (100, 100, 50));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        assert!(!m.is_bound_only(&pk(&A), &pk(&B), &DenomKey::Erg).unwrap());
+        // Ordinary notes still apply.
+        note(&mut m, &A, &C, 60, base() + 1500);
+        assert_eq!(total(&m, &A, &C), 60);
+
+        // Once the record is readable again, a rebuild succeeds, the failure is cleared and novations apply.
+        m.storage.store_confirmation(&CORRUPT_CONFIRMATION_KEY, &NoteConfirmation::local_only()).unwrap();
+        assert_eq!(m.rebuild_confirmations().unwrap(), 3);
+        assert_eq!((m.load_report().confirmations_error.clone(), m.novations_disabled_reason()), (None, None));
+        assert_eq!(m.check_pure_credit(), Ok(()));
+        m.set_off(&DenomKey::Erg, &setoff_edges(100, 100, 30, base() + 3998)).unwrap();
+        assert_eq!((total(&m, &A, &B), total(&m, &B, &A)), (70, 70));
     }
 }

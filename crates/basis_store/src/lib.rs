@@ -673,6 +673,72 @@ pub struct SetOffResult {
 pub type ExchangeAcceptanceCheckFn =
     Box<dyn FnOnce(ExchangeAcceptanceView) -> Result<(), String> + Send>;
 
+/// What opening the store found (see [`TrackerStateManager::load_report`]): the
+/// loading problems a pure-credit tracker refuses to start on, and the
+/// confirmation-load failure that makes every tracker refuse novations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreLoadReport {
+    /// Note records the index rebuild could not decode and skipped.
+    pub undecodable_note_records: usize,
+    /// Loading steps that failed while the store opened, each as
+    /// "<step>: <error>" (the note index rebuild, the tree rebuild).
+    pub load_errors: Vec<String>,
+    /// Why the confirmation records failed to load (from the latest
+    /// [`TrackerStateManager::rebuild_confirmations`]), if they did. While it is
+    /// set the store cannot tell which edges carry on-chain state, so it refuses
+    /// novations (debt transfer, set-off) with [`NoteError::OnchainScope`].
+    pub confirmations_error: Option<String>,
+}
+
+/// Why a store must not serve as a pure-credit tracker (design §3.7), from
+/// [`TrackerStateManager::check_pure_credit`]. Its `Display` is the startup
+/// error message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PureCreditRefusal {
+    /// Stored confirmation records with a committed or pending on-chain total.
+    pub onchain_confirmations: usize,
+    /// Note records that could not be decoded.
+    pub undecodable_note_records: usize,
+    /// Notes or confirmations that failed to load, each as "<step>: <error>".
+    pub load_errors: Vec<String>,
+}
+
+impl std::fmt::Display for PureCreditRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut problems = Vec::new();
+        if self.onchain_confirmations > 0 {
+            problems.push(format!(
+                "{} stored confirmation record(s) carry a committed or pending on-chain total",
+                self.onchain_confirmations
+            ));
+        }
+        if self.undecodable_note_records > 0 {
+            problems.push(format!(
+                "{} note record(s) could not be decoded",
+                self.undecodable_note_records
+            ));
+        }
+        for e in &self.load_errors {
+            problems.push(format!("loading failed ({})", e));
+        }
+        write!(
+            f,
+            "refusing to start in pure_credit mode: {}. A pure-credit tracker serves only \
+             credit edges that were never committed on-chain, and it must be able to read every \
+             stored record; start without server.pure_credit, or with a data directory that \
+             qualifies.",
+            problems.join("; ")
+        )
+    }
+}
+
+impl std::error::Error for PureCreditRefusal {}
+
+/// The public reason novations are refused while the confirmation records
+/// failed to load (GET /capabilities `novations_disabled_reason`, and the 503
+/// of the novation routes). Fixed text: the underlying error is only logged.
+pub const NOVATIONS_DISABLED_CONFIRMATIONS: &str = "the tracker's confirmation records failed to load, so it cannot tell which edges carry on-chain state; debt transfers and set-offs are refused until it restarts with readable records";
+
 /// Tracker state manager with persistent AVL tree
 pub struct TrackerStateManager {
     avl_state: basis_trees::BasisAvlTree,
@@ -712,6 +778,9 @@ pub struct TrackerStateManager {
     /// digest. The old (valid) tree is kept in place meanwhile, so a
     /// half-rebuilt tree is never committed.
     tree_dirty: bool,
+    /// What opening the store found (undecodable records, failed loading
+    /// steps, a confirmation-load failure); see [`Self::load_report`].
+    load_report: StoreLoadReport,
     /// Test-only fault-injection hook: while set, `rebuild_tree_canonically`
     /// returns an error without touching the live tree (issue #20 tests).
     #[cfg(test)]
@@ -720,8 +789,16 @@ pub struct TrackerStateManager {
 
 impl TrackerStateManager {
     /// Create a new tracker state manager with the configured storage location.
+    ///
+    /// Loading problems (undecodable note records, failed loading steps, a
+    /// confirmation-load failure) are logged and recorded in
+    /// [`Self::load_report`]; they do not stop the store from opening. A
+    /// pure-credit server refuses to start on them ([`Self::check_pure_credit`]),
+    /// and every server refuses novations while the confirmation records failed
+    /// to load ([`Self::novations_disabled_reason`]).
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
         tracing::debug!("Creating TrackerStateManager...");
+        let mut load_report = StoreLoadReport::default();
 
         // Use the configured storage location
         tracing::debug!("Opening note storage...");
@@ -732,8 +809,16 @@ impl TrackerStateManager {
                 // Rebuild indices to ensure all existing notes are indexed
                 // (especially important after upgrading to indexed storage)
                 match storage.rebuild_indices() {
-                    Ok(count) => tracing::info!("Note indices rebuilt: {} notes indexed", count),
-                    Err(e) => tracing::warn!("Failed to rebuild note indices: {:?}", e),
+                    Ok(scan) => {
+                        tracing::info!("Note indices rebuilt: {} notes indexed", scan.decoded);
+                        load_report.undecodable_note_records = scan.skipped;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to rebuild note indices: {:?}", e);
+                        load_report
+                            .load_errors
+                            .push(format!("note index rebuild: {:?}", e));
+                    }
                 }
                 storage
             }
@@ -773,17 +858,28 @@ impl TrackerStateManager {
             confirmations: std::collections::HashMap::new(),
             confirmed_digest: None,
             tree_dirty: false,
+            load_report,
             #[cfg(test)]
             fail_tree_rebuild: false,
         };
 
         if let Err(e) = manager.rebuild_avl_tree() {
             tracing::warn!("Failed to rebuild AVL tree from storage: {:?}", e);
+            manager
+                .load_report
+                .load_errors
+                .push(format!("tree rebuild: {:?}", e));
         }
 
         // Rebuild confirmation records from storage and mark every stored note as
-        // LocalOnly until the updater confirms otherwise.
-        manager.rebuild_confirmations();
+        // LocalOnly until the updater confirms otherwise. A failure is recorded
+        // in the load report (see `rebuild_confirmations`).
+        if let Err(e) = manager.rebuild_confirmations() {
+            tracing::error!(
+                "Confirmation records failed to load: {:?}. Debt transfers and set-offs are refused until the tracker restarts with readable records.",
+                e
+            );
+        }
 
         // Rebuild per-issuer reserve AVL trees from the persisted journal so that
         // redemptions can continue after a server restart without manual repair.
@@ -935,6 +1031,7 @@ impl TrackerStateManager {
             confirmations: std::collections::HashMap::new(),
             confirmed_digest: None,
             tree_dirty: false,
+            load_report: StoreLoadReport::default(),
             #[cfg(test)]
             fail_tree_rebuild: false,
         };
@@ -942,8 +1039,14 @@ impl TrackerStateManager {
         // Rebuild AVL tree and confirmations so test instances mirror production.
         if let Err(e) = manager.rebuild_avl_tree() {
             tracing::warn!("Failed to rebuild AVL tree in test instance: {:?}", e);
+            manager
+                .load_report
+                .load_errors
+                .push(format!("tree rebuild: {:?}", e));
         }
-        manager.rebuild_confirmations();
+        if let Err(e) = manager.rebuild_confirmations() {
+            tracing::warn!("Failed to rebuild confirmations in test instance: {:?}", e);
+        }
 
         manager
     }
@@ -1211,18 +1314,42 @@ impl TrackerStateManager {
     /// the persisted `confirmed_total_debt` metadata but recompute the status from
     /// the current local value and clear any pending in-flight state (pending
     /// transactions do not survive a restart).
-    pub fn rebuild_confirmations(&mut self) {
+    ///
+    /// Returns the number of confirmation records rebuilt. Fails closed: when
+    /// the notes or the stored confirmation records fail to load, it returns the
+    /// error and records it in the load report
+    /// ([`StoreLoadReport::confirmations_error`]); the store then refuses
+    /// novations until a rebuild succeeds. On an error the map holds what could
+    /// be built: nothing when the notes failed to load, every note local-only
+    /// when the stored records failed to load.
+    pub fn rebuild_confirmations(&mut self) -> Result<usize, NoteError> {
+        let result = self.load_confirmations();
+        self.load_report.confirmations_error = result
+            .as_ref()
+            .err()
+            .map(|e| format!("confirmation rebuild: {:?}", e));
+        result
+    }
+
+    /// The work of [`Self::rebuild_confirmations`].
+    fn load_confirmations(&mut self) -> Result<usize, NoteError> {
         self.confirmations.clear();
 
         let notes = match self.storage.get_all_notes_with_issuer() {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!("Failed to load notes for confirmation rebuild: {:?}", e);
-                return;
+                return Err(e);
             }
         };
 
-        let stored = self.storage.get_all_confirmations().unwrap_or_default();
+        let (stored, load_error) = match self.storage.get_all_confirmations() {
+            Ok(stored) => (stored, None),
+            Err(e) => {
+                tracing::warn!("Failed to load stored confirmation records: {:?}", e);
+                (Vec::new(), Some(e))
+            }
+        };
         let stored_map: std::collections::HashMap<NoteKeyBytes, NoteConfirmation> =
             stored.into_iter().collect();
 
@@ -1245,10 +1372,102 @@ impl TrackerStateManager {
             self.confirmations.insert(key, record);
         }
 
+        if let Some(e) = load_error {
+            return Err(e);
+        }
         tracing::info!(
             "Rebuilt confirmation records for {} notes",
             self.confirmations.len()
         );
+        Ok(self.confirmations.len())
+    }
+
+    /// What opening the store found: undecodable note records, failed loading
+    /// steps and whether the confirmation records failed to load.
+    pub fn load_report(&self) -> &StoreLoadReport {
+        &self.load_report
+    }
+
+    /// Why debt transfers and set-offs must be refused on this store, if they
+    /// must: the confirmation records failed to load, so the store cannot tell
+    /// which edges carry on-chain state. Fixed public text
+    /// ([`NOVATIONS_DISABLED_CONFIRMATIONS`]); the underlying error is in
+    /// [`StoreLoadReport::confirmations_error`] and the log.
+    pub fn novations_disabled_reason(&self) -> Option<String> {
+        self.load_report
+            .confirmations_error
+            .as_ref()
+            .map(|_| NOVATIONS_DISABLED_CONFIRMATIONS.to_string())
+    }
+
+    /// The number of edges whose confirmation record has a committed or pending
+    /// on-chain total (the edges a novation may not lower). Always 0 on a
+    /// pure-credit tracker.
+    pub fn onchain_edge_count(&self) -> usize {
+        self.confirmations
+            .values()
+            .filter(|c| c.confirmed_total_debt.is_some() || c.pending_total_debt.is_some())
+            .count()
+    }
+
+    /// The pure-credit startup check (design §3.7). A pure-credit tracker
+    /// serves only credit edges that were never committed on-chain, so it
+    /// refuses to start (`Err`) when:
+    /// - any STORED confirmation record has a committed or pending on-chain
+    ///   total (`confirmed_total_debt` or `pending_total_debt`; pending totals
+    ///   count although a restart clears them in memory, because the
+    ///   transaction may still confirm);
+    /// - any note record fails to decode (normally such records are skipped);
+    /// - the notes or the confirmation records failed to load, when the store
+    ///   opened or now.
+    /// The note and confirmation partitions are read again here, so the check
+    /// does not rely on the in-memory state alone.
+    pub fn check_pure_credit(&self) -> Result<(), PureCreditRefusal> {
+        let mut refusal = PureCreditRefusal {
+            undecodable_note_records: self.load_report.undecodable_note_records,
+            load_errors: self.load_report.load_errors.clone(),
+            ..Default::default()
+        };
+        if let Some(e) = &self.load_report.confirmations_error {
+            refusal.load_errors.push(e.clone());
+        }
+        match self.storage.get_all_notes_with_issuer_counted() {
+            Ok((_, skipped)) => {
+                refusal.undecodable_note_records = refusal.undecodable_note_records.max(skipped)
+            }
+            Err(e) => refusal.load_errors.push(format!("note records: {:?}", e)),
+        }
+        match self.storage.get_all_confirmations() {
+            Ok(stored) => {
+                refusal.onchain_confirmations = stored
+                    .iter()
+                    .filter(|(_, c)| {
+                        c.confirmed_total_debt.is_some() || c.pending_total_debt.is_some()
+                    })
+                    .count()
+            }
+            Err(e) => refusal
+                .load_errors
+                .push(format!("confirmation records: {:?}", e)),
+        }
+        if refusal == PureCreditRefusal::default() {
+            Ok(())
+        } else {
+            Err(refusal)
+        }
+    }
+
+    /// Novations need to know which edges carry on-chain state: while the
+    /// confirmation records failed to load
+    /// ([`StoreLoadReport::confirmations_error`]) no edge can be shown to have
+    /// none, so the scope check refuses every edge ([`NoteError::OnchainScope`]).
+    fn require_known_onchain_state(&self) -> Result<(), NoteError> {
+        match self.load_report.confirmations_error {
+            None => Ok(()),
+            Some(_) => Err(NoteError::OnchainScope(
+                NOVATIONS_DISABLED_CONFIRMATIONS.to_string(),
+            )),
+        }
     }
 
     /// Get a clone of the confirmation record for a note, if one exists.
@@ -1932,7 +2151,8 @@ impl TrackerStateManager {
     /// 5. no exchange is staged on either pair (`StagedExchange`);
     /// 6. the from-edge exists (`NotFound`);
     /// 7. the from-edge has no committed or pending on-chain total
-    ///    (`OnchainScope`);
+    ///    (`OnchainScope`; also refused while the confirmation records failed
+    ///    to load, see [`StoreLoadReport::confirmations_error`]);
     /// 8. `from_prior_total` and `to_prior_total`, optional and diagnostic,
     ///    equal X and Y when they are sent (`StalePrior`);
     /// 9. X >= a and X - a >= the from-edge's redeemed amount
@@ -2108,6 +2328,8 @@ impl TrackerStateManager {
             self.get_note_optional(issuer_pubkey, to_recipient_pubkey, denomination)?;
 
         // 7. SCOPE (see `transfer_debt`): the from-edge has never been committed on-chain.
+        // Unknown while the confirmation records failed to load: then refused.
+        self.require_known_onchain_state()?;
         let from_key_hash =
             NoteKey::from_assets(issuer_pubkey, from_recipient_pubkey, denomination).key_hash;
         if let Some(c) = self.confirmations.get(&from_key_hash) {
@@ -2332,7 +2554,8 @@ impl TrackerStateManager {
     /// 4. balance for every key (`InvalidSetOff`);
     /// 5. no exchange is staged on any of the pairs (`StagedExchange`);
     /// 6. edge by edge: the edge exists (`NotFound`); it has no committed or
-    ///    pending on-chain total (`OnchainScope`); the decrease is at most its
+    ///    pending on-chain total (`OnchainScope`; also refused while the
+    ///    confirmation records failed to load); the decrease is at most its
     ///    total and leaves at least its redeemed amount (`InvalidSetOff`); its
     ///    timestamp is newer than the edge's stored one (`PastTimestamp`); it
     ///    is bound to the same tracker NFT as the other edges
@@ -2446,6 +2669,8 @@ impl TrackerStateManager {
         for (index, e) in edges.iter().enumerate() {
             let note = self.lookup_note(&e.issuer_pubkey, &e.recipient_pubkey, denomination)?;
             let key = NoteKey::from_assets(&e.issuer_pubkey, &e.recipient_pubkey, denomination);
+            // Unknown while the confirmation records failed to load: then refused.
+            self.require_known_onchain_state()?;
             if let Some(c) = self.confirmations.get(&key.key_hash) {
                 if c.confirmed_total_debt.is_some() || c.pending_total_debt.is_some() {
                     return Err(NoteError::OnchainScope(

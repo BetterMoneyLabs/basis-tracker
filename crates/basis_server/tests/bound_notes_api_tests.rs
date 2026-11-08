@@ -153,6 +153,7 @@ async fn tracker() -> Tracker {
         acceptance_predicate: None,
         policy_storage,
         pending_redemptions: Arc::new(basis_server::redemption_build::PendingRedemptionRegistry::new()),
+        novations_disabled_reason: None,
         redemption_build_rate: Arc::new(basis_server::redemption_build::BuildRateLimiter::new()),
     };
     let app = axum::Router::new()

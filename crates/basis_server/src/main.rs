@@ -95,6 +95,17 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // Pure-credit mode (design §3.7): no chain access at all. The Ergo scanner,
+    // the tracker scanner and the tracker box updater are not started, and the
+    // tracker thread refuses to start on a store with on-chain state or
+    // unreadable records (see `basis_server::tracker_startup`).
+    let pure_credit = config.server.pure_credit;
+    if pure_credit {
+        tracing::info!(
+            "pure_credit mode: the Ergo scanner, the tracker scanner and the tracker box updater are not started"
+        );
+    }
+
     // Initialize real Ergo scanner with blockchain monitoring
     tracing::info!("Initializing Ergo scanner with blockchain monitoring...");
 
@@ -117,8 +128,11 @@ async fn main() {
         }
     };
 
-    // Start the scanner background task
-    if let Err(e) = start_scanner(ergo_scanner.clone()).await {
+    // Start the scanner background task (never in pure-credit mode: the scanner
+    // state above only opens local storage; the background task polls the node).
+    if pure_credit {
+        tracing::info!("pure_credit mode: the Ergo scanner is not started");
+    } else if let Err(e) = start_scanner(ergo_scanner.clone()).await {
         tracing::warn!("Failed to start background scanner: {}", e);
         tracing::info!("Continuing without background scanner...");
     } else {
@@ -150,7 +164,10 @@ async fn main() {
         "Tracker NFT ID from config: {:?}",
         config.ergo.tracker_nft_id
     );
-    let _tracker_scanner_initialized = if config.ergo.tracker_nft_id.is_some()
+    let _tracker_scanner_initialized = if pure_credit {
+        tracing::info!("pure_credit mode: the tracker scanner is not started");
+        false
+    } else if config.ergo.tracker_nft_id.is_some()
         && config
             .ergo
             .tracker_nft_id
@@ -266,6 +283,11 @@ async fn main() {
     // Clone the data directory for the tracker thread before the async move.
     let data_dir_for_tracker_thread = data_dir.clone();
 
+    // The tracker thread reports its startup decision (design §3.7) here; the
+    // server goes no further until it has.
+    let (startup_tx, startup_rx) =
+        tokio::sync::oneshot::channel::<Result<Option<String>, String>>();
+
     // Spawn tracker thread (using tokio::task::spawn_blocking for CPU-bound work)
     let _shared_tracker_state_clone = shared_tracker_state.clone();
     let shared_state_for_tracker = shared_tracker_state_for_updater.clone(); // Also pass shared state for updater
@@ -274,6 +296,16 @@ async fn main() {
 
         tracing::debug!("Tracker thread started");
         let tracker = TrackerStateManager::new(&data_dir_for_tracker_thread);
+
+        // A pure-credit tracker refuses to start on a store with on-chain state
+        // or unreadable records; any tracker refuses novations while the
+        // confirmation records failed to load.
+        let startup = basis_server::tracker_startup(&tracker, pure_credit);
+        let refused = startup.is_err();
+        let _ = startup_tx.send(startup);
+        if refused {
+            return;
+        }
 
         // Update shared state with the rebuilt AVL root digest after initialization
         let initial_root = tracker.get_state().avl_root_digest;
@@ -648,6 +680,9 @@ async fn main() {
                         .reconcile_with_confirmed_digest(&digest, &box_id, height);
                     let _ = response_tx.send(result);
                 }
+                TrackerCommand::OnchainEdgeCount { response_tx } => {
+                    let _ = response_tx.send(redemption_manager.tracker.onchain_edge_count());
+                }
             }));
             if outcome.is_err() {
                 tracing::error!(
@@ -657,13 +692,36 @@ async fn main() {
         }
     });
 
-    // Create tracker box updater
-    tracing::info!("Initializing tracker box updater...");
+    let novations_disabled_reason = match startup_rx.await {
+        Ok(Ok(reason)) => {
+            if let Some(reason) = &reason {
+                tracing::warn!("Debt transfers and set-offs are disabled: {}", reason);
+            }
+            reason
+        }
+        Ok(Err(refusal)) => {
+            tracing::error!("{}", refusal);
+            eprintln!("{}", refusal);
+            std::process::exit(1);
+        }
+        Err(_) => {
+            tracing::error!("The tracker thread stopped before reporting its startup state");
+            eprintln!("The tracker thread stopped before reporting its startup state");
+            std::process::exit(1);
+        }
+    };
 
-    // Check if node configuration is provided, abort if not
-    if config.ergo.scanner.node_url.is_empty() {
-        tracing::error!("No Ergo scanner node URL provided in configuration. Tracker box updater requires node connection.");
-        std::process::exit(1);
+    // Create tracker box updater
+    if pure_credit {
+        tracing::info!("pure_credit mode: the tracker box updater is not started");
+    } else {
+        tracing::info!("Initializing tracker box updater...");
+
+        // Check if node configuration is provided, abort if not
+        if config.ergo.scanner.node_url.is_empty() {
+            tracing::error!("No Ergo scanner node URL provided in configuration. Tracker box updater requires node connection.");
+            std::process::exit(1);
+        }
     }
 
     // Initialize tracker NFT ID in shared state if configured
@@ -679,50 +737,52 @@ async fn main() {
     // Use mainnet network prefix for address encoding
     let _network_prefix = ergo_lib::ergotree_ir::chain::address::NetworkPrefix::Mainnet;
 
-    let tracker_update_interval = std::env::var("BASIS_TRACKER_UPDATE_INTERVAL_SECONDS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(600);
+    if !pure_credit {
+        let tracker_update_interval = std::env::var("BASIS_TRACKER_UPDATE_INTERVAL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(600);
 
-    let (wallet_node_url, wallet_api_key) = config.ergo_wallet_node();
-    let tracker_box_config = TrackerBoxUpdateConfig {
-        wallet_node_url,
-        wallet_api_key,
-        scanner_node_url: config.ergo.scanner.node_url.clone(),
-        scanner_api_key: config.ergo.scanner.api_key.clone(),
-        update_interval_seconds: tracker_update_interval,
-        fee: config.transaction.fee,
-        change_address: config.get_change_address().ok(),
-        tracker_secret_key: config.tracker_secret_key_bytes(),
-        min_confirmation_depth: config.confirmation.min_depth,
-        reserve_contract_addresses: vec![
-            config.ergo.basis_reserve_contract_p2s.clone(),
-            config.ergo.basis_token_reserve_contract_p2s.clone(),
-        ],
-    };
-    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+        let (wallet_node_url, wallet_api_key) = config.ergo_wallet_node();
+        let tracker_box_config = TrackerBoxUpdateConfig {
+            wallet_node_url,
+            wallet_api_key,
+            scanner_node_url: config.ergo.scanner.node_url.clone(),
+            scanner_api_key: config.ergo.scanner.api_key.clone(),
+            update_interval_seconds: tracker_update_interval,
+            fee: config.transaction.fee,
+            change_address: config.get_change_address().ok(),
+            tracker_secret_key: config.tracker_secret_key_bytes(),
+            min_confirmation_depth: config.confirmation.min_depth,
+            reserve_contract_addresses: vec![
+                config.ergo.basis_reserve_contract_p2s.clone(),
+                config.ergo.basis_token_reserve_contract_p2s.clone(),
+            ],
+        };
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
-    // Clone the channel for the tracker updater
-    let _updater_shutdown_rx = shutdown_tx.subscribe();
+        // Clone the channel for the tracker updater
+        let _updater_shutdown_rx = shutdown_tx.subscribe();
 
-    // Start the tracker box updater in the background
-    let updater_config = tracker_box_config.clone();
-    let shared_state_clone = shared_tracker_state_for_updater.clone();
-    let updater_cmd_tx = tx.clone();
-    let updater_shutdown_rx = shutdown_tx.subscribe();
-    tokio::spawn(async move {
-        if let Err(e) = TrackerBoxUpdater::start(
-            updater_config,
-            shared_state_clone,
-            updater_shutdown_rx,
-            Some(updater_cmd_tx),
-        )
-        .await
-        {
-            tracing::error!("Tracker box updater failed: {}", e);
-        }
-    });
-    tracing::info!("Tracker box updater started successfully");
+        // Start the tracker box updater in the background
+        let updater_config = tracker_box_config.clone();
+        let shared_state_clone = shared_tracker_state_for_updater.clone();
+        let updater_cmd_tx = tx.clone();
+        let updater_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            if let Err(e) = TrackerBoxUpdater::start(
+                updater_config,
+                shared_state_clone,
+                updater_shutdown_rx,
+                Some(updater_cmd_tx),
+            )
+            .await
+            {
+                tracing::error!("Tracker box updater failed: {}", e);
+            }
+        });
+        tracing::info!("Tracker box updater started successfully");
+    }
 
     let event_store = match EventStore::new().await {
         Ok(store) => std::sync::Arc::new(store),
@@ -905,6 +965,7 @@ async fn main() {
         redemption_build_rate: std::sync::Arc::new(
             basis_server::redemption_build::BuildRateLimiter::new(),
         ),
+        novations_disabled_reason,
     };
 
     // Build CORS layer based on auth configuration.
@@ -1004,6 +1065,7 @@ async fn main() {
         .route("/tracker/proof", get(get_tracker_proof))
         .route("/tracker/state", get(get_tracker_state))
         .route("/tracker/pending-tx", get(get_pending_tx))
+        .route("/capabilities", get(get_capabilities))
         .route("/reserve/proof", get(get_reserve_proof))
         .route(
             "/tracker/signature",
@@ -1105,6 +1167,7 @@ async fn main() {
     tracing::debug!("  GET /tracker/latest-box-id");
     tracing::debug!("  GET /tracker/state");
     tracing::debug!("  GET /tracker/pending-tx");
+    tracing::debug!("  GET /capabilities");
 
     // Run our app with hyper, optionally over TLS.
     // When TLS is configured the auth credentials and signatures are encrypted

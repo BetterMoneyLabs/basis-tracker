@@ -19,6 +19,19 @@ const NOTE_VALUE_LEN: usize = 220;
 /// denomination(33) = 49 bytes.
 const JOURNAL_VALUE_LEN: usize = 49;
 
+/// The outcome of a full scan of the note records (`iou_notes`): how many
+/// records decoded and how many could not be decoded (a wrong length or a bad
+/// denomination byte) and were skipped. Skipped records are counted, never
+/// dropped silently: a pure-credit tracker refuses to start when any record was
+/// skipped (see `TrackerStateManager::check_pure_credit`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoteRecordScan {
+    /// Records that decoded (for an index rebuild: the records indexed).
+    pub decoded: usize,
+    /// Records that could not be decoded and were skipped.
+    pub skipped: usize,
+}
+
 /// Database storage for IOU notes with extra indices for efficient querying
 ///
 /// Uses three partitions:
@@ -1109,9 +1122,12 @@ impl NoteStorage {
     /// Rebuild secondary indices from existing notes in the database
     /// This should be called after upgrading to a version with indices when
     /// existing data may not have index entries
-    pub fn rebuild_indices(&self) -> Result<usize, NoteError> {
+    ///
+    /// Returns how many records were indexed and how many could not be decoded
+    /// and were skipped (counted and logged, so the caller can refuse them).
+    pub fn rebuild_indices(&self) -> Result<NoteRecordScan, NoteError> {
         tracing::info!("Rebuilding note indices from existing data...");
-        let mut count = 0;
+        let mut scan = NoteRecordScan::default();
 
         for item in self.notes_partition.iter() {
             let (key_bytes, value_bytes) = item.map_err(|e| {
@@ -1119,7 +1135,10 @@ impl NoteStorage {
             })?;
 
             let Some((issuer_pubkey, note)) = Self::deserialize_note_value(&value_bytes) else {
-                continue; // Skip invalid entries
+                // An undecodable record cannot be indexed. It is counted, so a
+                // pure-credit tracker can refuse to start on it.
+                scan.skipped += 1;
+                continue;
             };
 
             // Reconstruct the note key from the stored key bytes
@@ -1133,11 +1152,17 @@ impl NoteStorage {
             // Rebuild indices
             Self::add_to_index(&self.issuer_index, &issuer_pubkey, &note_key)?;
             Self::add_to_index(&self.recipient_index, &note.recipient_pubkey, &note_key)?;
-            count += 1;
+            scan.decoded += 1;
         }
 
-        tracing::info!("Index rebuild complete: {} notes indexed", count);
-        Ok(count)
+        if scan.skipped > 0 {
+            tracing::warn!(
+                "Index rebuild skipped {} note record(s) that could not be decoded",
+                scan.skipped
+            );
+        }
+        tracing::info!("Index rebuild complete: {} notes indexed", scan.decoded);
+        Ok(scan)
     }
 
     /// Get all notes in the database
@@ -1157,21 +1182,55 @@ impl NoteStorage {
         Ok(notes)
     }
 
-    /// Get all notes with issuer information
+    /// Get all notes with issuer information. Records that cannot be decoded
+    /// are skipped with a warning; [`Self::get_all_notes_with_issuer_counted`]
+    /// also returns how many.
     pub fn get_all_notes_with_issuer(&self) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
+        let (notes_with_issuer, skipped) = self.get_all_notes_with_issuer_counted()?;
+        if skipped > 0 {
+            tracing::warn!(
+                "Skipped {} note record(s) that could not be decoded",
+                skipped
+            );
+        }
+        Ok(notes_with_issuer)
+    }
+
+    /// All notes with issuer information, and the number of note records that
+    /// could not be decoded (a wrong length or a bad denomination byte) and
+    /// were skipped.
+    pub fn get_all_notes_with_issuer_counted(
+        &self,
+    ) -> Result<(Vec<(PubKey, IouNote)>, usize), NoteError> {
         let mut notes_with_issuer = Vec::new();
+        let mut skipped = 0usize;
 
         for item in self.notes_partition.iter() {
             let (_key_bytes, value_bytes) = item.map_err(|e| {
                 NoteError::StorageError(format!("Failed to iterate partition: {}", e))
             })?;
 
-            if let Some(pair) = Self::deserialize_note_value(&value_bytes) {
-                notes_with_issuer.push(pair);
+            match Self::deserialize_note_value(&value_bytes) {
+                Some(pair) => notes_with_issuer.push(pair),
+                None => skipped += 1,
             }
         }
 
-        Ok(notes_with_issuer)
+        Ok((notes_with_issuer, skipped))
+    }
+
+    /// Test-only: write raw bytes into the note records partition (to plant a
+    /// record that does not decode).
+    #[cfg(test)]
+    pub(crate) fn insert_raw_note_record(&self, key: &[u8], value: &[u8]) {
+        self.notes_partition.insert(key, value).unwrap();
+    }
+
+    /// Test-only: write raw bytes into the confirmations partition (to plant a
+    /// record that does not parse).
+    #[cfg(test)]
+    pub(crate) fn insert_raw_confirmation_record(&self, key: &[u8], value: &[u8]) {
+        self.confirmations_partition.insert(key, value).unwrap();
     }
 
     /// Retrieve an IOU note by its 32-byte note key.

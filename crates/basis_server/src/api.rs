@@ -8,15 +8,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     models::{
-        ApiResponse, Asset, CheckAcceptanceRequest, CheckAcceptanceResponse,
+        ApiResponse, Asset, CapabilitiesResponse, CheckAcceptanceRequest, CheckAcceptanceResponse,
         CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, ExchangeNotesRequest, TransferNotesRequest, TransferNotesResponse, SetOffRequest, SetOffResponse, SetOffEdgeResult,
         ExchangeNotesResponse, KeyStatusDenomination, KeyStatusResponse, NoteConfirmationSummary,
         NoteStateRequest, NoteStateResponse, PendingExchangeView, PendingTxResponse, ProofResponse,
         RedeemRequest, RedeemResponse, RedemptionPreparationRequest, RedemptionPreparationResponse,
         ReserveCollateralConfigResponse, ReserveCreationResponse, ReservePaymentRequest,
         ReserveTokenConfigResponse, SerializableIouNote, ServedDenomination, ServedTokenInfo,
-        TrackerEvent, TrackerSignatureRequest, TrackerSignatureResponse, TrackerStateResponse,
-        UploadPolicyRequest, UploadPolicyResponse,
+        TrackerCapabilities, TrackerEvent, TrackerSignatureRequest, TrackerSignatureResponse,
+        TrackerStateResponse, UploadPolicyRequest, UploadPolicyResponse,
     },
     AppState, ExchangeAcceptanceCheck, TrackerCommand,
 };
@@ -153,6 +153,49 @@ async fn verify_ergo_node_signature_compatibility(
 // Basic handler that responds with a static string
 pub async fn root() -> &'static str {
     "Hello, Basis Tracker API!"
+}
+
+/// `GET /capabilities` (Read role): this build's identity and the rules it
+/// enforces (design §3.6), for clients that enable a feature only when the
+/// response matches exactly. `onchain_edges` comes from the tracker thread;
+/// when it cannot be read the answer is 500, never a guess.
+pub async fn get_capabilities(
+    State(state): State<AppState>,
+) -> Result<Json<CapabilitiesResponse>, (StatusCode, Json<ApiResponse<()>>)> {
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(TrackerCommand::OnchainEdgeCount { response_tx })
+        .await
+        .is_err()
+    {
+        return Err(internal_error("Tracker thread unavailable"));
+    }
+    let onchain_edges = match response_rx.await {
+        Ok(count) => count as u64,
+        Err(_) => return Err(internal_error("Tracker thread did not respond")),
+    };
+    Ok(Json(CapabilitiesResponse {
+        success: true,
+        data: TrackerCapabilities::current(
+            state.config.server.pure_credit,
+            onchain_edges,
+            state.novations_disabled_reason.clone(),
+        ),
+    }))
+}
+
+/// The answer of the novation routes while novations are disabled
+/// ([`AppState::novations_disabled_reason`]): 503 with code
+/// `novations_disabled`, before the request is looked at further.
+fn novations_disabled_response<T>(reason: &str) -> (StatusCode, Json<ApiResponse<T>>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(crate::models::error_response_with_code(
+            format!("Novations are disabled: {}", reason),
+            "novations_disabled",
+        )),
+    )
 }
 
 const BOUND_NOTE_REQUIRED_MESSAGE: &str = "this edge was changed by a debt transfer or set-off and is bound-only: a new note on it must be a bound note (a timestamp ending in 997 ms, with prior_signature)";
@@ -1061,11 +1104,15 @@ pub async fn exchange_notes(
 /// signatures. See [`TransferNotesRequest`]. Pure-credit trackers only.
 /// Refusals carry a machine-readable `code` (see `transfer_error_response`),
 /// except the request-format ones (400, as before) and the new creditor's
-/// acceptance policy (403).
+/// acceptance policy (403). While novations are disabled every request
+/// answers 503 `novations_disabled`.
 pub async fn transfer_notes(
     State(state): State<AppState>,
     Json(payload): Json<TransferNotesRequest>,
 ) -> (StatusCode, Json<ApiResponse<TransferNotesResponse>>) {
+    if let Some(reason) = &state.novations_disabled_reason {
+        return novations_disabled_response(reason);
+    }
     let bad_request = |msg: String| {
         (
             StatusCode::BAD_REQUEST,
@@ -1275,11 +1322,15 @@ pub async fn transfer_notes(
 /// with per-edge timestamps. See [`SetOffRequest`]. Net-neutral for every
 /// participant; pure-credit edges only. Refusals carry a machine-readable
 /// `code` (see `setoff_error_response`), except the request-format ones (400,
-/// as before).
+/// as before). While novations are disabled every request answers 503
+/// `novations_disabled`.
 pub async fn setoff_notes(
     State(state): State<AppState>,
     Json(payload): Json<SetOffRequest>,
 ) -> (StatusCode, Json<ApiResponse<SetOffResponse>>) {
+    if let Some(reason) = &state.novations_disabled_reason {
+        return novations_disabled_response(reason);
+    }
     let bad_request = |msg: String| {
         (
             StatusCode::BAD_REQUEST,
