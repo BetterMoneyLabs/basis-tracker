@@ -90,13 +90,6 @@ mod http_api_tests {
                         );
                         let _ = response_tx.send(result);
                     }
-                    TrackerCommand::InitiateRedemption {
-                        request,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.initiate_redemption(&request);
-                        let _ = response_tx.send(result);
-                    }
                     TrackerCommand::CompleteRedemption {
                         issuer_pubkey,
                         recipient_pubkey,

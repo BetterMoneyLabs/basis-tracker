@@ -158,11 +158,10 @@ configured Ergo node wallet.
 
 ### Redemption
 
-- `POST /redeem` - Initiate redemption of an IOU note
-- `POST /redeem/complete` - Mark a redemption as completed locally (amounts are validated against the stored note state; a mismatch returns 400)
-- `POST /redemption/prepare` - Prepare a redemption (legacy tracker-signature + proof endpoint; the note must exist and the stored note's cumulative debt and timestamp are signed — the request's `timestamp` field is ignored)
 - `POST /redemption/build` - Build an unsigned redemption transaction and sign fee inputs (the tracker proof is generated against the last on-chain-confirmed tracker state; returns 400 if the note is not yet in the confirmed state)
-- `POST /redemption/submit` - Broadcast a fully-signed redemption transaction (note key and amounts are re-validated against stored state before broadcasting; a mismatch returns 400)
+- `POST /redemption/submit` - Broadcast a fully-signed redemption transaction. The echoed `unsigned_tx` from `/redemption/build` binds the submit to the stored build entry (unknown/expired entries return 409; a signed tx that is not the built one returns 400), and tracker state is synced from the stored entry after broadcast
+- `POST /redemption/prepare` - Prepare a redemption (legacy tracker-signature + proof endpoint; the note must exist and the stored note's cumulative debt and timestamp are signed — the request's `timestamp` field is ignored)
+- `POST /redeem/complete` - Admin-only repair hatch: mark a redemption as completed locally (amounts are validated against the stored note state; a mismatch returns 400). Normal clients never need it — `/redemption/submit` syncs state itself
 
 ### Proofs
 
@@ -300,20 +299,6 @@ curl -X POST http://localhost:3048/acceptance/check \
     "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
     "total_debt": 1000000000,
     "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202"
-  }'
-```
-
-### Initiate Redemption
-
-```bash
-curl -X POST http://localhost:3048/redeem \
-  -H "Content-Type: application/json" \
-  -d '{
-    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
-    "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
-    "amount": 500000000,
-    "timestamp": 1234567890000,
-    "issuer_signature": "030303..."
   }'
 ```
 

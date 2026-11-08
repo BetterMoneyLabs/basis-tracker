@@ -99,20 +99,23 @@ curl -X GET "http://localhost:3048/proof?issuer=<alice_public_key>&recipient=<bo
 ```
 
 ### Create Redemption Request
+
+> **Note:** `POST /redeem` was removed (issue #15 review N7). Redemptions are built
+> with `POST /redemption/build` (the tracker returns the unsigned transaction and
+> signs the fee inputs), signed locally by the creditor, and broadcast with
+> `POST /redemption/submit` (which also syncs tracker state). The CLI
+> (`note redeem`) and the TUI drive this flow end to end.
+
 ```bash
-# Submit redemption request
-curl -X POST http://localhost:3048/redeem \
+# Build the unsigned redemption transaction
+curl -X POST http://localhost:3048/redemption/build \
   -H "Content-Type: application/json" \
   -d '{
     "issuer_pubkey": "<alice_public_key>",
-    "recipient_pubkey": "<bob_public_key>", 
+    "recipient_pubkey": "<bob_public_key>",
     "amount": 1000000,
     "timestamp": <note_timestamp>,
-    "reserve_box_id": "<reserve_box_id_from_step_2>",
-    "avl_proof": "<avl_proof_from_get_proof>",
-    "issuer_signature": "<alice_signature_for_redemption>",
-    "tracker_signature": "<tracker_signature_for_redemption>",
-    "recipient_address": "<bob_p2pk_address>"
+    "issuer_signature": "<alice_signature_for_redemption>"
   }'
 ```
 
@@ -134,7 +137,7 @@ If you want to test directly with the HTTP API, you can use the endpoints as fol
 3. **GET /notes/issuer/{pubkey}** - Get notes by issuer
 4. **GET /notes/recipient/{pubkey}** - Get notes by recipient
 5. **GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}** - Get specific note
-6. **POST /redeem** - Initiate redemption process
+6. **POST /redemption/build** + **POST /redemption/submit** - Build, then sign and broadcast a redemption (`POST /redeem` was removed, see above)
 7. **GET /proof** - Get AVL proof for redemption
 
 ## Sample API Requests

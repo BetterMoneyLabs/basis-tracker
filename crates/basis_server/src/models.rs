@@ -247,30 +247,6 @@ pub struct KeyStatusDenomination {
     pub has_pending_refund: bool,
 }
 
-// Redemption request
-#[derive(Debug, Deserialize)]
-pub struct RedeemRequest {
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    /// Reserve box ID (optional - will be looked up if not provided)
-    #[serde(default)]
-    pub reserve_box_id: String,
-    /// Recipient address for redemption output (optional - derived from recipient_pubkey if not provided)
-    #[serde(default)]
-    pub recipient_address: String,
-    /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    pub issuer_signature: String,
-    /// Whether this is an emergency redemption
-    #[serde(default)]
-    pub emergency: bool,
-    /// Denomination of the debt ("erg" or "token:<64-hex>"); empty means default
-    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
-    #[serde(default)]
-    pub denomination: String,
-}
-
 // Redemption completion request
 #[derive(Debug, Deserialize)]
 pub struct CompleteRedemptionRequest {
@@ -286,43 +262,6 @@ pub struct CompleteRedemptionRequest {
     /// When omitted, the note's cumulative redeemed amount is used.
     #[serde(default)]
     pub new_already_redeemed: Option<u64>,
-}
-
-// Redemption response
-#[derive(Debug, Serialize)]
-pub struct RedeemResponse {
-    pub redemption_id: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    pub proof_available: bool,
-    pub transaction_pending: bool,
-    /// Prepared transaction data that can be submitted to Ergo node
-    /// Contains all necessary fields for wallet payment API
-    pub transaction_data: Option<TransactionData>,
-    /// Raw Ergo transaction JSON (hex encoded) that can be signed and submitted
-    pub transaction_bytes: Option<String>,
-}
-
-// Transaction data that can be submitted to Ergo node
-#[derive(Debug, Serialize)]
-pub struct TransactionData {
-    /// Target address for the transaction
-    pub address: String,
-    /// Value in nanoERG
-    pub value: u64,
-    /// Register values
-    pub registers: std::collections::HashMap<String, String>,
-    /// Assets to include in transaction
-    pub assets: Vec<TokenData>,
-    /// Transaction fee
-    pub fee: u64,
-}
-
-// Token/Asset data for transaction
-#[derive(Debug, Serialize)]
-pub struct TokenData {
-    pub token_id: String,
-    pub amount: u64,
 }
 
 // Proof response

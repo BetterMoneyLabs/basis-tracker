@@ -163,12 +163,6 @@ pub enum TrackerCommand {
             Result<Vec<([u8; 32], basis_store::PendingExchangeRecord)>, basis_store::NoteError>,
         >,
     },
-    InitiateRedemption {
-        request: basis_store::RedemptionRequest,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<basis_store::RedemptionData, basis_store::RedemptionError>,
-        >,
-    },
     CompleteRedemption {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,

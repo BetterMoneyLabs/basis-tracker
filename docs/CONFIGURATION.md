@@ -124,7 +124,8 @@ enforce_acceptance_policy = true
 ```
 
 When `enforce_acceptance_policy` is enabled, the tracker checks every redemption
-request (`POST /redeem` and `POST /redemption/build`) against the acceptance
+request (`POST /redemption/build`, `POST /redemption/prepare` and
+`POST /tracker/signature`) against the acceptance
 policies of the reserve issuer's **other** debt holders before signing:
 
 - The tracker simulates the post-redemption collateralization ratio

@@ -430,13 +430,6 @@ async fn main() {
                         .list_pending_exchanges(issuer_pubkey.as_ref(), recipient_pubkey.as_ref());
                     let _ = response_tx.send(result);
                 }
-                TrackerCommand::InitiateRedemption {
-                    request,
-                    response_tx,
-                } => {
-                    let result = redemption_manager.initiate_redemption(&request);
-                    let _ = response_tx.send(result);
-                }
                 TrackerCommand::CompleteRedemption {
                     issuer_pubkey,
                     recipient_pubkey,
@@ -951,7 +944,9 @@ async fn main() {
             "/acceptance/policy/{pubkey}",
             get(get_policy_by_recipient).options(handle_options),
         )
-        .route("/redeem", post(initiate_redemption).options(handle_options))
+        // `POST /redeem` was removed (issue #15 review N7): it only prepared a
+        // transaction for the removed `--server-sign` client path. Redemptions go
+        // through `/redemption/build` + `/redemption/submit`.
         .route(
             "/redeem/complete",
             post(complete_redemption).options(handle_options),
@@ -1055,7 +1050,6 @@ async fn main() {
     tracing::debug!("  GET /events");
     tracing::debug!("  GET /events/paginated");
     tracing::debug!("  GET /key-status/{{pubkey}}");
-    tracing::debug!("  POST /redeem");
     tracing::debug!("  POST /acceptance/check");
     tracing::debug!("  POST /acceptance/policy");
     tracing::debug!("  GET /tracker/latest-box-id");

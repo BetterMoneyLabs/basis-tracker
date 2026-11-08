@@ -1,7 +1,6 @@
 //! Integration tests for redemption API endpoints
 //!
 //! This module tests the redemption-related HTTP endpoints:
-//! - POST /redeem: Initiate redemption
 //! - POST /redeem/complete: Complete redemption
 //! - GET /proof/redemption: Get redemption proof
 //! - POST /redemption/prepare: Prepare redemption data
@@ -20,12 +19,12 @@ mod redemption_api_tests {
     use axum::http::StatusCode;
     use basis_server::{
         api::{
-            check_acceptance, complete_redemption, get_redemption_proof, initiate_redemption,
-            prepare_redemption, request_tracker_signature,
+            check_acceptance, complete_redemption, get_redemption_proof, prepare_redemption,
+            request_tracker_signature,
         },
         models::{
-            CheckAcceptanceRequest, CompleteRedemptionRequest, RedeemRequest,
-            RedemptionPreparationRequest, TrackerSignatureRequest,
+            CheckAcceptanceRequest, CompleteRedemptionRequest, RedemptionPreparationRequest,
+            TrackerSignatureRequest,
         },
         redemption_build::{build_redemption, RedemptionBuildRequest},
         AppState, TrackerCommand,
@@ -130,13 +129,6 @@ mod redemption_api_tests {
                             &recipient_pubkey,
                             &denomination,
                         );
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::InitiateRedemption {
-                        request,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.initiate_redemption(&request);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::CompleteRedemption {
@@ -604,255 +596,6 @@ mod redemption_api_tests {
     }
 
     // ============================================================================
-    // POST /redeem tests
-    // ============================================================================
-
-    #[tokio::test]
-    async fn test_redeem_invalid_hex_pubkey() {
-        // Test that invalid hex encoding for recipient pubkey returns 400
-        let state = create_mock_app_state().await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "not-valid-hex!!!".to_string(),
-            amount: 1000,
-            timestamp: 1234567890,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
-        assert!(body.data.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_redeem_invalid_pubkey_length() {
-        // Test that wrong-length public key returns 400
-        let state = create_mock_app_state().await;
-
-        // 32 bytes instead of 33
-        let wrong_length = "0101010101010101010101010101010101010101010101010101010101010101";
-
-        let request = RedeemRequest {
-            issuer_pubkey: wrong_length.to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
-            amount: 1000,
-            timestamp: 1234567890,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        // The handler will try to find a reserve and fail, or the tracker thread will fail
-        // Either way, it should not succeed
-        let body = &response.1;
-        assert!(
-            !body.success || body.data.is_none(),
-            "Expected failure or no data, got: {:?}",
-            body
-        );
-    }
-
-    #[tokio::test]
-    async fn test_redeem_rejected_when_would_violate_holder_policy() {
-        // C=900, D=1000 (ratio 0.9), global min_ratio 0.85. Redeeming 400 moves the
-        // ratio to 500/600 = 0.833 < 0.85: newly violates the other holder's policy.
-        let state = create_mock_app_state_with_acceptance(collateral_acceptance(0.85)).await;
-
-        let (issuer_secret, issuer_pubkey) = generate_keypair();
-        let issuer_hex = hex::encode(issuer_pubkey);
-        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
-        let redeemer_hex = hex::encode(redeemer_pubkey);
-        let (_holder_secret, holder_pubkey) = generate_keypair();
-        let holder_hex = hex::encode(holder_pubkey);
-
-        add_test_note(
-            &state,
-            &issuer_secret,
-            &issuer_hex,
-            &redeemer_hex,
-            400,
-            1000,
-        )
-        .await;
-        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 600, 2000).await;
-        add_test_reserve(&state, &issuer_hex, 900).await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: issuer_hex,
-            recipient_pubkey: redeemer_hex,
-            amount: 400,
-            timestamp: 1000,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        assert_eq!(
-            response.0,
-            StatusCode::BAD_REQUEST,
-            "body: {:?}",
-            response.1
-        );
-        let body = &response.1;
-        assert!(!body.success);
-        let error = body.error.as_deref().unwrap_or("");
-        assert!(
-            error.contains("failed_policy_violation"),
-            "expected failed_policy_violation, got: {}",
-            error
-        );
-    }
-
-    #[tokio::test]
-    async fn test_redeem_rejected_when_not_oldest_note() {
-        // Deeply undercollateralized reserve: C=100, D=1000, min_ratio 1.0. Every
-        // holder's policy is already violated, so only the oldest note may redeem.
-        // The redeemer's note (ts 2000) is newer than the holder's (ts 1000).
-        let state = create_mock_app_state_with_acceptance(collateral_acceptance(1.0)).await;
-
-        let (issuer_secret, issuer_pubkey) = generate_keypair();
-        let issuer_hex = hex::encode(issuer_pubkey);
-        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
-        let redeemer_hex = hex::encode(redeemer_pubkey);
-        let (_holder_secret, holder_pubkey) = generate_keypair();
-        let holder_hex = hex::encode(holder_pubkey);
-
-        add_test_note(
-            &state,
-            &issuer_secret,
-            &issuer_hex,
-            &redeemer_hex,
-            400,
-            2000,
-        )
-        .await;
-        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 600, 1000).await;
-        add_test_reserve(&state, &issuer_hex, 100).await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: issuer_hex,
-            recipient_pubkey: redeemer_hex,
-            amount: 100,
-            timestamp: 2000,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        let error = body.error.as_deref().unwrap_or("");
-        assert!(
-            error.contains("failed_not_oldest_note"),
-            "expected failed_not_oldest_note, got: {}",
-            error
-        );
-        // The message carries the oldest note's timestamp so the client knows the
-        // queue position.
-        assert!(
-            error.contains("1000"),
-            "expected oldest timestamp in message, got: {}",
-            error
-        );
-    }
-
-    #[tokio::test]
-    async fn test_redeem_skips_policy_check_when_enforcement_disabled() {
-        // Same setup as test_redeem_rejected_when_would_violate_holder_policy
-        // (C=900, D=1000, global min_ratio 0.85, redeeming 400 newly violates the
-        // other holder's policy), but with [redemption]
-        // enforce_acceptance_policy = false the policy check is skipped entirely:
-        // the request must not fail with a policy failure id. (It fails later,
-        // at the blockchain-height fetch, since no node is available in tests.)
-        let state = create_mock_app_state_with_options(
-            collateral_acceptance(0.85),
-            false,
-            "http://localhost:9053",
-        )
-        .await;
-
-        let (issuer_secret, issuer_pubkey) = generate_keypair();
-        let issuer_hex = hex::encode(issuer_pubkey);
-        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
-        let redeemer_hex = hex::encode(redeemer_pubkey);
-        let (_holder_secret, holder_pubkey) = generate_keypair();
-        let holder_hex = hex::encode(holder_pubkey);
-
-        add_test_note(
-            &state,
-            &issuer_secret,
-            &issuer_hex,
-            &redeemer_hex,
-            400,
-            1000,
-        )
-        .await;
-        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 600, 2000).await;
-        add_test_reserve(&state, &issuer_hex, 900).await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: issuer_hex,
-            recipient_pubkey: redeemer_hex,
-            amount: 400,
-            timestamp: 1000,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        let body = &response.1;
-        let error = body.error.as_deref().unwrap_or("");
-        assert!(
-            !error.contains("failed_policy_violation"),
-            "policy check should be skipped when enforcement is disabled, got: {}",
-            error
-        );
-        assert!(
-            !error.contains("failed_not_oldest_note"),
-            "policy check should be skipped when enforcement is disabled, got: {}",
-            error
-        );
-    }
-
-    // ============================================================================
     // POST /redemption/build acceptance-policy tests
     // ============================================================================
 
@@ -1093,76 +836,6 @@ mod redemption_api_tests {
             !data.acceptable,
             "1100 liabilities against 1000 collateral at min_ratio 1.0 should be rejected"
         );
-    }
-
-    #[tokio::test]
-    async fn test_redeem_note_not_found() {
-        // Test redemption for a note that doesn't exist in the tracker
-        let state = create_mock_app_state().await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
-            amount: 1000,
-            timestamp: 1234567890,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        // Should fail because no reserve exists for this issuer
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_redeem_emergency_flag_structure() {
-        // Test that emergency redemption flag is accepted in request structure
-        let state = create_mock_app_state().await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
-            amount: 1000,
-            timestamp: 1234567890,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: true, // Emergency flag set
-
-            denomination: String::new(),
-        };
-
-        // This will fail at the reserve lookup stage (no reserve in DB),
-        // but the request structure with emergency=true should be accepted
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        // Should fail at reserve lookup, not at request parsing
-        let body = &response.1;
-        if !body.success {
-            let default_msg = "unknown".to_string();
-            let error_msg = body.error.as_ref().unwrap_or(&default_msg);
-            assert!(
-                error_msg.contains("reserve")
-                    || error_msg.contains("Reserve")
-                    || error_msg.contains("No matching reserve"),
-                "Expected reserve-related error, got: {}",
-                error_msg
-            );
-        }
     }
 
     // ============================================================================
@@ -1753,35 +1426,6 @@ mod redemption_api_tests {
     // ============================================================================
 
     #[tokio::test]
-    async fn test_redeem_request_deserialization() {
-        // Test that RedeemRequest deserializes correctly from JSON
-        let json = r#"{
-            "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
-            "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
-            "amount": 1000,
-            "timestamp": 1234567890,
-            "issuer_signature": "01"
-        }"#;
-
-        let request: RedeemRequest = serde_json::from_str(json).unwrap();
-
-        assert_eq!(
-            request.issuer_pubkey,
-            "010101010101010101010101010101010101010101010101010101010101010101"
-        );
-        assert_eq!(
-            request.recipient_pubkey,
-            "020202020202020202020202020202020202020202020202020202020202020202"
-        );
-        assert_eq!(request.amount, 1000);
-        assert_eq!(request.timestamp, 1234567890);
-        assert_eq!(request.reserve_box_id, ""); // Default
-        assert_eq!(request.recipient_address, ""); // Default
-        assert_eq!(request.emergency, false); // Default
-        assert_eq!(request.issuer_signature, "01");
-    }
-
-    #[tokio::test]
     async fn test_complete_redemption_request_deserialization() {
         // Test CompleteRedemptionRequest deserialization from JSON
         let json = r#"{
@@ -1853,26 +1497,6 @@ mod redemption_api_tests {
         );
         assert_eq!(request.amount, 1000);
         assert_eq!(request.timestamp, 1234567890);
-    }
-
-    #[tokio::test]
-    async fn test_redeem_request_default_fields() {
-        // Test that serde default fields work correctly
-        let json = r#"{
-            "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
-            "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
-            "amount": 1000,
-            "timestamp": 1234567890,
-            "issuer_signature": "01"
-        }"#;
-
-        let request: RedeemRequest = serde_json::from_str(json).unwrap();
-
-        // Default values should be applied
-        assert_eq!(request.reserve_box_id, "");
-        assert_eq!(request.recipient_address, "");
-        assert_eq!(request.emergency, false);
-        assert_eq!(request.issuer_signature, "01");
     }
 
     // ------------------------------------------------------------------

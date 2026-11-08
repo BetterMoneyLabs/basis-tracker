@@ -490,7 +490,6 @@ impl BasisMcp {
                 &state.client,
                 &params.issuer,
                 params.amount,
-                true, // server-side signing so the recipient can redeem without the issuer key
                 params.denomination.as_deref(),
             )
             .await,

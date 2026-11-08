@@ -47,9 +47,10 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `GET /notes/recipient/{pubkey}` - Get all notes received by a public key
 - `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get specific note between two parties
 - `POST /notes/state` - Get the confirmation state of a single note (`confirmed` / `pending` / `local_only`) and whether it is currently redeemable
-- `POST /redeem` - Initiate redemption process
-- `POST /redeem/complete` - Complete redemption process (see the caveat below — this endpoint
-  advances local state from the request body and does **not** verify against the chain)
+- `POST /redeem/complete` - Admin-only repair hatch: complete redemption process (see the caveat below — this endpoint
+  advances local state from the request body and does **not** verify against the chain).
+  Normal clients never call it: `/redemption/submit` syncs local state after broadcast.
+  (`POST /redeem` was removed — issue #15 review N7.)
 - `POST /tracker/signature` - Request tracker signature for redemption (real Schnorr signature generation)
 - `POST /redemption/prepare` - Prepare redemption with all necessary data (real AVL proofs + tracker signature)
 - `POST /redemption/build` - Tracker-assisted redemption step 1: build the unsigned redemption

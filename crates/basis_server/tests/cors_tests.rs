@@ -94,13 +94,6 @@ mod cors_tests {
                         );
                         let _ = response_tx.send(result);
                     }
-                    TrackerCommand::InitiateRedemption {
-                        request,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.initiate_redemption(&request);
-                        let _ = response_tx.send(result);
-                    }
                     TrackerCommand::CompleteRedemption {
                         issuer_pubkey,
                         recipient_pubkey,
@@ -393,7 +386,6 @@ mod cors_tests {
             .route("/events", get(get_events))
             .route("/events/paginated", get(get_events_paginated))
             .route("/notes", post(create_note))
-            .route("/redeem", post(initiate_redemption))
             .route("/redeem/complete", post(complete_redemption))
             .route("/proof/redemption", get(get_redemption_proof))
             // Most specific parameterized routes first
@@ -615,7 +607,7 @@ mod cors_tests {
             ("/", Method::GET),
             ("/events", Method::GET),
             ("/notes", Method::POST),
-            ("/redeem", Method::POST),
+            ("/redeem/complete", Method::POST),
             ("/proof", Method::GET),
         ];
 

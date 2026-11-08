@@ -258,7 +258,7 @@ After the unsigned redemption transaction is built:
 5. **Reserve Existence**: A matching reserve must exist for the issuer
 6. **Sufficient Collateral**: Reserve must have sufficient collateral to cover redemption
 7. **Tracker Box Validity**: Tracker box must exist and NFT ID must match reserve's R6
-8. **Acceptance Policy Compliance**: For normal (non-emergency) redemptions, the tracker simulates the post-redemption collateralization state and rejects the request (HTTP 400) if it would newly violate another debt holder's acceptance policy (`failed_policy_violation`), or — when the reserve is already distressed (all other holders already violated) — if the redeemer does not hold the issuer's oldest outstanding note (`failed_not_oldest_note`). The check runs after the reserve lookup and before the tracker signature is issued, in `POST /redeem`, `POST /redemption/build`, `POST /redemption/prepare`, and `POST /tracker/signature`. Emergency redemptions bypass the tracker and are not policy-checked. See `specs/redemption_acceptance_policy.md` for the full design.
+8. **Acceptance Policy Compliance**: For normal (non-emergency) redemptions, the tracker simulates the post-redemption collateralization state and rejects the request (HTTP 400) if it would newly violate another debt holder's acceptance policy (`failed_policy_violation`), or — when the reserve is already distressed (all other holders already violated) — if the redeemer does not hold the issuer's oldest outstanding note (`failed_not_oldest_note`). The check runs after the reserve lookup and before the tracker signature is issued, in `POST /redemption/build`, `POST /redemption/prepare`, and `POST /tracker/signature`. Emergency redemptions bypass the tracker and are not policy-checked. See `specs/redemption_acceptance_policy.md` for the full design.
 
 ### Post-Redemption Validation
 1. **State Consistency**: Reserve's AVL tree must be properly updated
@@ -285,47 +285,9 @@ After the unsigned redemption transaction is built:
 
 ## API Endpoints
 
-### POST /redeem
-Initiates a redemption process for an IOU note. The tracker signature in the response covers the
-**stored** note's `amount_collected`/`timestamp`/`tracker_nft_id`; request `amount`/`timestamp`
-values are ignored for signing.
-
-**Request Body:**
-```json
-{
-  "issuer_pubkey": "hex_encoded_public_key",
-  "recipient_pubkey": "hex_encoded_public_key",
-  "total_debt": 5000000000,
-  "emergency": false
-}
-```
-
-**Response:**
-- Success: `200 OK` with redemption details
-- Failure: `400 Bad Request` or `500 Internal Server Error` with error message
-- `404 Not Found`: no stored note for the (issuer, recipient) pair
-- `409 Conflict`: the issuer has more than one tracked reserve — the endpoint fails closed
-  rather than risk a signature being replayed against a different reserve (per-reserve replay)
-
-**Success Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "redemption_id": "unique_redemption_identifier",
-    "total_debt": 5000000000,
-    "already_redeemed": 0,
-    "redeem_amount": 500000000,
-    "tracker_lookup_proof": "hex_encoded_proof",
-    "reserve_insert_proof": "hex_encoded_proof",
-    "tracker_signature": "hex_encoded_signature",
-    "reserve_signature": "hex_encoded_signature",
-    "is_first_redemption": true,
-    "transaction_pending": true
-  },
-  "error": null
-}
-```
+`POST /redeem` was removed (issue #15 review N7): it only prepared a transaction for the
+removed `--server-sign` client path. Redemptions go through `POST /redemption/build` +
+`POST /redemption/submit`; `POST /redeem/complete` remains as an Admin-only repair hatch.
 
 ### POST /redemption/prepare
 Prepare a complete redemption with real AVL proofs and tracker signatures from Ergo node.

@@ -145,66 +145,6 @@ pub struct KeyStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedeemRequest {
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    /// Reserve box ID (optional - will be looked up if not provided)
-    #[serde(default)]
-    pub reserve_box_id: String,
-    /// Tracker box ID (optional - fetched by server)
-    #[serde(default)]
-    pub tracker_box_id: String,
-    /// Tracker NFT ID from reserve box R6 register (optional - fetched by server)
-    #[serde(default)]
-    pub tracker_nft_id: String,
-    /// Current blockchain height (optional - fetched by server)
-    #[serde(default)]
-    pub current_height: u64,
-    /// Recipient address for redemption output (optional - derived from recipient_pubkey if not provided)
-    #[serde(default)]
-    pub recipient_address: String,
-    /// Change address for transaction outputs (optional - server will derive from tracker pubkey if not provided)
-    #[serde(default)]
-    pub change_address: String,
-    /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    pub issuer_signature: String,
-    /// Whether this is an emergency redemption
-    #[serde(default)]
-    pub emergency: bool,
-    /// Tracker's Schnorr signature (optional - server will generate if not provided)
-    #[serde(default)]
-    pub tracker_signature: Option<String>,
-    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
-    #[serde(default)]
-    pub denomination: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedeemResponse {
-    pub redemption_id: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    pub proof_available: bool,
-    pub transaction_pending: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompleteRedemptionRequest {
-    pub redemption_id: String,
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub redeemed_amount: u64,
-    /// Cumulative reserve-tree already_redeemed after this redemption.
-    #[serde(default)]
-    pub new_already_redeemed: Option<u64>,
-    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
-    #[serde(default)]
-    pub denomination: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateReserveRequest {
     pub nft_id: String,
     pub owner_pubkey: String,
@@ -942,71 +882,6 @@ impl TrackerClient {
     }
 
     // Redemption
-    pub async fn initiate_redemption(&self, request: RedeemRequest) -> Result<RedeemResponse> {
-        let url = format!("{}/redeem", self.base_url);
-        let body = serde_json::to_value(request)?;
-        let response = match self.post(&url, &body)?.send_json(body) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!(
-                    "Failed to initiate redemption: {}",
-                    error_text
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Request failed: {}", e));
-            }
-        };
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<RedeemResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to initiate redemption: {}",
-                error_text
-            ))
-        }
-    }
-
-    pub async fn complete_redemption(&self, request: CompleteRedemptionRequest) -> Result<()> {
-        let url = format!("{}/redeem/complete", self.base_url);
-        let body = serde_json::to_value(request)?;
-        let response = match self.post(&url, &body)?.send_json(body) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!(
-                    "Failed to complete redemption: {}",
-                    error_text
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Request failed: {}", e));
-            }
-        };
-
-        if response.status() == 200 {
-            Ok(())
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to complete redemption: {}",
-                error_text
-            ))
-        }
-    }
-
     /// Request tracker signature for redemption
     /// Following the Basis protocol specification - POST /tracker/signature
     ///
@@ -1133,6 +1008,9 @@ pub struct RedemptionBuildResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedemptionSubmitRequest {
     pub signed_tx: serde_json::Value,
+    /// The exact `unsigned_tx` value returned by `POST /redemption/build`; the server
+    /// binds the submit to the pending build entry it identifies (PR #16 B6).
+    pub unsigned_tx: serde_json::Value,
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub redeemed_amount: u64,
@@ -1358,11 +1236,14 @@ impl TrackerClient {
     /// Broadcast a fully-signed redemption transaction via the tracker. POST /redemption/submit.
     /// Returns the node-accepted transaction id.
     ///
-    /// `redeemed_amount` and `new_already_redeemed` let the tracker sync its local note and
-    /// reserve-tree state after a successful broadcast.
+    /// `unsigned_tx` must be the exact value returned by `/redemption/build`; it binds this
+    /// submit to the tracker's pending build entry. The wire `redeemed_amount` and
+    /// `new_already_redeemed` fields are ignored by the server (it syncs from the stored
+    /// build entry) and kept only for wire compatibility.
     pub async fn redemption_submit(
         &self,
         signed_tx: serde_json::Value,
+        unsigned_tx: serde_json::Value,
         issuer_pubkey: &str,
         recipient_pubkey: &str,
         redeemed_amount: u64,
@@ -1371,6 +1252,7 @@ impl TrackerClient {
         let url = format!("{}/redemption/submit", self.base_url);
         let request = RedemptionSubmitRequest {
             signed_tx,
+            unsigned_tx,
             issuer_pubkey: issuer_pubkey.to_string(),
             recipient_pubkey: recipient_pubkey.to_string(),
             redeemed_amount,

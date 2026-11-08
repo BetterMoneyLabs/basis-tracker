@@ -1740,8 +1740,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_scan_boxes_removes_absent_reserves_on_clean_scan() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         // Mock node returns one valid reserve box. A pre-existing stored reserve
         // that is absent from the scan should be removed because the snapshot is
         // fully parseable and therefore authoritative.
@@ -1923,8 +1921,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_scan_boxes_removes_spent_reserve_despite_garbage_box() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         // Mock node returning one valid reserve box and one malformed box
         // (missing R4). The malformed box is quarantined individually: it is
         // skipped with a warning, but it must NOT block removal of a tracked

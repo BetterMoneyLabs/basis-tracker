@@ -1432,7 +1432,7 @@ async fn tracker_assisted_redeem(
         .map_err(|e| format!("tracker build failed: {}", e))?;
 
     // Reconstruct the signing material the tracker produced.
-    let unsigned: UnsignedTransaction = serde_json::from_value(build.unsigned_tx)
+    let unsigned: UnsignedTransaction = serde_json::from_value(build.unsigned_tx.clone())
         .map_err(|e| format!("parse unsigned tx: {}", e))?;
     let partial: Transaction =
         serde_json::from_value(build.partial_tx).map_err(|e| format!("parse partial tx: {}", e))?;
@@ -1490,6 +1490,7 @@ async fn tracker_assisted_redeem(
     app.client
         .redemption_submit(
             tx_json,
+            build.unsigned_tx,
             issuer,
             recipient,
             amount,

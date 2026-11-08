@@ -1,8 +1,5 @@
 use crate::account::AccountManager;
-use crate::api::{
-    CompleteRedemptionRequest, CreateNoteRequest, KeyStatusResponse, RedeemRequest,
-    SerializableIouNote, TrackerClient,
-};
+use crate::api::{CreateNoteRequest, KeyStatusResponse, SerializableIouNote, TrackerClient};
 use crate::commands::transaction::execute_local_redemption;
 use crate::demo_keys;
 use crate::output::progress;
@@ -73,15 +70,10 @@ pub struct NoteListResult {
     pub notes: Vec<NoteListEntry>,
 }
 
-/// Result of `note redeem` (either the server-signed or the locally-signed path).
+/// Result of `note redeem` (locally signed, submitted via `/redemption/submit`).
 #[derive(Debug, Serialize)]
 pub struct NoteRedeemResult {
     pub amount: u64,
-    pub server_sign: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub redemption_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proof_available: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_id: Option<String>,
 }
@@ -138,9 +130,6 @@ pub enum NoteCommands {
         /// Amount to redeem in nanoERG
         #[arg(long)]
         amount: u64,
-        /// Use server-side signing and broadcasting instead of local signing (default is local).
-        #[arg(long, default_value = "false")]
-        server_sign: bool,
     },
 }
 
@@ -261,14 +250,12 @@ pub async fn handle_note_command(
             issuer,
             amount,
             denomination,
-            server_sign,
         } => {
             let result = redeem_note(
                 account_manager,
                 client,
                 &issuer,
                 amount,
-                server_sign,
                 denomination.as_deref(),
             )
             .await?;
@@ -549,13 +536,15 @@ pub async fn get_note(
         .await
 }
 
-/// Redeem a note, either via server-side signing or (default) local signing.
+/// Redeem a note via the local-signing path: the tracker builds the transaction
+/// (`/redemption/build`), the CLI verifies it and signs the reserve input locally,
+/// and the tracker broadcasts the fully-signed transaction (`/redemption/submit`),
+/// syncing its state from the stored build entry.
 pub async fn redeem_note(
     account_manager: &AccountManager,
     client: &TrackerClient,
     issuer: &str,
     amount: u64,
-    server_sign: bool,
     denomination: Option<&str>,
 ) -> Result<NoteRedeemResult> {
     let current_account = account_manager
@@ -602,86 +591,26 @@ pub async fn redeem_note(
             ));
         }
     }
-    let denom_id = denom.denomination_id();
+    // Local signing path: the CLI wallet signs the reserve input, the tracker builds and
+    // broadcasts via `/redemption/build` + `/redemption/submit`, and syncs its state from
+    // the stored build entry so the reserve tree is ready for the next redemption.
+    let tx_id = execute_local_redemption(
+        client,
+        issuer,
+        &recipient_pubkey,
+        amount,
+        false, // emergency
+        None,  // tracker_box_id
+        None,  // change_address
+        Some(recipient_secret),
+        denomination,
+    )
+    .await?;
 
-    let new_already_redeemed = note.amount_redeemed.saturating_add(amount);
-
-    if server_sign {
-        // Server-side signing path (legacy).
-        let timestamp = note.timestamp;
-
-        let redeem_request = RedeemRequest {
-            issuer_pubkey: issuer.to_string(),
-            recipient_pubkey: recipient_pubkey.clone(),
-            amount,
-            timestamp,
-            reserve_box_id: String::new(), // Will be looked up by server
-            tracker_box_id: String::new(), // Will be fetched by server
-            tracker_nft_id: String::new(), // Will be fetched by server
-            current_height: 0,             // Will be fetched by server
-            recipient_address: String::new(), // Will be derived from recipient_pubkey by server
-            change_address: String::new(), // Will be derived from tracker pubkey by server
-            issuer_signature: note.signature.clone(),
-            emergency: false,
-            tracker_signature: None, // Server will generate tracker signature
-
-            denomination: denom_id.clone(),
-        };
-
-        let response = client.initiate_redemption(redeem_request).await?;
-        progress!("✅ Redemption initiated");
-        progress!("  Redemption ID: {}", response.redemption_id);
-        progress!("  Amount: {} nanoERG", response.amount);
-        progress!("  Proof available: {}", response.proof_available);
-
-        // Complete redemption with the proper payload including redemption_id.
-        let complete_request = CompleteRedemptionRequest {
-            redemption_id: response.redemption_id.clone(),
-            issuer_pubkey: issuer.to_string(),
-            recipient_pubkey,
-            redeemed_amount: amount,
-            new_already_redeemed: Some(new_already_redeemed),
-
-            denomination: denom_id,
-        };
-
-        client.complete_redemption(complete_request).await?;
-        progress!("✅ Redemption completed");
-
-        Ok(NoteRedeemResult {
-            amount,
-            server_sign: true,
-            redemption_id: Some(response.redemption_id),
-            proof_available: Some(response.proof_available),
-            tx_id: None,
-        })
-    } else {
-        // Local signing path (default): the CLI wallet signs the reserve and fee inputs
-        // and broadcasts directly to the Ergo node; the server only provides the tracker
-        // Schnorr signature. `execute_local_redemption` also syncs tracker state after
-        // broadcast so the reserve tree is ready for the next redemption.
-        let tx_id = execute_local_redemption(
-            client,
-            issuer,
-            &recipient_pubkey,
-            amount,
-            false, // emergency
-            None,  // tracker_box_id
-            None,  // change_address
-            Some(recipient_secret),
-            None, // fee_secret
-            denomination,
-        )
-        .await?;
-
-        Ok(NoteRedeemResult {
-            amount,
-            server_sign: false,
-            redemption_id: None,
-            proof_available: None,
-            tx_id: Some(tx_id),
-        })
-    }
+    Ok(NoteRedeemResult {
+        amount,
+        tx_id: Some(tx_id),
+    })
 }
 
 fn print_reserve_status(status: &KeyStatusResponse) {

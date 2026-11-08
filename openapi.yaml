@@ -631,39 +631,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
-  /redeem:
-    post:
-      summary: Initiate redemption process
-      description: Initiate the redemption of an IOU note from a reserve.
-      operationId: initiateRedemption
-      tags:
-        - Redemption
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RedeemRequest'
-      responses:
-        '200':
-          description: Redemption initiated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseRedeem'
-        '400':
-          description: Bad request - invalid input parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-
   /redeem/complete:
     post:
       summary: Complete a redemption
@@ -2008,64 +1975,6 @@ components:
           example: 1000000000
 
     # Redemption Schemas
-    RedeemRequest:
-      type: object
-      description: Redemption request
-      required:
-        - issuer_pubkey
-        - recipient_pubkey
-        - amount
-        - timestamp
-        - issuer_signature
-      properties:
-        issuer_pubkey:
-          type: string
-          description: Hex-encoded issuer public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "010101010101010101010101010101010101010101010101010101010101010101"
-        recipient_pubkey:
-          type: string
-          description: Hex-encoded recipient public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "020202020202020202020202020202020202020202020202020202020202020202"
-        amount:
-          type: integer
-          format: uint64
-          description: Amount to redeem in nanoERG
-          example: 500000000
-        timestamp:
-          type: integer
-          format: uint64
-          description: Timestamp of the note being redeemed
-          example: 1234567890
-        reserve_box_id:
-          type: string
-          default: ""
-          description: Reserve box ID (optional - server will lookup if not provided)
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        recipient_address:
-          type: string
-          default: ""
-          description: Recipient address for redemption output (optional - server will derive from pubkey if not provided)
-          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
-        issuer_signature:
-          type: string
-          description: Hex-encoded Schnorr signature from issuer (130 characters = 65 bytes)
-          pattern: '^[0-9a-fA-F]{130}$'
-          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
-        emergency:
-          type: boolean
-          default: false
-          description: Whether this is an emergency redemption
-          example: false
-
-
-        denomination:
-          type: string
-          description: >-
-            Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
-            resolves to the pair's existing note's denomination when unambiguous, else "erg".
-          example: "erg"
     CompleteRedemptionRequest:
       type: object
       description: Request body for completing a redemption
@@ -2106,86 +2015,7 @@ components:
             Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
             resolves to the pair's existing note's denomination when unambiguous, else "erg".
           example: "erg"
-    RedeemResponse:
-      type: object
-      description: Redemption response
-      properties:
-        redemption_id:
-          type: string
-          description: Unique redemption identifier
-          example: "redeem_0101010101010101_0202020202020202"
-        amount:
-          type: integer
-          format: uint64
-          description: Amount being redeemed
-          example: 500000000
-        timestamp:
-          type: integer
-          format: uint64
-          description: Redemption timestamp
-          example: 1672531200
-        proof_available:
-          type: boolean
-          description: Whether proof is available
-          example: true
-        transaction_pending:
-          type: boolean
-          description: Whether redemption transaction is pending
-          example: false
-        transaction_data:
-          $ref: '#/components/schemas/TransactionData'
-        transaction_bytes:
-          type: string
-          nullable: true
-          description: Raw Ergo transaction JSON (hex encoded) that can be signed and submitted
-          example: "a1b2c3d4e5f6"
 
-    TransactionData:
-      type: object
-      description: Transaction data that can be submitted to an Ergo node
-      properties:
-        address:
-          type: string
-          description: Target address for the transaction
-          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
-        value:
-          type: integer
-          format: uint64
-          description: Value in nanoERG
-          example: 500000000
-        registers:
-          type: object
-          additionalProperties:
-            type: string
-          description: Register values
-          example:
-            R4: "010101010101010101010101010101010101010101010101010101010101010101"
-        assets:
-          type: array
-          description: Assets to include in transaction
-          items:
-            $ref: '#/components/schemas/TokenData'
-        fee:
-          type: integer
-          format: uint64
-          description: Transaction fee
-          example: 1100000
-
-    TokenData:
-      type: object
-      description: Token/asset data for a transaction
-      properties:
-        token_id:
-          type: string
-          description: Hex-encoded token ID
-          example: "b1c2d3e4f5061728394051627384950617283940516273849506172839405162"
-        amount:
-          type: integer
-          format: uint64
-          description: Token amount in raw units
-          example: 1000000000
-
-    # Tracker Signature Schemas
     TrackerSignatureRequest:
       type: object
       description: Request for tracker signature on redemption
@@ -2254,7 +2084,6 @@ components:
           nullable: true
           description: Whether this was an emergency redemption
           example: false
-
     # Proof Schemas
     ProofResponse:
       type: object
@@ -2559,6 +2388,7 @@ components:
       description: Request to submit a fully signed redemption transaction
       required:
         - signed_tx
+        - unsigned_tx
         - issuer_pubkey
         - recipient_pubkey
         - redeemed_amount
@@ -2567,23 +2397,30 @@ components:
         signed_tx:
           type: object
           description: Fully signed transaction JSON
+        unsigned_tx:
+          type: object
+          description: >-
+            The exact `unsigned_tx` value returned by `POST /redemption/build`. Its SHA-256
+            identifies the pending build entry this submit binds to; without a live entry the
+            submit is rejected with 409. The signed transaction must have the built
+            transaction's id (PR #16 B6).
         issuer_pubkey:
           type: string
-          description: Hex-encoded issuer public key
+          description: Deprecated and ignored; the issuer is taken from the pending build entry. Hex-encoded issuer public key
           example: "010101010101010101010101010101010101010101010101010101010101010101"
         recipient_pubkey:
           type: string
-          description: Hex-encoded recipient public key
+          description: Deprecated and ignored; see `issuer_pubkey`. Hex-encoded recipient public key
           example: "020202020202020202020202020202020202020202020202020202020202020202"
         redeemed_amount:
           type: integer
           format: uint64
-          description: Amount redeemed by this transaction in nanoERG
+          description: Deprecated and ignored; the amount is taken from the pending build entry
           example: 500000000
         new_already_redeemed:
           type: integer
           format: uint64
-          description: Cumulative reserve-tree already_redeemed value from the build response
+          description: Deprecated and ignored; the cumulative reserve-tree value is taken from the pending build entry
           example: 500000000
 
     RedemptionSubmitResponse:
@@ -3080,14 +2917,6 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/KeyStatusResponse'
-
-    ApiResponseRedeem:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/RedeemResponse'
 
     ApiResponseProof:
       allOf:
