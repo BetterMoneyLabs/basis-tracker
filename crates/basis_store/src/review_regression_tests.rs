@@ -159,10 +159,9 @@ fn avl_insert_of_an_existing_key_fails_like_the_jvm() {
 
 /// Follow-up review N11: `EUNip3sG…` is `basis-token.es` as of `bb0cfbd`. It derives the debt
 /// key and signed message exactly like `basis.es`, so on the multi-token tracker an ERG note
-/// also redeems the same number of raw token units from such a reserve. The demos still
-/// create reserves at it and the specs still document it.
+/// also redeems the same number of raw token units from such a reserve. The demos and specs
+/// must not ship it.
 #[test]
-#[ignore = "follow-up review N11: previous token reserve script still shipped in demos/specs"]
 fn previous_token_reserve_script_is_not_shipped() {
     const PREVIOUS_TOKEN_P2S_PREFIX: &str = "EUNip3sG";
 
