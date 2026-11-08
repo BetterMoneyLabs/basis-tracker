@@ -2808,3 +2808,268 @@ mod multi_denomination_tests {
             .is_err());
     }
 }
+
+/// Debt transfer (triad novation, specs/spec.md "Debt Transfer"), pure-credit
+/// trackers: A owes B; B is paid by moving part of A's debt to C.
+#[cfg(test)]
+mod debt_transfer_tests {
+    use crate::{DenomKey, ExchangeAcceptanceView, IouNote, NoteError, TrackerStateManager, TransferTotals};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    const NFT: [u8; 32] = [0x42; 32];
+    const TOKEN: [u8; 32] = [0xa5; 32];
+    const A: [u8; 32] = [1u8; 32];
+    const B: [u8; 32] = [2u8; 32];
+    const C: [u8; 32] = [3u8; 32];
+    const E: [u8; 32] = [4u8; 32];
+
+    fn pubkey(secret_key: &[u8; 32]) -> [u8; 33] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(secret_key).expect("valid secret key");
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+    }
+
+    fn create_note(issuer_secret: &[u8; 32], recipient: &[u8; 33], amount: u64, timestamp: u64) -> IouNote {
+        IouNote::create_and_sign(*recipient, amount, timestamp, issuer_secret, &NFT, DenomKey::Token(TOKEN))
+            .unwrap()
+    }
+
+    fn sign(secret: &[u8; 32], issuer: &[u8; 33], recipient: &[u8; 33], total: u64, ts: u64) -> [u8; 65] {
+        let msg = crate::schnorr::signing_message(issuer, recipient, &DenomKey::Token(TOKEN), total, ts, &NFT);
+        crate::schnorr::schnorr_sign(&msg, secret, &pubkey(secret)).unwrap()
+    }
+
+    /// The four signatures of a transfer of `amount` from A->old to A->new, given both edges' totals before it.
+    struct Sigs {
+        issuer_from: [u8; 65],
+        from_recipient: [u8; 65],
+        issuer_to: [u8; 65],
+        to_recipient: [u8; 65],
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sigs(old: &[u8; 32], new: &[u8; 32], from_before: u64, to_before: u64, amount: u64, ts: u64) -> Sigs {
+        let (a, o, n) = (pubkey(&A), pubkey(old), pubkey(new));
+        Sigs {
+            issuer_from: sign(&A, &a, &o, from_before - amount, ts),
+            from_recipient: sign(old, &a, &o, from_before - amount, ts),
+            issuer_to: sign(&A, &a, &n, to_before + amount, ts),
+            to_recipient: sign(new, &a, &n, to_before + amount, ts),
+        }
+    }
+
+    fn transfer(m: &mut TrackerStateManager, old: &[u8; 32], new: &[u8; 32], amount: u64, ts: u64, s: &Sigs)
+        -> Result<TransferTotals, NoteError> {
+        m.transfer_debt(
+            &pubkey(&A), &pubkey(old), &pubkey(new), &DenomKey::Token(TOKEN), amount, ts,
+            &s.issuer_from, &s.from_recipient, &s.issuer_to, &s.to_recipient,
+        )
+    }
+
+    fn total(m: &TrackerStateManager, recipient: &[u8; 32]) -> Option<u64> {
+        m.get_note_optional(&pubkey(&A), &pubkey(recipient), &DenomKey::Token(TOKEN))
+            .unwrap()
+            .map(|n| n.amount_collected)
+    }
+
+    /// A owes B 100 (and C `to_before`, if any).
+    fn setup(to_before: u64) -> TrackerStateManager {
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&B), 100, 1000)).unwrap();
+        if to_before > 0 {
+            m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&C), to_before, 1001)).unwrap();
+        }
+        m
+    }
+
+    #[test]
+    fn transfer_moves_debt_to_a_new_creditor() {
+        let mut m = setup(0);
+        let digest_before = m.get_state().avl_root_digest;
+        let totals = transfer(&mut m, &B, &C, 30, 2000, &sigs(&B, &C, 100, 0, 30, 2000)).unwrap();
+        assert_eq!(totals, TransferTotals { from_new_total: 70, to_new_total: 30 });
+        assert_eq!(total(&m, &B), Some(70));
+        assert_eq!(total(&m, &C), Some(30));
+        assert_ne!(m.get_state().avl_root_digest, digest_before);
+        // The new edge is indexed: C sees A's note among its notes.
+        let c_notes = m.get_recipient_notes(&pubkey(&C)).unwrap();
+        assert_eq!(c_notes.len(), 1);
+        assert_eq!(c_notes[0].amount_collected, 30);
+        // Both stored notes carry the issuer's signature over their new totals.
+        let b_note = m.lookup_note(&pubkey(&A), &pubkey(&B), &DenomKey::Token(TOKEN)).unwrap();
+        assert_eq!((b_note.amount_collected, b_note.timestamp), (70, 2000));
+        assert!(b_note.verify_signature(&pubkey(&A)).is_ok());
+        let c_note = m.lookup_note(&pubkey(&A), &pubkey(&C), &DenomKey::Token(TOKEN)).unwrap();
+        assert!(c_note.verify_signature(&pubkey(&A)).is_ok());
+    }
+
+    #[test]
+    fn transfer_adds_to_an_existing_edge_and_can_move_the_whole_debt() {
+        let mut m = setup(10);
+        let totals = transfer(&mut m, &B, &C, 100, 2000, &sigs(&B, &C, 100, 10, 100, 2000)).unwrap();
+        assert_eq!(totals, TransferTotals { from_new_total: 0, to_new_total: 110 });
+        assert_eq!(total(&m, &B), Some(0));
+        assert_eq!(total(&m, &C), Some(110));
+    }
+
+    #[test]
+    fn transferred_debt_can_move_again() {
+        let mut m = setup(0);
+        transfer(&mut m, &B, &C, 30, 2000, &sigs(&B, &C, 100, 0, 30, 2000)).unwrap();
+        transfer(&mut m, &C, &E, 20, 3000, &sigs(&C, &E, 30, 0, 20, 3000)).unwrap();
+        assert_eq!((total(&m, &B), total(&m, &C), total(&m, &E)), (Some(70), Some(10), Some(20)));
+    }
+
+    fn assert_unchanged(m: &TrackerStateManager, digest_before: &[u8; 33], b: u64, c: Option<u64>) {
+        assert_eq!(total(m, &B), Some(b));
+        assert_eq!(total(m, &C), c);
+        assert_eq!(&m.get_state().avl_root_digest, digest_before);
+    }
+
+    #[test]
+    fn the_old_creditors_consent_is_required() {
+        let mut m = setup(0);
+        let digest = m.get_state().avl_root_digest;
+        // The issuer and the new creditor alone cannot lower B's edge: B's slot signed by C, then by A.
+        let mut s = sigs(&B, &C, 100, 0, 30, 2000);
+        s.from_recipient = sign(&C, &pubkey(&A), &pubkey(&B), 70, 2000);
+        assert!(matches!(transfer(&mut m, &B, &C, 30, 2000, &s), Err(NoteError::InvalidSignature)));
+        s.from_recipient = sign(&A, &pubkey(&A), &pubkey(&B), 70, 2000);
+        assert!(matches!(transfer(&mut m, &B, &C, 30, 2000, &s), Err(NoteError::InvalidSignature)));
+        assert_unchanged(&m, &digest, 100, None);
+    }
+
+    #[test]
+    fn the_new_creditors_acceptance_and_the_issuers_signatures_are_required() {
+        let mut m = setup(0);
+        let digest = m.get_state().avl_root_digest;
+        let mut s = sigs(&B, &C, 100, 0, 30, 2000);
+        s.to_recipient = sign(&B, &pubkey(&A), &pubkey(&C), 30, 2000);
+        assert!(matches!(transfer(&mut m, &B, &C, 30, 2000, &s), Err(NoteError::InvalidSignature)));
+        let mut s = sigs(&B, &C, 100, 0, 30, 2000);
+        s.issuer_to = sign(&B, &pubkey(&A), &pubkey(&C), 30, 2000);
+        assert!(matches!(transfer(&mut m, &B, &C, 30, 2000, &s), Err(NoteError::InvalidSignature)));
+        let mut s = sigs(&B, &C, 100, 0, 30, 2000);
+        s.issuer_from = sign(&C, &pubkey(&A), &pubkey(&B), 70, 2000);
+        assert!(matches!(transfer(&mut m, &B, &C, 30, 2000, &s), Err(NoteError::InvalidSignature)));
+        // Signatures over other totals (e.g. a different amount) do not verify either.
+        let s = sigs(&B, &C, 100, 0, 30, 2000);
+        assert!(matches!(transfer(&mut m, &B, &C, 31, 2000, &s), Err(NoteError::InvalidSignature)));
+        assert_unchanged(&m, &digest, 100, None);
+    }
+
+    #[test]
+    fn cannot_transfer_more_than_is_owed_or_nothing() {
+        let mut m = setup(0);
+        let digest = m.get_state().avl_root_digest;
+        let s = sigs(&B, &C, 100, 0, 30, 2000);
+        assert!(matches!(transfer(&mut m, &B, &C, 101, 2000, &s), Err(NoteError::InvalidTransfer(_))));
+        assert!(matches!(transfer(&mut m, &B, &C, 0, 2000, &s), Err(NoteError::InvalidTransfer(_))));
+        // No note from A to E exists: nothing to transfer from.
+        assert!(matches!(transfer(&mut m, &E, &C, 10, 2000, &s), Err(NoteError::NotFound)));
+        assert_unchanged(&m, &digest, 100, None);
+    }
+
+    #[test]
+    fn creditors_must_differ_and_cannot_be_the_issuer() {
+        let mut m = setup(0);
+        let s = sigs(&B, &C, 100, 0, 30, 2000);
+        assert!(matches!(transfer(&mut m, &B, &B, 30, 2000, &s), Err(NoteError::InvalidTransfer(_))));
+        assert!(matches!(transfer(&mut m, &B, &A, 30, 2000, &s), Err(NoteError::InvalidTransfer(_))));
+    }
+
+    #[test]
+    fn timestamps_must_move_forward_so_a_transfer_cannot_be_replayed() {
+        let mut m = setup(10);
+        let digest = m.get_state().avl_root_digest;
+        // Not newer than C's existing edge (1001).
+        let s = sigs(&B, &C, 100, 10, 30, 1001);
+        assert!(matches!(transfer(&mut m, &B, &C, 30, 1001, &s), Err(NoteError::PastTimestamp)));
+        assert_unchanged(&m, &digest, 100, Some(10));
+        let s = sigs(&B, &C, 100, 10, 30, 2000);
+        transfer(&mut m, &B, &C, 30, 2000, &s).unwrap();
+        // Replaying the same signed transfer fails (the edges' timestamps are now 2000).
+        assert!(transfer(&mut m, &B, &C, 30, 2000, &s).is_err());
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(70), Some(40)));
+        // B's old note (100 at 1000) cannot be put back.
+        assert!(m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&B), 100, 1000)).is_err());
+    }
+
+    #[test]
+    fn refused_while_the_old_edge_has_a_pending_or_committed_on_chain_total() {
+        // Once B's edge (100) is in a tracker box update, B could still redeem 100 on-chain: lowering it at once
+        // would let B collect twice. Pending and confirmed both refuse.
+        let mut m = setup(0);
+        let digest = m.get_state().avl_root_digest;
+        m.mark_notes_pending(digest, "tx1", 100).unwrap();
+        let s = sigs(&B, &C, 100, 0, 30, 2000);
+        assert!(matches!(transfer(&mut m, &B, &C, 30, 2000, &s), Err(NoteError::InvalidTransfer(_))));
+        m.confirm_pending_notes(digest, "box1", 101).unwrap();
+        assert!(matches!(transfer(&mut m, &B, &C, 30, 2000, &s), Err(NoteError::InvalidTransfer(_))));
+        assert_unchanged(&m, &digest, 100, None);
+    }
+
+    #[test]
+    fn only_the_edge_being_lowered_must_be_free_of_on_chain_state() {
+        // B's and C's edges are committed on-chain; a later edge to E is not. Lowering E's edge works, and
+        // raising C's committed edge is an ordinary increase.
+        let mut m = setup(10);
+        let digest = m.get_state().avl_root_digest;
+        m.mark_notes_pending(digest, "tx1", 100).unwrap();
+        m.confirm_pending_notes(digest, "box1", 101).unwrap();
+        m.add_note(&pubkey(&A), &create_note(&A, &pubkey(&E), 50, 1500)).unwrap();
+        let totals = transfer(&mut m, &E, &C, 20, 2000, &sigs(&E, &C, 50, 10, 20, 2000)).unwrap();
+        assert_eq!(totals, TransferTotals { from_new_total: 30, to_new_total: 30 });
+    }
+
+    #[test]
+    fn a_storage_failure_leaves_state_unchanged() {
+        let mut m = setup(0);
+        let digest = m.get_state().avl_root_digest;
+        let confirmations = m.all_confirmations();
+        m.storage.fail_exchange_commits.store(true, std::sync::atomic::Ordering::SeqCst);
+        let s = sigs(&B, &C, 100, 0, 30, 2000);
+        assert!(matches!(transfer(&mut m, &B, &C, 30, 2000, &s), Err(NoteError::StorageError(_))));
+        assert_unchanged(&m, &digest, 100, None);
+        assert_eq!(m.all_confirmations(), confirmations);
+        m.storage.fail_exchange_commits.store(false, std::sync::atomic::Ordering::SeqCst);
+        transfer(&mut m, &B, &C, 30, 2000, &s).unwrap();
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(70), Some(30)));
+    }
+
+    #[test]
+    fn the_new_creditors_acceptance_policy_sees_the_pre_transfer_state_and_can_refuse() {
+        let mut m = setup(10);
+        let digest = m.get_state().avl_root_digest;
+        let s = sigs(&B, &C, 100, 10, 30, 2000);
+        let refuse: crate::ExchangeAcceptanceCheckFn = Box::new(|view: ExchangeAcceptanceView| {
+            assert_eq!(view.to_note.map(|n| n.amount_collected), Some(10));
+            Err("C accepts at most 20 from A".to_string())
+        });
+        let r = m.transfer_debt_checked(
+            &pubkey(&A), &pubkey(&B), &pubkey(&C), &DenomKey::Token(TOKEN), 30, 2000,
+            &s.issuer_from, &s.from_recipient, &s.issuer_to, &s.to_recipient, Some(refuse),
+        );
+        assert!(matches!(r, Err(NoteError::AcceptancePolicy(_))));
+        assert_unchanged(&m, &digest, 100, Some(10));
+        let accept: crate::ExchangeAcceptanceCheckFn = Box::new(|_view: ExchangeAcceptanceView| Ok(()));
+        m.transfer_debt_checked(
+            &pubkey(&A), &pubkey(&B), &pubkey(&C), &DenomKey::Token(TOKEN), 30, 2000,
+            &s.issuer_from, &s.from_recipient, &s.issuer_to, &s.to_recipient, Some(accept),
+        )
+        .unwrap();
+        assert_eq!((total(&m, &B), total(&m, &C)), (Some(70), Some(40)));
+    }
+
+    #[test]
+    fn the_tree_stays_reproducible_after_a_transfer() {
+        // The live tree after a transfer equals one rebuilt from storage (canonical order), so committed
+        // lookup proofs keep verifying.
+        let mut m = setup(10);
+        transfer(&mut m, &B, &C, 30, 2000, &sigs(&B, &C, 100, 10, 30, 2000)).unwrap();
+        let live = m.get_state().avl_root_digest;
+        m.rebuild_tree_canonically().unwrap();
+        m.update_state();
+        assert_eq!(m.get_state().avl_root_digest, live);
+    }
+}

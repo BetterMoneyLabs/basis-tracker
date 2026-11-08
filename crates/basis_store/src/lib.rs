@@ -326,6 +326,10 @@ pub enum NoteError {
     /// A cross-denomination exchange request was malformed (same denominations,
     /// zero amounts, or it would push an edge below its already-redeemed amount).
     InvalidExchange(String),
+    /// A debt transfer (triad novation) was malformed or is not possible in
+    /// this tracker's state: same creditors, zero amount, more than the issuer
+    /// owes the old creditor, or an old creditor's edge with on-chain state.
+    InvalidTransfer(String),
     /// The exchange was rejected by the recipient's acceptance policy in the
     /// target denomination. Evaluated inside the tracker thread against the
     /// pre-mutation state (finding #8), so a rejection is atomic with the
@@ -454,6 +458,13 @@ enum StagedExchangeDecision {
     /// Keep the exchange staged (from-edge not confirmed yet, or no
     /// observation available this cycle).
     Wait,
+}
+
+/// New cumulative totals of the two edges after a debt transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferTotals {
+    pub from_new_total: u64,
+    pub to_new_total: u64,
 }
 
 /// Boxed acceptance-policy check for an exchange (see
@@ -1575,6 +1586,276 @@ impl TrackerStateManager {
             issuer_to_signature,
             recipient_to_signature,
             from_reserve_box_id,
+        )
+    }
+
+    /// Debt transfer (triad novation, specs/spec.md "Debt Transfer"): move
+    /// `amount` of the issuer's cumulative debt from the edge
+    /// (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
+    /// denomination. The old creditor is paid by the transfer; the new creditor
+    /// is owed by the issuer instead.
+    ///
+    /// SIGNATURES: four, each over the standard 80-byte note message at the
+    /// edge's NEW cumulative total and `timestamp` (no new message format):
+    /// - issuer over the from-edge: the lowered total stays a note the issuer
+    ///   signed, so the edge remains redeemable;
+    /// - old creditor over the from-edge: the consent the S3 rule requires for
+    ///   lowering an edge. The issuer's signature alone is not enough: with it,
+    ///   an issuer and a key it controls could move the issuer's debt away from
+    ///   its creditor;
+    /// - issuer over the to-edge: the debtor's consent to owe the new creditor;
+    /// - new creditor over the to-edge: its acceptance of the issuer's debt.
+    /// All four are verified BEFORE any state changes.
+    ///
+    /// SCOPE: the from-edge must have no committed or pending on-chain total
+    /// (always the case on a pure-credit tracker). Then no tracker box holds an
+    /// older, higher total that could still be redeemed, so both edges are
+    /// applied at once, and the next tracker box commits the new totals. An
+    /// edge with on-chain state is refused: there, as for exchanges (issue
+    /// #17), the decrease would have to be committed before the increase
+    /// applies, and that two-phase path is not implemented yet.
+    ///
+    /// ATOMICITY: both notes, both confirmation records and the index entries
+    /// of a new to-edge are committed in one storage batch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfer_debt(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        from_recipient_pubkey: &PubKey,
+        to_recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
+        amount: u64,
+        timestamp: u64,
+        issuer_from_signature: &Signature,
+        from_recipient_signature: &Signature,
+        issuer_to_signature: &Signature,
+        to_recipient_signature: &Signature,
+    ) -> Result<TransferTotals, NoteError> {
+        if from_recipient_pubkey == to_recipient_pubkey {
+            return Err(NoteError::InvalidTransfer(
+                "the old and the new creditor must differ".to_string(),
+            ));
+        }
+        if from_recipient_pubkey == issuer_pubkey || to_recipient_pubkey == issuer_pubkey {
+            return Err(NoteError::InvalidTransfer(
+                "the issuer cannot be its own creditor".to_string(),
+            ));
+        }
+        if amount == 0 {
+            return Err(NoteError::InvalidTransfer(
+                "the transfer amount must be positive".to_string(),
+            ));
+        }
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
+            .as_millis() as u64;
+        if timestamp > current_time {
+            return Err(NoteError::FutureTimestamp);
+        }
+
+        // A staged exchange on either pair would compute its totals against
+        // the state this transfer is about to change.
+        for (_, existing) in self.storage.get_all_pending_exchanges()? {
+            if matches!(existing.status, PendingExchangeStatus::Staged)
+                && existing.issuer_pubkey == *issuer_pubkey
+                && (existing.recipient_pubkey == *from_recipient_pubkey
+                    || existing.recipient_pubkey == *to_recipient_pubkey)
+            {
+                return Err(NoteError::InvalidTransfer(
+                    "an exchange on one of these issuer/creditor pairs is staged".to_string(),
+                ));
+            }
+        }
+
+        let from_note = self.lookup_note(issuer_pubkey, from_recipient_pubkey, denomination)?;
+        let to_note_opt =
+            self.get_note_optional(issuer_pubkey, to_recipient_pubkey, denomination)?;
+
+        // SCOPE (see above): the from-edge has never been committed on-chain.
+        let from_key_hash =
+            NoteKey::from_assets(issuer_pubkey, from_recipient_pubkey, denomination).key_hash;
+        if let Some(c) = self.confirmations.get(&from_key_hash) {
+            if c.confirmed_total_debt.is_some() || c.pending_total_debt.is_some() {
+                return Err(NoteError::InvalidTransfer(
+                    "the old creditor's edge has a committed or pending on-chain total; lowering it needs the two-phase path (the decrease committed before the increase applies), which is not implemented yet".to_string(),
+                ));
+            }
+        }
+
+        let from_new_total = from_note.amount_collected.checked_sub(amount).ok_or_else(|| {
+            NoteError::InvalidTransfer(format!(
+                "the issuer owes the old creditor {} in this denomination, less than the {} to transfer",
+                from_note.amount_collected, amount
+            ))
+        })?;
+        if from_new_total < from_note.amount_redeemed {
+            return Err(NoteError::InvalidTransfer(format!(
+                "the transfer would lower the from-edge total ({}) below its already-redeemed amount ({})",
+                from_new_total, from_note.amount_redeemed
+            )));
+        }
+        let to_new_total = to_note_opt
+            .as_ref()
+            .map(|n| n.amount_collected)
+            .unwrap_or(0)
+            .checked_add(amount)
+            .ok_or(NoteError::AmountOverflow)?;
+
+        // Both edges move forward in time.
+        if timestamp <= from_note.timestamp
+            || to_note_opt
+                .as_ref()
+                .map(|n| timestamp <= n.timestamp)
+                .unwrap_or(false)
+        {
+            return Err(NoteError::PastTimestamp);
+        }
+
+        // Both edges are bound to the same tracker.
+        let tracker_nft_id = from_note.tracker_nft_id;
+        if let Some(to_note) = &to_note_opt {
+            if to_note.tracker_nft_id != tracker_nft_id {
+                return Err(NoteError::TrackerIdMismatch);
+            }
+        }
+
+        // Contract range (B2): ErgoScript reads amounts with signed byteArrayToLong.
+        for (field, value) in [
+            ("from_new_total", from_new_total),
+            ("to_new_total", to_new_total),
+        ] {
+            if value > i64::MAX as u64 {
+                return Err(NoteError::AmountExceedsContractRange { field, value });
+            }
+        }
+
+        // Verify all four signatures BEFORE mutating anything.
+        let msg_from = schnorr::signing_message(
+            issuer_pubkey,
+            from_recipient_pubkey,
+            denomination,
+            from_new_total,
+            timestamp,
+            &tracker_nft_id,
+        );
+        let msg_to = schnorr::signing_message(
+            issuer_pubkey,
+            to_recipient_pubkey,
+            denomination,
+            to_new_total,
+            timestamp,
+            &tracker_nft_id,
+        );
+        let verifier = SchnorrVerifier;
+        for (sig, msg, key) in [
+            (issuer_from_signature, &msg_from, issuer_pubkey),
+            (from_recipient_signature, &msg_from, from_recipient_pubkey),
+            (issuer_to_signature, &msg_to, issuer_pubkey),
+            (to_recipient_signature, &msg_to, to_recipient_pubkey),
+        ] {
+            if verifier.verify_signature(sig, msg, key).is_err() {
+                return Err(NoteError::InvalidSignature);
+            }
+        }
+
+        let from_note_new = IouNote {
+            recipient_pubkey: *from_recipient_pubkey,
+            amount_collected: from_new_total,
+            amount_redeemed: from_note.amount_redeemed,
+            timestamp,
+            signature: *issuer_from_signature,
+            tracker_nft_id,
+            denomination: *denomination,
+        };
+        let to_note_new = IouNote {
+            recipient_pubkey: *to_recipient_pubkey,
+            amount_collected: to_new_total,
+            amount_redeemed: to_note_opt.as_ref().map(|n| n.amount_redeemed).unwrap_or(0),
+            timestamp,
+            signature: *issuer_to_signature,
+            tracker_nft_id,
+            denomination: *denomination,
+        };
+        let from_key = NoteKey::from_assets(issuer_pubkey, from_recipient_pubkey, denomination);
+        let to_key = NoteKey::from_assets(issuer_pubkey, to_recipient_pubkey, denomination);
+        let from_confirmation = self.recomputed_confirmation(&from_key.key_hash, from_new_total);
+        let to_confirmation = self.recomputed_confirmation(&to_key.key_hash, to_new_total);
+        self.storage.commit_transfer(
+            issuer_pubkey,
+            &from_note_new,
+            &from_confirmation,
+            &to_note_new,
+            &to_confirmation,
+        )?;
+        self.confirmations.insert(from_key.key_hash, from_confirmation);
+        self.confirmations.insert(to_key.key_hash, to_confirmation);
+
+        tracing::info!(
+            "Debt transferred: {} of the issuer's debt moved from one creditor (total {} -> {}) to another (total -> {})",
+            amount,
+            from_note.amount_collected,
+            from_new_total,
+            to_new_total
+        );
+
+        // Both edges' timestamps moved: keep the live tree in the canonical
+        // (timestamp-sorted) insertion order, as after an exchange.
+        if let Err(e) = self.rebuild_tree_canonically() {
+            tracing::error!(
+                "Transfer committed but the live tree rebuild failed; retrying before the next digest update: {:?}",
+                e
+            );
+        }
+        self.update_state();
+        Ok(TransferTotals {
+            from_new_total,
+            to_new_total,
+        })
+    }
+
+    /// [`Self::transfer_debt`] with the new creditor's acceptance-policy check
+    /// evaluated against the pre-mutation state, atomically with the mutation
+    /// (finding #8, as for exchanges). The view's `to_note` is the
+    /// (issuer -> to_recipient) edge before the transfer. `Err(reason)` aborts
+    /// with [`NoteError::AcceptancePolicy`] and nothing is mutated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfer_debt_checked(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        from_recipient_pubkey: &PubKey,
+        to_recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
+        amount: u64,
+        timestamp: u64,
+        issuer_from_signature: &Signature,
+        from_recipient_signature: &Signature,
+        issuer_to_signature: &Signature,
+        to_recipient_signature: &Signature,
+        acceptance_check: Option<ExchangeAcceptanceCheckFn>,
+    ) -> Result<TransferTotals, NoteError> {
+        if let Some(check) = acceptance_check {
+            let view = ExchangeAcceptanceView {
+                to_note: self.get_note_optional(issuer_pubkey, to_recipient_pubkey, denomination)?,
+                issuer_notes: self.get_issuer_notes(issuer_pubkey)?,
+                confirmations: self.all_confirmations(),
+            };
+            if let Err(reason) = check(view) {
+                return Err(NoteError::AcceptancePolicy(reason));
+            }
+        }
+        self.transfer_debt(
+            issuer_pubkey,
+            from_recipient_pubkey,
+            to_recipient_pubkey,
+            denomination,
+            amount,
+            timestamp,
+            issuer_from_signature,
+            from_recipient_signature,
+            issuer_to_signature,
+            to_recipient_signature,
         )
     }
 

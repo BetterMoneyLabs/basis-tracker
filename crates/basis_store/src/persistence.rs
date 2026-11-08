@@ -708,6 +708,75 @@ impl NoteStorage {
             .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange apply: {}", e)))
     }
 
+    /// Atomically commit a debt transfer (pure-credit trackers): the lowered
+    /// from-edge note, the raised to-edge note, both confirmation records and
+    /// the index entries of a new to-edge land together or not at all. On `Err`
+    /// nothing was written.
+    pub fn commit_transfer(
+        &self,
+        issuer_pubkey: &PubKey,
+        from_note: &IouNote,
+        from_confirmation: &NoteConfirmation,
+        to_note: &IouNote,
+        to_confirmation: &NoteConfirmation,
+    ) -> Result<(), NoteError> {
+        #[cfg(test)]
+        if self
+            .fail_exchange_commits
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(NoteError::StorageError(
+                "injected transfer commit failure".to_string(),
+            ));
+        }
+
+        let from_key = NoteKey::from_assets(
+            issuer_pubkey,
+            &from_note.recipient_pubkey,
+            &from_note.denomination,
+        );
+        let to_key = NoteKey::from_assets(
+            issuer_pubkey,
+            &to_note.recipient_pubkey,
+            &to_note.denomination,
+        );
+        let from_value = Self::serialize_note_value(issuer_pubkey, from_note);
+        let to_value = Self::serialize_note_value(issuer_pubkey, to_note);
+        let from_confirmation_value = serde_json::to_vec(from_confirmation).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+        })?;
+        let to_confirmation_value = serde_json::to_vec(to_confirmation).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+        })?;
+        let issuer_index_value =
+            self.index_value_with_key(&self.issuer_index, issuer_pubkey, &to_key)?;
+        let recipient_index_value =
+            self.index_value_with_key(&self.recipient_index, &to_note.recipient_pubkey, &to_key)?;
+
+        let mut batch = self.keyspace.batch();
+        batch.insert(&self.notes_partition, from_key.to_bytes(), from_value);
+        batch.insert(&self.notes_partition, to_key.to_bytes(), to_value);
+        if let Some(value) = issuer_index_value {
+            batch.insert(&self.issuer_index, issuer_pubkey, value);
+        }
+        if let Some(value) = recipient_index_value {
+            batch.insert(&self.recipient_index, &to_note.recipient_pubkey, value);
+        }
+        batch.insert(
+            &self.confirmations_partition,
+            &from_key.key_hash,
+            from_confirmation_value,
+        );
+        batch.insert(
+            &self.confirmations_partition,
+            &to_key.key_hash,
+            to_confirmation_value,
+        );
+        batch
+            .commit()
+            .map_err(|e| NoteError::StorageError(format!("Failed to commit transfer: {}", e)))
+    }
+
     /// Serialize a denomination as a tag byte plus a fixed 32-byte token id
     /// (zeroed for ERG).
     fn serialize_denom(denom: &DenomKey) -> [u8; 33] {

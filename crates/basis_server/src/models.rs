@@ -106,6 +106,44 @@ pub struct ExchangeNotesResponse {
     pub to_edge_status: String,
 }
 
+/// Debt transfer request (triad novation, specs/spec.md "Debt Transfer").
+///
+/// Moves `amount` of the issuer's cumulative debt from the edge
+/// (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
+/// denomination. All four signatures are over the respective edge's standard
+/// 80-byte note message at the NEW cumulative total and `timestamp`: the issuer
+/// re-signs both edges, the old creditor's signature is the consent the S3 rule
+/// requires for lowering its edge, and the new creditor's is its acceptance.
+/// Pure-credit trackers only: a tracker with on-chain state refuses.
+#[derive(Debug, Deserialize)]
+pub struct TransferNotesRequest {
+    pub issuer_pubkey: String,
+    pub from_recipient_pubkey: String,
+    pub to_recipient_pubkey: String,
+    #[serde(default)]
+    pub denomination: String,
+    pub amount: u64,
+    /// New timestamp for both edges; must be newer than both edges' current ones.
+    pub timestamp: u64,
+    /// Issuer signature over the from-edge's new note message (hex, 65 bytes)
+    pub issuer_from_signature: String,
+    /// Old creditor's signature over the from-edge's new note message (consent)
+    pub from_recipient_signature: String,
+    /// Issuer signature over the to-edge's new note message (hex, 65 bytes)
+    pub issuer_to_signature: String,
+    /// New creditor's signature over the to-edge's new note message (acceptance)
+    pub to_recipient_signature: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferNotesResponse {
+    pub transferred: bool,
+    pub denomination: String,
+    pub from_new_total: u64,
+    pub to_new_total: u64,
+    pub timestamp: u64,
+}
+
 /// One pending (staged or cancelled) cross-denomination exchange, as returned
 /// by `GET /exchanges/pending` (issue #17).
 #[derive(Debug, Serialize)]

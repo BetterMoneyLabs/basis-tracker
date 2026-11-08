@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::{
     models::{
         ApiResponse, Asset, CheckAcceptanceRequest, CheckAcceptanceResponse,
-        CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, ExchangeNotesRequest,
+        CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, ExchangeNotesRequest, TransferNotesRequest, TransferNotesResponse,
         ExchangeNotesResponse, KeyStatusDenomination, KeyStatusResponse, NoteConfirmationSummary,
         NoteStateRequest, NoteStateResponse, PendingExchangeView, PendingTxResponse, ProofResponse,
         RedeemRequest, RedeemResponse, RedemptionPreparationRequest, RedemptionPreparationResponse,
@@ -399,6 +399,7 @@ pub async fn create_note(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -751,6 +752,175 @@ pub async fn exchange_notes(
     }
 }
 
+/// `POST /notes/transfer`: debt transfer (triad novation). See
+/// [`TransferNotesRequest`]. Pure-credit trackers only.
+pub async fn transfer_notes(
+    State(state): State<AppState>,
+    Json(payload): Json<TransferNotesRequest>,
+) -> (StatusCode, Json<ApiResponse<TransferNotesResponse>>) {
+    let bad_request = |msg: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(crate::models::error_response(msg)),
+        )
+    };
+    let issuer_pubkey: PubKey = match parse_pubkey(&payload.issuer_pubkey) {
+        Ok(pk) => pk,
+        Err(msg) => return bad_request(msg),
+    };
+    let from_recipient_pubkey: PubKey = match parse_pubkey(&payload.from_recipient_pubkey) {
+        Ok(pk) => pk,
+        Err(msg) => return bad_request(msg),
+    };
+    let to_recipient_pubkey: PubKey = match parse_pubkey(&payload.to_recipient_pubkey) {
+        Ok(pk) => pk,
+        Err(msg) => return bad_request(msg),
+    };
+    let denomination = match state.config.parse_served_denomination(&payload.denomination) {
+        Ok(d) => d,
+        Err(msg) => return bad_request(format!("invalid denomination: {}", msg)),
+    };
+    let decode_sig = |name: &str, hex_str: &str| -> Result<Signature, String> {
+        let bytes = hex::decode(hex_str).map_err(|_| format!("{} must be hex-encoded", name))?;
+        bytes
+            .try_into()
+            .map_err(|_| format!("{} must be 65 bytes", name))
+    };
+    let issuer_from_signature =
+        match decode_sig("issuer_from_signature", &payload.issuer_from_signature) {
+            Ok(s) => s,
+            Err(msg) => return bad_request(msg),
+        };
+    let from_recipient_signature =
+        match decode_sig("from_recipient_signature", &payload.from_recipient_signature) {
+            Ok(s) => s,
+            Err(msg) => return bad_request(msg),
+        };
+    let issuer_to_signature = match decode_sig("issuer_to_signature", &payload.issuer_to_signature)
+    {
+        Ok(s) => s,
+        Err(msg) => return bad_request(msg),
+    };
+    let to_recipient_signature =
+        match decode_sig("to_recipient_signature", &payload.to_recipient_signature) {
+            Ok(s) => s,
+            Err(msg) => return bad_request(msg),
+        };
+
+    // The NEW creditor's acceptance policy, evaluated inside the tracker
+    // thread against the pre-mutation state, atomically with the mutation
+    // (finding #8). The issuer's gross debt is counted with the to-edge raised
+    // and the from-edge NOT lowered, which overstates it by `amount`: a
+    // collateralization predicate can only be stricter here, never looser.
+    let amount = payload.amount;
+    let acceptance_check = match &state.acceptance_predicate {
+        Some(predicate) => {
+            let reserve_tracker = state.reserve_tracker.lock().await.clone();
+            let predicate = std::sync::Arc::clone(predicate);
+            Some(ExchangeAcceptanceCheck(Box::new(
+                move |view: basis_store::ExchangeAcceptanceView| -> Result<(), String> {
+                    let to_new_total = view
+                        .to_note
+                        .as_ref()
+                        .map(|n| n.amount_collected)
+                        .unwrap_or(0)
+                        .checked_add(amount)
+                        .ok_or_else(|| "amount overflows the to-edge total".to_string())?;
+                    let issuer_gross_debt = compute_issuer_gross_debt(
+                        &view.issuer_notes,
+                        &view.confirmations,
+                        &issuer_pubkey,
+                        &to_recipient_pubkey,
+                        to_new_total,
+                        &denomination,
+                    );
+                    let ctx = crate::acceptance::PredicateContext {
+                        issuer_pubkey,
+                        recipient_pubkey: to_recipient_pubkey,
+                        total_debt: to_new_total,
+                        reserve_tracker: Some(reserve_tracker),
+                        issuer_gross_debt,
+                        denomination,
+                    };
+                    if predicate.acceptable(&ctx) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "rejected by the new creditor's acceptance policy '{}'",
+                            predicate.name()
+                        ))
+                    }
+                },
+            )))
+        }
+        None => None,
+    };
+
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(TrackerCommand::TransferNotes {
+            issuer_pubkey,
+            from_recipient_pubkey,
+            to_recipient_pubkey,
+            denomination,
+            amount,
+            timestamp: payload.timestamp,
+            issuer_from_signature,
+            from_recipient_signature,
+            issuer_to_signature,
+            to_recipient_signature,
+            acceptance_check,
+            response_tx,
+        })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+    match response_rx.await {
+        Ok(Ok(totals)) => (
+            StatusCode::OK,
+            Json(crate::models::success_response(TransferNotesResponse {
+                transferred: true,
+                denomination: denomination.denomination_id(),
+                from_new_total: totals.from_new_total,
+                to_new_total: totals.to_new_total,
+                timestamp: payload.timestamp,
+            })),
+        ),
+        Ok(Err(e)) => {
+            let (status, message) = match e {
+                NoteError::InvalidTransfer(msg) => (StatusCode::BAD_REQUEST, format!("Invalid transfer: {}", msg)),
+                NoteError::AcceptancePolicy(msg) => (StatusCode::FORBIDDEN, msg),
+                NoteError::NotFound => (
+                    StatusCode::NOT_FOUND,
+                    "the issuer has no note to the old creditor in this denomination".to_string(),
+                ),
+                NoteError::InvalidSignature => (StatusCode::BAD_REQUEST, "Invalid signature".to_string()),
+                NoteError::PastTimestamp => (
+                    StatusCode::BAD_REQUEST,
+                    "timestamp must be newer than both edges' current timestamps".to_string(),
+                ),
+                NoteError::FutureTimestamp => (StatusCode::BAD_REQUEST, "timestamp is in the future".to_string()),
+                other => (StatusCode::BAD_REQUEST, format!("Transfer rejected: {:?}", other)),
+            };
+            (status, Json(crate::models::error_response(message)))
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread did not respond".to_string(),
+            )),
+        ),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PendingExchangesQuery {
     /// Optional issuer public key filter (hex, 66 chars).
@@ -985,6 +1155,7 @@ pub async fn get_notes_by_issuer(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1121,6 +1292,7 @@ pub async fn get_notes_by_recipient(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1320,6 +1492,7 @@ pub async fn get_note_by_issuer_and_recipient(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
@@ -1440,6 +1613,7 @@ pub async fn get_all_notes(
                 NoteError::StorageError(msg) => format!("Storage error: {}", msg),
                 NoteError::UnsupportedOperation => "Operation not supported".to_string(),
                 NoteError::InvalidExchange(msg) => format!("Invalid exchange: {}", msg),
+                NoteError::InvalidTransfer(msg) => format!("Invalid transfer: {}", msg),
                 NoteError::AcceptancePolicy(msg) => format!("Acceptance policy: {}", msg),
                 NoteError::StaleCommittedDebt { committed, local } => format!(
                     "Committed tracker state ({}) is ahead of the note's current total ({}); \
