@@ -112,19 +112,20 @@ paths:
       description: >-
         Moves cumulative debt between two denominations of one (issuer, recipient)
         pair in two phases (issue #17). Phase 1, applied immediately: the
-        from-denomination edge decreases by from_amount. Phase 2, staged: the
-        to-denomination edge increases by to_amount, but only applies once the
+        from-denomination edge decreases to from_new_total. Phase 2, staged: the
+        to-denomination edge increases to to_new_total, but only applies once the
         from-edge decrease is committed on-chain AND the issuer's tracked
         from-denomination reserve box is verified unchanged (still unspent with
         an R5 digest matching the tracker's reserve tree). This prevents the
         creditor from redeeming the old from-edge note AND collecting the staged
-        to-edge increase. Both parties sign both edges' new states; the
-        recipient's signatures are the creditor consent required for a debt
-        decrease (S3 rule). The acceptance policy is evaluated in the target
-        denomination against the pre-mutation state, atomically with the
-        mutation. The request fails with 409 when the issuer has zero or
-        multiple tracked reserves in the from denomination. Track progress via
-        GET /exchanges/pending.
+        to-edge increase. Both parties sign a domain-separated exchange message
+        binding both edges' pre- and post-totals and a one-hour validity window
+        (issue #15 review N10); the recipient's signature is the creditor
+        consent required for a debt decrease (S3 rule). The acceptance policy is
+        evaluated in the target denomination against the pre-mutation state,
+        atomically with the mutation. The request fails with 409 when the issuer
+        has zero or multiple tracked reserves in the from denomination. Track
+        progress via GET /exchanges/pending.
       operationId: exchangeNotes
       tags:
         - Notes
@@ -1340,21 +1341,33 @@ components:
     ExchangeNotesRequest:
       type: object
       description: >-
-        Cross-denomination debt exchange request. All four signatures are over the
-        respective edge's standard 80-byte note message (debtKey ‖ totalDebt ‖
-        timestamp ‖ trackerNftId) at the NEW cumulative total and timestamp.
+        Cross-denomination debt exchange request (N10). Carries absolute
+        post-totals: the from-edge decreases to from_new_total and the to-edge
+        increases to to_new_total; the tracker derives the amounts from the
+        current edge state. Consent is the domain-separated exchange message —
+        blake2b256("basis-exchange-v1") ‖ fromKey ‖ fromPre ‖ fromPost ‖
+        toKey ‖ toPre ‖ toPost ‖ timestamp ‖ trackerNftId (168 bytes) —
+        signed by BOTH parties (issuer_exchange_signature,
+        recipient_exchange_signature). The tracker reconstructs it with the
+        current totals as the pre-totals, so an exchange held while either
+        edge moved fails verification, and a timestamp older than one hour is
+        rejected. issuer_from_signature / issuer_to_signature are the issuer's
+        signatures over each edge's standard 80-byte note message at its new
+        total; they become the stored notes' signatures. The issuer signs and
+        submits last, so the recipient never holds an issuer note signature
+        before the exchange is staged.
       required:
         - issuer_pubkey
         - recipient_pubkey
         - from_denomination
-        - from_amount
+        - from_new_total
         - to_denomination
-        - to_amount
+        - to_new_total
         - timestamp
+        - issuer_exchange_signature
+        - recipient_exchange_signature
         - issuer_from_signature
-        - recipient_from_signature
         - issuer_to_signature
-        - recipient_to_signature
       properties:
         issuer_pubkey:
           type: string
@@ -1368,34 +1381,36 @@ components:
           type: string
           description: Denomination of the edge being decreased ("erg" or "token:<64-hex>")
           example: "erg"
-        from_amount:
+        from_new_total:
           type: integer
           format: uint64
-          description: Amount by which the from-edge's cumulative debt decreases
+          description: Absolute from-edge cumulative total after the exchange (must be below the current total)
         to_denomination:
           type: string
           description: Denomination of the edge being increased
           example: "token:a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
-        to_amount:
+        to_new_total:
           type: integer
           format: uint64
-          description: Amount by which the to-edge's cumulative debt increases
+          description: Absolute to-edge cumulative total after the exchange (must be above the current total)
         timestamp:
           type: integer
           format: uint64
-          description: New timestamp for both edges (must be newer than both current ones)
+          description: >-
+            New timestamp for both edges (must be newer than both current ones
+            and within the one-hour validity window)
+        issuer_exchange_signature:
+          type: string
+          description: Issuer signature over the domain-separated exchange message (hex, 130 chars)
+        recipient_exchange_signature:
+          type: string
+          description: Recipient signature over the same exchange message (creditor consent)
         issuer_from_signature:
           type: string
-          description: Issuer signature over the from-edge's new message (hex, 130 chars)
-        recipient_from_signature:
-          type: string
-          description: Recipient signature over the from-edge's new message (creditor consent)
+          description: Issuer signature over the from-edge's standard note message at from_new_total
         issuer_to_signature:
           type: string
-          description: Issuer signature over the to-edge's new message
-        recipient_to_signature:
-          type: string
-          description: Recipient signature over the to-edge's new message (creditor acceptance)
+          description: Issuer signature over the to-edge's standard note message at to_new_total
 
     ExchangeNotesResponse:
       type: object

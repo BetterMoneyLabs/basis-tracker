@@ -306,14 +306,14 @@ mod redemption_api_tests {
                         issuer_pubkey,
                         recipient_pubkey,
                         from_denomination,
-                        from_amount,
+                        from_new_total,
                         to_denomination,
-                        to_amount,
+                        to_new_total,
                         timestamp,
                         issuer_from_signature,
-                        recipient_from_signature,
                         issuer_to_signature,
-                        recipient_to_signature,
+                        issuer_exchange_signature,
+                        recipient_exchange_signature,
                         from_reserve_box_id,
                         acceptance_check,
                         response_tx,
@@ -325,14 +325,14 @@ mod redemption_api_tests {
                             &issuer_pubkey,
                             &recipient_pubkey,
                             &from_denomination,
-                            from_amount,
+                            from_new_total,
                             &to_denomination,
-                            to_amount,
+                            to_new_total,
                             timestamp,
                             &issuer_from_signature,
-                            &recipient_from_signature,
                             &issuer_to_signature,
-                            &recipient_to_signature,
+                            &issuer_exchange_signature,
+                            &recipient_exchange_signature,
                             &from_reserve_box_id,
                             acceptance_check.map(|check| check.0),
                         );
@@ -1503,6 +1503,77 @@ mod redemption_api_tests {
     // POST /notes/exchange: cross-denomination triage
     // ------------------------------------------------------------------
 
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// Build an N10 exchange request: both parties sign the domain-separated
+    /// exchange message (pre-totals bound to the current edge state), and the
+    /// issuer signs both edges' standard note messages at the new totals.
+    #[allow(clippy::too_many_arguments)]
+    fn exchange_request(
+        issuer_secret: &[u8; 32],
+        issuer_pubkey: &[u8; 33],
+        recipient_secret: &[u8; 32],
+        recipient_pubkey: &[u8; 33],
+        from_denom: &basis_store::DenomKey,
+        from_pre: u64,
+        from_post: u64,
+        to_denom: &basis_store::DenomKey,
+        to_pre: u64,
+        to_post: u64,
+        ts: u64,
+        nft: &[u8; 32],
+    ) -> basis_server::models::ExchangeNotesRequest {
+        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
+        };
+        let msg_from = basis_store::schnorr::signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denom,
+            from_post,
+            ts,
+            nft,
+        );
+        let msg_to = basis_store::schnorr::signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            to_denom,
+            to_post,
+            ts,
+            nft,
+        );
+        let msg_x = basis_store::schnorr::exchange_signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denom,
+            from_pre,
+            from_post,
+            to_denom,
+            to_pre,
+            to_post,
+            ts,
+            nft,
+        );
+        basis_server::models::ExchangeNotesRequest {
+            issuer_pubkey: hex::encode(issuer_pubkey),
+            recipient_pubkey: hex::encode(recipient_pubkey),
+            from_denomination: from_denom.denomination_id(),
+            from_new_total: from_post,
+            to_denomination: to_denom.denomination_id(),
+            to_new_total: to_post,
+            timestamp: ts,
+            issuer_exchange_signature: sign(issuer_secret, &msg_x, issuer_pubkey),
+            recipient_exchange_signature: sign(recipient_secret, &msg_x, recipient_pubkey),
+            issuer_from_signature: sign(issuer_secret, &msg_from, issuer_pubkey),
+            issuer_to_signature: sign(issuer_secret, &msg_to, issuer_pubkey),
+        }
+    }
+
     /// The exchange endpoint moves debt between two denominations of one
     /// (issuer, recipient) pair when both parties sign both edges
     /// (specs/ergo/multi_collateral_reserves.md §10).
@@ -1567,43 +1638,53 @@ mod redemption_api_tests {
         // to-edge increase.
         add_tracker_reserve(&state, &issuer_hex, 500_000_000).await;
 
-        // Exchange 30 ERG -> 90 USE at ts 2000. Both parties sign both edges' new
-        // messages: from-edge new total 70 ERG, to-edge new total 140 USE.
-        let ts = 2000u64;
+        // Exchange 30 ERG -> 90 USE: from-edge 100 -> 70, to-edge 50 -> 140.
+        // Both parties sign the domain-separated exchange message binding the
+        // current totals as pre-totals (N10); the issuer signs both edges' new
+        // note messages.
+        let ts = now_ms();
         let erg = basis_store::DenomKey::Erg;
         let tok = basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap());
-        let msg_from = basis_store::schnorr::signing_message(
+
+        // Creditor consent is required: the recipient's exchange signature
+        // replaced by the issuer's own is rejected and nothing moves.
+        let mut bad_request = exchange_request(
+            &issuer_secret,
             &issuer_pubkey,
+            &recipient_secret,
             &recipient_pubkey,
             &erg,
+            100,
             70,
-            ts,
-            &nft,
-        );
-        let msg_to = basis_store::schnorr::signing_message(
-            &issuer_pubkey,
-            &recipient_pubkey,
             &tok,
+            50,
             140,
             ts,
             &nft,
         );
-        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
-        };
-        let request = basis_server::models::ExchangeNotesRequest {
-            issuer_pubkey: issuer_hex.clone(),
-            recipient_pubkey: recipient_hex.clone(),
-            from_denomination: "erg".to_string(),
-            from_amount: 30,
-            to_denomination: format!("token:{}", token_id),
-            to_amount: 90,
-            timestamp: ts,
-            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
-            recipient_from_signature: sign(&recipient_secret, &msg_from, &recipient_pubkey),
-            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
-            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
-        };
+        bad_request.recipient_exchange_signature = bad_request.issuer_exchange_signature.clone();
+        let (status, body) = basis_server::api::exchange_notes(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(bad_request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.success);
+
+        let request = exchange_request(
+            &issuer_secret,
+            &issuer_pubkey,
+            &recipient_secret,
+            &recipient_pubkey,
+            &erg,
+            100,
+            70,
+            &tok,
+            50,
+            140,
+            ts,
+            &nft,
+        );
 
         let (status, body) = basis_server::api::exchange_notes(
             axum::extract::State(state.clone()),
@@ -1654,29 +1735,6 @@ mod redemption_api_tests {
         assert_eq!(pending[0].to_new_total, 140);
         assert_eq!(pending[0].to_amount, 90);
         assert_eq!(pending[0].cancel_reason, None);
-
-        // Creditor consent is required: reuse the same request with the recipient's
-        // from-edge signature replaced by an issuer-signed one.
-        let bad_request = basis_server::models::ExchangeNotesRequest {
-            issuer_pubkey: issuer_hex,
-            recipient_pubkey: recipient_hex,
-            from_denomination: "erg".to_string(),
-            from_amount: 10,
-            to_denomination: format!("token:{}", token_id),
-            to_amount: 10,
-            timestamp: ts + 1,
-            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
-            recipient_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey), // wrong signer
-            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
-            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
-        };
-        let (status, body) = basis_server::api::exchange_notes(
-            axum::extract::State(state),
-            axum::extract::Json(bad_request),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(!body.success);
     }
 
     // ============================================================================
@@ -1757,40 +1815,22 @@ mod redemption_api_tests {
         // satisfy the token edge (finding #4 semantics, #8 wiring).
         add_tracker_reserve(&state, &issuer_hex, 10_000_000_000).await;
 
-        let ts = 2000u64;
+        let ts = now_ms();
         let erg = basis_store::DenomKey::Erg;
-        let msg_from = basis_store::schnorr::signing_message(
+        let request = exchange_request(
+            &issuer_secret,
             &issuer_pubkey,
+            &recipient_secret,
             &recipient_pubkey,
             &erg,
+            100,
             70,
-            ts,
-            &nft,
-        );
-        let msg_to = basis_store::schnorr::signing_message(
-            &issuer_pubkey,
-            &recipient_pubkey,
             &tok,
+            50,
             140,
             ts,
             &nft,
         );
-        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
-        };
-        let request = basis_server::models::ExchangeNotesRequest {
-            issuer_pubkey: issuer_hex.clone(),
-            recipient_pubkey: recipient_hex.clone(),
-            from_denomination: "erg".to_string(),
-            from_amount: 30,
-            to_denomination: format!("token:{}", token_id),
-            to_amount: 90,
-            timestamp: ts,
-            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
-            recipient_from_signature: sign(&recipient_secret, &msg_from, &recipient_pubkey),
-            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
-            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
-        };
 
         let (status, body) = basis_server::api::exchange_notes(
             axum::extract::State(state.clone()),
@@ -1887,40 +1927,22 @@ mod redemption_api_tests {
         // phase 2 observes its box on-chain before applying the staged increase.
         add_tracker_reserve(&state, &issuer_hex, 500_000_000).await;
 
-        let ts = 2000u64;
+        let ts = now_ms();
         let erg = basis_store::DenomKey::Erg;
-        let msg_from = basis_store::schnorr::signing_message(
+        let request = exchange_request(
+            &issuer_secret,
             &issuer_pubkey,
+            &recipient_secret,
             &recipient_pubkey,
             &erg,
+            100,
             70,
-            ts,
-            &nft,
-        );
-        let msg_to = basis_store::schnorr::signing_message(
-            &issuer_pubkey,
-            &recipient_pubkey,
             &tok,
+            50,
             140,
             ts,
             &nft,
         );
-        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
-        };
-        let request = basis_server::models::ExchangeNotesRequest {
-            issuer_pubkey: issuer_hex.clone(),
-            recipient_pubkey: recipient_hex.clone(),
-            from_denomination: "erg".to_string(),
-            from_amount: 30,
-            to_denomination: format!("token:{}", token_id),
-            to_amount: 90,
-            timestamp: ts,
-            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
-            recipient_from_signature: sign(&recipient_secret, &msg_from, &recipient_pubkey),
-            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
-            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
-        };
 
         let (status, body) = basis_server::api::exchange_notes(
             axum::extract::State(state),

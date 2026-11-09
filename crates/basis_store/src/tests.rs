@@ -1311,6 +1311,51 @@ mod multi_denomination_tests {
         .unwrap()
     }
 
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// Sign an exchange the way the N10 protocol expects: both parties sign the
+    /// domain-separated exchange message (pre-totals bound to the current edge
+    /// state), and the issuer additionally signs each edge's standard note
+    /// message at its new total. Returns (issuer_from, issuer_to,
+    /// issuer_exchange, recipient_exchange).
+    #[allow(clippy::too_many_arguments)]
+    fn exchange_sigs(
+        issuer_secret: &[u8; 32],
+        recipient_secret: &[u8; 32],
+        from_denom: &DenomKey,
+        from_pre: u64,
+        from_post: u64,
+        to_denom: &DenomKey,
+        to_pre: u64,
+        to_post: u64,
+        ts: u64,
+    ) -> ([u8; 65], [u8; 65], [u8; 65], [u8; 65]) {
+        let issuer = pubkey(issuer_secret);
+        let recipient = pubkey(recipient_secret);
+        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
+        };
+        let msg_from =
+            crate::schnorr::signing_message(&issuer, &recipient, from_denom, from_post, ts, &NFT);
+        let msg_to =
+            crate::schnorr::signing_message(&issuer, &recipient, to_denom, to_post, ts, &NFT);
+        let msg_x = crate::schnorr::exchange_signing_message(
+            &issuer, &recipient, from_denom, from_pre, from_post, to_denom, to_pre, to_post, ts,
+            &NFT,
+        );
+        (
+            sign_as(issuer_secret, &msg_from, &issuer),
+            sign_as(issuer_secret, &msg_to, &issuer),
+            sign_as(issuer_secret, &msg_x, &issuer),
+            sign_as(recipient_secret, &msg_x, &recipient),
+        )
+    }
+
     #[test]
     fn same_pair_independent_debt_per_denomination() {
         let mut manager = TrackerStateManager::new_with_temp_storage();
@@ -1454,39 +1499,35 @@ mod multi_denomination_tests {
             )
             .unwrap();
 
-        // Exchange 30 ERG for 40 TOKEN_A at timestamp 2000.
-        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
-        };
-        let ts = 2000u64;
-        let msg_from =
-            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
-        let msg_to = crate::schnorr::signing_message(
-            &issuer,
-            &recipient,
+        // Exchange 30 ERG for 40 TOKEN_A: from-edge 100 -> 70, to-edge 50 -> 90.
+        // ts2 for the follow-up exchange must be newer than ts and both must
+        // lie inside the one-hour validity window (N10).
+        let ts = now_ms() - 2000;
+        let (issuer_from, issuer_to, issuer_x, recipient_x) = exchange_sigs(
+            &issuer_secret,
+            &recipient_secret,
+            &DenomKey::Erg,
+            100,
+            70,
             &DenomKey::Token(TOKEN_A),
+            50,
             90,
             ts,
-            &NFT,
         );
-        let issuer_from = sign_as(&issuer_secret, &msg_from, &issuer);
-        let recipient_from = sign_as(&recipient_secret, &msg_from, &recipient);
-        let issuer_to = sign_as(&issuer_secret, &msg_to, &issuer);
-        let recipient_to = sign_as(&recipient_secret, &msg_to, &recipient);
 
         manager
             .exchange_debt(
                 &issuer,
                 &recipient,
                 &DenomKey::Erg,
-                30,
+                70,
                 &DenomKey::Token(TOKEN_A),
-                40,
+                90,
                 ts,
                 &issuer_from,
-                &recipient_from,
                 &issuer_to,
-                &recipient_to,
+                &issuer_x,
+                &recipient_x,
                 "reserve_box",
             )
             .unwrap();
@@ -1569,32 +1610,49 @@ mod multi_denomination_tests {
             .unwrap()
             .is_empty());
 
-        // Creditor consent is required: a bad recipient signature is rejected and
-        // nothing moves.
-        let ts2 = 2001u64;
-        let msg_from2 =
-            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 60, ts2, &NFT);
-        let msg_to2 = crate::schnorr::signing_message(
-            &issuer,
-            &recipient,
+        // Creditor consent is required: the recipient's exchange signature
+        // replaced by an issuer-signed one is rejected and nothing moves.
+        // (The first exchange was fully applied above: from-edge 70, to-edge 90.)
+        let ts2 = now_ms() - 1000;
+        let (issuer_from2, issuer_to2, issuer_x2, _recipient_x2) = exchange_sigs(
+            &issuer_secret,
+            &recipient_secret,
+            &DenomKey::Erg,
+            70,
+            60,
             &DenomKey::Token(TOKEN_A),
+            90,
             100,
             ts2,
-            &NFT,
         );
-        let bad_recipient_from = sign_as(&issuer_secret, &msg_from2, &issuer); // signed by the wrong party
+        let bad_recipient_x = {
+            // The exchange message signed by the issuer instead of the recipient.
+            let msg_x2 = crate::schnorr::exchange_signing_message(
+                &issuer,
+                &recipient,
+                &DenomKey::Erg,
+                70,
+                60,
+                &DenomKey::Token(TOKEN_A),
+                90,
+                100,
+                ts2,
+                &NFT,
+            );
+            crate::schnorr::schnorr_sign(&msg_x2, &issuer_secret, &issuer).unwrap()
+        };
         let result = manager.exchange_debt(
             &issuer,
             &recipient,
             &DenomKey::Erg,
-            10,
+            60,
             &DenomKey::Token(TOKEN_A),
-            10,
+            100,
             ts2,
-            &sign_as(&issuer_secret, &msg_from2, &issuer),
-            &bad_recipient_from,
-            &sign_as(&issuer_secret, &msg_to2, &issuer),
-            &sign_as(&recipient_secret, &msg_to2, &recipient),
+            &issuer_from2,
+            &issuer_to2,
+            &issuer_x2,
+            &bad_recipient_x,
             "reserve_box",
         );
         assert!(matches!(result, Err(NoteError::InvalidSignature)));
@@ -1615,18 +1673,134 @@ mod multi_denomination_tests {
                 &issuer,
                 &recipient,
                 &DenomKey::Erg,
-                10,
+                60,
                 &DenomKey::Erg,
-                10,
+                60,
                 ts2,
-                &issuer_from,
-                &recipient_from,
-                &issuer_to,
-                &recipient_to,
+                &issuer_from2,
+                &issuer_to2,
+                &issuer_x2,
+                &bad_recipient_x,
                 "reserve_box",
             ),
             Err(NoteError::InvalidExchange(_))
         ));
+    }
+
+    /// N10: a signed exchange is bound to the exact pre-state it was negotiated
+    /// on — an intervening payment on either edge invalidates it — and it
+    /// expires after the one-hour validity window.
+    #[test]
+    fn exchange_rejected_when_held_or_expired() {
+        let mut manager = TrackerStateManager::new_with_temp_storage();
+        let issuer_secret = [1u8; 32];
+        let recipient_secret = [3u8; 32];
+        let issuer = pubkey(&issuer_secret);
+        let recipient = pubkey(&recipient_secret);
+
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient, 100, 1000, DenomKey::Erg),
+            )
+            .unwrap();
+        manager
+            .add_note(
+                &issuer,
+                &create_note(
+                    &issuer_secret,
+                    &recipient,
+                    50,
+                    1001,
+                    DenomKey::Token(TOKEN_A),
+                ),
+            )
+            .unwrap();
+
+        // Sign an exchange: from-edge 100 -> 40, to-edge 50 -> 110.
+        let ts = now_ms() - 1000;
+        let (issuer_from, issuer_to, issuer_x, recipient_x) = exchange_sigs(
+            &issuer_secret,
+            &recipient_secret,
+            &DenomKey::Erg,
+            100,
+            40,
+            &DenomKey::Token(TOKEN_A),
+            50,
+            110,
+            ts,
+        );
+
+        // Held exchange: the debtor pays 50 ERG more with a note (backdated to
+        // before the exchange's timestamp but newer than the edge's note — only
+        // per-pair order is enforced for notes), moving the from-edge to 150.
+        manager
+            .add_note(
+                &issuer,
+                &create_note(&issuer_secret, &recipient, 150, ts - 1, DenomKey::Erg),
+            )
+            .unwrap();
+
+        // Submitting the held exchange now fails: the reconstructed exchange
+        // message binds the CURRENT from-edge total (150), not the signed 100.
+        let result = manager.exchange_debt(
+            &issuer,
+            &recipient,
+            &DenomKey::Erg,
+            40,
+            &DenomKey::Token(TOKEN_A),
+            110,
+            ts,
+            &issuer_from,
+            &issuer_to,
+            &issuer_x,
+            &recipient_x,
+            "reserve_box",
+        );
+        assert!(
+            matches!(result, Err(NoteError::InvalidSignature)),
+            "a held exchange must not survive an intervening payment, got {result:?}"
+        );
+        assert_eq!(
+            manager
+                .get_total_debt(&issuer, &recipient, &DenomKey::Erg)
+                .unwrap(),
+            150,
+            "the payment must not be erased"
+        );
+
+        // Expired exchange: a fresh, otherwise valid exchange signed more than
+        // an hour ago is rejected before any signature check.
+        let stale_ts = now_ms() - 2 * 60 * 60 * 1000;
+        let (issuer_from3, issuer_to3, issuer_x3, recipient_x3) = exchange_sigs(
+            &issuer_secret,
+            &recipient_secret,
+            &DenomKey::Erg,
+            150,
+            100,
+            &DenomKey::Token(TOKEN_A),
+            50,
+            100,
+            stale_ts,
+        );
+        let result = manager.exchange_debt(
+            &issuer,
+            &recipient,
+            &DenomKey::Erg,
+            100,
+            &DenomKey::Token(TOKEN_A),
+            100,
+            stale_ts,
+            &issuer_from3,
+            &issuer_to3,
+            &issuer_x3,
+            &recipient_x3,
+            "reserve_box",
+        );
+        assert!(
+            matches!(&result, Err(NoteError::InvalidExchange(msg)) if msg.contains("validity window")),
+            "an expired exchange must be rejected, got {result:?}"
+        );
     }
 
     /// Finding #8: the exchange acceptance check sees the exact pre-mutation
@@ -1658,25 +1832,17 @@ mod multi_denomination_tests {
             )
             .unwrap();
 
-        let ts = 2000u64;
-        let msg_from =
-            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
-        let msg_to = crate::schnorr::signing_message(
-            &issuer,
-            &recipient,
+        let ts = now_ms();
+        let sigs = exchange_sigs(
+            &issuer_secret,
+            &recipient_secret,
+            &DenomKey::Erg,
+            100,
+            70,
             &DenomKey::Token(TOKEN_A),
+            50,
             90,
             ts,
-            &NFT,
-        );
-        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
-        };
-        let sigs = (
-            sign_as(&issuer_secret, &msg_from, &issuer),
-            sign_as(&recipient_secret, &msg_from, &recipient),
-            sign_as(&issuer_secret, &msg_to, &issuer),
-            sign_as(&recipient_secret, &msg_to, &recipient),
         );
 
         // The check must observe the exact pre-mutation state: the to-edge note
@@ -1707,9 +1873,9 @@ mod multi_denomination_tests {
             &issuer,
             &recipient,
             &DenomKey::Erg,
-            30,
+            70,
             &DenomKey::Token(TOKEN_A),
-            40,
+            90,
             ts,
             &sigs.0,
             &sigs.1,
@@ -1756,9 +1922,9 @@ mod multi_denomination_tests {
             &issuer,
             &recipient,
             &DenomKey::Erg,
-            30,
+            70,
             &DenomKey::Token(TOKEN_A),
-            40,
+            90,
             ts,
             &sigs.0,
             &sigs.1,
@@ -1811,9 +1977,9 @@ mod multi_denomination_tests {
     }
 
     /// Shared setup for the issue #17 phase-2 tests: add an ERG note (100) and
-    /// a TOKEN_A note (50), then stage an exchange of 30 ERG for 40 TOKEN_A at
-    /// timestamp 2000. Returns the manager, both pubkeys, and the staged
-    /// record's from-edge note key.
+    /// a TOKEN_A note (50), then stage an exchange taking the ERG edge to 70
+    /// and the TOKEN_A edge to 90. Returns the manager, both pubkeys, and the
+    /// staged record's from-edge note key.
     fn stage_exchange() -> (TrackerStateManager, [u8; 33], [u8; 33], [u8; 32]) {
         let mut manager = TrackerStateManager::new_with_temp_storage();
         let issuer_secret = [1u8; 32];
@@ -1840,33 +2006,33 @@ mod multi_denomination_tests {
             )
             .unwrap();
 
-        let ts = 2000u64;
-        let msg_from =
-            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
-        let msg_to = crate::schnorr::signing_message(
-            &issuer,
-            &recipient,
+        // Leave headroom for a second exchange later in the test (its
+        // timestamp must be newer) while staying inside the validity window.
+        let ts = now_ms() - 2000;
+        let (issuer_from, issuer_to, issuer_x, recipient_x) = exchange_sigs(
+            &issuer_secret,
+            &recipient_secret,
+            &DenomKey::Erg,
+            100,
+            70,
             &DenomKey::Token(TOKEN_A),
+            50,
             90,
             ts,
-            &NFT,
         );
-        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
-        };
         manager
             .exchange_debt(
                 &issuer,
                 &recipient,
                 &DenomKey::Erg,
-                30,
+                70,
                 &DenomKey::Token(TOKEN_A),
-                40,
+                90,
                 ts,
-                &sign_as(&issuer_secret, &msg_from, &issuer),
-                &sign_as(&recipient_secret, &msg_from, &recipient),
-                &sign_as(&issuer_secret, &msg_to, &issuer),
-                &sign_as(&recipient_secret, &msg_to, &recipient),
+                &issuer_from,
+                &issuer_to,
+                &issuer_x,
+                &recipient_x,
                 "reserve_box",
             )
             .unwrap();
@@ -2009,33 +2175,31 @@ mod multi_denomination_tests {
         let digest_before = manager.get_state().avl_root_digest;
         let confirmations_before = manager.all_confirmations();
 
-        let ts = 2000u64;
-        let msg_from =
-            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
-        let msg_to = crate::schnorr::signing_message(
-            &issuer,
-            &recipient,
+        let ts = now_ms();
+        let (issuer_from, issuer_to, issuer_x, recipient_x) = exchange_sigs(
+            &issuer_secret(),
+            &recipient_secret(),
+            &DenomKey::Erg,
+            100,
+            70,
             &DenomKey::Token(TOKEN_A),
+            50,
             90,
             ts,
-            &NFT,
         );
-        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
-        };
         let do_exchange = |manager: &mut TrackerStateManager| {
             manager.exchange_debt(
                 &issuer,
                 &recipient,
                 &DenomKey::Erg,
-                30,
+                70,
                 &DenomKey::Token(TOKEN_A),
-                40,
+                90,
                 ts,
-                &sign_as(&issuer_secret(), &msg_from, &issuer),
-                &sign_as(&recipient_secret(), &msg_from, &recipient),
-                &sign_as(&issuer_secret(), &msg_to, &issuer),
-                &sign_as(&recipient_secret(), &msg_to, &recipient),
+                &issuer_from,
+                &issuer_to,
+                &issuer_x,
+                &recipient_x,
                 "reserve_box",
             )
         };
@@ -2189,34 +2353,32 @@ mod multi_denomination_tests {
         let digest_before = manager.get_state().avl_root_digest;
         manager.fail_tree_rebuild = true;
 
-        let ts = 2000u64;
-        let msg_from =
-            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
-        let msg_to = crate::schnorr::signing_message(
-            &issuer,
-            &recipient,
+        let ts = now_ms();
+        let (issuer_from, issuer_to, issuer_x, recipient_x) = exchange_sigs(
+            &issuer_secret(),
+            &recipient_secret(),
+            &DenomKey::Erg,
+            100,
+            70,
             &DenomKey::Token(TOKEN_A),
+            50,
             90,
             ts,
-            &NFT,
         );
-        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
-        };
         // The storage commit succeeds; only the in-memory rebuild fails.
         manager
             .exchange_debt(
                 &issuer,
                 &recipient,
                 &DenomKey::Erg,
-                30,
+                70,
                 &DenomKey::Token(TOKEN_A),
-                40,
+                90,
                 ts,
-                &sign_as(&issuer_secret(), &msg_from, &issuer),
-                &sign_as(&recipient_secret(), &msg_from, &recipient),
-                &sign_as(&issuer_secret(), &msg_to, &issuer),
-                &sign_as(&recipient_secret(), &msg_to, &recipient),
+                &issuer_from,
+                &issuer_to,
+                &issuer_x,
+                &recipient_x,
                 "reserve_box",
             )
             .unwrap();
@@ -2333,7 +2495,7 @@ mod multi_denomination_tests {
         manager
             .add_note(
                 &issuer,
-                &create_note(&issuer_secret(), &recipient, 80, 2001, DenomKey::Erg),
+                &create_note(&issuer_secret(), &recipient, 80, now_ms(), DenomKey::Erg),
             )
             .unwrap();
         let digest = manager.get_state().avl_root_digest;
@@ -2387,7 +2549,7 @@ mod multi_denomination_tests {
                     &issuer_secret(),
                     &recipient,
                     60,
-                    2001,
+                    now_ms(),
                     DenomKey::Token(TOKEN_A),
                 ),
             )
@@ -2473,34 +2635,33 @@ mod multi_denomination_tests {
         let (mut manager, issuer, recipient, _staged_key) = stage_exchange();
 
         // A second exchange for the same pair is rejected while one is staged.
-        let ts2 = 2001u64;
-        let msg_from2 =
-            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 60, ts2, &NFT);
-        let msg_to2 = crate::schnorr::signing_message(
-            &issuer,
-            &recipient,
-            &DenomKey::Token(TOKEN_A),
-            100,
-            ts2,
-            &NFT,
-        );
-        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
-        };
+        // (The staged one took the edges to 70 ERG / 90 TOKEN_A.)
+        let ts2 = now_ms() - 1000;
         let issuer_secret = issuer_secret();
         let recipient_secret = recipient_secret();
+        let (issuer_from2, issuer_to2, issuer_x2, recipient_x2) = exchange_sigs(
+            &issuer_secret,
+            &recipient_secret,
+            &DenomKey::Erg,
+            70,
+            60,
+            &DenomKey::Token(TOKEN_A),
+            90,
+            100,
+            ts2,
+        );
         let result = manager.exchange_debt(
             &issuer,
             &recipient,
             &DenomKey::Erg,
-            10,
+            60,
             &DenomKey::Token(TOKEN_A),
-            10,
+            100,
             ts2,
-            &sign_as(&issuer_secret, &msg_from2, &issuer),
-            &sign_as(&recipient_secret, &msg_from2, &recipient),
-            &sign_as(&issuer_secret, &msg_to2, &issuer),
-            &sign_as(&recipient_secret, &msg_to2, &recipient),
+            &issuer_from2,
+            &issuer_to2,
+            &issuer_x2,
+            &recipient_x2,
             "reserve_box",
         );
         assert!(
@@ -2530,14 +2691,14 @@ mod multi_denomination_tests {
             &issuer,
             &recipient,
             &DenomKey::Erg,
-            10,
+            60,
             &DenomKey::Token(TOKEN_A),
-            10,
+            100,
             ts2,
-            &sign_as(&issuer_secret, &msg_from2, &issuer),
-            &sign_as(&recipient_secret, &msg_from2, &recipient),
-            &sign_as(&issuer_secret, &msg_to2, &issuer),
-            &sign_as(&recipient_secret, &msg_to2, &recipient),
+            &issuer_from2,
+            &issuer_to2,
+            &issuer_x2,
+            &recipient_x2,
             "reserve_box",
         );
         assert!(result.is_ok(), "{result:?}");
@@ -2573,33 +2734,31 @@ mod multi_denomination_tests {
                     ),
                 )
                 .unwrap();
-            let ts = 2000u64;
-            let msg_from =
-                crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
-            let msg_to = crate::schnorr::signing_message(
-                &issuer,
-                &recipient,
+            let ts = now_ms();
+            let (issuer_from, issuer_to, issuer_x, recipient_x) = exchange_sigs(
+                &issuer_secret,
+                &recipient_secret,
+                &DenomKey::Erg,
+                100,
+                70,
                 &DenomKey::Token(TOKEN_A),
+                50,
                 90,
                 ts,
-                &NFT,
             );
-            let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-                crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
-            };
             manager
                 .exchange_debt(
                     &issuer,
                     &recipient,
                     &DenomKey::Erg,
-                    30,
+                    70,
                     &DenomKey::Token(TOKEN_A),
-                    40,
+                    90,
                     ts,
-                    &sign_as(&issuer_secret, &msg_from, &issuer),
-                    &sign_as(&recipient_secret, &msg_from, &recipient),
-                    &sign_as(&issuer_secret, &msg_to, &issuer),
-                    &sign_as(&recipient_secret, &msg_to, &recipient),
+                    &issuer_from,
+                    &issuer_to,
+                    &issuer_x,
+                    &recipient_x,
                     "box99",
                 )
                 .unwrap();
@@ -2685,33 +2844,31 @@ mod multi_denomination_tests {
 
         // Stage the exchange: the live from-edge drops to 70 while the
         // committed value stays 100.
-        let ts = 2000u64;
-        let msg_from =
-            crate::schnorr::signing_message(&issuer, &recipient, &DenomKey::Erg, 70, ts, &NFT);
-        let msg_to = crate::schnorr::signing_message(
-            &issuer,
-            &recipient,
+        let ts = now_ms();
+        let (issuer_from, issuer_to, issuer_x, recipient_x) = exchange_sigs(
+            &issuer_secret,
+            &recipient_secret,
+            &DenomKey::Erg,
+            100,
+            70,
             &DenomKey::Token(TOKEN_A),
+            50,
             90,
             ts,
-            &NFT,
         );
-        let sign_as = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            crate::schnorr::schnorr_sign(msg, secret, pk).unwrap()
-        };
         manager
             .exchange_debt(
                 &issuer,
                 &recipient,
                 &DenomKey::Erg,
-                30,
+                70,
                 &DenomKey::Token(TOKEN_A),
-                40,
+                90,
                 ts,
-                &sign_as(&issuer_secret, &msg_from, &issuer),
-                &sign_as(&recipient_secret, &msg_from, &recipient),
-                &sign_as(&issuer_secret, &msg_to, &issuer),
-                &sign_as(&recipient_secret, &msg_to, &recipient),
+                &issuer_from,
+                &issuer_to,
+                &issuer_x,
+                &recipient_x,
                 "reserve_box",
             )
             .unwrap();

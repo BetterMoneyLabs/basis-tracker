@@ -36,9 +36,14 @@ applied at request time.
 
 ### Phase 1 — request time (`exchange_debt`)
 
-All existing validation is unchanged (four Schnorr signatures, timestamp
-monotonicity, contract range, below-redeemed floor, acceptance policy against
-pre-mutation state). Then:
+All existing validation is unchanged in kind, with the consent artifact updated
+per issue #15 review N10: the creditor consent is both parties' signature over a
+domain-separated exchange message (`blake2b256("basis-exchange-v1") ‖` both
+edges' debt keys, pre- and post-totals `‖ timestamp ‖ trackerNftId`, 168 bytes),
+reconstructed by the tracker with the current totals as pre-totals and valid for
+one hour; the issuer additionally signs each edge's standard note message at its
+new total (timestamp monotonicity, contract range, below-redeemed floor, and the
+acceptance policy against pre-mutation state all still apply). Then:
 
 1. The **from-edge decrease is applied immediately** (AVL update + note store
    + confirmation recompute). It will be committed by the next tracker box

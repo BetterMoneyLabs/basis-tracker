@@ -63,30 +63,44 @@ pub struct CreateNoteRequest {
 
 /// Cross-denomination debt exchange request (off-chain novation / triage).
 ///
-/// Moves `from_amount` of cumulative debt out of the (issuer, recipient,
-/// from_denomination) edge and `to_amount` into the (issuer, recipient,
-/// to_denomination) edge (specs/ergo/multi_collateral_reserves.md §10). All four
-/// signatures are over the respective edge's standard 80-byte note message at the
-/// NEW cumulative total and `timestamp`; the recipient's signatures are the
-/// creditor consent required by the S3 rule.
+/// Moves the (issuer, recipient, from_denomination) edge down to
+/// `from_new_total` and the (issuer, recipient, to_denomination) edge up to
+/// `to_new_total` (specs/ergo/multi_collateral_reserves.md §10).
+///
+/// Consent (issue #15 review N10): both parties sign a domain-separated
+/// exchange message — blake2b256("basis-exchange-v1") ‖ both edges' debt keys,
+/// pre- and post-totals ‖ timestamp ‖ tracker NFT id (168 bytes). The tracker
+/// reconstructs it with the CURRENT totals as the pre-totals, so an exchange
+/// signed against a moved edge fails verification, and a timestamp older than
+/// one hour is rejected. The issuer signs and submits last: the recipient
+/// hands over only its exchange signature, so the recipient never holds an
+/// issuer signature it could post as a standalone note before the exchange
+/// lands. `issuer_from_signature` / `issuer_to_signature` are the issuer's
+/// standard 80-byte note messages at the new totals; they become the stored
+/// notes' signatures (needed for later redemption).
 #[derive(Debug, Deserialize)]
 pub struct ExchangeNotesRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub from_denomination: String,
-    pub from_amount: u64,
+    /// Absolute from-edge total after the exchange (must be below the current total).
+    pub from_new_total: u64,
     pub to_denomination: String,
-    pub to_amount: u64,
-    /// New timestamp for both edges; must be newer than both edges' current ones.
+    /// Absolute to-edge total after the exchange (must be above the current total).
+    pub to_new_total: u64,
+    /// New timestamp for both edges; must be newer than both edges' current
+    /// ones and within the one-hour validity window.
     pub timestamp: u64,
-    /// Issuer signature over the from-edge's new note message (hex, 65 bytes)
+    /// Issuer signature over the domain-separated exchange message (hex, 65 bytes)
+    pub issuer_exchange_signature: String,
+    /// Recipient signature over the same exchange message (creditor consent)
+    pub recipient_exchange_signature: String,
+    /// Issuer signature over the from-edge's standard note message at
+    /// `from_new_total` (hex, 65 bytes); becomes the from-edge note signature
     pub issuer_from_signature: String,
-    /// Recipient signature over the from-edge's new note message (creditor consent)
-    pub recipient_from_signature: String,
-    /// Issuer signature over the to-edge's new note message (hex, 65 bytes)
+    /// Issuer signature over the to-edge's standard note message at
+    /// `to_new_total` (hex, 65 bytes); becomes the staged to-edge note signature
     pub issuer_to_signature: String,
-    /// Recipient signature over the to-edge's new note message (creditor acceptance)
-    pub recipient_to_signature: String,
 }
 
 #[derive(Debug, Serialize)]

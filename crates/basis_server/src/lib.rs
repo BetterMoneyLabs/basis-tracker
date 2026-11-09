@@ -109,8 +109,10 @@ pub enum TrackerCommand {
         >,
     },
     /// Atomic cross-denomination debt exchange (triage/novation,
-    /// specs/ergo/multi_collateral_reserves.md §10). All four signatures were
-    /// verified by the API layer; the store re-verifies them before mutating.
+    /// specs/ergo/multi_collateral_reserves.md §10). Carries absolute
+    /// post-totals; the store derives the amounts and re-verifies all four
+    /// signatures before mutating (the domain-separated exchange message is
+    /// reconstructed with the current totals as pre-totals, N10).
     ///
     /// `acceptance_check` is evaluated by the store against the pre-mutation
     /// state, atomically with the mutation (finding #8): evaluating it in the
@@ -121,14 +123,14 @@ pub enum TrackerCommand {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
         from_denomination: basis_store::DenomKey,
-        from_amount: u64,
+        from_new_total: u64,
         to_denomination: basis_store::DenomKey,
-        to_amount: u64,
+        to_new_total: u64,
         timestamp: u64,
         issuer_from_signature: basis_store::Signature,
-        recipient_from_signature: basis_store::Signature,
         issuer_to_signature: basis_store::Signature,
-        recipient_to_signature: basis_store::Signature,
+        issuer_exchange_signature: basis_store::Signature,
+        recipient_exchange_signature: basis_store::Signature,
         /// Box id of the issuer's canonical from-denomination reserve at
         /// request time; stored on the staged exchange so phase 2 can verify
         /// the reserve was not drained while the to-edge increase was staged

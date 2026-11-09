@@ -37,9 +37,10 @@ mod create_reserve_tests {
         tokio::spawn(async move {
             while let Some(cmd) = rx.recv().await {
                 if let TrackerCommand::GetReserveStateDigest { response_tx, .. } = cmd {
-                    let empty_digest =
-                        hex::decode("4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900")
-                            .unwrap();
+                    let empty_digest = hex::decode(
+                        "4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900",
+                    )
+                    .unwrap();
                     let _ = response_tx.send(empty_digest);
                 }
             }

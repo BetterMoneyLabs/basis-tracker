@@ -503,6 +503,11 @@ enum StagedExchangeDecision {
 pub type ExchangeAcceptanceCheckFn =
     Box<dyn FnOnce(ExchangeAcceptanceView) -> Result<(), String> + Send>;
 
+/// Validity window for a signed exchange (issue #15 review N10): the exchange
+/// timestamp must be at most this far in the past. A held exchange expires
+/// instead of staying replayable against edges that moved since it was signed.
+const EXCHANGE_VALIDITY_WINDOW_MS: u64 = 60 * 60 * 1000;
+
 /// Tracker state manager with persistent AVL tree
 pub struct TrackerStateManager {
     avl_state: basis_trees::BasisAvlTree,
@@ -1395,9 +1400,10 @@ impl TrackerStateManager {
     }
 
     /// Atomically move debt between two denominations of the same (issuer, recipient)
-    /// pair: decrease the `from` edge by `from_amount` and increase the `to` edge by
-    /// `to_amount`. This is the off-chain novation used for cross-denomination
-    /// exchange (specs/ergo/multi_collateral_reserves.md §10).
+    /// pair: decrease the `from` edge to `from_new_total` and increase the `to`
+    /// edge to `to_new_total` (specs/ergo/multi_collateral_reserves.md §10). The
+    /// amounts moved are derived: `from_amount = current − from_new_total` and
+    /// `to_amount = to_new_total − current`.
     ///
     /// TWO-PHASE (issue #17, `specs/ergo/exchange_atomicity.md`): only the
     /// from-edge decrease is applied here. The to-edge increase is STAGED in the
@@ -1408,10 +1414,19 @@ impl TrackerStateManager {
     /// Applying both edges at once would let a creditor redeem the old from-edge
     /// total with a pre-built transaction AND collect the to-edge increase.
     ///
-    /// SECURITY: decreasing an edge is the S3 operation — it is only permitted here
-    /// because the creditor consented, proven by the recipient's signature over the
-    /// from-edge's new message. All four signatures (issuer and recipient over each
-    /// edge's 80-byte message) are verified BEFORE any state changes.
+    /// SECURITY (S3 + issue #15 review N10): decreasing an edge is only
+    /// permitted with the creditor's consent. Consent is a domain-separated
+    /// exchange message — blake2b256("basis-exchange-v1") ‖ both edges' debt
+    /// keys, pre- and post-totals ‖ timestamp ‖ tracker NFT id — signed by BOTH
+    /// parties. The tracker reconstructs the message with the CURRENT totals as
+    /// the pre-totals, so a signed exchange held while either edge moved no
+    /// longer verifies, and a timestamp older than EXCHANGE_VALIDITY_WINDOW_MS
+    /// is rejected outright. The message is not a valid 80-byte note message,
+    /// so no part of an exchange can be replayed as a standalone note.
+    /// `issuer_from_signature` / `issuer_to_signature` are the issuer's
+    /// signatures over each edge's standard note message at its new total; they
+    /// become the stored notes' signatures (needed for later redemption).
+    /// All four signatures are verified BEFORE any state changes.
     ///
     /// ATOMICITY (issue #20): the staged record, the decreased from-edge note and
     /// its confirmation record are committed in one fjall batch — they land
@@ -1423,24 +1438,19 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
         from_denomination: &DenomKey,
-        from_amount: u64,
+        from_new_total: u64,
         to_denomination: &DenomKey,
-        to_amount: u64,
+        to_new_total: u64,
         timestamp: u64,
         issuer_from_signature: &Signature,
-        recipient_from_signature: &Signature,
         issuer_to_signature: &Signature,
-        recipient_to_signature: &Signature,
+        issuer_exchange_signature: &Signature,
+        recipient_exchange_signature: &Signature,
         from_reserve_box_id: &str,
     ) -> Result<(), NoteError> {
         if from_denomination == to_denomination {
             return Err(NoteError::InvalidExchange(
                 "from and to denominations must differ".to_string(),
-            ));
-        }
-        if from_amount == 0 || to_amount == 0 {
-            return Err(NoteError::InvalidExchange(
-                "exchange amounts must be positive".to_string(),
             ));
         }
 
@@ -1450,6 +1460,15 @@ impl TrackerStateManager {
             .as_millis() as u64;
         if timestamp > current_time {
             return Err(NoteError::FutureTimestamp);
+        }
+        // N10: a signed exchange expires. Without a window a creditor could hold
+        // a fully-signed exchange indefinitely and submit it whenever the edges
+        // happen to drift back to the signed pre-totals.
+        if current_time.saturating_sub(timestamp) > EXCHANGE_VALIDITY_WINDOW_MS {
+            return Err(NoteError::InvalidExchange(format!(
+                "exchange timestamp {} is older than the {} ms validity window",
+                timestamp, EXCHANGE_VALIDITY_WINDOW_MS
+            )));
         }
 
         // Only one staged exchange may be in flight per (issuer, recipient)
@@ -1473,10 +1492,20 @@ impl TrackerStateManager {
         let to_note_opt =
             self.get_note_optional(issuer_pubkey, recipient_pubkey, to_denomination)?;
 
-        let from_new_total = from_note
+        // The request carries absolute post-totals; the amounts moved are
+        // derived from the CURRENT edge state. Because the exchange message
+        // below is reconstructed with these same current totals as pre-totals,
+        // an exchange signed against any other state fails verification (N10).
+        let from_amount = from_note
             .amount_collected
-            .checked_sub(from_amount)
-            .ok_or(NoteError::AmountOverflow)?;
+            .checked_sub(from_new_total)
+            .filter(|amount| *amount > 0)
+            .ok_or_else(|| {
+                NoteError::InvalidExchange(format!(
+                    "from_new_total ({}) must be below the current from-edge total ({})",
+                    from_new_total, from_note.amount_collected
+                ))
+            })?;
         // The edge cannot drop below what was already redeemed from it.
         if from_new_total < from_note.amount_redeemed {
             return Err(NoteError::InvalidExchange(format!(
@@ -1485,10 +1514,16 @@ impl TrackerStateManager {
             )));
         }
         let to_base_collected = to_note_opt.as_ref().map(|n| n.amount_collected);
-        let to_new_total = to_base_collected
-            .unwrap_or(0)
-            .checked_add(to_amount)
-            .ok_or(NoteError::AmountOverflow)?;
+        let to_amount = to_new_total
+            .checked_sub(to_base_collected.unwrap_or(0))
+            .filter(|amount| *amount > 0)
+            .ok_or_else(|| {
+                NoteError::InvalidExchange(format!(
+                    "to_new_total ({}) must be above the current to-edge total ({})",
+                    to_new_total,
+                    to_base_collected.unwrap_or(0)
+                ))
+            })?;
 
         // The exchange must move both edges forward in time.
         if timestamp <= from_note.timestamp
@@ -1519,7 +1554,12 @@ impl TrackerStateManager {
             }
         }
 
-        // Verify all four signatures BEFORE mutating anything.
+        // Verify all four signatures BEFORE mutating anything (N10):
+        // - the issuer's standard note-message signatures at each edge's new
+        //   total (they become the stored notes' signatures);
+        // - both parties' signatures over the domain-separated exchange
+        //   message, reconstructed with the CURRENT totals as pre-totals, so
+        //   the consent is bound to the exact state being exchanged.
         let msg_from = schnorr::signing_message(
             issuer_pubkey,
             recipient_pubkey,
@@ -1536,12 +1576,28 @@ impl TrackerStateManager {
             timestamp,
             &tracker_nft_id,
         );
+        let msg_exchange = schnorr::exchange_signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denomination,
+            from_note.amount_collected,
+            from_new_total,
+            to_denomination,
+            to_base_collected.unwrap_or(0),
+            to_new_total,
+            timestamp,
+            &tracker_nft_id,
+        );
         let verifier = SchnorrVerifier;
         for (sig, msg, key) in [
             (issuer_from_signature, &msg_from, issuer_pubkey),
-            (recipient_from_signature, &msg_from, recipient_pubkey),
             (issuer_to_signature, &msg_to, issuer_pubkey),
-            (recipient_to_signature, &msg_to, recipient_pubkey),
+            (issuer_exchange_signature, &msg_exchange, issuer_pubkey),
+            (
+                recipient_exchange_signature,
+                &msg_exchange,
+                recipient_pubkey,
+            ),
         ] {
             if verifier.verify_signature(sig, msg, key).is_err() {
                 return Err(NoteError::InvalidSignature);
@@ -1599,12 +1655,15 @@ impl TrackerStateManager {
             .insert(from_key.key_hash, new_confirmation);
 
         tracing::info!(
-            "Exchange staged: from-edge {} decreased {} -> {}; to-edge {} increase to {} applies after the decrease is confirmed (issue #17)",
+            "Exchange staged: from-edge {} decreased {} -> {} (−{}); to-edge {} increase {} -> {} (+{}) applies after the decrease is confirmed (issue #17)",
             from_denomination.denomination_id(),
             from_note.amount_collected,
             from_new_total,
+            from_amount,
             to_denomination.denomination_id(),
-            to_new_total
+            to_base_collected.unwrap_or(0),
+            to_new_total,
+            to_amount
         );
 
         // Recreate the live tree from storage in the persisted first-insertion
@@ -1696,14 +1755,14 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
         from_denomination: &DenomKey,
-        from_amount: u64,
+        from_new_total: u64,
         to_denomination: &DenomKey,
-        to_amount: u64,
+        to_new_total: u64,
         timestamp: u64,
         issuer_from_signature: &Signature,
-        recipient_from_signature: &Signature,
         issuer_to_signature: &Signature,
-        recipient_to_signature: &Signature,
+        issuer_exchange_signature: &Signature,
+        recipient_exchange_signature: &Signature,
         from_reserve_box_id: &str,
         acceptance_check: Option<ExchangeAcceptanceCheckFn>,
     ) -> Result<(), NoteError> {
@@ -1725,14 +1784,14 @@ impl TrackerStateManager {
             issuer_pubkey,
             recipient_pubkey,
             from_denomination,
-            from_amount,
+            from_new_total,
             to_denomination,
-            to_amount,
+            to_new_total,
             timestamp,
             issuer_from_signature,
-            recipient_from_signature,
             issuer_to_signature,
-            recipient_to_signature,
+            issuer_exchange_signature,
+            recipient_exchange_signature,
             from_reserve_box_id,
         )
     }

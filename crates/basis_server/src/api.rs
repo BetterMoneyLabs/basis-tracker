@@ -428,9 +428,12 @@ pub async fn create_note(
 /// Exchange debt between two denominations of one (issuer, recipient) pair
 /// (off-chain novation / triage, specs/ergo/multi_collateral_reserves.md §10).
 ///
-/// Both parties sign both edges' new states; the tracker never takes a view of the
-/// exchange rate — it is bilaterally agreed. Both edges live in the single tracker
-/// tree, so the exchange is one atomic state change committed in one R5 publication.
+/// Both parties sign the domain-separated exchange message binding both edges'
+/// pre- and post-totals and a one-hour validity window (issue #15 review N10);
+/// the issuer additionally signs each edge's standard note message at its new
+/// total. The tracker takes no view of the exchange rate — it is bilaterally
+/// agreed. Both edges live in the single tracker tree, so the exchange is one
+/// atomic state change committed in one R5 publication.
 #[axum::debug_handler]
 pub async fn exchange_notes(
     State(state): State<AppState>,
@@ -525,9 +528,11 @@ pub async fn exchange_notes(
         }
     };
 
-    // Decode the four signatures. The closure returns a plain message so the
-    // Err variant stays small (the full response tuple is built only on the
-    // error path).
+    // Decode the four signatures (N10): both parties' signatures over the
+    // domain-separated exchange message, plus the issuer's standard note
+    // signatures at each edge's new total. The closure returns a plain message
+    // so the Err variant stays small (the full response tuple is built only on
+    // the error path).
     let decode_sig = |name: &str, hex_str: &str| -> Result<Signature, String> {
         let bytes = hex::decode(hex_str).map_err(|_| format!("{} must be hex-encoded", name))?;
         bytes
@@ -540,81 +545,29 @@ pub async fn exchange_notes(
             Json(crate::models::error_response(msg)),
         )
     };
+    let issuer_exchange_signature = match decode_sig(
+        "issuer_exchange_signature",
+        &payload.issuer_exchange_signature,
+    ) {
+        Ok(s) => s,
+        Err(msg) => return bad_request(msg),
+    };
+    let recipient_exchange_signature = match decode_sig(
+        "recipient_exchange_signature",
+        &payload.recipient_exchange_signature,
+    ) {
+        Ok(s) => s,
+        Err(msg) => return bad_request(msg),
+    };
     let issuer_from_signature =
         match decode_sig("issuer_from_signature", &payload.issuer_from_signature) {
             Ok(s) => s,
             Err(msg) => return bad_request(msg),
         };
-    let recipient_from_signature = match decode_sig(
-        "recipient_from_signature",
-        &payload.recipient_from_signature,
-    ) {
-        Ok(s) => s,
-        Err(msg) => return bad_request(msg),
-    };
     let issuer_to_signature = match decode_sig("issuer_to_signature", &payload.issuer_to_signature)
     {
         Ok(s) => s,
         Err(msg) => return bad_request(msg),
-    };
-    let recipient_to_signature =
-        match decode_sig("recipient_to_signature", &payload.recipient_to_signature) {
-            Ok(s) => s,
-            Err(msg) => return bad_request(msg),
-        };
-
-    // The to-edge's new total (for the response and the acceptance re-evaluation).
-    let to_new_total = {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if state
-            .tx
-            .send(TrackerCommand::GetNoteByIssuerAndRecipient {
-                issuer_pubkey,
-                recipient_pubkey,
-                denomination: to_denomination,
-                response_tx: tx,
-            })
-            .await
-            .is_err()
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Tracker thread unavailable".to_string(),
-                )),
-            );
-        }
-        let existing = match rx.await {
-            Ok(Ok(note)) => note.map(|n| n.amount_collected).unwrap_or(0),
-            Ok(Err(e)) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(format!(
-                        "tracker error: {:?}",
-                        e
-                    ))),
-                );
-            }
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(
-                        "Tracker thread did not respond".to_string(),
-                    )),
-                );
-            }
-        };
-        match existing.checked_add(payload.to_amount) {
-            Some(t) => t,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(crate::models::error_response(
-                        "to_amount overflows the to-edge total".to_string(),
-                    )),
-                );
-            }
-        }
     };
 
     // Acceptance policy for the TARGET edge is evaluated inside the tracker
@@ -631,13 +584,10 @@ pub async fn exchange_notes(
             let predicate = std::sync::Arc::clone(predicate);
             Some(ExchangeAcceptanceCheck(Box::new(
                 move |view: basis_store::ExchangeAcceptanceView| -> Result<(), String> {
-                    let to_new_total = view
-                        .to_note
-                        .as_ref()
-                        .map(|n| n.amount_collected)
-                        .unwrap_or(0)
-                        .checked_add(payload.to_amount)
-                        .ok_or_else(|| "to_amount overflows the to-edge total".to_string())?;
+                    // The store rejects the exchange when `to_new_total` is not
+                    // above the current to-edge total, so this is the post
+                    // total the policy must admit.
+                    let to_new_total = payload.to_new_total;
                     let issuer_gross_debt = compute_issuer_gross_debt(
                         &view.issuer_notes,
                         &view.confirmations,
@@ -676,14 +626,14 @@ pub async fn exchange_notes(
             issuer_pubkey,
             recipient_pubkey,
             from_denomination,
-            from_amount: payload.from_amount,
+            from_new_total: payload.from_new_total,
             to_denomination,
-            to_amount: payload.to_amount,
+            to_new_total: payload.to_new_total,
             timestamp: payload.timestamp,
             issuer_from_signature,
-            recipient_from_signature,
             issuer_to_signature,
-            recipient_to_signature,
+            issuer_exchange_signature,
+            recipient_exchange_signature,
             from_reserve_box_id,
             acceptance_check,
             response_tx,
@@ -701,31 +651,15 @@ pub async fn exchange_notes(
 
     match response_rx.await {
         Ok(Ok(())) => {
-            let from_new_total = {
-                // from-edge new total: current minus from_amount (store validated it).
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = state
-                    .tx
-                    .send(TrackerCommand::GetNoteByIssuerAndRecipient {
-                        issuer_pubkey,
-                        recipient_pubkey,
-                        denomination: from_denomination,
-                        response_tx: tx,
-                    })
-                    .await;
-                match rx.await {
-                    Ok(Ok(Some(note))) => note.amount_collected,
-                    _ => 0,
-                }
-            };
             (
                 StatusCode::OK,
                 Json(crate::models::success_response(ExchangeNotesResponse {
                     exchanged: true,
                     from_denomination: from_denomination.denomination_id(),
                     to_denomination: to_denomination.denomination_id(),
-                    from_new_total,
-                    to_new_total,
+                    // The store validated the totals against the current state.
+                    from_new_total: payload.from_new_total,
+                    to_new_total: payload.to_new_total,
                     timestamp: payload.timestamp,
                     // Two-phase exchange (issue #17): only the from-edge
                     // decrease is applied now; the to-edge increase is staged
