@@ -471,6 +471,21 @@ pub struct ReservePaymentRequest {
     pub registers: std::collections::HashMap<String, String>,
 }
 
+/// Response for GET /reserves/state-digest: the tracker's reserve AVL tree
+/// state for an (issuer, denomination) pair — both the raw root digest and
+/// the serialized SAvlTree value a reserve (re)creation must carry in R5
+/// (issue #15 review N9: reserve rotation carries redeemed-amount history
+/// forward, so R5 is not always the empty tree).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveStateDigestResponse {
+    pub issuer_pubkey: String,
+    pub denomination: String,
+    /// 33-byte AVL+ root digest (hex, 66 chars).
+    pub reserve_state_digest: String,
+    /// Serialized SAvlTree register value (hex) for the reserve box's R5.
+    pub reserve_r5: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     pub token_id: String,

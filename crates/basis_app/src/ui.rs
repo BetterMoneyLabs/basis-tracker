@@ -1741,9 +1741,34 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
             match app.client.create_reserve(request.clone()).await {
                 Ok(response) => {
                     // Never offer to submit a payload that funds anything but this reserve.
-                    if let Err(e) =
-                        basis_cli_lib::verify::verify_reserve_payload(&request, &response, None)
+                    // R5 must carry the tracker's reserve-tree state digest for this
+                    // (owner, denomination) pair (issue #15 review N9).
+                    let denomination = if request.token_id.is_empty() {
+                        "erg".to_string()
+                    } else {
+                        format!("token:{}", request.token_id)
+                    };
+                    let expected_r5 = match app
+                        .client
+                        .get_reserve_state_digest(&request.owner_pubkey, &denomination)
+                        .await
                     {
+                        Ok(d) => d.reserve_r5,
+                        Err(e) => {
+                            app.set_notification(
+                                format!("Failed to fetch the reserve state digest: {}", e),
+                                true,
+                            );
+                            app.navigate_to(Screen::Reserves);
+                            return Ok(());
+                        }
+                    };
+                    if let Err(e) = basis_cli_lib::verify::verify_reserve_payload(
+                        &request,
+                        &response,
+                        None,
+                        &expected_r5,
+                    ) {
                         app.set_notification(
                             format!("Refusing the tracker's reserve payload: {}", e),
                             true,
@@ -1774,6 +1799,7 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
                                     app.node_api_key.as_deref(),
                                     &request,
                                     &response,
+                                    &expected_r5,
                                 ) {
                                     Ok(tx_id) => {
                                         app.set_notification(

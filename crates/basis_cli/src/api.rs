@@ -176,6 +176,18 @@ pub struct ReservePaymentRequest {
     pub registers: std::collections::HashMap<String, String>,
 }
 
+/// Reserve AVL tree state digest returned by `GET /reserves/state-digest`:
+/// the tracker's reserve tree for an (issuer, denomination) pair, both as the
+/// raw 33-byte root digest and as the serialized SAvlTree value a reserve
+/// (re)creation must carry in R5 (issue #15 review N9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveStateDigestResponse {
+    pub issuer_pubkey: String,
+    pub denomination: String,
+    pub reserve_state_digest: String,
+    pub reserve_r5: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     pub token_id: String,
@@ -473,8 +485,10 @@ fn send_pinned_deployment(
 /// transaction id.
 ///
 /// The node pays whatever the payload says, so the payload is first checked to be
-/// exactly the reserve `request` asked the tracker for (including the owner's change
-/// address and a bounded fee, [`crate::verify::verify_reserve_payload`]).
+/// exactly the reserve `request` asked the tracker for (including R5 = `expected_r5`,
+/// the tracker's reserve-tree state digest from `GET /reserves/state-digest`, the
+/// owner's change address and a bounded fee,
+/// [`crate::verify::verify_reserve_payload`]).
 ///
 /// The tracker only admits a reserve root box whose creating transaction spends a P2PK
 /// input of the R4 owner key (see `specs/ergo/reserve_admission.md`), so this function
@@ -489,8 +503,9 @@ pub fn submit_reserve_to_node(
     node_api_key: Option<&str>,
     request: &CreateReserveRequest,
     payload: &ReserveCreationResponse,
+    expected_r5: &str,
 ) -> Result<String> {
-    crate::verify::verify_reserve_payload(request, payload, None)?;
+    crate::verify::verify_reserve_payload(request, payload, None, expected_r5)?;
 
     let payment_requests: Vec<NodePaymentRequest> = payload
         .requests
@@ -1347,6 +1362,35 @@ impl TrackerClient {
         } else {
             let error_text = response.into_string()?;
             Err(anyhow::anyhow!("Failed to create reserve: {}", error_text))
+        }
+    }
+
+    /// Fetch the tracker's reserve AVL tree state for an (issuer, denomination)
+    /// pair — the R5 value a reserve (re)creation must carry (issue #15 review
+    /// N9). Used to verify a `/reserves/create` payload before funding it.
+    pub async fn get_reserve_state_digest(
+        &self,
+        issuer_pubkey: &str,
+        denomination: &str,
+    ) -> Result<ReserveStateDigestResponse> {
+        let url = format!(
+            "{}/reserves/state-digest?issuer_pubkey={}&denomination={}",
+            self.base_url, issuer_pubkey, denomination
+        );
+        let response = self.get(&url)?.call()?;
+        if response.status() == 200 {
+            let api_response: ApiResponse<ReserveStateDigestResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get reserve state digest: {}",
+                error_text
+            ))
         }
     }
 

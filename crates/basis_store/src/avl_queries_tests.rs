@@ -210,6 +210,31 @@ fn test_update_already_redeemed_creates_tree_for_unknown_issuer() {
     );
 }
 
+#[test]
+fn test_fresh_pair_reserve_state_digest_matches_onchain_empty_r5() {
+    // Issue #15 review N9: /reserves/create sets R5 to the tracker mirror's
+    // reserve-tree digest. For a fresh (issuer, denomination) pair that digest
+    // is the empty tree, and serialized as a SAvlTree register it must equal
+    // the constant fresh reserves were always created with — otherwise the
+    // scanner's empty-R5 admission check and the on-chain contract diverge.
+    let manager = TrackerStateManager::new_with_temp_storage();
+    let (_, issuer) = generate_keypair();
+
+    let digest = manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg);
+    assert_eq!(
+        hex::encode(&digest),
+        "4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900",
+        "fresh pair must yield the empty AVL+ tree digest"
+    );
+    let r5 = hex::encode(basis_offchain::ergo_tx::build_savl_tree_from_digest(
+        &hex::encode(&digest),
+    ));
+    assert_eq!(
+        r5, "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000",
+        "fresh pair R5 must equal the historical empty-tree register value"
+    );
+}
+
 // ============================================================================
 // generate_reserve_insert_proof
 // ============================================================================

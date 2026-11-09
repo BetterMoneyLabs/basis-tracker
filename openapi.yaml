@@ -500,6 +500,12 @@ paths:
         owner's wallet must hold the reserve NFT and enough ERG for the reserve
         value plus fee. The `nft_id` must not be the tracker's own NFT, and the
         amounts are bounded by `server.reserve_creation_max_*` config caps.
+        `/reserves/create` sets the reserve box's R5 register to the tracker's
+        reserve AVL tree digest for the (owner, denomination) pair — the empty
+        tree for a fresh pair, or the carried-forward redeemed-amount history
+        after a reserve rotation (issue #15 review N9; verify with
+        GET /reserves/state-digest). The scanner admits a root box with a
+        non-empty R5 only when it matches the digest this endpoint recorded.
         The tracker only tracks a reserve whose creating transaction spends a
         P2PK input of the R4 owner key (see specs/ergo/reserve_admission.md);
         `basis-cli reserve create --submit` guarantees that (pinning inputs, or
@@ -524,6 +530,53 @@ paths:
                 $ref: '#/components/schemas/ApiResponseReserveCreation'
         '400':
           description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /reserves/state-digest:
+    get:
+      summary: Get reserve tree state digest
+      description: >-
+        Get the tracker's reserve AVL tree state for an (issuer, denomination)
+        pair: the 33-byte root digest and the serialized SAvlTree value that a
+        reserve (re)creation must carry in R5. For a fresh pair this is the
+        empty tree; after a reserve rotation it carries the redeemed-amount
+        history forward (issue #15 review N9). Clients use this to verify the
+        R5 register of a `/reserves/create` payload before signing it with
+        their own node.
+      operationId: getReserveStateDigest
+      tags:
+        - Reserves
+      parameters:
+        - name: issuer_pubkey
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Issuer (reserve owner) public key, hex-encoded 33 bytes
+        - name: denomination
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 'Denomination: "erg" (default) or "token:<64-hex>"'
+      responses:
+        '200':
+          description: Reserve state digest retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserveStateDigest'
+        '400':
+          description: Bad request - invalid public key or denomination
           content:
             application/json:
               schema:
@@ -2899,6 +2952,35 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/ReserveCreationResponse'
+
+    ReserveStateDigestResponse:
+      type: object
+      required:
+        - issuer_pubkey
+        - denomination
+        - reserve_state_digest
+        - reserve_r5
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Issuer (reserve owner) public key, hex-encoded 33 bytes
+        denomination:
+          type: string
+          description: 'Canonical denomination id: "erg" or "token:<64-hex>"'
+        reserve_state_digest:
+          type: string
+          description: 33-byte AVL+ root digest (hex, 66 chars)
+        reserve_r5:
+          type: string
+          description: Serialized SAvlTree register value (hex) for the reserve box's R5
+
+    ApiResponseReserveStateDigest:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ReserveStateDigestResponse'
 
     ApiResponseEvents:
       allOf:

@@ -815,6 +815,49 @@ impl ServerState {
         Ok(reserve_info)
     }
 
+    /// Whether the box's R5 matches the pending rotation digest `/reserves/create`
+    /// recorded for this (owner, denomination) — see [`Self::root_setup_violation`].
+    fn pending_root_matches(&self, scan_box: &ScanBox, reserve_info: &ExtendedReserveInfo) -> bool {
+        let Some(r5) = scan_box.additional_registers.get("R5") else {
+            return false;
+        };
+        let denomination = reserve_info
+            .denomination()
+            .map(|d| d.denomination_id())
+            .unwrap_or_else(|| "erg".to_string());
+        match self
+            .reserve_storage
+            .get_pending_root_r5(&reserve_info.owner_pubkey, &denomination)
+        {
+            Ok(Some(expected)) => r5.eq_ignore_ascii_case(&expected),
+            Ok(None) => false,
+            Err(e) => {
+                warn!(
+                    "Failed to read pending reserve root for {}: {:?}",
+                    reserve_info.owner_pubkey, e
+                );
+                false
+            }
+        }
+    }
+
+    /// Consume the pending rotation record for the pair, if one was recorded.
+    fn consume_pending_root(&self, reserve_info: &ExtendedReserveInfo) {
+        let denomination = reserve_info
+            .denomination()
+            .map(|d| d.denomination_id())
+            .unwrap_or_else(|| "erg".to_string());
+        if let Err(e) = self
+            .reserve_storage
+            .remove_pending_root_r5(&reserve_info.owner_pubkey, &denomination)
+        {
+            warn!(
+                "Failed to consume pending reserve root for {}: {:?}",
+                reserve_info.owner_pubkey, e
+            );
+        }
+    }
+
     /// C4 setup checks for a root candidate (the first box of an
     /// (owner, denomination) lineage). Returns the violation reason, or `None`
     /// when the box is a cleanly created reserve.
@@ -824,7 +867,14 @@ impl ServerState {
     /// creditors from ever redeeming, so neither must be counted as collateral.
     /// These checks must NOT run on successor boxes: a redemption legitimately
     /// leaves R5 non-empty and refund initiation legitimately sets R7.
+    ///
+    /// N9 (reserve rotation): a root MAY carry a non-empty R5 when it equals the
+    /// digest recorded by `/reserves/create` for this (owner, denomination),
+    /// which carries the redeemed-amount history forward from the refunded
+    /// reserve. Without that, a creditor could replay old redemption vars
+    /// against a rotated reserve's empty tree and be paid twice.
     fn root_setup_violation(
+        &self,
         scan_box: &ScanBox,
         reserve_info: &ExtendedReserveInfo,
     ) -> Option<String> {
@@ -837,6 +887,7 @@ impl ServerState {
         let empty_tree_register = empty_reserve_tree_register();
         match scan_box.additional_registers.get("R5") {
             Some(r5) if r5.eq_ignore_ascii_case(&empty_tree_register) => None,
+            _ if self.pending_root_matches(scan_box, reserve_info) => None,
             other => Some(format!(
                 "Reserve box {} created with a non-empty AVL tree (R5 = {:?})",
                 reserve_info.box_id, other
@@ -1005,7 +1056,7 @@ impl ServerState {
             None => {
                 // Root candidate: cheap C4 setup checks first, then the P2PK
                 // ownership proof (requires a node call).
-                if let Some(violation) = Self::root_setup_violation(scan_box, reserve_info) {
+                if let Some(violation) = self.root_setup_violation(scan_box, reserve_info) {
                     return ReserveAdmission::Quarantined { reason: violation };
                 }
                 let proof = match self
@@ -1022,7 +1073,12 @@ impl ServerState {
                     }
                 };
                 match decide_admission(false, proof, true) {
-                    AdmissionVerdict::Admit => ReserveAdmission::Admitted,
+                    AdmissionVerdict::Admit => {
+                        // Consume the pending rotation record so a second root
+                        // carrying the same R5 cannot be admitted later (N9).
+                        self.consume_pending_root(reserve_info);
+                        ReserveAdmission::Admitted
+                    }
                     AdmissionVerdict::Quarantine => ReserveAdmission::Quarantined {
                         reason: format!(
                             "reserve root {} for owner {} was created by a transaction spending no P2PK input of the R4 key; \
@@ -2388,6 +2444,83 @@ mod tests {
                 .to_string(),
         );
         let state = c4_test_state(NodeConfig::default());
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("structurally valid box parses");
+        match state.admit_reserve_box(&scan_box, &info, "test_p2s").await {
+            ReserveAdmission::Quarantined { reason } => {
+                assert!(
+                    reason.contains("non-empty AVL tree"),
+                    "unexpected reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admission_admits_rotated_root_with_pending_r5() {
+        // N9 (reserve rotation): /reserves/create sets R5 to the tracker's
+        // reserve-tree digest for the pair and records it; the scanner admits a
+        // root carrying that non-empty R5 and consumes the record.
+        let rotated_r5 = format!("64{}032000", "11".repeat(33));
+        let mut scan_box = c4_test_box();
+        scan_box
+            .additional_registers
+            .insert("R5".to_string(), rotated_r5.clone());
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let owner_tree = p2pk_ergo_tree(owner);
+        let txs = HashMap::from([(
+            scan_box.transaction_id.clone(),
+            tx_json(
+                &scan_box.transaction_id,
+                &[(
+                    &"33".repeat(32),
+                    "some_address",
+                    &"44".repeat(32),
+                    &owner_tree,
+                )],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+        state
+            .reserve_storage
+            .store_pending_root_r5(owner, "erg", &rotated_r5)
+            .unwrap();
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        assert_eq!(
+            state.admit_reserve_box(&scan_box, &info, "test_p2s").await,
+            ReserveAdmission::Admitted
+        );
+        assert_eq!(
+            state
+                .reserve_storage
+                .get_pending_root_r5(owner, "erg")
+                .unwrap(),
+            None,
+            "the pending record must be consumed once the matching root is admitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admission_quarantines_root_with_mismatched_pending_r5() {
+        // A recorded pending root authorizes only that exact R5: a root box
+        // carrying a different non-empty tree is still quarantined (N9).
+        let recorded_r5 = format!("64{}032000", "11".repeat(33));
+        let other_r5 = format!("64{}032000", "22".repeat(33));
+        let mut scan_box = c4_test_box();
+        scan_box
+            .additional_registers
+            .insert("R5".to_string(), other_r5);
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let state = c4_test_state(NodeConfig::default());
+        state
+            .reserve_storage
+            .store_pending_root_r5(owner, "erg", &recorded_r5)
+            .unwrap();
         let info = state
             .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
             .expect("structurally valid box parses");

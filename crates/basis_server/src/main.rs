@@ -990,6 +990,7 @@ async fn main() {
         .route("/reserves/{box_id}", get(get_reserve_by_box_id))
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/reserves/quarantined", get(get_quarantined_reserves))
+        .route("/reserves/state-digest", get(get_reserve_state_digest))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
         .route(

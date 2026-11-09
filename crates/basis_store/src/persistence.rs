@@ -75,6 +75,7 @@ pub struct QuarantinedReserve {
 pub struct ReserveStorage {
     partition: fjall::Partition,
     quarantine_partition: fjall::Partition,
+    pending_root_partition: fjall::Partition,
 }
 
 /// Database storage for tracker information
@@ -1297,9 +1298,16 @@ impl ReserveStorage {
                 NoteError::StorageError(format!("Failed to open quarantine partition: {}", e))
             })?;
 
+        let pending_root_partition = keyspace
+            .open_partition("pending_reserve_roots", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open pending-root partition: {}", e))
+            })?;
+
         Ok(Self {
             partition,
             quarantine_partition,
+            pending_root_partition,
         })
     }
 
@@ -1363,6 +1371,62 @@ impl ReserveStorage {
         Ok(())
     }
 
+    /// Record the expected R5 register value for the next reserve root of an
+    /// (owner, denomination) pair (issue #15 review N9).
+    ///
+    /// `/reserves/create` sets R5 to the tracker's reserve-tree digest for the pair,
+    /// carrying redeemed amounts forward across a reserve rotation; the scanner admits
+    /// a root box with a non-empty R5 only when it matches a digest recorded here.
+    pub fn store_pending_root_r5(
+        &self,
+        owner_pubkey: &str,
+        denomination: &str,
+        r5_register_hex: &str,
+    ) -> Result<(), NoteError> {
+        let key = pending_root_key(owner_pubkey, denomination);
+        self.pending_root_partition
+            .insert(key, r5_register_hex.as_bytes())
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store pending reserve root: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// The expected R5 register value for the next reserve root of the pair, if recorded.
+    pub fn get_pending_root_r5(
+        &self,
+        owner_pubkey: &str,
+        denomination: &str,
+    ) -> Result<Option<String>, NoteError> {
+        match self
+            .pending_root_partition
+            .get(pending_root_key(owner_pubkey, denomination))
+        {
+            Ok(Some(bytes)) => String::from_utf8(bytes.to_vec()).map(Some).map_err(|e| {
+                NoteError::StorageError(format!("Invalid pending reserve root value: {}", e))
+            }),
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to read pending reserve root: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Consume the pending-root record once the matching reserve root was admitted.
+    pub fn remove_pending_root_r5(
+        &self,
+        owner_pubkey: &str,
+        denomination: &str,
+    ) -> Result<(), NoteError> {
+        self.pending_root_partition
+            .remove(pending_root_key(owner_pubkey, denomination))
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to remove pending reserve root: {}", e))
+            })?;
+        Ok(())
+    }
+
     /// Persist a quarantined reserve box (issue #19).
     pub fn store_quarantined(&self, record: &QuarantinedReserve) -> Result<(), NoteError> {
         let value = serde_json::to_vec(record).map_err(|e| {
@@ -1417,6 +1481,16 @@ impl ReserveStorage {
 
         Ok(records)
     }
+}
+
+/// Storage key for a pending reserve root: lowercase owner key + denomination id.
+fn pending_root_key(owner_pubkey: &str, denomination: &str) -> Vec<u8> {
+    format!(
+        "{}:{}",
+        owner_pubkey.to_ascii_lowercase(),
+        denomination.to_lowercase()
+    )
+    .into_bytes()
 }
 
 impl TrackerStorage {

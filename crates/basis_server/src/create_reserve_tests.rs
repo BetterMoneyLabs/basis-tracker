@@ -31,7 +31,19 @@ mod create_reserve_tests {
 
     // Helper function to create a test AppState that doesn't require file system access
     fn create_test_app_state() -> AppState {
-        let (tx, _rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
+        // /reserves/create asks the tracker thread for the pair's reserve-tree
+        // digest (N9); answer with the empty-tree digest and drain anything else.
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let TrackerCommand::GetReserveStateDigest { response_tx, .. } = cmd {
+                    let empty_digest =
+                        hex::decode("4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900")
+                            .unwrap();
+                    let _ = response_tx.send(empty_digest);
+                }
+            }
+        });
         let event_store = std::sync::Arc::new(crate::store::EventStore::new_in_memory());
 
         // Create a minimal configuration

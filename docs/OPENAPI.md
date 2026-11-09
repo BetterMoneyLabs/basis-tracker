@@ -124,9 +124,16 @@ All endpoints return a standardized response envelope:
 - `GET /reserves/{box_id}` - Get a specific reserve by box ID
 - `GET /reserves/issuer/{pubkey}` - Get reserves for an issuer
 - `GET /reserves/quarantined` - List reserve boxes rejected by admission control (issue #19): duplicates that do not descend from the tracked reserve for their (owner, denomination), roots that failed setup validation, or roots whose creating transaction spends no P2PK input of the R4 owner key. Quarantined boxes are never tracked.
+- `GET /reserves/state-digest?issuer_pubkey=<hex>&denomination=<erg|token:hex>` - Get the tracker's reserve AVL tree state for an (issuer, denomination) pair: the 33-byte root digest (`reserve_state_digest`) and the serialized SAvlTree value a reserve (re)creation must carry in R5 (`reserve_r5`). Empty tree for a fresh pair; carried-forward redeemed-amount history after a reserve rotation (issue #15 review N9).
 - `POST /reserves/create` - Build a reserve creation payment request
 
-`POST /reserves/create` only *builds* the payment request. To create the
+`POST /reserves/create` only *builds* the payment request. Its R5 register is
+set to the tracker's reserve-tree digest for the (owner, denomination) pair —
+the empty tree for a fresh pair, or the carried-forward redemption history
+after a rotation — and the scanner admits a root box with a non-empty R5 only
+when it matches the digest recorded by this endpoint (issue #15 review N9).
+Clients can fetch the expected value beforehand with
+`GET /reserves/state-digest`. To create the
 reserve on-chain, submit the returned `requests` array to your own Ergo
 node's wallet directly:
 

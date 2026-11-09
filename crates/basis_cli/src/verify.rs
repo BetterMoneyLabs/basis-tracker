@@ -24,8 +24,10 @@ use basis_store::DenomKey;
 
 use crate::api::{CreateReserveRequest, ReserveCreationResponse};
 
-/// R5 of a new reserve: the empty AVL tree (digest for `PlasmaParameters(32, None)`), flags 0x03
-/// (insert + update), key length 32, variable value length.
+/// R5 of a fresh reserve: the empty AVL tree (digest for `PlasmaParameters(32, None)`), flags
+/// 0x03 (insert + update), key length 32, variable value length. Test-only: production callers
+/// pass the tracker's reserve-tree state digest (issue #15 review N9).
+#[cfg(test)]
 const EMPTY_RESERVE_TREE_R5: &str =
     "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000";
 
@@ -43,7 +45,10 @@ const MAX_RESERVE_DEPLOYMENT_FEE_NANO: u64 = 10_000_000;
 /// put its own key in R4 of the genuine contract, use another script, or add requests or assets.
 /// The payload must be the single reserve box `request` describes: the reserve contract compiled
 /// into this client for its denomination, the requested ERG value, the reserve NFT (amount 1)
-/// followed by the collateral token for a token reserve, R4 = owner key, R5 = empty reserve tree,
+/// followed by the collateral token for a token reserve, R4 = owner key, R5 = `expected_r5` (the
+/// tracker's reserve-tree state digest for the (owner, denomination) pair — the empty tree for a
+/// fresh pair, the carried-forward redemption history after a rotation; fetch it with
+/// `GET /reserves/state-digest`, issue #15 review N9),
 /// R6 = a 32-byte tracker NFT id (`expected_tracker_nft_id` when the caller knows it), R7 absent
 /// or Long 0, the change address derived from the owner key, and a fee no higher than
 /// [`MAX_RESERVE_DEPLOYMENT_FEE_NANO`]. The last two checks matter because newer submission paths
@@ -54,6 +59,7 @@ pub fn verify_reserve_payload(
     request: &CreateReserveRequest,
     payload: &ReserveCreationResponse,
     expected_tracker_nft_id: Option<&str>,
+    expected_r5: &str,
 ) -> Result<()> {
     let [reserve] = payload.requests.as_slice() else {
         return Err(anyhow!(
@@ -133,8 +139,10 @@ pub fn verify_reserve_payload(
     if register("R4")? != Constant::from(parse_point(&owner_pk)?) {
         return Err(anyhow!("R4 is not the owner key {}", request.owner_pubkey));
     }
-    if register("R5")? != parse_constant(EMPTY_RESERVE_TREE_R5)? {
-        return Err(anyhow!("R5 is not the empty reserve tree"));
+    if register("R5")? != parse_constant(expected_r5)? {
+        return Err(anyhow!(
+            "R5 does not match the tracker's reserve state digest for this (owner, denomination)"
+        ));
     }
     let tracker_nft_id = register("R6")?
         .try_extract_into::<Vec<u8>>()
@@ -487,7 +495,7 @@ mod tests {
     }
 
     fn reserve_err(request: &CreateReserveRequest, payload: &ReserveCreationResponse) -> String {
-        verify_reserve_payload(request, payload, None)
+        verify_reserve_payload(request, payload, None, EMPTY_RESERVE_TREE_R5)
             .expect_err("payload must be rejected")
             .to_string()
     }
@@ -497,14 +505,15 @@ mod tests {
         for token in [false, true] {
             let request = reserve_request(token);
             let payload = honest_payload(&request);
-            verify_reserve_payload(&request, &payload, None).unwrap();
-            verify_reserve_payload(&request, &payload, Some(TRACKER_NFT)).unwrap();
+            verify_reserve_payload(&request, &payload, None, EMPTY_RESERVE_TREE_R5).unwrap();
+            verify_reserve_payload(&request, &payload, Some(TRACKER_NFT), EMPTY_RESERVE_TREE_R5)
+                .unwrap();
         }
         // R7 may also be left out entirely.
         let request = reserve_request(false);
         let mut payload = honest_payload(&request);
         payload.requests[0].registers.remove("R7");
-        verify_reserve_payload(&request, &payload, None).unwrap();
+        verify_reserve_payload(&request, &payload, None, EMPTY_RESERVE_TREE_R5).unwrap();
     }
 
     #[test]
@@ -549,7 +558,7 @@ mod tests {
         // The tracker default is well under the cap.
         let mut payload = honest_payload(&request);
         payload.fee = MAX_RESERVE_DEPLOYMENT_FEE_NANO;
-        verify_reserve_payload(&request, &payload, None).unwrap();
+        verify_reserve_payload(&request, &payload, None, EMPTY_RESERVE_TREE_R5).unwrap();
 
         // A dishonest tracker cannot make the owner burn their wallet as a fee.
         let mut payload = honest_payload(&request);
@@ -623,9 +632,14 @@ mod tests {
         assert!(reserve_err(&request, &with("R5", &r5)).contains("R5"));
         // Tracker NFT id of the wrong length, or not the one the caller expects.
         assert!(reserve_err(&request, &with("R6", "0e0411223344")).contains("R6"));
-        let err = verify_reserve_payload(&request, &honest, Some(&"cc".repeat(32)))
-            .unwrap_err()
-            .to_string();
+        let err = verify_reserve_payload(
+            &request,
+            &honest,
+            Some(&"cc".repeat(32)),
+            EMPTY_RESERVE_TREE_R5,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("R6"));
         // A pending refund on a brand-new reserve.
         assert!(reserve_err(&request, &with("R7", "050a")).contains("R7"));

@@ -143,8 +143,19 @@ pub async fn create_reserve(
     // Call the API to create the reserve payload
     let payload = client.create_reserve(request.clone()).await?;
     // The tracker only builds the payload and whoever submits it pays what it says, so it must be
-    // the reserve requested above before it is shown, returned or submitted.
-    crate::verify::verify_reserve_payload(&request, &payload, None)?;
+    // the reserve requested above before it is shown, returned or submitted. R5 must carry the
+    // tracker's reserve-tree state digest for this (owner, denomination) pair — the empty tree
+    // for a fresh pair, the carried-forward redemption history after a rotation (N9).
+    let denomination = if token_id.is_empty() {
+        "erg".to_string()
+    } else {
+        format!("token:{}", token_id)
+    };
+    let expected_r5 = client
+        .get_reserve_state_digest(&owner_pubkey, &denomination)
+        .await?
+        .reserve_r5;
+    crate::verify::verify_reserve_payload(&request, &payload, None, &expected_r5)?;
 
     let tx_id = if submit {
         let cfg = account_manager.config_manager.get_config();
@@ -159,6 +170,7 @@ pub async fn create_reserve(
             cfg.node_api_key.as_deref(),
             &request,
             &payload,
+            &expected_r5,
         )?)
     } else {
         None
