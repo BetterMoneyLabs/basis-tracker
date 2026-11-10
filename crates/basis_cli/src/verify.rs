@@ -31,13 +31,11 @@ use crate::api::{CreateReserveRequest, ReserveCreationResponse};
 const EMPTY_RESERVE_TREE_R5: &str =
     "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000";
 
-/// Highest reserve-creation fee this client will pay (`payload.fee`).
-///
-/// The tracker's default is 0.001 ERG, and a reserve deployment is a small transaction, so
-/// 0.01 ERG leaves an order of magnitude of headroom. Without a bound, a dishonest tracker can
+/// Highest transaction fee a reserve-creation payload may ask the owner's wallet to pay
+/// (0.1 ERG, 100 times the tracker's default fee). Without a bound, a dishonest tracker can
 /// set `fee` to the owner's whole wallet balance: the pinned deployment path sends this value
 /// to the node and selects enough owner inputs to cover it.
-const MAX_RESERVE_DEPLOYMENT_FEE_NANO: u64 = 10_000_000;
+pub const MAX_RESERVE_CREATION_FEE: u64 = 100_000_000;
 
 /// Check a `POST /reserves/create` payload before the owner's wallet is asked to fund it.
 ///
@@ -51,10 +49,11 @@ const MAX_RESERVE_DEPLOYMENT_FEE_NANO: u64 = 10_000_000;
 /// `GET /reserves/state-digest`, issue #15 review N9),
 /// R6 = a 32-byte tracker NFT id (`expected_tracker_nft_id` when the caller knows it), R7 absent
 /// or Long 0, the change address derived from the owner key, and a fee no higher than
-/// [`MAX_RESERVE_DEPLOYMENT_FEE_NANO`]. The last two checks matter because newer submission paths
-/// send the owner's change (and the pre-deployment funding UTXO) to `payload.change_address` and
-/// pay `payload.fee`; a tracker that names its own address or an excessive fee there would take
-/// the owner's funds.
+/// [`MAX_RESERVE_CREATION_FEE`]. The last two checks matter because
+/// [`crate::api::submit_reserve_to_node`] sends the owner's change (and the pre-deployment
+/// funding UTXO of a pinned-input deployment, ERG remainder plus leftover tokens) to
+/// `payload.change_address` and pays `payload.fee`; a tracker that names its own address or an
+/// excessive fee there would take the owner's funds.
 pub fn verify_reserve_payload(
     request: &CreateReserveRequest,
     payload: &ReserveCreationResponse,
@@ -85,13 +84,6 @@ pub fn verify_reserve_payload(
             "reserve value is {} nanoERG, requested {}",
             reserve.value,
             request.erg_amount
-        ));
-    }
-    if payload.fee > MAX_RESERVE_DEPLOYMENT_FEE_NANO {
-        return Err(anyhow!(
-            "reserve deployment fee is {} nanoERG, above the {} nanoERG this client pays",
-            payload.fee,
-            MAX_RESERVE_DEPLOYMENT_FEE_NANO
         ));
     }
 
@@ -165,6 +157,14 @@ pub fn verify_reserve_payload(
     if registers.contains_key("R7") && register("R7")? != Constant::from(0i64) {
         return Err(anyhow!(
             "R7 must be absent or 0 for a new reserve (no pending refund)"
+        ));
+    }
+
+    if payload.fee > MAX_RESERVE_CREATION_FEE {
+        return Err(anyhow!(
+            "fee is {} nanoERG, more than the {} nanoERG this client pays for a reserve creation",
+            payload.fee,
+            MAX_RESERVE_CREATION_FEE
         ));
     }
     Ok(())
@@ -557,14 +557,14 @@ mod tests {
 
         // The tracker default is well under the cap.
         let mut payload = honest_payload(&request);
-        payload.fee = MAX_RESERVE_DEPLOYMENT_FEE_NANO;
+        payload.fee = MAX_RESERVE_CREATION_FEE;
         verify_reserve_payload(&request, &payload, None, EMPTY_RESERVE_TREE_R5).unwrap();
 
         // A dishonest tracker cannot make the owner burn their wallet as a fee.
         let mut payload = honest_payload(&request);
-        payload.fee = MAX_RESERVE_DEPLOYMENT_FEE_NANO + 1;
+        payload.fee = MAX_RESERVE_CREATION_FEE + 1;
         let err = reserve_err(&request, &payload);
-        assert!(err.contains("fee") && err.contains("above"), "{}", err);
+        assert!(err.contains("fee") && err.contains("more than"), "{}", err);
     }
 
     #[test]

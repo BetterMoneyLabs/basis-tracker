@@ -481,7 +481,9 @@ fn send_pinned_deployment(
 /// Submit a reserve creation payload to the OWNER's Ergo node for broadcast.
 ///
 /// The node signs it with the owner's wallet key, so the owner's wallet must hold the
-/// reserve NFT (`nft_id`) and enough ERG for the reserve value and fee. Returns the
+/// reserve NFT (`nft_id`) and enough ERG for the reserve value and fee. The node pays
+/// whatever the payload says, so it is first checked to be exactly the reserve `request`
+/// asked the tracker for ([`crate::verify::verify_reserve_payload`]). Returns the
 /// transaction id.
 ///
 /// The node pays whatever the payload says, so the payload is first checked to be
