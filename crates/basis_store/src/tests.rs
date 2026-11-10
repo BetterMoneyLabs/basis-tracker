@@ -5120,3 +5120,398 @@ mod pure_credit_startup_tests {
         assert_eq!(stored_records(&m, &[from_key, to_key, CORRUPT_CONFIRMATION_KEY]), before);
     }
 }
+
+/// Tracker v3.2 regression tests for audit VS-1 and readiness R-17 (design §3 (a)-(d)). A prior acknowledgment is
+/// PA(I,R,X,p,T): the edge's stored total X AND stored timestamp p, at the operation's timestamp T, in a 105-byte
+/// message (tag `basis/prior-ack/1`) that no note, set-off or statement signs. An edge's timestamp strictly increases
+/// with every write, so each state (X, p) occurs once and an acknowledgment applies at most once, whatever totals
+/// the edge takes later. Every scenario here has honest signers only.
+///
+/// The helpers between the VERSION markers are the only code that differs when this module is run against tracker
+/// v3.1 (24675ec), whose acknowledgments are the 80-byte note messages M(I,R,X,T) of the totals alone and whose
+/// transfer takes no prior timestamps: there the stale attempts of (a), (b), (c2) and (d) apply.
+#[cfg(test)]
+mod prior_ack_regression_tests {
+    use crate::{DenomKey, IouNote, NoteError, PriorAck, SetOffEdge, TrackerStateManager, TransferSignatures, TransferTotals};
+    use secp256k1::{Secp256k1, SecretKey};
+
+    const NFT: [u8; 32] = [0x42; 32];
+    const A: [u8; 32] = [1u8; 32];
+    const B: [u8; 32] = [2u8; 32];
+    const C: [u8; 32] = [3u8; 32];
+    const D: [u8; 32] = [4u8; 32];
+    const E: [u8; 32] = [5u8; 32];
+    const Z: [u8; 32] = [6u8; 32];
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// A whole second ten minutes before this module's first test started: every timestamp is a small offset from
+    /// it, in the past and well inside the one-hour maximum age.
+    fn base() -> u64 {
+        static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *BASE.get_or_init(|| (now_ms() - 600_000) / 1000 * 1000)
+    }
+
+    /// `offset` ms after [`base`]: offsets ending in 999 are transfers, 998 set-offs, 997 bound notes, 000-994
+    /// ordinary notes.
+    fn at(offset: u64) -> u64 {
+        base() + offset
+    }
+
+    fn pk(secret: &[u8; 32]) -> [u8; 33] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(secret).expect("valid secret key");
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+    }
+
+    fn sign_bytes(signer: &[u8; 32], message: &[u8]) -> [u8; 65] {
+        crate::schnorr::schnorr_sign(message, signer, &pk(signer)).unwrap()
+    }
+
+    /// `signer`'s signature over the 80-byte note message M(issuer, recipient, total, ts).
+    fn sign(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> [u8; 65] {
+        sign_bytes(signer, &crate::schnorr::signing_message(&pk(issuer), &pk(recipient), &DenomKey::Erg, total, ts, &NFT))
+    }
+
+    fn note(issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> IouNote {
+        IouNote::create_and_sign(pk(recipient), total, ts, issuer, &NFT, DenomKey::Erg).unwrap()
+    }
+
+    /// An ordinary note.
+    fn add(m: &mut TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) {
+        m.add_note(&pk(issuer), &note(issuer, recipient, total, ts), None).unwrap();
+    }
+
+    /// The stored state (total, timestamp) of issuer -> recipient, (0, 0) when the edge is absent.
+    fn state(m: &TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32]) -> (u64, u64) {
+        m.get_note_optional(&pk(issuer), &pk(recipient), &DenomKey::Erg)
+            .unwrap()
+            .map(|n| (n.amount_collected, n.timestamp))
+            .unwrap_or((0, 0))
+    }
+
+    // ---- VERSION: tracker v3.2 ------------------------------------------------------------------------------------
+
+    /// The message a prior acknowledgment of issuer -> recipient in the state `prior` (total, timestamp) for the
+    /// operation at `ts` is a signature over: PA(issuer, recipient, total, timestamp, ts).
+    fn ack_message(issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), ts: u64) -> Vec<u8> {
+        crate::schnorr::prior_ack_message(&pk(issuer), &pk(recipient), &DenomKey::Erg, prior.0, prior.1, ts, &NFT)
+    }
+
+    /// A debt transfer without the diagnostic fields (the signatures bind).
+    #[allow(clippy::too_many_arguments)]
+    fn transfer(
+        m: &mut TrackerStateManager, issuer: &[u8; 32], from: &[u8; 32], to: &[u8; 32], amount: u64, ts: u64,
+        s: &TransferSignatures,
+    ) -> Result<TransferTotals, NoteError> {
+        m.transfer_debt(&pk(issuer), &pk(from), &pk(to), &DenomKey::Erg, amount, ts, s, None, None, None, None)
+    }
+
+    /// A bound note (residue 997) with `prior_signature` and no diagnostic fields.
+    fn bound_note(
+        m: &mut TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64, prior_signature: [u8; 65],
+    ) -> Result<(), NoteError> {
+        let prior = PriorAck { signature: prior_signature, prior_total: None, prior_timestamp: None };
+        m.add_note(&pk(issuer), &note(issuer, recipient, total, ts), Some(prior))
+    }
+
+    // ---- end VERSION ----------------------------------------------------------------------------------------------
+
+    /// `signer`'s prior acknowledgment of issuer -> recipient in the state `prior` for the operation at `ts`.
+    fn ack(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), ts: u64) -> [u8; 65] {
+        sign_bytes(signer, &ack_message(issuer, recipient, prior, ts))
+    }
+
+    /// The seven signatures of a transfer of `amount` of `issuer`'s debt from issuer -> from to issuer -> to at
+    /// `ts`, each creditor acknowledging its edge in the given state ((0, 0) for an absent edge).
+    #[allow(clippy::too_many_arguments)]
+    fn sigs(
+        issuer: &[u8; 32], from: &[u8; 32], to: &[u8; 32], from_state: (u64, u64), to_state: (u64, u64), amount: u64,
+        ts: u64,
+    ) -> TransferSignatures {
+        let (from_total, to_total) = (from_state.0 - amount, to_state.0 + amount);
+        TransferSignatures {
+            issuer_from: sign(issuer, issuer, from, from_total, ts),
+            issuer_to: sign(issuer, issuer, to, to_total, ts),
+            from_recipient_prior: ack(from, issuer, from, from_state, ts),
+            from_recipient: sign(from, issuer, from, from_total, ts),
+            from_recipient_to: sign(from, issuer, to, to_total, ts),
+            to_recipient_prior: ack(to, issuer, to, to_state, ts),
+            to_recipient: sign(to, issuer, to, to_total, ts),
+        }
+    }
+
+    /// A set-off edge issuer -> recipient lowered from `before` by `decrease` at `ts`, signed by both parties.
+    fn edge(issuer: &[u8; 32], recipient: &[u8; 32], before: u64, decrease: u64, ts: u64) -> SetOffEdge {
+        SetOffEdge {
+            issuer_pubkey: pk(issuer),
+            recipient_pubkey: pk(recipient),
+            decrease,
+            timestamp: ts,
+            issuer_signature: sign(issuer, issuer, recipient, before - decrease, ts),
+            recipient_signature: sign(recipient, issuer, recipient, before - decrease, ts),
+        }
+    }
+
+    #[test]
+    fn a_vs1_a_retry_on_the_same_prior_cannot_apply_after_both_edges_return_to_its_totals() {
+        // Spec 18.6 (audit VS-1). A owes B 100 and C 10. B pays C 30 of A's debt: attempt 1 at T1 and, as a retry of
+        // the same payment built on the same state of both edges, attempt 2 at T2 > T1. Attempt 1 applies. Between
+        // T1 and T2, A raises A->B back to 100 (a bound note: A owes B 30 more, for something else) and C moves 30
+        // out of A->C (C pays D 30 of A's debt), so both edges are back at the totals both attempts acknowledged;
+        // none of this needs B's signature. Attempt 2 must not apply: B would pay C twice.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        let (pb, pc) = (at(1000), at(1001));
+        add(&mut m, &A, &B, 100, pb);
+        add(&mut m, &A, &C, 10, pc);
+        let (t1, t2) = (at(2999), at(5999));
+        let attempt1 = sigs(&A, &B, &C, (100, pb), (10, pc), 30, t1);
+        let attempt2 = sigs(&A, &B, &C, (100, pb), (10, pc), 30, t2);
+        transfer(&mut m, &A, &B, &C, 30, t1, &attempt1).unwrap();
+        assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((70, t1), (40, t1)));
+        // A->B is bound-only after the transfer: A raises it back to 100 with a bound note acknowledging (70, T1).
+        let tb = at(3997);
+        bound_note(&mut m, &A, &B, 100, tb, ack(&A, &A, &B, (70, t1), tb)).unwrap();
+        // C pays D 30 of A's debt: A->C is back at 10.
+        let tc = at(4999);
+        transfer(&mut m, &A, &C, &D, 30, tc, &sigs(&A, &C, &D, (40, t1), (0, 0), 30, tc)).unwrap();
+        assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((100, tb), (10, tc)), "both totals are back");
+        let digest = m.get_state().avl_root_digest;
+        // Attempt 2 is refused and changes nothing.
+        let r = transfer(&mut m, &A, &B, &C, 30, t2, &attempt2);
+        assert!(matches!(r, Err(NoteError::InvalidSignature)), "attempt 2 must not apply (B would pay C twice): {:?}", r);
+        assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((100, tb), (10, tc)));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // Each acknowledgment alone refuses it: with either one re-signed over the current state, still refused.
+        let only_from = TransferSignatures { from_recipient_prior: ack(&B, &A, &B, (100, tb), t2), ..attempt2 };
+        assert!(matches!(transfer(&mut m, &A, &B, &C, 30, t2, &only_from), Err(NoteError::InvalidSignature)));
+        let only_to = TransferSignatures { to_recipient_prior: ack(&C, &A, &C, (10, tc), t2), ..attempt2 };
+        assert!(matches!(transfer(&mut m, &A, &B, &C, 30, t2, &only_to), Err(NoteError::InvalidSignature)));
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // Control: only the acknowledgments refused it. A new attempt acknowledging the current states (B and C
+        // sign again, knowing them) applies at the same T2.
+        transfer(&mut m, &A, &B, &C, 30, t2, &sigs(&A, &B, &C, (100, tb), (10, tc), 30, t2)).unwrap();
+        assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((70, t2), (40, t2)));
+    }
+
+    #[test]
+    fn b_two_bound_notes_on_the_same_prior_exclude_each_other_after_the_edge_returns_to_it() {
+        // Readiness R-17 (the issuer-side twin). A owes B 100. A pays B 30 more by a bound note at ts1 and, as a
+        // retry of the same payment, by a second bound note at ts2 > ts1, both acknowledging A->B as stored then.
+        // The first applies (130). A novation then lowers A->B back to 100 between ts1 and ts2: a transfer (B pays E
+        // 30 of A's debt) or a set-off (B owes A 30, cleared against A->B). The second bound note must not apply:
+        // A would pay B twice.
+        for lowered_by in ["a transfer", "a set-off"] {
+            let mut m = TrackerStateManager::new_with_temp_storage();
+            let p = at(1000);
+            add(&mut m, &A, &B, 100, p);
+            add(&mut m, &B, &A, 30, at(1001));
+            let (ts1, ts2) = (at(2997), at(4997));
+            let (first, retry) = (ack(&A, &A, &B, (100, p), ts1), ack(&A, &A, &B, (100, p), ts2));
+            bound_note(&mut m, &A, &B, 130, ts1, first).unwrap();
+            assert_eq!(state(&m, &A, &B), (130, ts1));
+            let tx = if lowered_by == "a transfer" {
+                let tx = at(3999);
+                transfer(&mut m, &A, &B, &E, 30, tx, &sigs(&A, &B, &E, (130, ts1), (0, 0), 30, tx)).unwrap();
+                tx
+            } else {
+                let tx = at(3998);
+                m.set_off(&DenomKey::Erg, &[edge(&A, &B, 130, 30, tx), edge(&B, &A, 30, 30, tx)]).unwrap();
+                tx
+            };
+            assert_eq!(state(&m, &A, &B), (100, tx), "{}: A->B is back at the acknowledged total", lowered_by);
+            let digest = m.get_state().avl_root_digest;
+            let r = bound_note(&mut m, &A, &B, 130, ts2, retry);
+            assert!(
+                matches!(r, Err(NoteError::InvalidPriorSignature)),
+                "{}: the second bound note must not apply (A would pay B twice): {:?}",
+                lowered_by,
+                r
+            );
+            assert_eq!(state(&m, &A, &B), (100, tx));
+            assert_eq!(m.get_state().avl_root_digest, digest);
+            // Control: a bound note acknowledging the current state (100, tx) applies at ts2.
+            bound_note(&mut m, &A, &B, 130, ts2, ack(&A, &A, &B, (100, tx), ts2)).unwrap();
+            assert_eq!(state(&m, &A, &B), (130, ts2));
+        }
+    }
+
+    #[test]
+    fn c1_an_acknowledgment_lifted_from_another_role_is_refused() {
+        // Design §1: acknowledging the prior note's own message M(A,B,X,p) would be the obvious fix, and it is wrong:
+        // B signs exactly that message in other roles. A->B reaches its state by a transfer into it (Z pays B 40 of
+        // A's debt at T0: B signs M(A,B,40,T0) as the new creditor) or by a set-off (B signs M(A,B,X,p) as the
+        // creditor of the lowered edge). Neither signature, nor B's acknowledgment of the same state for another
+        // attempt (another T), is B's prior acknowledgment of a transfer out of A->B at T.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &A, &Z, 50, at(1000));
+        add(&mut m, &A, &C, 10, at(1001));
+        let t0 = at(1999);
+        let into = sigs(&A, &Z, &B, (50, at(1000)), (0, 0), 40, t0);
+        transfer(&mut m, &A, &Z, &B, 40, t0, &into).unwrap();
+        assert_eq!(state(&m, &A, &B), (40, t0));
+        let t = at(2999);
+        let honest = sigs(&A, &B, &C, (40, t0), (10, at(1001)), 15, t);
+        let digest = m.get_state().avl_root_digest;
+        for (what, lifted) in [
+            ("B's to_recipient signature of the transfer into A->B, M(A,B,40,T0)", into.to_recipient),
+            ("B's signature over M(A,B,X,p) = M(A,B,40,T0)", sign(&B, &A, &B, 40, t0)),
+            ("B's acknowledgment of the same state for an attempt at another T", ack(&B, &A, &B, (40, t0), t - 1000)),
+            ("B's acknowledgment of the to-edge's state", ack(&B, &A, &C, (10, at(1001)), t)),
+            ("A's acknowledgment of the same state (an issuer's, as for a bound note)", ack(&A, &A, &B, (40, t0), t)),
+        ] {
+            let s = TransferSignatures { from_recipient_prior: lifted, ..honest };
+            let r = transfer(&mut m, &A, &B, &C, 15, t, &s);
+            assert!(matches!(r, Err(NoteError::InvalidSignature)), "{}: {:?}", what, r);
+        }
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // The same from a set-off: B owes A 5; a set-off lowers A->B and B->A by 5 at S, B signing M(A,B,35,S) as
+        // the creditor of A->B, which is M(A,B,X,p) of A->B's new state.
+        add(&mut m, &B, &A, 5, at(2000));
+        let s_ts = at(2998);
+        let setoff = [edge(&A, &B, 40, 5, s_ts), edge(&B, &A, 5, 5, s_ts)];
+        m.set_off(&DenomKey::Erg, &setoff).unwrap();
+        assert_eq!(state(&m, &A, &B), (35, s_ts));
+        let honest = sigs(&A, &B, &C, (35, s_ts), (10, at(1001)), 15, t);
+        let lifted = TransferSignatures { from_recipient_prior: setoff[0].recipient_signature, ..honest };
+        let r = transfer(&mut m, &A, &B, &C, 15, t, &lifted);
+        assert!(matches!(r, Err(NoteError::InvalidSignature)), "B's set-off signature M(A,B,35,S): {:?}", r);
+        // Control: the honest acknowledgment applies.
+        transfer(&mut m, &A, &B, &C, 15, t, &honest).unwrap();
+        assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((20, t), (25, t)));
+    }
+
+    #[test]
+    fn c2_an_80_byte_note_message_is_never_an_acknowledgment() {
+        // Tracker v3.1's acknowledgments were the note messages of the prior totals at the operation's timestamp:
+        // M(A,B,X,T) and M(A,C,Y,T) for a transfer, M(I,R,P,ts) for a bound note. Version 4 transfers and version
+        // 3 bound notes refuse them (the honest ones apply).
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        let (pb, pc) = (at(1000), at(1001));
+        add(&mut m, &A, &B, 100, pb);
+        add(&mut m, &A, &C, 10, pc);
+        let t = at(2999);
+        let honest = sigs(&A, &B, &C, (100, pb), (10, pc), 30, t);
+        let digest = m.get_state().avl_root_digest;
+        let old_from = TransferSignatures { from_recipient_prior: sign(&B, &A, &B, 100, t), ..honest };
+        assert!(matches!(transfer(&mut m, &A, &B, &C, 30, t, &old_from), Err(NoteError::InvalidSignature)), "M(A,B,X,T)");
+        let old_to = TransferSignatures { to_recipient_prior: sign(&C, &A, &C, 10, t), ..honest };
+        assert!(matches!(transfer(&mut m, &A, &B, &C, 30, t, &old_to), Err(NoteError::InvalidSignature)), "M(A,C,Y,T)");
+        let ts = at(1997);
+        let r = bound_note(&mut m, &A, &C, 15, ts, sign(&A, &A, &C, 10, ts));
+        assert!(matches!(r, Err(NoteError::InvalidPriorSignature)), "M(I,R,P,ts): {:?}", r);
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        bound_note(&mut m, &A, &C, 15, ts, ack(&A, &A, &C, (10, pc), ts)).unwrap();
+        transfer(&mut m, &A, &B, &C, 30, t, &sigs(&A, &B, &C, (100, pb), (15, ts), 30, t)).unwrap();
+        assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((70, t), (45, t)));
+    }
+
+    #[test]
+    fn c3_the_new_creditor_role_signs_the_same_acknowledgment_but_gives_no_consent_to_pay() {
+        // PA binds an edge's state and T, not the signer's role: B acknowledging A->B at (X, p) for T is the same
+        // message whether B is the new creditor of a transfer into A->B at T or the old creditor of a transfer out
+        // of A->B at T. That gives nothing away: paying out of A->B also needs B's consent to the decrease
+        // (from_recipient, M(A,B,X-a,T)) and to the destination (from_recipient_to), which a transfer into A->B
+        // never contains; and both transfers move A->B to T, so at most one of them can ever apply.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &A, &B, 40, at(1000));
+        add(&mut m, &A, &Z, 50, at(1001));
+        let t = at(2999);
+        let into = sigs(&A, &Z, &B, (50, at(1001)), (40, at(1000)), 20, t); // Z pays B 20: A->B 40 -> 60
+        let out = sigs(&A, &B, &C, (40, at(1000)), (0, 0), 15, t); // B pays C 15: A->B 40 -> 25
+        // B's new-creditor acknowledgment of A->B is a valid old-creditor acknowledgment of A->B at T.
+        let message = ack_message(&A, &B, (40, at(1000)), t);
+        assert!(crate::schnorr::schnorr_verify(&into.to_recipient_prior, &message, &pk(&B)).is_ok());
+        assert!(crate::schnorr::schnorr_verify(&out.from_recipient_prior, &message, &pk(&B)).is_ok());
+        let digest = m.get_state().avl_root_digest;
+        // With B's acknowledgment taken from the transfer into A->B, and every signature of B's that the transfer
+        // into A->B holds, the payment out of A->B still lacks B's consent.
+        for (what, from_recipient, from_recipient_to) in [
+            ("without B's consent", out.issuer_from, out.issuer_to),
+            ("B's new-creditor signature as consent", into.to_recipient, into.to_recipient),
+        ] {
+            let s = TransferSignatures {
+                from_recipient_prior: into.to_recipient_prior,
+                from_recipient,
+                from_recipient_to,
+                ..out
+            };
+            assert!(matches!(transfer(&mut m, &A, &B, &C, 15, t, &s), Err(NoteError::InvalidSignature)), "{}", what);
+        }
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // Whichever applies first, the other is dead: here the transfer into A->B.
+        transfer(&mut m, &A, &Z, &B, 20, t, &into).unwrap();
+        assert_eq!(state(&m, &A, &B), (60, t));
+        assert!(transfer(&mut m, &A, &B, &C, 15, t, &out).is_err());
+        assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((60, t), (0, 0)));
+    }
+
+    #[test]
+    fn d1_acknowledging_zero_zero_works_for_an_absent_to_edge_and_nothing_else_does() {
+        // An absent edge is acknowledged as (0, 0) (a stored note always has a timestamp > 0, so (0, 0) can never be
+        // a stored state). For a new to-edge, C's (0, 0) applies and any other prior timestamp is refused.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        let pb = at(1000);
+        add(&mut m, &A, &B, 100, pb);
+        let t = at(2999);
+        let honest = sigs(&A, &B, &C, (100, pb), (0, 0), 30, t);
+        let digest = m.get_state().avl_root_digest;
+        for p in [1, pb, t] {
+            let s = TransferSignatures { to_recipient_prior: ack(&C, &A, &C, (0, p), t), ..honest };
+            let r = transfer(&mut m, &A, &B, &C, 30, t, &s);
+            assert!(matches!(r, Err(NoteError::InvalidSignature)), "(0, {}) for an absent edge: {:?}", p, r);
+        }
+        // A first bound note on an absent edge likewise.
+        let ts = at(1997);
+        let r = bound_note(&mut m, &A, &E, 5, ts, ack(&A, &A, &E, (0, 1), ts));
+        assert!(matches!(r, Err(NoteError::InvalidPriorSignature)), "(0, 1) for an absent edge: {:?}", r);
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        bound_note(&mut m, &A, &E, 5, ts, ack(&A, &A, &E, (0, 0), ts)).unwrap();
+        transfer(&mut m, &A, &B, &C, 30, t, &honest).unwrap();
+        assert_eq!((state(&m, &A, &B), state(&m, &A, &C), state(&m, &A, &E)), ((70, t), (30, t), (5, ts)));
+    }
+
+    #[test]
+    fn d2_an_existing_edge_is_never_acknowledged_as_zero_zero_even_at_total_zero() {
+        // An existing to-edge is acknowledged at its stored state, never as (0, 0): with a positive total, and also
+        // at total 0, which version 3 could not tell from an absent edge (its acknowledgment M(A,C,0,T) has no
+        // timestamp). The zero case is the to-edge ABA: C acknowledged A->C before the edge existed, A->C was then
+        // created and moved back to 0, and the old acknowledgment would still apply.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        let pb = at(1000);
+        add(&mut m, &A, &B, 100, pb);
+        let t = at(4999);
+        let signed_before = sigs(&A, &B, &C, (100, pb), (0, 0), 30, t); // A->C absent when B and C signed
+        // A->C is created (10 at pc) and C moves it all out again (C pays D 10 of A's debt): A->C is at (0, tc).
+        let pc = at(1001);
+        add(&mut m, &A, &C, 10, pc);
+        let tc = at(2999);
+        transfer(&mut m, &A, &C, &D, 10, tc, &sigs(&A, &C, &D, (10, pc), (0, 0), 10, tc)).unwrap();
+        assert_eq!(state(&m, &A, &C), (0, tc));
+        // A->E exists with a positive total.
+        let e = at(1002);
+        add(&mut m, &A, &E, 7, e);
+        let digest = m.get_state().avl_root_digest;
+        let r = transfer(&mut m, &A, &B, &C, 30, t, &signed_before);
+        assert!(matches!(r, Err(NoteError::InvalidSignature)), "(0, 0) for an existing edge at total 0: {:?}", r);
+        // A bound note on an existing edge at 0 likewise.
+        let ts = at(3997);
+        let r = bound_note(&mut m, &A, &C, 4, ts, ack(&A, &A, &C, (0, 0), ts));
+        assert!(matches!(r, Err(NoteError::InvalidPriorSignature)), "(0, 0) for an existing edge at total 0: {:?}", r);
+        // And for an edge with a positive total, (0, 0) and (Y, 0) are refused.
+        for prior in [(0, 0), (7, 0)] {
+            let s = TransferSignatures { to_recipient_prior: ack(&E, &A, &E, prior, t), ..sigs(&A, &B, &E, (100, pb), (7, e), 30, t) };
+            let r = transfer(&mut m, &A, &B, &E, 30, t, &s);
+            assert!(matches!(r, Err(NoteError::InvalidSignature)), "{:?} for an edge at (7, e): {:?}", prior, r);
+        }
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // Control: acknowledging the stored state (0, tc) applies.
+        transfer(&mut m, &A, &B, &C, 30, t, &sigs(&A, &B, &C, (100, pb), (0, tc), 30, t)).unwrap();
+        assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((70, t), (30, t)));
+    }
+}
