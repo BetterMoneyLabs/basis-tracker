@@ -170,6 +170,26 @@ Tests require `scala/secrets/participants.csv` with valid `name,address,secret_h
 - **Contract template filtering** for targeted scanning
 - **Real Ergo node integration** - Connects to mainnet and testnet nodes
 
+### Reserve mirror repair
+
+The per-(issuer, denomination) reserve AVL tree mirror (`reserve_avl_states`) normally
+advances only through the redemption API flow. When the mirror's digest no longer matches a
+reserve box's on-chain R5 (a redemption confirmed outside the tracker flow, an optimistic
+update that never confirmed), `/redemption/build` repairs it lazily at build time
+(`crates/basis_server/src/reserve_lineage.rs`): it walks the reserve lineage backwards over
+the extra-indexed node (`/blockchain/box/byId`, `/blockchain/transaction/byId`), extracting
+each redemption generation's op from the spending proof's context extension (var #1 =
+receiver key, var #4 = note timestamp; the redeemed delta is the collateral decrease), until
+it reaches a generation matching the mirror digest (incremental repair) or the empty-tree
+digest (full rebuild, dropping phantom ops). The collected ops are staged and applied by
+`TrackerStateManager::apply_chain_reserve_ops` only if the staged tree reproduces the
+on-chain R5; otherwise nothing is mutated and the build errors out.
+
+The reserve AVL journal (`reserve_avl_journal` partition) is versioned: v1 values are 49
+bytes (timestamp, cumulative redeemed, denomination), v2 values are 82 bytes and additionally
+embed the recipient public key, so chain-observed ops referencing notes the tracker never
+stored still replay after a restart. Both lengths are accepted on read.
+
 ### Usage Example
 ```rust
 use basis_store::ergo_scanner::{start_scanner, create_default_scanner};

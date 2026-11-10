@@ -302,6 +302,23 @@ mod redemption_api_tests {
                             .reconcile_with_confirmed_digest(&digest, &box_id, height);
                         let _ = response_tx.send(result);
                     }
+                    TrackerCommand::ApplyChainReserveOps {
+                        issuer_pubkey,
+                        denomination,
+                        ops,
+                        sync_point,
+                        expected_digest,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.apply_chain_reserve_ops(
+                            &issuer_pubkey,
+                            &denomination,
+                            &ops,
+                            sync_point,
+                            expected_digest,
+                        );
+                        let _ = response_tx.send(result);
+                    }
                     TrackerCommand::ExchangeNotes {
                         issuer_pubkey,
                         recipient_pubkey,

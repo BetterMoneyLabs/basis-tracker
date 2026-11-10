@@ -176,7 +176,7 @@ impl NodeBox {
     }
 }
 
-struct NodeClient {
+pub(crate) struct NodeClient {
     url: String,
     api_key: Option<String>,
 }
@@ -184,7 +184,7 @@ struct NodeClient {
 impl NodeClient {
     /// Node used for chain reads (`/utxo/*` on chain boxes, `/blocks/*`): the
     /// scanner node (`[ergo.scanner]`, extra-indexed).
-    fn chain(state: &AppState) -> Self {
+    pub(crate) fn chain(state: &AppState) -> Self {
         NodeClient {
             url: state
                 .config
@@ -214,7 +214,7 @@ impl NodeClient {
         }
     }
 
-    async fn get_json(&self, path: &str) -> Result<Value, String> {
+    pub(crate) async fn get_json(&self, path: &str) -> Result<Value, String> {
         let client = basis_store::http::bounded_client();
         let url = format!("{}{}", self.url, path);
         let mut req = client.get(&url);
@@ -617,6 +617,227 @@ fn api_err<T>(status: StatusCode, msg: impl Into<String>) -> ApiResult<T> {
     Err((status, Json(error_response(msg.into()))))
 }
 
+/// Outcome of trying to pick a reserve box for a redemption build.
+enum ReserveSelection {
+    /// (box_id, collateral, refund_height, reserve_token_id)
+    Found((String, u64, u64, String)),
+    /// Every otherwise-eligible candidate was skipped because its on-chain R5 does not
+    /// match the tracker's reserve tree digest: the mirror has diverged from the chain
+    /// (issue #15 review N14) and can be repaired from confirmed spends.
+    DigestMismatch {
+        box_id: String,
+        chain_r5: String,
+        mirror_digest: String,
+    },
+}
+
+/// Select the smallest reserve that covers the redemption, leaves a valid remainder, is
+/// actually unspent on-chain, AND whose on-chain R5 (reserve AVL tree) matches the tracker's
+/// current reserve tree digest — otherwise the insert proof cannot verify on-chain.
+async fn select_reserve_candidate(
+    state: &AppState,
+    issuer_pubkey: &basis_store::PubKey,
+    denomination: &basis_store::DenomKey,
+    payload: &RedemptionBuildRequest,
+) -> ApiResult<ReserveSelection> {
+    // The tracker's current reserve tree root digest; the spent reserve's R5 must equal this.
+    let tracker_reserve_digest = {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if state
+            .tx
+            .send(TrackerCommand::GetReserveStateDigest {
+                issuer_pubkey: *issuer_pubkey,
+                denomination: *denomination,
+                response_tx: tx,
+            })
+            .await
+            .is_err()
+        {
+            return api_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "tracker thread unavailable",
+            );
+        }
+        match rx.await {
+            Ok(d) => hex::encode(d),
+            Err(_) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, "tracker unavailable"),
+        }
+    };
+
+    let scanner = state.ergo_scanner.lock().await;
+    let reserves = match scanner.reserve_storage().get_all_reserves() {
+        Ok(r) => r,
+        Err(e) => {
+            return api_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("read reserves: {e:?}"),
+            )
+        }
+    };
+    drop(scanner);
+    let normalized_issuer = basis_store::normalize_public_key(&payload.issuer_pubkey);
+    let required = payload.amount.saturating_add(MIN_RESERVE_REMAINDER);
+
+    // Gather matching candidates (issuer owner, sufficient collateral), smallest first.
+    let mut candidates: Vec<(String, u64, u64, String)> = Vec::new();
+    for reserve in &reserves {
+        // Owner key may be double-hex-encoded in the DB.
+        let owner = if let Ok(b) = hex::decode(&reserve.owner_pubkey) {
+            if let Ok(s) = String::from_utf8(b.clone()) {
+                if s.chars().all(|c| c.is_ascii_hexdigit()) {
+                    s
+                } else {
+                    reserve.owner_pubkey.clone()
+                }
+            } else {
+                reserve.owner_pubkey.clone()
+            }
+        } else {
+            reserve.owner_pubkey.clone()
+        };
+        if basis_store::normalize_public_key(&owner) != normalized_issuer {
+            continue;
+        }
+        // A note redeems only against a reserve of its own denomination
+        // (specs/ergo/multi_collateral_reserves.md §6 invariant 3).
+        if reserve.denomination().as_ref() != Some(denomination) {
+            continue;
+        }
+        let collateral = reserve.base_info.collateral_amount;
+        // For token-backed reserves the collateral is measured in token units,
+        // so we only need to cover the redemption amount. For ERG-backed reserves
+        // the collateral is the box value in nanoERG and must leave the minimum
+        // remainder in the reserve box.
+        let collateral_required = if reserve.base_info.reserve_token_id.is_empty() {
+            required
+        } else {
+            payload.amount
+        };
+        if collateral < collateral_required {
+            continue;
+        }
+        candidates.push((
+            decode_box_id(&reserve.box_id),
+            collateral,
+            reserve.base_info.refund_initiation_height,
+            reserve.base_info.reserve_token_id.clone(),
+        ));
+    }
+    candidates.sort_by_key(|(_, c, _, _)| *c);
+
+    // Pick the smallest candidate that is unspent on-chain and whose R5 matches the tracker's
+    // current reserve tree digest.
+    let chain_node = NodeClient::chain(state);
+    let mut digest_mismatch: Option<(String, String)> = None;
+    for (box_id, collateral, refund_height, reserve_token_id) in &candidates {
+        // For ERG-backed reserves the box must hold enough ERG to cover the redemption
+        // plus the minimum remainder. For token-backed reserves the ERG value is preserved,
+        // so we only require the minimum box value.
+        let min_box_value = if reserve_token_id.is_empty() {
+            required
+        } else {
+            MIN_RESERVE_REMAINDER
+        };
+        match chain_node.box_details(box_id).await {
+            Ok(b) if b.value >= min_box_value => match b.r5_digest_hex() {
+                Some(d) if d == tracker_reserve_digest => {
+                    return Ok(ReserveSelection::Found((
+                        box_id.clone(),
+                        *collateral,
+                        *refund_height,
+                        reserve_token_id.clone(),
+                    )));
+                }
+                Some(d) => {
+                    tracing::warn!(
+                        "reserve {} R5 {} != tracker tree {}; skipping",
+                        box_id,
+                        &d[..16.min(d.len())],
+                        &tracker_reserve_digest[..16.min(tracker_reserve_digest.len())]
+                    );
+                    digest_mismatch.get_or_insert((box_id.clone(), d));
+                }
+                None => {
+                    tracing::warn!("reserve {} has no R5 digest; skipping", box_id);
+                }
+            },
+            _ => {
+                tracing::warn!("skipping unavailable/insufficient reserve box {}", box_id);
+            }
+        }
+    }
+    if let Some((box_id, chain_r5)) = digest_mismatch {
+        return Ok(ReserveSelection::DigestMismatch {
+            box_id,
+            chain_r5,
+            mirror_digest: tracker_reserve_digest,
+        });
+    }
+    api_err(
+        StatusCode::BAD_REQUEST,
+        format!(
+            "no unspent reserve with >= {required} units collateral and a reserve tree matching the tracker (digest {}) for issuer {}",
+            &tracker_reserve_digest[..16.min(tracker_reserve_digest.len())],
+            payload.issuer_pubkey
+        ),
+    )
+}
+
+/// Repair the (issuer, denomination) reserve mirror from confirmed chain spends
+/// (issue #15 review N14): walk the reserve lineage backwards from the diverged box,
+/// extract each redemption from the spending transaction's context extension, and let
+/// the tracker thread stage-verify-apply them against the on-chain R5.
+async fn repair_reserve_mirror(
+    state: &AppState,
+    issuer_pubkey: &basis_store::PubKey,
+    denomination: &basis_store::DenomKey,
+    successor_box_id: &str,
+    chain_r5: &str,
+    mirror_digest: &str,
+) -> Result<(), String> {
+    let node = NodeClient::chain(state);
+    let contract_address = match denomination {
+        basis_store::DenomKey::Erg => state.config.basis_reserve_contract_p2s(),
+        basis_store::DenomKey::Token(_) => state.config.basis_token_reserve_contract_p2s(),
+    };
+    if contract_address.is_empty() {
+        return Err("reserve contract address is not configured".to_string());
+    }
+    let collateral_token_id = match denomination {
+        basis_store::DenomKey::Token(id) => Some(hex::encode(id)),
+        basis_store::DenomKey::Erg => None,
+    };
+    let (ops, sync_point) = crate::reserve_lineage::collect_lineage_redemption_ops(
+        &node,
+        contract_address,
+        collateral_token_id.as_deref(),
+        successor_box_id,
+        mirror_digest,
+    )
+    .await?;
+    let expected_digest: [u8; 33] = hex::decode(chain_r5)
+        .ok()
+        .and_then(|b| b.as_slice().try_into().ok())
+        .ok_or_else(|| format!("on-chain R5 digest is not 33 bytes: {chain_r5}"))?;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state
+        .tx
+        .send(TrackerCommand::ApplyChainReserveOps {
+            issuer_pubkey: *issuer_pubkey,
+            denomination: *denomination,
+            ops,
+            sync_point,
+            expected_digest,
+            response_tx: tx,
+        })
+        .await
+        .map_err(|_| "tracker thread unavailable".to_string())?;
+    rx.await
+        .map_err(|_| "tracker thread dropped the repair".to_string())?
+        .map_err(|e| format!("{e:?}"))
+}
+
 // ----- handlers -----
 
 /// Build the unsigned redemption transaction and sign the fee input(s) locally.
@@ -776,144 +997,61 @@ async fn build_redemption_inner(
 
     // Select the smallest reserve that covers the redemption, leaves a valid remainder, is actually
     // unspent on-chain, AND whose on-chain R5 (reserve AVL tree) matches the tracker's current
-    // reserve tree digest — otherwise the insert proof cannot verify on-chain.
-    let (reserve_box_id, reserve_collateral, reserve_refund_height, reserve_token_id) = {
-        // The tracker's current reserve tree root digest; the spent reserve's R5 must equal this.
-        let tracker_reserve_digest = {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            if state
-                .tx
-                .send(TrackerCommand::GetReserveStateDigest {
-                    issuer_pubkey,
-                    denomination,
-                    response_tx: tx,
-                })
-                .await
-                .is_err()
-            {
-                return api_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "tracker thread unavailable",
-                );
-            }
-            match rx.await {
-                Ok(d) => hex::encode(d),
-                Err(_) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, "tracker unavailable"),
-            }
-        };
-
-        let scanner = state.ergo_scanner.lock().await;
-        let reserves = match scanner.reserve_storage().get_all_reserves() {
-            Ok(r) => r,
-            Err(e) => {
-                return api_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("read reserves: {e:?}"),
+    // reserve tree digest — otherwise the insert proof cannot verify on-chain. When selection fails
+    // only because the mirror has diverged from the chain, repair the mirror from confirmed chain
+    // spends once and retry (issue #15 review N14).
+    let mut repair_attempted = false;
+    let (reserve_box_id, reserve_collateral, reserve_refund_height, reserve_token_id) = loop {
+        match select_reserve_candidate(state, &issuer_pubkey, &denomination, payload).await? {
+            ReserveSelection::Found(selection) => break selection,
+            ReserveSelection::DigestMismatch {
+                box_id,
+                chain_r5,
+                mirror_digest,
+            } if !repair_attempted => {
+                repair_attempted = true;
+                match repair_reserve_mirror(
+                    state,
+                    &issuer_pubkey,
+                    &denomination,
+                    &box_id,
+                    &chain_r5,
+                    &mirror_digest,
                 )
-            }
-        };
-        drop(scanner);
-        let normalized_issuer = basis_store::normalize_public_key(&payload.issuer_pubkey);
-        let required = payload.amount.saturating_add(MIN_RESERVE_REMAINDER);
-
-        // Gather matching candidates (issuer owner, sufficient collateral), smallest first.
-        let mut candidates: Vec<(String, u64, u64, String)> = Vec::new();
-        for reserve in &reserves {
-            // Owner key may be double-hex-encoded in the DB.
-            let owner = if let Ok(b) = hex::decode(&reserve.owner_pubkey) {
-                if let Ok(s) = String::from_utf8(b.clone()) {
-                    if s.chars().all(|c| c.is_ascii_hexdigit()) {
-                        s
-                    } else {
-                        reserve.owner_pubkey.clone()
+                .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Repaired reserve mirror for issuer {} from confirmed chain spends; retrying selection",
+                            payload.issuer_pubkey
+                        );
+                        continue;
                     }
-                } else {
-                    reserve.owner_pubkey.clone()
-                }
-            } else {
-                reserve.owner_pubkey.clone()
-            };
-            if basis_store::normalize_public_key(&owner) != normalized_issuer {
-                continue;
-            }
-            // A note redeems only against a reserve of its own denomination
-            // (specs/ergo/multi_collateral_reserves.md §6 invariant 3).
-            if reserve.denomination().as_ref() != Some(&denomination) {
-                continue;
-            }
-            let collateral = reserve.base_info.collateral_amount;
-            // For token-backed reserves the collateral is measured in token units,
-            // so we only need to cover the redemption amount. For ERG-backed reserves
-            // the collateral is the box value in nanoERG and must leave the minimum
-            // remainder in the reserve box.
-            let collateral_required = if reserve.base_info.reserve_token_id.is_empty() {
-                required
-            } else {
-                payload.amount
-            };
-            if collateral < collateral_required {
-                continue;
-            }
-            candidates.push((
-                decode_box_id(&reserve.box_id),
-                collateral,
-                reserve.base_info.refund_initiation_height,
-                reserve.base_info.reserve_token_id.clone(),
-            ));
-        }
-        candidates.sort_by_key(|(_, c, _, _)| *c);
-
-        // Pick the smallest candidate that is unspent on-chain and whose R5 matches the tracker's
-        // current reserve tree digest.
-        let mut found: Option<(String, u64, u64, String)> = None;
-        for (box_id, collateral, refund_height, reserve_token_id) in &candidates {
-            // For ERG-backed reserves the box must hold enough ERG to cover the redemption
-            // plus the minimum remainder. For token-backed reserves the ERG value is preserved,
-            // so we only require the minimum box value.
-            let min_box_value = if reserve_token_id.is_empty() {
-                required
-            } else {
-                MIN_RESERVE_REMAINDER
-            };
-            match chain_node.box_details(box_id).await {
-                Ok(b) if b.value >= min_box_value => match b.r5_digest_hex() {
-                    Some(d) if d == tracker_reserve_digest => {
-                        found = Some((
-                            box_id.clone(),
-                            *collateral,
-                            *refund_height,
-                            reserve_token_id.clone(),
-                        ));
-                        break;
-                    }
-                    Some(d) => {
+                    Err(e) => {
                         tracing::warn!(
-                            "reserve {} R5 {} != tracker tree {}; skipping",
-                            box_id,
-                            &d[..16.min(d.len())],
-                            &tracker_reserve_digest[..16.min(tracker_reserve_digest.len())]
+                            "Reserve mirror repair failed for issuer {}: {}",
+                            payload.issuer_pubkey,
+                            e
+                        );
+                        return api_err(
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "reserve tree for issuer {} has diverged from the chain and repair failed: {}",
+                                payload.issuer_pubkey, e
+                            ),
                         );
                     }
-                    None => {
-                        tracing::warn!("reserve {} has no R5 digest; skipping", box_id);
-                    }
-                },
-                _ => {
-                    tracing::warn!("skipping unavailable/insufficient reserve box {}", box_id);
                 }
             }
-        }
-        match found {
-            Some(id) => id,
-            None => {
+            ReserveSelection::DigestMismatch { mirror_digest, .. } => {
                 return api_err(
                     StatusCode::BAD_REQUEST,
                     format!(
-                        "no unspent reserve with >= {required} units collateral and a reserve tree matching the tracker (digest {}) for issuer {}",
-                        &tracker_reserve_digest[..16.min(tracker_reserve_digest.len())],
+                        "no unspent reserve with a reserve tree matching the tracker (digest {}) for issuer {}",
+                        &mirror_digest[..16.min(mirror_digest.len())],
                         payload.issuer_pubkey
                     ),
-                )
+                );
             }
         }
     };

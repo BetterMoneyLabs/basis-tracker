@@ -323,10 +323,40 @@ impl NoteKey {
     }
 }
 
+/// A redemption operation observed on-chain in a reserve lineage (issue #15 review N14).
+///
+/// Extracted from a confirmed spend of a reserve box: the receiver key and timestamp come
+/// from the spending transaction's context extension (vars #1 and #4), and `redeemed_delta`
+/// is the collateral decrease between the spent box and its successor. The mirror applies it
+/// read-modify-write: the new cumulative value is the tree's current already_redeemed for the
+/// key plus `redeemed_delta`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainReserveOp {
+    /// Recipient (creditor) public key. The reserve tree key is
+    /// blake2b256(issuer ‖ recipient) — without the token id, matching both reserve
+    /// contracts (`basis.es` and `basis-token.es` both use `reserveKey`).
+    pub recipient_pubkey: PubKey,
+    /// Note timestamp from the spending transaction's extension var #4.
+    pub timestamp: u64,
+    /// Collateral decrease in this redemption generation (nanoERG or token units).
+    pub redeemed_delta: u64,
+}
+
+/// Where a reserve lineage walk found a state consistent with the local mirror
+/// (issue #15 review N14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveSyncPoint {
+    /// A generation's R5 equals the current mirror digest: apply the collected ops on top
+    /// of the pair's replayed journal state.
+    Mirror,
+    /// The walk reached the lineage root (empty tree) without matching the mirror: replace
+    /// the pair's state wholesale, dropping phantom optimistic updates that never confirmed.
+    Genesis,
+}
+
 /// Status information for a public key
 #[derive(Debug, Clone, PartialEq)]
-pub struct KeyStatus {
-    /// Total issued debt
+pub struct KeyStatus {    /// Total issued debt
     pub total_debt: u64,
     /// On-chain collateral
     pub collateral: u64,
@@ -2594,24 +2624,30 @@ impl TrackerStateManager {
 
         tracing::info!("Replaying {} reserve AVL journal entries...", updates.len());
 
-        for (issuer_pubkey, note_key, denomination, timestamp, already_redeemed) in updates {
-            // Reconstruct recipient pubkey from the note key. The note key is the
-            // denomination-derived debt key, so we look up the stored note to obtain
-            // the recipient pubkey.
-            let note = match self.storage.get_note_by_key(&note_key)? {
-                Some(note) => note,
+        for (issuer_pubkey, note_key, denomination, timestamp, already_redeemed, recipient) in updates {
+            // The recipient pubkey is embedded in v2 journal entries (issue #15 review N14:
+            // chain-observed redemptions may reference notes the tracker never stored). Legacy
+            // entries recover it from the stored note via the denomination-derived note key.
+            let recipient_pubkey = match recipient {
+                Some(pk) => pk,
                 None => {
-                    tracing::warn!(
-                        "Reserve AVL journal references unknown note key {}; skipping",
-                        hex::encode(note_key.to_bytes())
-                    );
-                    continue;
+                    let note = match self.storage.get_note_by_key(&note_key)? {
+                        Some(note) => note,
+                        None => {
+                            tracing::warn!(
+                                "Reserve AVL journal references unknown note key {}; skipping",
+                                hex::encode(note_key.to_bytes())
+                            );
+                            continue;
+                        }
+                    };
+                    note.recipient_pubkey
                 }
             };
 
             if let Err(e) = self.apply_reserve_avl_update(
                 &issuer_pubkey,
-                &note.recipient_pubkey,
+                &recipient_pubkey,
                 &denomination,
                 timestamp,
                 already_redeemed,
@@ -2655,6 +2691,126 @@ impl TrackerStateManager {
             timestamp,
             already_redeemed,
         )
+    }
+
+    /// Rebuild the reserve AVL tree for one (issuer, denomination) pair from the persisted
+    /// journal, using the same entry-resolution rules as startup replay (embedded recipient
+    /// for v2 entries, note lookup for legacy ones, unknown keys skipped).
+    fn replay_reserve_journal_for(
+        &self,
+        issuer_pubkey: &PubKey,
+        denomination: &DenomKey,
+    ) -> Result<basis_trees::BasisAvlTree, NoteError> {
+        let mut tree = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to create reserve AVL tree: {:?}", e))
+        })?;
+        for (issuer, note_key, denom, timestamp, already_redeemed, recipient) in self
+            .storage
+            .iter_reserve_avl_updates()
+            .map_err(|e| NoteError::StorageError(format!("Failed to read journal: {:?}", e)))?
+        {
+            if &issuer != issuer_pubkey || &denom != denomination {
+                continue;
+            }
+            let recipient_pubkey = match recipient {
+                Some(pk) => pk,
+                None => match self.storage.get_note_by_key(&note_key)? {
+                    Some(note) => note.recipient_pubkey,
+                    None => continue,
+                },
+            };
+            let key = NoteKey::from_keys(&issuer, &recipient_pubkey);
+            let mut value_bytes = Vec::with_capacity(16);
+            value_bytes.extend_from_slice(&timestamp.to_be_bytes());
+            value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
+            tree.update(key.to_bytes(), value_bytes).map_err(|e| {
+                NoteError::StorageError(format!("Reserve AVL journal replay failed: {}", e))
+            })?;
+        }
+        Ok(tree)
+    }
+
+    /// Apply chain-observed redemption ops to the (issuer, denomination) reserve tree,
+    /// staged and verified against the on-chain R5 digest before anything is swapped in
+    /// (issue #15 review N14: re-sync the reserve-tree mirror from confirmed chain spends).
+    ///
+    /// The staged tree starts from the pair's replayed journal (`Mirror`) or from the empty
+    /// tree (`Genesis`, dropping phantom optimistic updates that never confirmed). Each op is
+    /// applied read-modify-write — new already_redeemed = current + `redeemed_delta` — which
+    /// reproduces the on-chain cumulative values as long as the sync point is correct. The
+    /// live tree and journal are only touched after the staged root digest equals
+    /// `expected_digest`.
+    pub fn apply_chain_reserve_ops(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        denomination: &DenomKey,
+        ops: &[ChainReserveOp],
+        sync_point: ReserveSyncPoint,
+        expected_digest: [u8; 33],
+    ) -> Result<(), NoteError> {
+        let mut staged = match sync_point {
+            ReserveSyncPoint::Genesis => basis_trees::BasisAvlTree::new().map_err(|e| {
+                NoteError::StorageError(format!("Failed to create reserve AVL tree: {:?}", e))
+            })?,
+            ReserveSyncPoint::Mirror => {
+                self.replay_reserve_journal_for(issuer_pubkey, denomination)?
+            }
+        };
+
+        let mut journal_entries: Vec<(PubKey, u64, u64)> = Vec::with_capacity(ops.len());
+        for op in ops {
+            let key = NoteKey::from_keys(issuer_pubkey, &op.recipient_pubkey);
+            let current = match staged.get(&key.to_bytes()) {
+                Some(value) if value.len() == 16 => {
+                    u64::from_be_bytes(value[8..16].try_into().unwrap())
+                }
+                Some(_) => {
+                    return Err(NoteError::StorageError(
+                        "Malformed reserve tree value during chain sync".to_string(),
+                    ))
+                }
+                None => 0,
+            };
+            let new_redeemed = current.checked_add(op.redeemed_delta).ok_or_else(|| {
+                NoteError::StorageError("Chain redemption amount overflow".to_string())
+            })?;
+            let mut value_bytes = Vec::with_capacity(16);
+            value_bytes.extend_from_slice(&op.timestamp.to_be_bytes());
+            value_bytes.extend_from_slice(&new_redeemed.to_be_bytes());
+            staged.update(key.to_bytes(), value_bytes).map_err(|e| {
+                NoteError::StorageError(format!("Reserve AVL chain sync failed: {}", e))
+            })?;
+            journal_entries.push((op.recipient_pubkey, op.timestamp, new_redeemed));
+        }
+
+        if staged.root_digest() != expected_digest {
+            return Err(NoteError::StorageError(format!(
+                "Chain sync of reserve tree for issuer {} did not reproduce the on-chain \
+                 digest (staged {:?}, expected {:?}); local state left unchanged",
+                hex::encode(issuer_pubkey),
+                staged.root_digest(),
+                expected_digest
+            )));
+        }
+
+        // Verified: make it persistent state. Genesis replaces the pair's journal so
+        // phantom entries do not survive a restart; both modes then append the new ops.
+        if sync_point == ReserveSyncPoint::Genesis {
+            self.storage
+                .remove_reserve_avl_journal_entries_for(issuer_pubkey, denomination)?;
+        }
+        for (recipient, timestamp, already_redeemed) in &journal_entries {
+            self.storage.append_reserve_avl_update(
+                issuer_pubkey,
+                recipient,
+                denomination,
+                *timestamp,
+                *already_redeemed,
+            )?;
+        }
+        self.reserve_avl_states
+            .insert((*issuer_pubkey, *denomination), staged);
+        Ok(())
     }
 
     /// Generate proof for a specific note

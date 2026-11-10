@@ -2379,13 +2379,18 @@ mod tests {
     }
 
     fn c4_test_state(config: NodeConfig) -> ServerState {
+        // Nanos alone can collide between threads on coarse clocks; the counter makes the
+        // directory unique even then, so one test's remove_dir_all can never delete another
+        // test's storage out from under fjall.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let data_dir = std::env::temp_dir().join(format!(
-            "basis_scanner_c4_test_{}_{}",
+            "basis_scanner_c4_test_{}_{}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
-            std::process::id()
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&data_dir);
         ServerState::new(config, &data_dir).expect("Failed to create server state")

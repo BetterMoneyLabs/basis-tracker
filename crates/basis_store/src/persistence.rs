@@ -16,8 +16,15 @@ use std::path::Path;
 const NOTE_VALUE_LEN: usize = 220;
 
 /// Fixed-width reserve journal value length: timestamp(8) ‖ already_redeemed(8) ‖
-/// denomination(33) = 49 bytes.
+/// denomination(33) = 49 bytes (legacy format, without the recipient key).
 const JOURNAL_VALUE_LEN: usize = 49;
+
+/// Current reserve journal value length: timestamp(8) ‖ already_redeemed(8) ‖
+/// denomination(33) ‖ recipient_pubkey(33) = 82 bytes. The recipient was added so
+/// chain-observed redemptions (issue #15 review N14) replay after a restart even
+/// when the corresponding note is not in the note store; legacy 49-byte entries
+/// are still accepted and fall back to note lookup on replay.
+const JOURNAL_VALUE_LEN_V2: usize = 82;
 
 /// Database storage for IOU notes with extra indices for efficient querying
 ///
@@ -1212,10 +1219,11 @@ impl NoteStorage {
         key.extend_from_slice(issuer_pubkey);
         key.extend_from_slice(&note_key.to_bytes());
 
-        let mut value = Vec::with_capacity(JOURNAL_VALUE_LEN);
+        let mut value = Vec::with_capacity(JOURNAL_VALUE_LEN_V2);
         value.extend_from_slice(&timestamp.to_be_bytes());
         value.extend_from_slice(&already_redeemed.to_be_bytes());
         value.extend_from_slice(&denomination.encode33());
+        value.extend_from_slice(recipient_pubkey);
 
         self.reserve_avl_journal_partition
             .insert(&key, &value)
@@ -1232,10 +1240,12 @@ impl NoteStorage {
     /// Iterate the reserve AVL journal in operation order.
     ///
     /// Returns a vector of (issuer_pubkey, note_key, denomination, timestamp,
-    /// already_redeemed) tuples.
+    /// already_redeemed, recipient_pubkey) tuples. `recipient_pubkey` is `Some` for
+    /// v2 entries (which embed it) and `None` for legacy 49-byte entries, where the
+    /// caller must recover the recipient from the note store.
     pub fn iter_reserve_avl_updates(
         &self,
-    ) -> Result<Vec<(PubKey, NoteKey, DenomKey, u64, u64)>, NoteError> {
+    ) -> Result<Vec<(PubKey, NoteKey, DenomKey, u64, u64, Option<PubKey>)>, NoteError> {
         let mut updates = Vec::new();
 
         for item in self.reserve_avl_journal_partition.iter() {
@@ -1243,7 +1253,9 @@ impl NoteStorage {
                 NoteError::StorageError(format!("Failed to iterate reserve AVL journal: {}", e))
             })?;
 
-            if key.len() != 16 + 33 + 32 || value.len() != JOURNAL_VALUE_LEN {
+            if key.len() != 16 + 33 + 32
+                || (value.len() != JOURNAL_VALUE_LEN && value.len() != JOURNAL_VALUE_LEN_V2)
+            {
                 tracing::warn!(
                     "Skipping malformed reserve AVL journal entry: key_len={}, value_len={}",
                     key.len(),
@@ -1267,6 +1279,15 @@ impl NoteStorage {
                         e
                     ))
                 })?;
+            let recipient_pubkey: Option<PubKey> = if value.len() == JOURNAL_VALUE_LEN_V2 {
+                Some(value[49..82].try_into().map_err(|_| {
+                    NoteError::StorageError(
+                        "Invalid recipient pubkey in reserve AVL journal".to_string(),
+                    )
+                })?)
+            } else {
+                None
+            };
 
             updates.push((
                 issuer_pubkey,
@@ -1274,10 +1295,51 @@ impl NoteStorage {
                 denomination,
                 timestamp,
                 already_redeemed,
+                recipient_pubkey,
             ));
         }
 
         Ok(updates)
+    }
+
+    /// Remove all reserve AVL journal entries for an (issuer, denomination) pair.
+    /// Used when the pair's tree is rebuilt from chain-observed redemptions
+    /// (issue #15 review N14): the confirmed op list replaces the journal, so
+    /// phantom optimistic updates (never confirmed on-chain) do not survive a restart.
+    pub fn remove_reserve_avl_journal_entries_for(
+        &self,
+        issuer_pubkey: &PubKey,
+        denomination: &DenomKey,
+    ) -> Result<usize, NoteError> {
+        let denom_bytes = denomination.encode33();
+        let mut matching: Vec<Vec<u8>> = Vec::new();
+
+        for item in self.reserve_avl_journal_partition.iter() {
+            let (key, value) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate reserve AVL journal: {}", e))
+            })?;
+            if key.len() != 16 + 33 + 32
+                || (value.len() != JOURNAL_VALUE_LEN && value.len() != JOURNAL_VALUE_LEN_V2)
+            {
+                continue;
+            }
+            if &key[16..49] == issuer_pubkey.as_slice() && &value[16..49] == denom_bytes.as_slice()
+            {
+                matching.push(key.to_vec());
+            }
+        }
+
+        let removed = matching.len();
+        for key in matching {
+            self.reserve_avl_journal_partition.remove(&key).map_err(|e| {
+                NoteError::StorageError(format!(
+                    "Failed to remove reserve AVL journal entry: {}",
+                    e
+                ))
+            })?;
+        }
+
+        Ok(removed)
     }
 }
 

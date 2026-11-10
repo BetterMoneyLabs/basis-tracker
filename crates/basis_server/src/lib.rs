@@ -8,6 +8,7 @@ pub mod config;
 pub mod models;
 pub mod redemption_build;
 pub mod reserve_api;
+pub mod reserve_lineage;
 pub mod store;
 pub mod tracker_box_updater;
 
@@ -174,6 +175,17 @@ pub enum TrackerCommand {
         /// Falls back to the note's cumulative redeemed amount when `None`.
         new_already_redeemed: Option<u64>,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::RedemptionError>>,
+    },
+    /// Apply chain-observed redemption ops to a reserve tree, staged and verified against
+    /// the on-chain R5 digest (issue #15 review N14). Sent by the `/redemption/build`
+    /// repair path when the tracker's reserve mirror has diverged from the chain.
+    ApplyChainReserveOps {
+        issuer_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
+        ops: Vec<basis_store::ChainReserveOp>,
+        sync_point: basis_store::ReserveSyncPoint,
+        expected_digest: [u8; 33],
+        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
     },
     GenerateProof {
         issuer_pubkey: basis_store::PubKey,

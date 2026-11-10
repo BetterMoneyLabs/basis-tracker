@@ -195,3 +195,64 @@ fn previous_token_reserve_script_is_not_shipped() {
         "previous token reserve P2S still in: {hits:#?}"
     );
 }
+
+/// Follow-up review N14: the reserve mirror only advanced via `update_already_redeemed`
+/// from the redemption API flow, so an optimistic update for a redemption that never
+/// confirmed (or a redemption confirmed outside the tracker) diverged the mirror from the
+/// on-chain R5 permanently. The repair applies chain-observed ops on top of a staged
+/// rebuild and must drop phantom entries to reproduce the on-chain digest.
+#[test]
+fn reserve_mirror_resyncs_from_chain_observed_ops() {
+    let issuer = keypair(1);
+    let (real, phantom) = (keypair(2).1, keypair(3).1);
+
+    // Chain truth: one confirmed redemption of 1000 at timestamp 100.
+    let mut reference = TrackerStateManager::new_with_temp_storage();
+    reference
+        .update_already_redeemed(&issuer.1, &real, &DenomKey::Erg, 100, 1_000)
+        .unwrap();
+    let chain_digest: [u8; 33] = reference
+        .reserve_state_digest(&issuer.1, &DenomKey::Erg)
+        .try_into()
+        .unwrap();
+
+    // The diverged mirror additionally journaled a phantom redemption that never confirmed.
+    let mut diverged = TrackerStateManager::new_with_temp_storage();
+    diverged
+        .update_already_redeemed(&issuer.1, &real, &DenomKey::Erg, 100, 1_000)
+        .unwrap();
+    diverged
+        .update_already_redeemed(&issuer.1, &phantom, &DenomKey::Erg, 900, 7_777)
+        .unwrap();
+    assert_ne!(
+        diverged.reserve_state_digest(&issuer.1, &DenomKey::Erg),
+        chain_digest
+    );
+
+    diverged
+        .apply_chain_reserve_ops(
+            &issuer.1,
+            &DenomKey::Erg,
+            &[crate::ChainReserveOp {
+                recipient_pubkey: real,
+                timestamp: 100,
+                redeemed_delta: 1_000,
+            }],
+            crate::ReserveSyncPoint::Genesis,
+            chain_digest,
+        )
+        .unwrap();
+
+    assert_eq!(
+        diverged.reserve_state_digest(&issuer.1, &DenomKey::Erg),
+        chain_digest,
+        "after the chain-observed repair the mirror must reproduce the on-chain R5"
+    );
+    assert_eq!(
+        diverged
+            .get_already_redeemed(&issuer.1, &phantom, &DenomKey::Erg)
+            .unwrap(),
+        0,
+        "the phantom entry must be gone"
+    );
+}

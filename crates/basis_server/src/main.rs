@@ -540,6 +540,23 @@ async fn main() {
                         .reserve_state_digest(&issuer_pubkey, &denomination);
                     let _ = response_tx.send(digest);
                 }
+                TrackerCommand::ApplyChainReserveOps {
+                    issuer_pubkey,
+                    denomination,
+                    ops,
+                    sync_point,
+                    expected_digest,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.apply_chain_reserve_ops(
+                        &issuer_pubkey,
+                        &denomination,
+                        &ops,
+                        sync_point,
+                        expected_digest,
+                    );
+                    let _ = response_tx.send(result);
+                }
                 TrackerCommand::GetConfirmation {
                     issuer_pubkey,
                     recipient_pubkey,
