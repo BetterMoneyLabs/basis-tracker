@@ -5453,8 +5453,9 @@ mod prior_ack_regression_tests {
 
     #[test]
     fn d1_acknowledging_zero_zero_works_for_an_absent_to_edge_and_nothing_else_does() {
-        // An absent edge is acknowledged as (0, 0) (a stored note always has a timestamp > 0, so (0, 0) can never be
-        // a stored state). For a new to-edge, C's (0, 0) applies and any other prior timestamp is refused.
+        // An absent edge is acknowledged as (0, 0) (a stored note can be (0, 0) too, which is economically identical
+        // to the absent edge and cannot recur after any write with a later timestamp: d3). For a new to-edge, C's
+        // (0, 0) applies and any other prior timestamp is refused.
         let mut m = TrackerStateManager::new_with_temp_storage();
         let pb = at(1000);
         add(&mut m, &A, &B, 100, pb);
@@ -5513,6 +5514,40 @@ mod prior_ack_regression_tests {
         // Control: acknowledging the stored state (0, tc) applies.
         transfer(&mut m, &A, &B, &C, 30, t, &sigs(&A, &B, &C, (100, pb), (0, tc), 30, t)).unwrap();
         assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((70, t), (30, t)));
+    }
+
+    #[test]
+    fn d3_a_stored_zero_zero_is_the_absent_state_and_cannot_recur() {
+        // An ordinary note of total 0 at timestamp 0 is accepted, so an edge can be stored at (0, 0), the state an
+        // absent edge is acknowledged as. It is economically the absent edge: acknowledging (0, 0) applies on it as on
+        // an absent edge (a bound note, and a transfer's new creditor). It cannot recur: every later write has a later
+        // timestamp, so afterwards neither a note at timestamp 0 nor an acknowledgment of (0, 0) applies.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &A, &E, 0, 0);
+        add(&mut m, &A, &C, 0, 0);
+        assert!(m.get_note_optional(&pk(&A), &pk(&E), &DenomKey::Erg).unwrap().is_some());
+        assert_eq!((state(&m, &A, &E), state(&m, &A, &C)), ((0, 0), (0, 0)));
+        let ts = at(1997);
+        bound_note(&mut m, &A, &E, 5, ts, ack(&A, &A, &E, (0, 0), ts)).unwrap();
+        let pb = at(1000);
+        add(&mut m, &A, &B, 100, pb);
+        let t = at(2999);
+        transfer(&mut m, &A, &B, &C, 30, t, &sigs(&A, &B, &C, (100, pb), (0, 0), 30, t)).unwrap();
+        assert_eq!((state(&m, &A, &E), state(&m, &A, &C)), ((5, ts), (30, t)));
+        let digest = m.get_state().avl_root_digest;
+        let r = m.add_note(&pk(&A), &note(&A, &E, 0, 0), None);
+        assert!(matches!(r, Err(NoteError::PastTimestamp)), "a note at timestamp 0 after a write: {:?}", r);
+        let later = at(3997);
+        let r = bound_note(&mut m, &A, &E, 9, later, ack(&A, &A, &E, (0, 0), later));
+        assert!(matches!(r, Err(NoteError::InvalidPriorSignature)), "(0, 0) after a write: {:?}", r);
+        let t2 = at(4999);
+        let s = TransferSignatures { to_recipient_prior: ack(&C, &A, &C, (0, 0), t2), ..sigs(&A, &B, &C, (70, t), (30, t), 10, t2) };
+        let r = transfer(&mut m, &A, &B, &C, 10, t2, &s);
+        assert!(matches!(r, Err(NoteError::InvalidSignature)), "(0, 0) for the new creditor after a write: {:?}", r);
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // Control: acknowledging the stored state applies.
+        bound_note(&mut m, &A, &E, 9, later, ack(&A, &A, &E, (5, ts), later)).unwrap();
+        assert_eq!(state(&m, &A, &E), (9, later));
     }
 }
 

@@ -197,8 +197,10 @@ pub const PRIOR_ACK_MESSAGE_LEN: usize = 105;
 ///
 /// - TAG = [`PRIOR_ACK_TAG`], the 17 ASCII bytes `basis/prior-ack/1`;
 /// - debtKey and trackerNftId exactly as in [`signing_message`];
-/// - an edge without a note is acknowledged as X = 0, p = 0 (a stored note
-///   always has p > 0, so (0, 0) can never be a stored state).
+/// - an edge without a note is acknowledged as X = 0, p = 0. A stored note can
+///   be (0, 0) too (an ordinary note of total 0 at timestamp 0); that state is
+///   economically identical to the absent edge, and it cannot recur after any
+///   write, since every write has a later timestamp.
 ///
 /// It is never 80 bytes and starts with the tag, so it can never be taken for a
 /// note message, and it binds the prior state (X, p) and the operation's T, so
