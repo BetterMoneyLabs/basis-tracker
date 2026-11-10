@@ -5515,3 +5515,281 @@ mod prior_ack_regression_tests {
         assert_eq!((state(&m, &A, &B), state(&m, &A, &C)), ((70, t), (30, t)));
     }
 }
+
+/// An edge's stored timestamp strictly increases with every write: tracker v3.2's prior acknowledgments rely on it
+/// (each state (total, timestamp) of an edge occurs once, so an acknowledgment applies at most once). Phase 2 of an
+/// exchange used to write the staged to-edge note at its staging timestamp without comparing it with the edge's
+/// current one; it now cancels the exchange when the to-edge was written at or after that timestamp. Every write
+/// path refuses a timestamp that is not later than the edge's stored one, and so does the guard each path calls
+/// right before its storage commit. Exchanges here use the exchange residue 995.
+#[cfg(test)]
+mod timestamp_monotonicity_tests {
+    use crate::{
+        DenomKey, ExchangeObservation, IouNote, NoteError, PendingExchangeStatus, PriorAck, SetOffEdge,
+        TrackerStateManager, TransferSignatures,
+    };
+    use secp256k1::{Secp256k1, SecretKey};
+
+    const NFT: [u8; 32] = [0x42; 32];
+    const ERG: DenomKey = DenomKey::Erg;
+    const TOKEN: DenomKey = DenomKey::Token([0x77; 32]);
+    const A: [u8; 32] = [1u8; 32];
+    const B: [u8; 32] = [2u8; 32];
+    const C: [u8; 32] = [3u8; 32];
+    const D: [u8; 32] = [4u8; 32];
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// A whole second ten minutes before this module's first test started (inside the one-hour maximum age).
+    fn base() -> u64 {
+        static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *BASE.get_or_init(|| (now_ms() - 600_000) / 1000 * 1000)
+    }
+
+    /// `offset` ms after [`base`]: offsets ending in 999 are transfers, 998 set-offs, 997 bound notes, 995
+    /// exchanges, 000-994 ordinary notes.
+    fn at(offset: u64) -> u64 {
+        base() + offset
+    }
+
+    fn pk(secret: &[u8; 32]) -> [u8; 33] {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(secret).expect("valid secret key");
+        secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+    }
+
+    fn sign_bytes(signer: &[u8; 32], message: &[u8]) -> [u8; 65] {
+        crate::schnorr::schnorr_sign(message, signer, &pk(signer)).unwrap()
+    }
+
+    /// `signer`'s signature over the note message M(issuer, recipient, denomination, total, ts).
+    fn sign(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], d: DenomKey, total: u64, ts: u64) -> [u8; 65] {
+        sign_bytes(signer, &crate::schnorr::signing_message(&pk(issuer), &pk(recipient), &d, total, ts, &NFT))
+    }
+
+    /// `signer`'s prior acknowledgment of issuer -> recipient (ERG) in the state `prior` for the operation at `ts`.
+    fn ack(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), ts: u64) -> [u8; 65] {
+        sign_bytes(
+            signer,
+            &crate::schnorr::prior_ack_message(&pk(issuer), &pk(recipient), &ERG, prior.0, prior.1, ts, &NFT),
+        )
+    }
+
+    fn note(issuer: &[u8; 32], recipient: &[u8; 32], d: DenomKey, total: u64, ts: u64) -> IouNote {
+        IouNote::create_and_sign(pk(recipient), total, ts, issuer, &NFT, d).unwrap()
+    }
+
+    /// An ordinary note.
+    fn add(m: &mut TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32], d: DenomKey, total: u64, ts: u64) {
+        m.add_note(&pk(issuer), &note(issuer, recipient, d, total, ts), None).unwrap();
+    }
+
+    /// The stored state (total, timestamp) of issuer -> recipient, (0, 0) when the edge is absent.
+    fn state(m: &TrackerStateManager, issuer: &[u8; 32], recipient: &[u8; 32], d: DenomKey) -> (u64, u64) {
+        m.get_note_optional(&pk(issuer), &pk(recipient), &d)
+            .unwrap()
+            .map(|n| (n.amount_collected, n.timestamp))
+            .unwrap_or((0, 0))
+    }
+
+    /// An ERG -> TOKEN exchange on A->C at `ts`, signed by A and C: ERG lowered by 30, TOKEN raised by 40, from
+    /// the edges' current totals.
+    fn exchange(m: &mut TrackerStateManager, ts: u64) -> Result<(), NoteError> {
+        let (erg, token) = (state(m, &A, &C, ERG).0 - 30, state(m, &A, &C, TOKEN).0 + 40);
+        m.exchange_debt(
+            &pk(&A), &pk(&C), &ERG, 30, &TOKEN, 40, ts,
+            &sign(&A, &A, &C, ERG, erg, ts), &sign(&C, &A, &C, ERG, erg, ts),
+            &sign(&A, &A, &C, TOKEN, token, ts), &sign(&C, &A, &C, TOKEN, token, ts),
+            "reserve_box",
+        )
+    }
+
+    /// A tracker box commits the staged exchange's from-edge decrease and its reserve is observed intact: phase 2
+    /// applies or cancels it. Returns (applied, cancelled).
+    fn phase_two(m: &mut TrackerStateManager) -> (usize, usize) {
+        let digest = m.get_state().avl_root_digest;
+        m.mark_notes_pending(digest, "tx1", 1).unwrap();
+        m.confirm_pending_notes(digest, "box1", 2).unwrap();
+        let staged = m.list_staged_exchanges().unwrap();
+        assert_eq!(staged.len(), 1);
+        let observation = ExchangeObservation {
+            key: staged[0].key,
+            reserve_r5_digest: Some(m.reserve_state_digest(&pk(&A), &ERG).try_into().unwrap()),
+        };
+        let processed = m.process_staged_exchanges(&[observation]).unwrap();
+        (processed.applied, processed.cancelled)
+    }
+
+    /// The seven signatures of a transfer of `amount` of A's ERG debt from A -> from to A -> to at `ts`, each
+    /// creditor acknowledging its edge in the given state ((0, 0) for an absent edge).
+    fn transfer(
+        m: &mut TrackerStateManager, from: &[u8; 32], to: &[u8; 32], from_state: (u64, u64), to_state: (u64, u64),
+        amount: u64, ts: u64,
+    ) -> Result<(), NoteError> {
+        let (from_total, to_total) = (from_state.0 - amount, to_state.0 + amount);
+        let s = TransferSignatures {
+            issuer_from: sign(&A, &A, from, ERG, from_total, ts),
+            issuer_to: sign(&A, &A, to, ERG, to_total, ts),
+            from_recipient_prior: ack(from, &A, from, from_state, ts),
+            from_recipient: sign(from, &A, from, ERG, from_total, ts),
+            from_recipient_to: sign(from, &A, to, ERG, to_total, ts),
+            to_recipient_prior: ack(to, &A, to, to_state, ts),
+            to_recipient: sign(to, &A, to, ERG, to_total, ts),
+        };
+        m.transfer_debt(&pk(&A), &pk(from), &pk(to), &ERG, amount, ts, &s, None, None, None, None).map(|_| ())
+    }
+
+    /// A set-off edge issuer -> recipient (ERG) lowered from `before` by `decrease` at `ts`, signed by both parties.
+    fn edge(issuer: &[u8; 32], recipient: &[u8; 32], before: u64, decrease: u64, ts: u64) -> SetOffEdge {
+        SetOffEdge {
+            issuer_pubkey: pk(issuer),
+            recipient_pubkey: pk(recipient),
+            decrease,
+            timestamp: ts,
+            issuer_signature: sign(issuer, issuer, recipient, ERG, before - decrease, ts),
+            recipient_signature: sign(recipient, issuer, recipient, ERG, before - decrease, ts),
+        }
+    }
+
+    fn past(r: Result<(), NoteError>, what: &str) {
+        assert!(matches!(r, Err(NoteError::PastTimestamp)), "{}: {:?}", what, r);
+    }
+
+    #[test]
+    fn a_staged_exchange_is_cancelled_when_its_to_edge_was_written_at_a_later_timestamp_meanwhile() {
+        // A->C TOKEN is at (50, t1); an exchange staged at t2 raises it to 90 once its tracker box commits; meanwhile
+        // an ordinary note writes A->C TOKEN at the same total at t3 > t2. Applying the staged note would move the
+        // edge from (50, t3) to (90, t2): its timestamp back, after which the state (50, t3) could occur again (an
+        // exchange out of the token edge at t3 lowers it to 50 there). Phase 2 cancels the exchange instead.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &A, &C, ERG, 100, at(1000));
+        add(&mut m, &A, &C, TOKEN, 50, at(1001));
+        exchange(&mut m, at(1995)).unwrap();
+        add(&mut m, &A, &C, TOKEN, 50, at(3000));
+        assert_eq!(phase_two(&mut m), (0, 1), "the staged exchange is cancelled, not applied");
+        assert_eq!(state(&m, &A, &C, TOKEN), (50, at(3000)));
+        assert_eq!(state(&m, &A, &C, ERG), (70, at(1995)), "the from-edge decrease stays applied, as for every cancellation");
+        let records = m.list_pending_exchanges(None, None).unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(
+            matches!(&records[0].1.status, PendingExchangeStatus::Cancelled { reason } if reason.contains("would move the edge's timestamp back")),
+            "{:?}",
+            records[0].1.status
+        );
+    }
+
+    #[test]
+    fn a_staged_exchange_still_applies_when_its_to_edge_was_written_at_the_same_total_before_its_timestamp() {
+        // Control: the same note at t1 < t' < t2 leaves the to-edge's total unchanged and earlier than the exchange,
+        // so the exchange applies and the edge's timestamp keeps increasing (t1, t', t2).
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &A, &C, ERG, 100, at(1000));
+        add(&mut m, &A, &C, TOKEN, 50, at(1001));
+        exchange(&mut m, at(1995)).unwrap();
+        add(&mut m, &A, &C, TOKEN, 50, at(1500));
+        assert_eq!(phase_two(&mut m), (1, 0));
+        assert_eq!(state(&m, &A, &C, TOKEN), (90, at(1995)));
+        assert!(m.list_pending_exchanges(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_write_path_refuses_a_timestamp_not_later_than_the_edge_s_stored_one() {
+        // Each path at the edge's stored timestamp and before it: PastTimestamp, and nothing changes. (Phase 2 of
+        // an exchange: the two tests above.)
+        // POST /notes, an ordinary note, and update_note.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &A, &B, ERG, 10, at(2000));
+        let digest = m.get_state().avl_root_digest;
+        for ts in [at(2000), at(1000)] {
+            past(m.add_note(&pk(&A), &note(&A, &B, ERG, 20, ts), None), "ordinary note");
+            past(m.update_note(&pk(&A), &note(&A, &B, ERG, 20, ts)), "update_note");
+        }
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        // POST /notes, a bound note: the edge was created by a bound note at t.
+        let t = at(2997);
+        let first = PriorAck { signature: ack(&A, &A, &C, (0, 0), t), prior_total: None, prior_timestamp: None };
+        m.add_note(&pk(&A), &note(&A, &C, ERG, 10, t), Some(first)).unwrap();
+        let digest_c = m.get_state().avl_root_digest;
+        for ts in [t, at(1997)] {
+            let prior = PriorAck { signature: ack(&A, &A, &C, (10, t), ts), prior_total: None, prior_timestamp: None };
+            past(m.add_note(&pk(&A), &note(&A, &C, ERG, 20, ts), Some(prior)), "bound note");
+        }
+        assert_eq!(m.get_state().avl_root_digest, digest_c);
+        assert_ne!(digest, digest_c);
+        assert_eq!((state(&m, &A, &B, ERG), state(&m, &A, &C, ERG)), ((10, at(2000)), (10, t)));
+
+        // An exchange: the from-edge, then the to-edge, later than the exchange; then both edges at its timestamp
+        // (after an exchange at that timestamp applied).
+        for (erg_ts, token_ts) in [(at(3000), at(1001)), (at(1000), at(3000))] {
+            let mut m = TrackerStateManager::new_with_temp_storage();
+            add(&mut m, &A, &C, ERG, 100, erg_ts);
+            add(&mut m, &A, &C, TOKEN, 50, token_ts);
+            let digest = m.get_state().avl_root_digest;
+            past(exchange(&mut m, at(2995)), "exchange");
+            assert_eq!(m.get_state().avl_root_digest, digest);
+            assert!(m.list_pending_exchanges(None, None).unwrap().is_empty());
+        }
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &A, &C, ERG, 100, at(1000));
+        add(&mut m, &A, &C, TOKEN, 50, at(1001));
+        exchange(&mut m, at(1995)).unwrap();
+        assert_eq!(phase_two(&mut m), (1, 0));
+        let digest = m.get_state().avl_root_digest;
+        past(exchange(&mut m, at(1995)), "exchange at the edges' timestamp");
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        assert_eq!((state(&m, &A, &C, ERG), state(&m, &A, &C, TOKEN)), ((70, at(1995)), (90, at(1995))));
+
+        // A debt transfer: both edges at its timestamp (after a transfer at that timestamp applied) and before it;
+        // then the to-edge later than the transfer.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &A, &B, ERG, 100, at(1000));
+        let t = at(2999);
+        transfer(&mut m, &B, &C, (100, at(1000)), (0, 0), 30, t).unwrap();
+        add(&mut m, &A, &D, ERG, 5, at(4000));
+        let digest = m.get_state().avl_root_digest;
+        for ts in [t, at(1999)] {
+            past(transfer(&mut m, &B, &C, (70, t), (30, t), 10, ts), "transfer");
+        }
+        past(transfer(&mut m, &B, &D, (70, t), (5, at(4000)), 10, at(3999)), "transfer to a later edge");
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        assert_eq!((state(&m, &A, &B, ERG), state(&m, &A, &C, ERG)), ((70, t), (30, t)));
+
+        // A set-off: both edges at its timestamp (after a set-off at that timestamp applied), both before it, and
+        // one edge at its stored timestamp next to a fresh one.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        add(&mut m, &A, &B, ERG, 10, at(1000));
+        add(&mut m, &B, &A, ERG, 10, at(1001));
+        let s = at(1998);
+        m.set_off(&ERG, &[edge(&A, &B, 10, 5, s), edge(&B, &A, 10, 5, s)]).unwrap();
+        let digest = m.get_state().avl_root_digest;
+        for (ab, ba) in [(s, s), (at(998), at(998)), (at(2998), s)] {
+            let r = m.set_off(&ERG, &[edge(&A, &B, 5, 2, ab), edge(&B, &A, 5, 2, ba)]).map(|_| ());
+            past(r, "set-off");
+        }
+        assert_eq!(m.get_state().avl_root_digest, digest);
+        assert_eq!((state(&m, &A, &B, ERG), state(&m, &B, &A, ERG)), ((5, s), (5, s)));
+    }
+
+    #[test]
+    fn the_write_guard_refuses_a_timestamp_not_later_than_the_stored_one() {
+        // The check every write path makes right before its storage commit.
+        let mut m = TrackerStateManager::new_with_temp_storage();
+        // An absent edge takes any timestamp, 0 included.
+        for ts in [0, 1, at(1000)] {
+            assert!(m.require_later_timestamp(&pk(&A), &note(&A, &B, ERG, 5, ts)).is_ok(), "{}", ts);
+        }
+        add(&mut m, &A, &B, ERG, 10, at(2000));
+        for ts in [0, at(1999), at(2000)] {
+            past(m.require_later_timestamp(&pk(&A), &note(&A, &B, ERG, 20, ts)), "guard");
+        }
+        assert!(m.require_later_timestamp(&pk(&A), &note(&A, &B, ERG, 20, at(2001))).is_ok());
+        // Another denomination or another creditor is another edge.
+        assert!(m.require_later_timestamp(&pk(&A), &note(&A, &B, TOKEN, 20, at(1000))).is_ok());
+        assert!(m.require_later_timestamp(&pk(&A), &note(&A, &C, ERG, 20, at(1000))).is_ok());
+    }
+}

@@ -1207,6 +1207,39 @@ impl TrackerStateManager {
         Ok(())
     }
 
+    /// The last check before a write gives the (issuer, recipient,
+    /// denomination) edge of `note` a new state: `note.timestamp` must be later
+    /// than the edge's stored timestamp, else `PastTimestamp` and nothing is
+    /// written. An edge's timestamp then strictly increases with every write,
+    /// so each state (total, timestamp) of an edge occurs once, which the prior
+    /// acknowledgments (tracker v3.2) rely on: one applies at most once. Every
+    /// path that writes a new state calls it right before its storage commit:
+    /// `add_note`, `update_note`, `exchange_debt` (the from-edge),
+    /// `apply_staged_exchange` (the to-edge), `apply_transfer` (both edges) and
+    /// `set_off` (every edge). Each checks the timestamp earlier on its own
+    /// (`decide_staged_exchange` cancels an exchange whose to-edge moved past
+    /// it); this guard holds even where such a check is missed.
+    /// `record_redemption` is not a new state (it keeps the stored total,
+    /// timestamp and signature and raises only the redeemed amount), so it does
+    /// not call it.
+    fn require_later_timestamp(
+        &self,
+        issuer_pubkey: &PubKey,
+        note: &IouNote,
+    ) -> Result<(), NoteError> {
+        match self.get_note_optional(issuer_pubkey, &note.recipient_pubkey, &note.denomination)? {
+            Some(stored) if note.timestamp <= stored.timestamp => {
+                tracing::error!(
+                    "Write refused: the new timestamp {} is not later than the edge's stored timestamp {}",
+                    note.timestamp,
+                    stored.timestamp
+                );
+                Err(NoteError::PastTimestamp)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Add a new note to the tracker state
     /// Updates the AVL tree with hash(issuer||receiver) -> totalDebt mapping
     ///
@@ -1321,6 +1354,7 @@ impl TrackerStateManager {
         // update_state rebuild the tree from storage before the next commit.
         // (The reverse order committed debt the tracker had no record of —
         // issue #20 follow-up.)
+        self.require_later_timestamp(issuer_pubkey, &note_to_store)?;
         self.storage.store_note(issuer_pubkey, &note_to_store)?;
         if let Err(e) = self.avl_state.update(key_bytes.clone(), value_bytes) {
             self.tree_dirty = true;
@@ -1967,6 +2001,7 @@ impl TrackerStateManager {
         // leaves nothing changed; a tree failure leaves storage safely ahead
         // and sets the dirty flag so the tree is rebuilt before the next
         // digest update.
+        self.require_later_timestamp(issuer_pubkey, &note_to_store)?;
         self.storage.store_note(issuer_pubkey, &note_to_store)?;
         if let Err(e) = self.avl_state.update(key_bytes, value_bytes) {
             self.tree_dirty = true;
@@ -2178,6 +2213,7 @@ impl TrackerStateManager {
         // Not written back while the stored confirmation records failed to load
         // (see `confirmation_write_back_allowed`): the stored record stays.
         let write_back = self.confirmation_write_back_allowed();
+        self.require_later_timestamp(issuer_pubkey, &from_note_new)?;
         self.storage.commit_exchange_staged(
             issuer_pubkey,
             &staged,
@@ -2751,6 +2787,8 @@ impl TrackerStateManager {
         let from_confirmation =
             self.recomputed_confirmation(&from_key.key_hash, totals.from_new_total);
         let to_confirmation = self.recomputed_confirmation(&to_key.key_hash, totals.to_new_total);
+        self.require_later_timestamp(issuer_pubkey, &from_note)?;
+        self.require_later_timestamp(issuer_pubkey, &to_note)?;
         self.storage.commit_note_batch(
             &[
                 (*issuer_pubkey, from_note, from_confirmation.clone()),
@@ -3010,6 +3048,9 @@ impl TrackerStateManager {
             });
         }
 
+        for (issuer_pubkey, note, _) in &entries {
+            self.require_later_timestamp(issuer_pubkey, note)?;
+        }
         self.storage.commit_note_batch(&entries, &keys)?;
         for (key, (_, _, confirmation)) in keys.iter().zip(entries.into_iter()) {
             self.confirmations.insert(*key, confirmation);
@@ -3066,8 +3107,12 @@ impl TrackerStateManager {
     ///    advance both sides in lockstep, so a mismatch means an unreported
     ///    on-chain redemption drained the reserve during staging.
     /// 4. The to-edge base is unchanged, so applying the staged note cannot
-    ///    lower an edge that grew meanwhile. The applied note carries the
-    ///    to-edge's current `amount_redeemed` forward.
+    ///    lower an edge that grew meanwhile, and the to-edge's stored timestamp
+    ///    is still earlier than the staged note's, so applying it cannot move
+    ///    the edge's timestamp back (an edge's timestamp strictly increases with
+    ///    every write; a note written on the to-edge at the same total while the
+    ///    exchange was staged, at a later timestamp, cancels it). The applied
+    ///    note carries the to-edge's current `amount_redeemed` forward.
     /// 5. The staged to-note's signature re-verifies.
     ///
     /// Otherwise the exchange is cancelled with the reason persisted on the
@@ -3178,6 +3223,18 @@ impl TrackerStateManager {
                 "the to-edge changed while the exchange was staged (a new note was issued on it); the staged increase no longer matches the agreed state".to_string(),
             ));
         }
+        // The staged note must still be later than the to-edge's stored note:
+        // a note written on the to-edge at the same total, at a timestamp at or
+        // after the exchange's, would otherwise be followed by an earlier
+        // timestamp, and the edge's state (total, timestamp) could recur.
+        if let Some(note) = &current_to {
+            if note.timestamp >= record.to_note.timestamp {
+                return Ok(StagedExchangeDecision::Cancel(format!(
+                    "the to-edge was written at timestamp {} while the exchange was staged, not earlier than the exchange's timestamp {}; applying the staged increase would move the edge's timestamp back",
+                    note.timestamp, record.to_note.timestamp
+                )));
+            }
+        }
 
         // 5. Re-verify the staged to-note's issuer signature.
         let msg_to = schnorr::signing_message(
@@ -3232,6 +3289,7 @@ impl TrackerStateManager {
         // Not written back while the stored confirmation records failed to load
         // (see `confirmation_write_back_allowed`): the stored record stays.
         let write_back = self.confirmation_write_back_allowed();
+        self.require_later_timestamp(&record.issuer_pubkey, &to_note)?;
         self.storage.commit_exchange_apply(
             &record.issuer_pubkey,
             &to_note,
