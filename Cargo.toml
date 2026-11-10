@@ -18,9 +18,12 @@ thiserror = "1.0"
 reqwest = "0.11"
 
 [patch.crates-io]
-ergo-lib = { path = "/home/kushti/ergo/sigma-rust/ergo-lib" }
-ergotree-ir = { path = "/home/kushti/ergo/sigma-rust/ergotree-ir" }
-ergotree-interpreter = { path = "/home/kushti/ergo/sigma-rust/ergotree-interpreter" }
+# ergo-lib 0.29.0 is not on crates.io yet. Pin the public sigma-rust develop
+# revision the workspace is tested against, so a clean checkout builds and the
+# tracker binary is reproducible. Bump the rev deliberately, never use a branch.
+ergo-lib = { git = "https://github.com/ergoplatform/sigma-rust", rev = "8120eddd0d066c8e566e9c30507a359edad62200" }
+ergotree-ir = { git = "https://github.com/ergoplatform/sigma-rust", rev = "8120eddd0d066c8e566e9c30507a359edad62200" }
+ergotree-interpreter = { git = "https://github.com/ergoplatform/sigma-rust", rev = "8120eddd0d066c8e566e9c30507a359edad62200" }
 # Vendored with JVM-compatible insert semantics (treats Operation::Insert as
 # insert-or-update) so the Basis reserve contract can be reduced locally for
 # sequential redemptions.

@@ -6,6 +6,7 @@ mod crypto;
 mod demo_keys;
 mod interactive;
 mod output;
+mod verify;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -117,7 +118,7 @@ async fn run(cli: Cli) -> Result<()> {
             commands::reserve::handle_reserve_command(cmd, &account_manager, &client, json).await
         }
         Commands::Transaction { cmd } => {
-            commands::transaction::handle_transaction_command(cmd, &client, &account_manager, json)
+            commands::transaction::handle_transaction_command(cmd, &client, json)
                 .await
         }
         Commands::Test { cmd } => {

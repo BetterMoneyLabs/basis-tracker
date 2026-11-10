@@ -48,9 +48,9 @@ tls_key_path = "server.key"
 mode = "signature"          # RECOMMENDED. The built-in default is "none".
 # Shared secret used only when mode = "api_key".
 # api_key = "change-me"
-# Optional separate key for Admin-only routes (/reserves/create,
-# /acceptance/policy, /redeem/complete). When set, api_key above grants only
-# Write. When unset, api_key keeps full Admin and a startup warning is logged.
+# Separate key for the Admin-only route (/redeem/complete). Required when
+# mode = "api_key": api_key above then grants only Write. The server refuses to
+# start without it, with the "change-me-admin" placeholder, or equal to api_key.
 # admin_api_key = "..."
 
 # Authorized public keys used when mode = "signature".
@@ -147,8 +147,8 @@ Every authenticated request receives an effective role. Routes require the follo
 | `/tracker/signature` | `POST` | `Write` |
 | `/notes/state` | `POST` | `Read` |
 | `/acceptance/check` | `POST` | `Read` |
-| `/acceptance/policy` | `POST` | `Admin` |
-| `/reserves/create` | `POST` | `Admin` |
+| `/acceptance/policy` | `POST` | `Write` (the policy is signed by its recipient) |
+| `/reserves/create` | `POST` | `Write` (payload only; the owner submits it) |
 | unknown routes/verbs | any | `Admin` |
 
 Role hierarchy: `Admin` > `Write` > `Read`. A higher role can access endpoints requiring a lower role.

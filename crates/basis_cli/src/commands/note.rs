@@ -662,7 +662,6 @@ pub async fn redeem_note(
         // broadcast so the reserve tree is ready for the next redemption.
         let tx_id = execute_local_redemption(
             client,
-            account_manager,
             issuer,
             &recipient_pubkey,
             amount,

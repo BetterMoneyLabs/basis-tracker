@@ -221,7 +221,6 @@ pub enum GenerateRedemptionResult {
 pub async fn handle_transaction_command(
     cmd: TransactionCommands,
     client: &TrackerClient,
-    account_manager: &crate::account::AccountManager,
     json: bool,
 ) -> Result<()> {
     match cmd {
@@ -240,7 +239,6 @@ pub async fn handle_transaction_command(
         } => {
             let result = generate_redemption_transaction(
                 client,
-                account_manager,
                 &issuer_pubkey,
                 &recipient_pubkey,
                 amount,
@@ -268,7 +266,6 @@ pub async fn handle_transaction_command(
         } => {
             let result = redeem_tracker_assisted(
                 client,
-                account_manager,
                 &issuer_pubkey,
                 &recipient_pubkey,
                 amount,
@@ -727,6 +724,15 @@ async fn build_redemption_tx(
     let reserve_box_binary = client
         .get_box_binary(&reserve_box_id, NODE_URL, Some(API_KEY))
         .await?;
+    // The reserve box id came from the tracker, and input 0 is signed with the recipient's key:
+    // it must be the issuer's reserve under the compiled contract, not e.g. a recipient P2PK box
+    // that the "reserve output" would then drain.
+    let reserve_box = ErgoBox::sigma_parse_bytes(&hex::decode(&reserve_box_binary)?)
+        .map_err(|e| anyhow::anyhow!("failed to parse reserve box {}: {:?}", reserve_box_id, e))?;
+    let issuer_pk: [u8; 33] = hex::decode(issuer_pubkey)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Issuer public key must be 33 bytes"))?;
+    crate::verify::verify_reserve_input(&reserve_box, &issuer_pk, denomination)?;
     let tracker_box_binary = client
         .get_box_binary(&tracker_box_id, NODE_URL, Some(API_KEY))
         .await?;
@@ -868,7 +874,6 @@ async fn build_redemption_tx(
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_local_redemption(
     client: &TrackerClient,
-    account_manager: &crate::account::AccountManager,
     issuer_pubkey: &str,
     recipient_pubkey: &str,
     amount: u64,
@@ -910,9 +915,9 @@ pub async fn execute_local_redemption(
         }
     }
 
-    // The reserve signature must be freshly generated for the current redemption because the
-    // contract requires `timestamp > storedTimestamp`. After a prior redemption the note's
-    // timestamp is refreshed, so the signature stored on the note is stale.
+    // The issuer signature (context var #2) covers the tracker's committed total debt and the
+    // note's timestamp: the issuer signs it when it is the current account, otherwise the
+    // stored note's signature is reused if it covers exactly that message.
     progress!("🔍 Fetching tracker proof for total debt...");
     let tracker_proof = client
         .get_tracker_proof(
@@ -923,10 +928,7 @@ pub async fn execute_local_redemption(
         .await?;
     let total_debt = tracker_proof.total_debt;
 
-    progress!("🔑 Signing redemption message with the current issuer account...");
-    let current = account_manager
-        .get_current()
-        .ok_or_else(|| anyhow::anyhow!("No current account selected; issuer account is required to sign the redemption message"))?;
+    progress!("🔑 Resolving the issuer's redemption signature...");
     let issuer_pk: [u8; 33] = hex::decode(issuer_pubkey)
         .map_err(|e| anyhow::anyhow!("Invalid issuer public key: {}", e))?
         .try_into()
@@ -935,13 +937,6 @@ pub async fn execute_local_redemption(
         .map_err(|e| anyhow::anyhow!("Invalid recipient public key: {}", e))?
         .try_into()
         .map_err(|_| anyhow::anyhow!("Recipient public key must be 33 bytes"))?;
-    if current.get_pubkey_hex() != issuer_pubkey {
-        return Err(anyhow::anyhow!(
-            "Current account {} is not the issuer {}; only the issuer can sign the redemption message",
-            current.get_pubkey_hex(),
-            issuer_pubkey
-        ));
-    }
     let tracker_nft_id: [u8; 32] = hex::decode(&note.tracker_nft_id)
         .map_err(|e| anyhow::anyhow!("Invalid tracker NFT ID on note: {}", e))?
         .try_into()
@@ -954,7 +949,11 @@ pub async fn execute_local_redemption(
         note.timestamp,
         &tracker_nft_id,
     );
-    let issuer_signature = current.sign_message(&message)?;
+    let issuer_signature = crate::verify::redemption_issuer_signature(
+        &issuer_pk,
+        &note.signature,
+        &message,
+    )?;
     let issuer_signature_hex = hex::encode(issuer_signature);
 
     let build = build_redemption_tx(
@@ -1035,7 +1034,6 @@ pub async fn execute_local_redemption(
 #[allow(clippy::too_many_arguments)]
 pub async fn generate_redemption_transaction(
     client: &TrackerClient,
-    account_manager: &crate::account::AccountManager,
     issuer_pubkey: &str,
     recipient_pubkey: &str,
     amount: u64,
@@ -1051,7 +1049,6 @@ pub async fn generate_redemption_transaction(
     if local_sign {
         let tx_id = execute_local_redemption(
             client,
-            account_manager,
             issuer_pubkey,
             recipient_pubkey,
             amount,
@@ -1109,11 +1106,8 @@ pub async fn generate_redemption_transaction(
         ));
     }
 
-    // Get issuer signature from CLI wallet
-    progress!("🔑 Signing redemption with issuer key...");
-    let current_account = account_manager
-        .get_current()
-        .ok_or_else(|| anyhow::anyhow!("No current account selected"))?;
+    // Issuer signature: the stored note's, verified locally.
+    progress!("🔑 Resolving the issuer's redemption signature...");
 
     let issuer_pk: [u8; 33] = hex::decode(issuer_pubkey)
         .map_err(|e| anyhow::anyhow!("Invalid issuer public key: {}", e))?
@@ -1136,7 +1130,11 @@ pub async fn generate_redemption_transaction(
         note.timestamp,
         &tracker_nft_id,
     );
-    let issuer_signature = current_account.sign_message(&message)?;
+    let issuer_signature = crate::verify::redemption_issuer_signature(
+        &issuer_pk,
+        &note.signature,
+        &message,
+    )?;
     let issuer_signature_hex = hex::encode(issuer_signature);
 
     let build = build_redemption_tx(
@@ -1241,11 +1239,11 @@ pub async fn generate_redemption_transaction(
 }
 
 /// Tracker-assisted redemption driver (mirrors the TUI flow). The tracker builds the unsigned
-/// transaction and signs the fee input(s); the CLI signs the issuer message with the current
-/// account and adds the reserve input's proveDlog(recipient) proof, then submits via the tracker.
+/// transaction and signs the fee input(s); the CLI supplies the issuer signature (the stored
+/// note's, verified locally), checks the build, and adds the reserve input's proveDlog(recipient)
+/// proof, then submits via the tracker.
 pub async fn redeem_tracker_assisted(
     client: &TrackerClient,
-    account_manager: &crate::account::AccountManager,
     issuer_pubkey: &str,
     recipient_pubkey: &str,
     amount: u64,
@@ -1299,17 +1297,7 @@ pub async fn redeem_tracker_assisted(
     let timestamp = note.timestamp;
     progress!("✅ total_debt={} timestamp={}", total_debt, timestamp);
 
-    // Issuer signs the redemption message with the current account.
-    let current = account_manager
-        .get_current()
-        .ok_or_else(|| anyhow::anyhow!("no current account (should be the issuer)"))?;
-    if current.get_pubkey_hex() != issuer_pubkey {
-        progress!(
-            "⚠️  current account {}... != issuer {}...; signature may be rejected",
-            &current.get_pubkey_hex()[..16],
-            &issuer_pubkey[..16]
-        );
-    }
+    // Issuer signature: the stored note's, verified locally.
     let tracker_nft_id: [u8; 32] = hex::decode(&note.tracker_nft_id)
         .map_err(|e| anyhow::anyhow!("Invalid tracker NFT ID on note: {}", e))?
         .try_into()
@@ -1322,7 +1310,11 @@ pub async fn redeem_tracker_assisted(
         timestamp,
         &tracker_nft_id,
     );
-    let issuer_sig = current.sign_message(&message)?;
+    let issuer_sig = crate::verify::redemption_issuer_signature(
+        &issuer_pk,
+        &note.signature,
+        &message,
+    )?;
     progress!("✅ issuer signature ({} bytes)", issuer_sig.len());
 
     // Tracker builds the unsigned tx and signs the fee input(s).
@@ -1379,6 +1371,19 @@ pub async fn redeem_tracker_assisted(
         .to_vec()
         .try_into()
         .map_err(|_| anyhow::anyhow!("headers array"))?;
+
+    // Nothing the tracker built is signed with the recipient's key until it is checked to be
+    // this note's redemption.
+    crate::verify::verify_redemption_tx(
+        &unsigned,
+        &input_boxes,
+        &data_boxes,
+        &issuer_pk,
+        &recipient_pk,
+        &denom,
+        amount,
+    )
+    .map_err(|e| anyhow::anyhow!("refusing to sign the tracker's redemption: {}", e))?;
 
     // Recipient (receiver) secret for the reserve input's proveDlog(recipient).
     let recipient_address = pubkey_to_address(recipient_pubkey)?;
