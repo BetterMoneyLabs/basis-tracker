@@ -29,6 +29,10 @@ use crate::api::{CreateReserveRequest, ReserveCreationResponse};
 const EMPTY_RESERVE_TREE_R5: &str =
     "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000";
 
+/// Highest transaction fee a reserve-creation payload may ask the owner's wallet to pay
+/// (0.1 ERG, 100 times the tracker's default fee).
+pub const MAX_RESERVE_CREATION_FEE: u64 = 100_000_000;
+
 /// Check a `POST /reserves/create` payload before the owner's wallet is asked to fund it.
 ///
 /// The owner's node pays exactly what the payload says, so a dishonest tracker could otherwise
@@ -38,6 +42,11 @@ const EMPTY_RESERVE_TREE_R5: &str =
 /// followed by the collateral token for a token reserve, R4 = owner key, R5 = empty reserve tree,
 /// R6 = a 32-byte tracker NFT id (`expected_tracker_nft_id` when the caller knows it) and R7
 /// absent or Long 0.
+///
+/// [`crate::api::submit_reserve_to_node`] also sends the pre-deployment box and the change of a
+/// pinned-input deployment (ERG remainder plus leftover tokens) to `change_address` and pays
+/// `fee`, so the change address must be the owner's own P2PK address and the fee at most
+/// [`MAX_RESERVE_CREATION_FEE`].
 pub fn verify_reserve_payload(
     request: &CreateReserveRequest,
     payload: &ReserveCreationResponse,
@@ -130,6 +139,21 @@ pub fn verify_reserve_payload(
     if registers.contains_key("R7") && register("R7")? != Constant::from(0i64) {
         return Err(anyhow!(
             "R7 must be absent or 0 for a new reserve (no pending refund)"
+        ));
+    }
+
+    if address_tree_bytes(&payload.change_address)? != tree_bytes(&p2pk_tree(&owner_pk)?)? {
+        return Err(anyhow!(
+            "change address {} is not the P2PK address of the owner key {}",
+            payload.change_address,
+            request.owner_pubkey
+        ));
+    }
+    if payload.fee > MAX_RESERVE_CREATION_FEE {
+        return Err(anyhow!(
+            "fee is {} nanoERG, more than the {} nanoERG this client pays for a reserve creation",
+            payload.fee,
+            MAX_RESERVE_CREATION_FEE
         ));
     }
     Ok(())
@@ -529,6 +553,25 @@ mod tests {
         let mut payload = honest_payload(&request);
         payload.requests[0].assets[1].amount += 1;
         assert!(reserve_err(&request, &payload).contains("assets"));
+    }
+
+    /// The pinned-input deployment pays its change (ERG remainder and leftover tokens) to
+    /// `change_address` and burns `fee`, so neither may be the tracker's choice.
+    #[test]
+    fn reserve_payload_rejects_foreign_change_address_or_excessive_fee() {
+        let request = reserve_request(true);
+        let mut payload = honest_payload(&request);
+        payload.change_address = basis_offchain::ergo_tx::pubkey_to_address(TRACKER_PK).unwrap();
+        assert!(reserve_err(&request, &payload).contains("change address"));
+        // A script address is not the owner's P2PK address either.
+        payload.change_address = get_basis_reserve_contract_p2s().unwrap();
+        assert!(reserve_err(&request, &payload).contains("change address"));
+
+        let mut payload = honest_payload(&request);
+        payload.fee = MAX_RESERVE_CREATION_FEE;
+        verify_reserve_payload(&request, &payload, None).unwrap();
+        payload.fee = MAX_RESERVE_CREATION_FEE + 1;
+        assert!(reserve_err(&request, &payload).contains("fee"));
     }
 
     #[test]
