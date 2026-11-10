@@ -211,6 +211,7 @@ pub mod redact {
             f.debug_struct("PriorAck")
                 .field("signature", &Sig(&self.0.signature))
                 .field("prior_total", &self.0.prior_total)
+                .field("prior_timestamp", &self.0.prior_timestamp)
                 .finish()
         }
     }
@@ -367,12 +368,13 @@ pub enum TrackerCommand {
         acceptance_check: Option<ExchangeAcceptanceCheck>,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
     },
-    /// Debt transfer (triad novation, specs/spec.md "Debt Transfer"), version 3:
+    /// Debt transfer (triad novation, specs/spec.md "Debt Transfer"), version 4:
     /// move `amount` of the issuer's debt from the edge to `from_recipient` to
     /// the edge to `to_recipient`, in one denomination. Pure-credit trackers
     /// only (the store refuses on a tracker with on-chain state). The store
     /// verifies all seven signatures, including both creditors' prior
-    /// acknowledgments, before mutating; `acceptance_check` (the new creditor's
+    /// acknowledgments (`basis/prior-ack/1` of each edge's stored total and
+    /// timestamp at the transfer's timestamp), before mutating; `acceptance_check` (the new creditor's
     /// policy) runs after them, atomically with the mutation, as for exchanges.
     TransferNotes {
         issuer_pubkey: basis_store::PubKey,
@@ -388,6 +390,13 @@ pub enum TrackerCommand {
         /// Optional and diagnostic: the to-edge total the new creditor
         /// acknowledged (0 for a new edge); when present it must equal the stored total.
         to_prior_total: Option<u64>,
+        /// Optional and diagnostic: the from-edge timestamp the old creditor
+        /// acknowledged; when present it must equal the stored note's timestamp.
+        from_prior_timestamp: Option<u64>,
+        /// Optional and diagnostic: the to-edge timestamp the new creditor
+        /// acknowledged (0 for a new edge); when present it must equal the stored
+        /// note's timestamp.
+        to_prior_timestamp: Option<u64>,
         acceptance_check: Option<ExchangeAcceptanceCheck>,
         response_tx: tokio::sync::oneshot::Sender<
             Result<basis_store::TransferTotals, basis_store::NoteError>,
@@ -636,6 +645,8 @@ impl std::fmt::Debug for TrackerCommand {
                 signatures,
                 from_prior_total,
                 to_prior_total,
+                from_prior_timestamp,
+                to_prior_timestamp,
                 acceptance_check,
                 ..
             } => f
@@ -649,6 +660,8 @@ impl std::fmt::Debug for TrackerCommand {
                 .field("signatures", &redact::TransferSigs(signatures))
                 .field("from_prior_total", from_prior_total)
                 .field("to_prior_total", to_prior_total)
+                .field("from_prior_timestamp", from_prior_timestamp)
+                .field("to_prior_timestamp", to_prior_timestamp)
                 .field("acceptance_check", acceptance_check)
                 .finish_non_exhaustive(),
             TrackerCommand::SetOff {

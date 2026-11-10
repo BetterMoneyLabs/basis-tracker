@@ -107,9 +107,17 @@ fn setoff_body(ts: u64, edges: Vec<Value>) -> Value {
     json!({"denomination": "erg", "timestamp": ts, "edges": edges})
 }
 
-/// The POST /notes/transfer body moving `amount` of A's ERG debt from A->old (stored total `from_before`) to
-/// A->new (stored total `to_before`, 0 when absent) at `ts`, with all seven signatures.
-fn transfer_body(old: &[u8; 32], new: &[u8; 32], from_before: u64, to_before: u64, amount: u64, ts: u64) -> Value {
+/// `signer`'s prior acknowledgment (hex) of the ERG edge issuer -> recipient in the state `prior` (total,
+/// timestamp; (0, 0) for an absent edge) for the operation at `ts` (tracker v3.2, `basis/prior-ack/1`).
+fn ack(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), ts: u64) -> String {
+    let msg = basis_store::schnorr::prior_ack_message(&pk(issuer), &pk(recipient), &DenomKey::Erg, prior.0, prior.1, ts, &nft());
+    hex::encode(basis_store::schnorr::schnorr_sign(&msg, signer, &pk(signer)).unwrap())
+}
+
+/// The POST /notes/transfer body (version 4) moving `amount` of A's ERG debt from A->old (stored state `from`:
+/// total, timestamp) to A->new (stored state `to`, (0, 0) when absent) at `ts`, with all seven signatures.
+fn transfer_body(old: &[u8; 32], new: &[u8; 32], from: (u64, u64), to: (u64, u64), amount: u64, ts: u64) -> Value {
+    let ((from_before, from_ts), (to_before, to_ts)) = (from, to);
     let (from_total, to_total) = (from_before.saturating_sub(amount), to_before + amount);
     json!({
         "issuer_pubkey": pk_hex(&A),
@@ -120,10 +128,10 @@ fn transfer_body(old: &[u8; 32], new: &[u8; 32], from_before: u64, to_before: u6
         "timestamp": ts,
         "issuer_from_signature": sign(&A, &A, old, from_total, ts),
         "issuer_to_signature": sign(&A, &A, new, to_total, ts),
-        "from_recipient_prior_signature": sign(old, &A, old, from_before, ts),
+        "from_recipient_prior_signature": ack(old, &A, old, (from_before, from_ts), ts),
         "from_recipient_signature": sign(old, &A, old, from_total, ts),
         "from_recipient_to_signature": sign(old, &A, new, to_total, ts),
-        "to_recipient_prior_signature": sign(new, &A, new, to_before, ts),
+        "to_recipient_prior_signature": ack(new, &A, new, (to_before, to_ts), ts),
         "to_recipient_signature": sign(new, &A, new, to_total, ts),
     })
 }
@@ -170,6 +178,8 @@ async fn tracker() -> Tracker {
                     signatures,
                     from_prior_total,
                     to_prior_total,
+                    from_prior_timestamp,
+                    to_prior_timestamp,
                     acceptance_check,
                     response_tx,
                 } => {
@@ -183,6 +193,8 @@ async fn tracker() -> Tracker {
                         &signatures,
                         from_prior_total,
                         to_prior_total,
+                        from_prior_timestamp,
+                        to_prior_timestamp,
                         acceptance_check.map(|check| check.0),
                     ));
                 }
@@ -627,7 +639,7 @@ async fn set_off_and_transfer_signatures_do_not_cross_routes() {
     assert_created(&t.note(&note_body(&B, &A, 60, at_residue(base, 1))).await);
     let tt = at_residue(base + 2_000, 999);
     let s = tt + 999; // ends in 998 ms, after T
-    let transfer = transfer_body(&B, &C, 100, 0, 60, tt);
+    let transfer = transfer_body(&B, &C, (100, at_residue(base, 0)), (0, 0), 60, tt);
     let setoff = setoff_body(s, vec![shared(&A, &B, 100, 30, s), shared(&B, &A, 60, 30, s)]);
     let edges = [(A, B), (B, A), (A, C)];
 
@@ -646,7 +658,7 @@ async fn set_off_and_transfer_signatures_do_not_cross_routes() {
     }
     // The set-off's A->B signatures as a transfer's from-edge signatures at S (a transfer of 30), every other slot
     // validly signed at S.
-    let mut at_s = transfer_body(&B, &C, 100, 0, 30, s);
+    let mut at_s = transfer_body(&B, &C, (100, at_residue(base, 0)), (0, 0), 30, s);
     at_s["issuer_from_signature"] = setoff["edges"][0]["issuer_signature"].clone();
     at_s["from_recipient_signature"] = setoff["edges"][0]["recipient_signature"].clone();
     let r = t.transfer(&at_s).await;
@@ -678,8 +690,9 @@ async fn every_lowered_edge_is_bound_only_after_a_set_off_with_per_edge_timestam
         assert_refused(&r, StatusCode::BAD_REQUEST, Some("bound_note_required"));
     }
     assert_eq!(t.triangle_totals().await, (Some(5), Some(2), Some(0)));
-    for (issuer, recipient, prior, total) in [(&A, &B, 5, 6), (&B, &C, 2, 5), (&C, &A, 0, 1)] {
-        let bound = with(&note_body(issuer, recipient, total, t2 + 999), "prior_signature", json!(sign(issuer, issuer, recipient, prior, t2 + 999)));
+    // Each bound note acknowledges its edge's state after the set-off: its new total at its own timestamp.
+    for (issuer, recipient, prior, total) in [(&A, &B, (5, t1), 6), (&B, &C, (2, t2), 5), (&C, &A, (0, t1), 1)] {
+        let bound = with(&note_body(issuer, recipient, total, t2 + 999), "prior_signature", json!(ack(issuer, issuer, recipient, prior, t2 + 999)));
         assert_created(&t.note(&bound).await);
     }
     assert_eq!(t.triangle_totals().await, (Some(6), Some(5), Some(1)));

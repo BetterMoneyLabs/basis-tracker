@@ -353,6 +353,8 @@ mod redemption_api_tests {
                         signatures,
                         from_prior_total,
                         to_prior_total,
+                        from_prior_timestamp,
+                        to_prior_timestamp,
                         acceptance_check,
                         response_tx,
                     } => {
@@ -366,6 +368,8 @@ mod redemption_api_tests {
                             &signatures,
                             from_prior_total,
                             to_prior_total,
+                            from_prior_timestamp,
+                            to_prior_timestamp,
                             acceptance_check.map(|check| check.0),
                         );
                         let _ = response_tx.send(result);

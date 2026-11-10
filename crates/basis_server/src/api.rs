@@ -199,8 +199,14 @@ fn novations_disabled_response<T>(reason: &str) -> (StatusCode, Json<ApiResponse
 }
 
 const BOUND_NOTE_REQUIRED_MESSAGE: &str = "this edge was changed by a debt transfer or set-off and is bound-only: a new note on it must be a bound note (a timestamp ending in 997 ms, with prior_signature)";
-const INVALID_PRIOR_SIGNATURE_MESSAGE: &str = "prior_signature is not the issuer's signature over the edge's current total at this note's timestamp";
-const STALE_PRIOR_MESSAGE: &str = "prior_total is not the edge's current total";
+const INVALID_PRIOR_SIGNATURE_MESSAGE: &str = "prior_signature is not the issuer's signature over the acknowledgment basis/prior-ack/1 of the edge's current total and timestamp at this operation's timestamp";
+const STALE_PRIOR_MESSAGE: &str = "prior_total or prior_timestamp is not the edge's current total or timestamp";
+/// POST /notes/transfer message for `NoteError::StalePrior`.
+const TRANSFER_STALE_PRIOR_MESSAGE: &str = "from_prior_total, to_prior_total, from_prior_timestamp or to_prior_timestamp is not the edge's current total or timestamp";
+/// POST /notes/transfer message for `NoteError::InvalidPriorSignature` (the
+/// transfer path reports a prior acknowledgment that does not verify as
+/// `invalid_signature`, like every other slot; kept for exhaustiveness).
+const TRANSFER_INVALID_PRIOR_SIGNATURE_MESSAGE: &str = "a prior acknowledgment is not the creditor's signature over the acknowledgment basis/prior-ack/1 of the edge's current total and timestamp at this operation's timestamp";
 const NOT_AN_INCREASE_MESSAGE: &str =
     "a bound note must raise the edge's total above the acknowledged prior total";
 const NOVATION_EXPIRED_MESSAGE: &str =
@@ -223,7 +229,7 @@ fn reserved_timestamp_message(timestamp: u64) -> String {
     match timestamp % 1000 {
         basis_store::TRANSFER_TS_MS => "timestamps ending in 999 ms are reserved for debt transfers (POST /notes/transfer); ordinary notes use 000-994 ms".to_string(),
         basis_store::SETOFF_TS_MS => "timestamps ending in 998 ms are reserved for set-offs (POST /notes/setoff); ordinary notes use 000-994 ms".to_string(),
-        basis_store::BOUND_NOTE_TS_MS => "a bound note needs prior_signature: timestamps ending in 997 ms are bound notes, accepted only with the issuer's acknowledgment of the edge's current total".to_string(),
+        basis_store::BOUND_NOTE_TS_MS => "a bound note needs prior_signature: timestamps ending in 997 ms are bound notes, accepted only with the issuer's acknowledgment of the edge's current total and timestamp".to_string(),
         basis_store::COMPRESS_TS_MS => "timestamps ending in 996 ms are reserved (triad compress); ordinary notes use 000-994 ms".to_string(),
         basis_store::EXCHANGE_TS_MS => "timestamps ending in 995 ms are reserved (exchange); ordinary notes use 000-994 ms".to_string(),
         _ => RESERVED_TIMESTAMPS_MESSAGE.to_string(),
@@ -306,12 +312,12 @@ fn transfer_error_response(e: NoteError) -> (StatusCode, Option<&'static str>, S
         NoteError::InvalidPriorSignature => (
             StatusCode::BAD_REQUEST,
             Some("invalid_prior_signature"),
-            "a prior acknowledgment is not the creditor's signature over its edge's current total".to_string(),
+            TRANSFER_INVALID_PRIOR_SIGNATURE_MESSAGE.to_string(),
         ),
         NoteError::StalePrior => (
             StatusCode::CONFLICT,
             Some("stale_prior"),
-            "from_prior_total or to_prior_total is not the edge's current total".to_string(),
+            TRANSFER_STALE_PRIOR_MESSAGE.to_string(),
         ),
         NoteError::PastTimestamp => (
             StatusCode::BAD_REQUEST,
@@ -605,26 +611,29 @@ pub async fn create_note(
     };
 
     // Bound notes (timestamp residue 997): the issuer's prior acknowledgment of
-    // the edge's current total. Decoded after every existing request check, so
-    // their precedence is unchanged; the store decides whether a prior is allowed.
-    let prior = match (&payload.prior_signature, payload.prior_total) {
-        (None, None) => None,
-        // prior_total without prior_signature at a reserved residue (995-999):
-        // the note goes to the store without a prior, which refuses it after its
-        // existing checks with reserved_timestamp (design §3.2: a bound note at
-        // 997 without prior_signature is reserved_timestamp; 995, 996, 998 and
-        // 999 are reserved for every note). prior_total is diagnostic only.
-        (None, Some(_)) if basis_store::is_reserved_timestamp(payload.timestamp) => None,
-        (None, Some(_)) => {
+    // the edge's current total and timestamp. Decoded after every existing
+    // request check, so their precedence is unchanged; the store decides whether
+    // a prior is allowed.
+    let prior = match (&payload.prior_signature, payload.prior_total, payload.prior_timestamp) {
+        (None, None, None) => None,
+        // prior_total or prior_timestamp without prior_signature at a reserved
+        // residue (995-999): the note goes to the store without a prior, which
+        // refuses it after its existing checks with reserved_timestamp (design
+        // §3.2: a bound note at 997 without prior_signature is
+        // reserved_timestamp; 995, 996, 998 and 999 are reserved for every note).
+        // Both are diagnostic only.
+        (None, _, _) if basis_store::is_reserved_timestamp(payload.timestamp) => None,
+        (None, prior_total, _) => {
+            let field = if prior_total.is_some() { "prior_total" } else { "prior_timestamp" };
             return (
                 StatusCode::BAD_REQUEST,
                 Json(crate::models::error_response_with_code(
-                    "prior_total is only valid together with prior_signature".to_string(),
+                    format!("{} is only valid together with prior_signature", field),
                     "invalid_request",
                 )),
-            )
+            );
         }
-        (Some(prior_hex), prior_total) => {
+        (Some(prior_hex), prior_total, prior_timestamp) => {
             let bytes = match hex::decode(prior_hex) {
                 Ok(bytes) => bytes,
                 Err(_) => {
@@ -652,6 +661,7 @@ pub async fn create_note(
             Some(basis_store::PriorAck {
                 signature: prior_signature,
                 prior_total,
+                prior_timestamp,
             })
         }
     };
@@ -1118,8 +1128,9 @@ pub async fn exchange_notes(
     }
 }
 
-/// `POST /notes/transfer`: debt transfer (triad novation), version 3 with seven
-/// signatures. See [`TransferNotesRequest`]. Pure-credit trackers only.
+/// `POST /notes/transfer`: debt transfer (triad novation), version 4 with seven
+/// signatures (the two creditor prior acknowledgments over `basis/prior-ack/1`).
+/// See [`TransferNotesRequest`]. Pure-credit trackers only.
 /// Refusals carry a machine-readable `code` (see `transfer_error_response`),
 /// except the request-format ones (400, as before) and the new creditor's
 /// acceptance policy (403). While novations are disabled every request
@@ -1271,6 +1282,8 @@ pub async fn transfer_notes(
             signatures,
             from_prior_total: payload.from_prior_total,
             to_prior_total: payload.to_prior_total,
+            from_prior_timestamp: payload.from_prior_timestamp,
+            to_prior_timestamp: payload.to_prior_timestamp,
             acceptance_check,
             response_tx,
         })
@@ -6676,9 +6689,14 @@ mod transfer_error_mapping_tests {
                 NoteError::InvalidPriorSignature,
                 StatusCode::BAD_REQUEST,
                 Some("invalid_prior_signature"),
-                "a prior acknowledgment is not the creditor's signature over its edge's current total",
+                "a prior acknowledgment is not the creditor's signature over the acknowledgment basis/prior-ack/1 of the edge's current total and timestamp at this operation's timestamp",
             ),
-            (NoteError::StalePrior, StatusCode::CONFLICT, Some("stale_prior"), "from_prior_total or to_prior_total is not the edge's current total"),
+            (
+                NoteError::StalePrior,
+                StatusCode::CONFLICT,
+                Some("stale_prior"),
+                "from_prior_total, to_prior_total, from_prior_timestamp or to_prior_timestamp is not the edge's current total or timestamp",
+            ),
             (NoteError::PastTimestamp, StatusCode::BAD_REQUEST, Some("past_timestamp"), "timestamp must be newer than both edges' current timestamps"),
             (NoteError::FutureTimestamp, StatusCode::BAD_REQUEST, Some("future_timestamp"), "timestamp is in the future"),
             (NoteError::NovationExpired, StatusCode::BAD_REQUEST, Some("novation_expired"), "the novation's timestamp is older than the maximum novation age"),

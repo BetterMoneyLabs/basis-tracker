@@ -60,11 +60,12 @@ pub struct CreateNoteRequest {
     /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
     #[serde(default)]
     pub denomination: String,
-    /// Bound notes only (a timestamp ending in 997 ms): the issuer's prior
-    /// acknowledgment, its signature (hex, 65 bytes) over the edge's standard
-    /// note message at its CURRENT total and this note's timestamp. The note
-    /// applies only while that total is still the stored one. Must be absent for
-    /// every other note.
+    /// Bound notes only (a timestamp ending in 997 ms; bound notes version 3):
+    /// the issuer's prior acknowledgment, its signature (hex, 65 bytes) over the
+    /// 105-byte acknowledgment `basis/prior-ack/1` of the edge's CURRENT total
+    /// and timestamp (0 and 0 for an absent edge) at this note's timestamp,
+    /// `basis_store::schnorr::prior_ack_message`. The note applies only while
+    /// the edge is still in that state. Must be absent for every other note.
     #[serde(default)]
     pub prior_signature: Option<String>,
     /// Optional and diagnostic: the current total the prior acknowledgment
@@ -72,6 +73,12 @@ pub struct CreateNoteRequest {
     /// Only valid together with `prior_signature`.
     #[serde(default)]
     pub prior_total: Option<u64>,
+    /// Optional and diagnostic: the current timestamp the prior acknowledgment
+    /// covers (0 for an absent edge). When present it must equal the stored
+    /// note's timestamp (409 `stale_prior`). Only valid together with
+    /// `prior_signature`.
+    #[serde(default)]
+    pub prior_timestamp: Option<u64>,
 }
 
 /// Redacted (see [`crate::redact`]): signatures appear only as fingerprints.
@@ -88,6 +95,7 @@ impl std::fmt::Debug for CreateNoteRequest {
             .field("denomination", &Denom(&self.denomination))
             .field("prior_signature", &self.prior_signature.as_deref().map(SigHex))
             .field("prior_total", &self.prior_total)
+            .field("prior_timestamp", &self.prior_timestamp)
             .finish()
     }
 }
@@ -138,19 +146,22 @@ pub struct ExchangeNotesResponse {
 }
 
 /// Debt transfer request (triad novation, specs/spec.md "Debt Transfer"),
-/// version 3.
+/// version 4 (tracker v3.2).
 ///
 /// Moves `amount` of the issuer's cumulative debt from the edge
 /// (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
-/// denomination. Seven signatures (hex, 65 bytes each), all over the standard
-/// 80-byte note message at `timestamp` (see `basis_store::TransferSignatures`):
-/// the issuer re-signs both edges at their new totals; the old creditor
-/// acknowledges its edge's current total and signs both new totals (the consent
-/// the S3 rule requires for lowering its edge, bound to this destination); the
-/// new creditor acknowledges its edge's current total (0 for a new edge) and
-/// signs its new total (its acceptance). The prior acknowledgments make the
-/// amount exact: the transfer applies only while both edges are still at the
-/// acknowledged totals. Pure-credit trackers only: a tracker with on-chain
+/// denomination. Seven signatures (hex, 65 bytes each), see
+/// `basis_store::TransferSignatures`: the issuer re-signs both edges at their
+/// new totals; the old creditor acknowledges its edge's current state and signs
+/// both new totals (the consent the S3 rule requires for lowering its edge,
+/// bound to this destination); the new creditor acknowledges its edge's current
+/// state (0 and 0 for a new edge) and signs its new total (its acceptance). The
+/// five new-total signatures are over the standard 80-byte note message at
+/// `timestamp`; the two prior acknowledgments are over the 105-byte message
+/// `basis/prior-ack/1` of the edge's stored total and timestamp at `timestamp`
+/// (`basis_store::schnorr::prior_ack_message`). The prior acknowledgments make
+/// the amount exact and the attempt single-use: the transfer applies only
+/// while both edges are still in the acknowledged states. Pure-credit trackers only: a tracker with on-chain
 /// state refuses. Unknown fields are refused, so a field this tracker does not
 /// know is never silently dropped. `Debug` is redacted (signatures appear only
 /// as fingerprints, see [`crate::redact`]).
@@ -171,8 +182,9 @@ pub struct TransferNotesRequest {
     pub timestamp: u64,
     /// Issuer signature over the from-edge's new note message (hex, 65 bytes)
     pub issuer_from_signature: String,
-    /// Old creditor's prior acknowledgment: its signature over the from-edge's
-    /// note message at the edge's CURRENT total (hex, 65 bytes)
+    /// Old creditor's prior acknowledgment: its signature over the
+    /// acknowledgment `basis/prior-ack/1` of the from-edge's CURRENT total and
+    /// timestamp at `timestamp` (hex, 65 bytes)
     pub from_recipient_prior_signature: String,
     /// Old creditor's signature over the from-edge's new note message (consent)
     pub from_recipient_signature: String,
@@ -181,8 +193,9 @@ pub struct TransferNotesRequest {
     pub from_recipient_to_signature: String,
     /// Issuer signature over the to-edge's new note message (hex, 65 bytes)
     pub issuer_to_signature: String,
-    /// New creditor's prior acknowledgment: its signature over the to-edge's
-    /// note message at the edge's CURRENT total, 0 for a new edge (hex, 65 bytes)
+    /// New creditor's prior acknowledgment: its signature over the
+    /// acknowledgment `basis/prior-ack/1` of the to-edge's CURRENT total and
+    /// timestamp, 0 and 0 for a new edge, at `timestamp` (hex, 65 bytes)
     pub to_recipient_prior_signature: String,
     /// New creditor's signature over the to-edge's new note message (acceptance)
     pub to_recipient_signature: String,
@@ -194,6 +207,15 @@ pub struct TransferNotesRequest {
     /// (0 for a new edge). When present it must equal the stored total (409 `stale_prior`).
     #[serde(default)]
     pub to_prior_total: Option<u64>,
+    /// Optional and diagnostic: the from-edge timestamp the old creditor
+    /// acknowledged. When present it must equal the stored note's timestamp (409 `stale_prior`).
+    #[serde(default)]
+    pub from_prior_timestamp: Option<u64>,
+    /// Optional and diagnostic: the to-edge timestamp the new creditor
+    /// acknowledged (0 for a new edge). When present it must equal the stored
+    /// note's timestamp (409 `stale_prior`).
+    #[serde(default)]
+    pub to_prior_timestamp: Option<u64>,
 }
 
 /// Redacted (see [`crate::redact`]): signatures appear only as fingerprints.
@@ -225,6 +247,8 @@ impl std::fmt::Debug for TransferNotesRequest {
             .field("to_recipient_signature", &SigHex(&self.to_recipient_signature))
             .field("from_prior_total", &self.from_prior_total)
             .field("to_prior_total", &self.to_prior_total)
+            .field("from_prior_timestamp", &self.from_prior_timestamp)
+            .field("to_prior_timestamp", &self.to_prior_timestamp)
             .finish()
     }
 }
@@ -341,7 +365,7 @@ pub struct CapabilitiesResponse {
 pub struct TrackerCapabilities {
     /// Always `"basis"`.
     pub tracker: String,
-    /// The rule set: `"valun-circulating-credit/3"` ([`CAPABILITIES_BUILD`]).
+    /// The rule set: `"valun-circulating-credit/4"` ([`CAPABILITIES_BUILD`]).
     pub build: String,
     /// The git commit the binary was built from (`BASIS_GIT_COMMIT` at build
     /// time), or `"unknown"`.
@@ -364,9 +388,12 @@ pub struct TrackerCapabilities {
     pub novations_disabled_reason: Option<String>,
 }
 
-/// Bound notes: residue 997, version 2 (tracker v3.1): a bound note older than
-/// `max_age_ms` is refused (`novation_expired`), like a novation. Version 1
-/// (tracker v3) had no maximum age.
+/// Bound notes: residue 997, version 3 (tracker v3.2): the issuer's prior
+/// acknowledgment is over `prior_ack` (`basis/prior-ack/1`, the edge's stored
+/// total and timestamp at the note's timestamp), and a bound note older than
+/// `max_age_ms` is refused (`novation_expired`), like a novation. Version 2
+/// (tracker v3.1) acknowledged the note message at the stored total; version 1
+/// (tracker v3) also had no maximum age.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundNotesCapability {
     pub ms: u64,
@@ -374,6 +401,8 @@ pub struct BoundNotesCapability {
     /// The maximum age of a bound note's timestamp (one hour, the novation
     /// maximum age).
     pub max_age_ms: u64,
+    /// The tag of the prior-acknowledgment message (`basis_core::PRIOR_ACK_TAG`).
+    pub prior_ack: String,
 }
 
 /// The novation routes and their shared maximum age.
@@ -385,13 +414,17 @@ pub struct NovationCapabilities {
     pub setoff: SetOffCapability,
 }
 
-/// POST /notes/transfer: residue 999, version 3, its seven signature slots in
-/// request order of `basis_store::TransferSignatures`.
+/// POST /notes/transfer: residue 999, version 4 (tracker v3.2), its seven
+/// signature slots in request order of `basis_store::TransferSignatures`, the
+/// two `_prior` slots over `prior_ack` (`basis/prior-ack/1`). Version 3
+/// (tracker v3.1) acknowledged the note message at the stored total.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferCapability {
     pub ms: u64,
     pub version: u32,
     pub signatures: Vec<String>,
+    /// The tag of the prior-acknowledgment message (`basis_core::PRIOR_ACK_TAG`).
+    pub prior_ack: String,
 }
 
 /// POST /notes/setoff: residue 998, version 3, at most 64 edges, per-edge
@@ -406,8 +439,14 @@ pub struct SetOffCapability {
 }
 
 /// The `build` of [`TrackerCapabilities`]: the Valun circulating-credit rule
-/// set, tracker v3.
-pub const CAPABILITIES_BUILD: &str = "valun-circulating-credit/3";
+/// set, tracker v3.2 (`/3` was tracker v3 and v3.1).
+pub const CAPABILITIES_BUILD: &str = "valun-circulating-credit/4";
+
+/// The `prior_ack` of the bound-note and transfer capabilities: the tag of the
+/// prior-acknowledgment message, as text.
+fn prior_ack_tag() -> String {
+    String::from_utf8_lossy(basis_core::PRIOR_ACK_TAG).into_owned()
+}
 
 impl TrackerCapabilities {
     /// This build's capabilities, with the run-time values: the `pure_credit`
@@ -437,15 +476,16 @@ impl TrackerCapabilities {
             ],
             bound_notes: BoundNotesCapability {
                 ms: basis_store::BOUND_NOTE_TS_MS,
-                version: 2,
+                version: 3,
                 max_age_ms: basis_store::NOVATION_MAX_AGE_MS,
+                prior_ack: prior_ack_tag(),
             },
             bound_only_edges: true,
             novation: NovationCapabilities {
                 max_age_ms: basis_store::NOVATION_MAX_AGE_MS,
                 transfer: TransferCapability {
                     ms: basis_store::TRANSFER_TS_MS,
-                    version: 3,
+                    version: 4,
                     signatures: names(&[
                         "issuer_from",
                         "issuer_to",
@@ -455,6 +495,7 @@ impl TrackerCapabilities {
                         "to_recipient_prior",
                         "to_recipient",
                     ]),
+                    prior_ack: prior_ack_tag(),
                 },
                 setoff: SetOffCapability {
                     ms: basis_store::SETOFF_TS_MS,

@@ -1,7 +1,8 @@
-//! POST /notes/transfer on the v3 tracker (transfer version 3): seven
-//! signatures including both creditors' prior acknowledgments, the one-hour
-//! maximum age, a strict request (unknown fields refused) and a status and
-//! machine-readable `code` for every store refusal. Every request goes through
+//! POST /notes/transfer on the v3.2 tracker (transfer version 4): seven
+//! signatures including both creditors' prior acknowledgments (over
+//! `basis/prior-ack/1`: the edge's stored total and timestamp at the transfer's
+//! timestamp), the one-hour maximum age, a strict request (unknown fields
+//! refused) and a status and machine-readable `code` for every store refusal. Every request goes through
 //! the axum router and a tracker thread backed by a real store.
 
 use axum::body::Body;
@@ -80,9 +81,18 @@ fn note_body(issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> Va
     })
 }
 
-/// The POST /notes/transfer body moving `amount` of A's ERG debt from A->old (stored total `from_before`) to
-/// A->new (stored total `to_before`, 0 when absent) at `ts`, with all seven signatures and no diagnostic priors.
-fn transfer_body(old: &[u8; 32], new: &[u8; 32], from_before: u64, to_before: u64, amount: u64, ts: u64) -> Value {
+/// `signer`'s prior acknowledgment (hex) of the ERG edge issuer -> recipient in the state `prior` (total,
+/// timestamp; (0, 0) for an absent edge) for the operation at `ts` (tracker v3.2, `basis/prior-ack/1`).
+fn ack(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), ts: u64) -> String {
+    let msg = basis_store::schnorr::prior_ack_message(&pk(issuer), &pk(recipient), &DenomKey::Erg, prior.0, prior.1, ts, &nft());
+    hex::encode(basis_store::schnorr::schnorr_sign(&msg, signer, &pk(signer)).unwrap())
+}
+
+/// The POST /notes/transfer body (version 4) moving `amount` of A's ERG debt from A->old (stored state `from`:
+/// total, timestamp) to A->new (stored state `to`, (0, 0) when absent) at `ts`, with all seven signatures and no
+/// diagnostic priors.
+fn transfer_body(old: &[u8; 32], new: &[u8; 32], from: (u64, u64), to: (u64, u64), amount: u64, ts: u64) -> Value {
+    let ((from_before, from_ts), (to_before, to_ts)) = (from, to);
     let (from_total, to_total) = (from_before.saturating_sub(amount), to_before + amount);
     json!({
         "issuer_pubkey": hex::encode(pk(&A)),
@@ -93,10 +103,10 @@ fn transfer_body(old: &[u8; 32], new: &[u8; 32], from_before: u64, to_before: u6
         "timestamp": ts,
         "issuer_from_signature": sign(&A, &A, old, from_total, ts),
         "issuer_to_signature": sign(&A, &A, new, to_total, ts),
-        "from_recipient_prior_signature": sign(old, &A, old, from_before, ts),
+        "from_recipient_prior_signature": ack(old, &A, old, (from_before, from_ts), ts),
         "from_recipient_signature": sign(old, &A, old, from_total, ts),
         "from_recipient_to_signature": sign(old, &A, new, to_total, ts),
-        "to_recipient_prior_signature": sign(new, &A, new, to_before, ts),
+        "to_recipient_prior_signature": ack(new, &A, new, (to_before, to_ts), ts),
         "to_recipient_signature": sign(new, &A, new, to_total, ts),
     })
 }
@@ -147,6 +157,8 @@ async fn tracker_with(acceptance_predicate: Option<Arc<dyn basis_server::accepta
                     signatures,
                     from_prior_total,
                     to_prior_total,
+                    from_prior_timestamp,
+                    to_prior_timestamp,
                     acceptance_check,
                     response_tx,
                 } => {
@@ -160,6 +172,8 @@ async fn tracker_with(acceptance_predicate: Option<Arc<dyn basis_server::accepta
                         &signatures,
                         from_prior_total,
                         to_prior_total,
+                        from_prior_timestamp,
+                        to_prior_timestamp,
                         acceptance_check.map(|check| check.0),
                     ));
                 }
@@ -346,6 +360,16 @@ fn assert_transferred(response: &(StatusCode, Value)) {
     assert_eq!(v["data"]["transferred"], true, "response: {}", v);
 }
 
+/// The stored state of A -> B after [`funded`]: 100 at at_residue(base, 0).
+fn b0(base: u64) -> (u64, u64) {
+    (100, at_residue(base, 0))
+}
+
+/// The stored state of A -> C after [`funded`]: 10 at at_residue(base, 1).
+fn c0(base: u64) -> (u64, u64) {
+    (10, at_residue(base, 1))
+}
+
 /// A tracker where A owes B 100 and C 10 (ERG), noted about a minute ago.
 async fn funded() -> (Tracker, u64) {
     let t = tracker().await;
@@ -359,7 +383,7 @@ async fn funded() -> (Tracker, u64) {
 async fn a_transfer_with_seven_signatures_applies_and_reports_the_prior_totals() {
     let (t, base) = funded().await;
     let ts = at_residue(base + 2_000, 999);
-    let mut body = transfer_body(&B, &C, 100, 10, 30, ts);
+    let mut body = transfer_body(&B, &C, b0(base), c0(base), 30, ts);
     body["from_prior_total"] = json!(100);
     body["to_prior_total"] = json!(10);
     let (status, raw) = t.post_raw("/notes/transfer", &body).await;
@@ -381,7 +405,7 @@ async fn an_unknown_field_is_refused_and_a_version_2_request_is_incomplete() {
     let base = now_ms() - 60_000;
     assert_created(&t.note(&note_body(&A, &B, 100, at_residue(base, 0))).await);
     let ts = at_residue(base + 2_000, 999);
-    let body = transfer_body(&B, &C, 100, 0, 30, ts);
+    let body = transfer_body(&B, &C, b0(base), (0, 0), 30, ts);
     // deny_unknown_fields: a field this tracker does not know is refused, never silently dropped.
     for extra in ["extra", "prior_signature", "from_recipient_prior_total"] {
         let (status, raw) = t.post_raw("/notes/transfer", &with(&body, extra, json!(1))).await;
@@ -422,12 +446,18 @@ async fn an_unknown_field_is_refused_and_a_version_2_request_is_incomplete() {
 async fn a_prior_acknowledgment_signed_by_the_wrong_key_is_refused() {
     let (t, base) = funded().await;
     let ts = at_residue(base + 2_000, 999);
-    let body = transfer_body(&B, &C, 100, 10, 30, ts);
+    let body = transfer_body(&B, &C, b0(base), c0(base), 30, ts);
     for (slot, forged) in [
-        ("from_recipient_prior_signature", sign(&A, &A, &B, 100, ts)), // the issuer signs in the old creditor's place
-        ("from_recipient_prior_signature", sign(&C, &A, &B, 100, ts)), // the new creditor does
-        ("to_recipient_prior_signature", sign(&B, &A, &C, 10, ts)),   // the old creditor signs in the new creditor's place
-        ("to_recipient_prior_signature", sign(&A, &A, &C, 10, ts)),   // the issuer does
+        ("from_recipient_prior_signature", ack(&A, &A, &B, b0(base), ts)), // the issuer signs in the old creditor's place
+        ("from_recipient_prior_signature", ack(&C, &A, &B, b0(base), ts)), // the new creditor does
+        ("to_recipient_prior_signature", ack(&B, &A, &C, c0(base), ts)),   // the old creditor signs in the new creditor's place
+        ("to_recipient_prior_signature", ack(&A, &A, &C, c0(base), ts)),   // the issuer does
+        // Tracker v3.2: the right creditor's version-3 acknowledgment (the note message of the prior total at T),
+        // and its acknowledgment of the right total at another prior timestamp.
+        ("from_recipient_prior_signature", sign(&B, &A, &B, 100, ts)),
+        ("to_recipient_prior_signature", sign(&C, &A, &C, 10, ts)),
+        ("from_recipient_prior_signature", ack(&B, &A, &B, (100, b0(base).1 + 1), ts)),
+        ("to_recipient_prior_signature", ack(&C, &A, &C, (10, 0), ts)),
     ] {
         let r = t.transfer(&with(&body, slot, json!(forged))).await;
         assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_signature"));
@@ -444,13 +474,17 @@ async fn an_absent_to_edge_with_a_prior_over_zero_is_accepted_and_created() {
     let base = now_ms() - 60_000;
     assert_created(&t.note(&note_body(&A, &B, 100, at_residue(base, 0))).await);
     let ts = at_residue(base + 2_000, 999);
-    let body = transfer_body(&B, &C, 100, 0, 30, ts);
+    let body = transfer_body(&B, &C, b0(base), (0, 0), 30, ts);
     // Any other prior for the absent edge is refused.
     assert_refused(&t.transfer(&with(&body, "to_prior_total", json!(5))).await, StatusCode::CONFLICT, Some("stale_prior"));
-    let five = with(&body, "to_recipient_prior_signature", json!(sign(&C, &A, &C, 5, ts)));
+    let five = with(&body, "to_recipient_prior_signature", json!(ack(&C, &A, &C, (5, 0), ts)));
     assert_refused(&t.transfer(&five).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
+    // The absent edge's state is (0, 0): a prior timestamp other than 0 is refused, as a diagnostic or signed.
+    assert_refused(&t.transfer(&with(&body, "to_prior_timestamp", json!(1))).await, StatusCode::CONFLICT, Some("stale_prior"));
+    let stamped = with(&body, "to_recipient_prior_signature", json!(ack(&C, &A, &C, (0, 1), ts)));
+    assert_refused(&t.transfer(&stamped).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
     assert_eq!(t.total(&A, &C).await, None);
-    let r = t.transfer(&with(&body, "to_prior_total", json!(0))).await;
+    let r = t.transfer(&with(&with(&body, "to_prior_total", json!(0)), "to_prior_timestamp", json!(0))).await;
     assert_transferred(&r);
     assert_eq!((r.1["data"]["to_prior_total"].clone(), r.1["data"]["to_new_total"].clone()), (json!(0), json!(30)));
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(70), Some(30)));
@@ -461,8 +495,9 @@ async fn transfer_signatures_submitted_alone_to_post_notes_are_refused() {
     let (t, base) = funded().await;
     assert_created(&t.note(&note_body(&B, &A, 50, at_residue(base, 2))).await);
     let ts = at_residue(base + 4_000, 999);
-    let body = transfer_body(&B, &C, 100, 10, 30, ts);
-    // Each of the seven signatures is over a note message (A -> recipient, total, ts) at residue 999.
+    let body = transfer_body(&B, &C, b0(base), c0(base), 30, ts);
+    // Five of the seven signatures are over a note message (A -> recipient, total, ts) at residue 999; the two prior
+    // acknowledgments are over PA messages, which are no note messages at all.
     let slots: [(&str, &[u8; 32], u64); 7] = [
         ("issuer_from_signature", &B, 70),
         ("issuer_to_signature", &C, 40),
@@ -476,7 +511,7 @@ async fn transfer_signatures_submitted_alone_to_post_notes_are_refused() {
     // The issuer's signature on the raised edge is a valid note that would raise A->C: the residue refuses it,
     // with or without a prior acknowledgment attached.
     assert_refused(&t.note(&as_note("issuer_to_signature", &C, 40)).await, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
-    let bound = with(&as_note("issuer_to_signature", &C, 40), "prior_signature", json!(sign(&A, &A, &C, 10, ts)));
+    let bound = with(&as_note("issuer_to_signature", &C, 40), "prior_signature", json!(ack(&A, &A, &C, c0(base), ts)));
     assert_refused(&t.note(&bound).await, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
     // The creditors' signatures are not the issuer's, so none of them is a note at all.
     for (slot, recipient, total) in slots.iter().skip(2) {
@@ -515,16 +550,20 @@ async fn two_attempts_of_the_same_payment_exclude_each_other_in_either_order() {
     for t1_first in [true, false] {
         let (t, base) = funded().await;
         let (t1, t2) = (at_residue(base + 2_000, 999), at_residue(base + 3_000, 999));
-        let priors = |body: Value| with(&with(&body, "from_prior_total", json!(100)), "to_prior_total", json!(10));
-        let first = priors(transfer_body(&B, &C, 100, 10, 30, t1));
-        let second = priors(transfer_body(&B, &C, 100, 10, 30, t2));
+        let priors = |body: Value| {
+            let totals = with(&with(&body, "from_prior_total", json!(100)), "to_prior_total", json!(10));
+            with(&with(&totals, "from_prior_timestamp", json!(b0(base).1)), "to_prior_timestamp", json!(c0(base).1))
+        };
+        let first = priors(transfer_body(&B, &C, b0(base), c0(base), 30, t1));
+        let second = priors(transfer_body(&B, &C, b0(base), c0(base), 30, t2));
         let (applied, other) = if t1_first { (&first, &second) } else { (&second, &first) };
         assert_transferred(&t.transfer(applied).await);
         // Either way the other attempt no longer matches the acknowledged totals.
         assert_refused(&t.transfer(other).await, StatusCode::CONFLICT, Some("stale_prior"));
         let mut bare = other.clone();
-        bare.as_object_mut().unwrap().remove("from_prior_total");
-        bare.as_object_mut().unwrap().remove("to_prior_total");
+        for field in ["from_prior_total", "to_prior_total", "from_prior_timestamp", "to_prior_timestamp"] {
+            bare.as_object_mut().unwrap().remove(field);
+        }
         if t1_first {
             assert_refused(&t.transfer(&bare).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
         } else {
@@ -539,13 +578,13 @@ async fn both_edges_are_bound_only_after_a_transfer() {
     let (t, base) = funded().await;
     assert_created(&t.note(&note_body(&A, &E, 5, at_residue(base, 2))).await);
     let ts = at_residue(base + 2_000, 999);
-    assert_transferred(&t.transfer(&transfer_body(&B, &C, 100, 10, 30, ts)).await);
+    assert_transferred(&t.transfer(&transfer_body(&B, &C, b0(base), c0(base), 30, ts)).await);
     // ts ends in 999, so ts + 2 ends in 001 (ordinary) and ts + 998 in 997 (bound note).
     for (recipient, total) in [(&B, 80), (&C, 50)] {
         let r = t.note(&note_body(&A, recipient, total, ts + 2)).await;
         assert_refused(&r, StatusCode::BAD_REQUEST, Some("bound_note_required"));
     }
-    assert_created(&t.note(&with(&note_body(&A, &C, 50, ts + 998), "prior_signature", json!(sign(&A, &A, &C, 40, ts + 998)))).await);
+    assert_created(&t.note(&with(&note_body(&A, &C, 50, ts + 998), "prior_signature", json!(ack(&A, &A, &C, (40, ts), ts + 998)))).await);
     // The edge the transfer did not touch still takes ordinary notes.
     assert_created(&t.note(&note_body(&A, &E, 6, ts + 2)).await);
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await, t.total(&A, &E).await), (Some(70), Some(50), Some(6)));
@@ -555,19 +594,21 @@ async fn both_edges_are_bound_only_after_a_transfer() {
 async fn store_refusals_map_to_statuses_and_codes() {
     let (t, base) = funded().await;
     let ts = at_residue(base + 2_000, 999);
-    let ok = transfer_body(&B, &C, 100, 10, 30, ts);
+    let ok = transfer_body(&B, &C, b0(base), c0(base), 30, ts);
     let forged = with(&ok, "issuer_to_signature", ok["issuer_from_signature"].clone());
     let cases: Vec<(&str, Value, StatusCode, &str)> = vec![
         ("zero amount", with(&ok, "amount", json!(0)), StatusCode::BAD_REQUEST, "invalid_transfer"),
-        ("the same creditor twice", transfer_body(&B, &B, 100, 100, 30, ts), StatusCode::BAD_REQUEST, "invalid_transfer"),
-        ("not the transfer residue", transfer_body(&B, &C, 100, 10, 30, ts - 1), StatusCode::BAD_REQUEST, "invalid_transfer"),
-        ("more than is owed", transfer_body(&B, &C, 100, 10, 101, ts), StatusCode::BAD_REQUEST, "invalid_transfer"),
+        ("the same creditor twice", transfer_body(&B, &B, b0(base), b0(base), 30, ts), StatusCode::BAD_REQUEST, "invalid_transfer"),
+        ("not the transfer residue", transfer_body(&B, &C, b0(base), c0(base), 30, ts - 1), StatusCode::BAD_REQUEST, "invalid_transfer"),
+        ("more than is owed", transfer_body(&B, &C, b0(base), c0(base), 101, ts), StatusCode::BAD_REQUEST, "invalid_transfer"),
         ("a signature that does not verify", forged, StatusCode::BAD_REQUEST, "invalid_signature"),
         ("a stale diagnostic prior", with(&ok, "from_prior_total", json!(99)), StatusCode::CONFLICT, "stale_prior"),
-        ("older than the edges", transfer_body(&B, &C, 100, 10, 30, at_residue(base - 5_000, 999)), StatusCode::BAD_REQUEST, "past_timestamp"),
-        ("in the future", transfer_body(&B, &C, 100, 10, 30, at_residue(now_ms() + HOUR_MS, 999)), StatusCode::BAD_REQUEST, "future_timestamp"),
-        ("older than an hour", transfer_body(&B, &C, 100, 10, 30, at_residue(now_ms() - HOUR_MS - 1_000, 999)), StatusCode::BAD_REQUEST, "novation_expired"),
-        ("no edge from the issuer to the old creditor", transfer_body(&D, &C, 50, 10, 30, ts), StatusCode::NOT_FOUND, "not_found"),
+        ("a stale diagnostic prior timestamp", with(&ok, "from_prior_timestamp", json!(b0(base).1 - 1)), StatusCode::CONFLICT, "stale_prior"),
+        ("a stale diagnostic to-edge prior timestamp", with(&ok, "to_prior_timestamp", json!(0)), StatusCode::CONFLICT, "stale_prior"),
+        ("older than the edges", transfer_body(&B, &C, b0(base), c0(base), 30, at_residue(base - 5_000, 999)), StatusCode::BAD_REQUEST, "past_timestamp"),
+        ("in the future", transfer_body(&B, &C, b0(base), c0(base), 30, at_residue(now_ms() + HOUR_MS, 999)), StatusCode::BAD_REQUEST, "future_timestamp"),
+        ("older than an hour", transfer_body(&B, &C, b0(base), c0(base), 30, at_residue(now_ms() - HOUR_MS - 1_000, 999)), StatusCode::BAD_REQUEST, "novation_expired"),
+        ("no edge from the issuer to the old creditor", transfer_body(&D, &C, (50, 0), c0(base), 30, ts), StatusCode::NOT_FOUND, "not_found"),
     ];
     for (name, body, status, code) in &cases {
         let r = t.transfer(body).await;
@@ -577,16 +618,21 @@ async fn store_refusals_map_to_statuses_and_codes() {
     // Messages are plain text, never a Debug rendering.
     let r = t.transfer(&with(&ok, "amount", json!(0))).await;
     assert_eq!(r.1["error"], "Invalid transfer: the transfer amount must be positive");
-    let r = t.transfer(&transfer_body(&B, &C, 100, 10, 30, at_residue(now_ms() - HOUR_MS - 1_000, 999))).await;
+    let r = t.transfer(&with(&ok, "to_prior_timestamp", json!(0))).await;
+    assert_eq!(
+        r.1["error"],
+        "from_prior_total, to_prior_total, from_prior_timestamp or to_prior_timestamp is not the edge's current total or timestamp"
+    );
+    let r = t.transfer(&transfer_body(&B, &C, b0(base), c0(base), 30, at_residue(now_ms() - HOUR_MS - 1_000, 999))).await;
     assert_eq!(r.1["error"], "the novation's timestamp is older than the maximum novation age");
-    let r = t.transfer(&transfer_body(&D, &C, 50, 10, 30, ts)).await;
+    let r = t.transfer(&transfer_body(&D, &C, (50, 0), c0(base), 30, ts)).await;
     assert_eq!(r.1["error"], "the issuer has no note to the old creditor in this denomination");
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(100), Some(10)));
 
     // The two edges bound to different tracker NFTs (A -> E is stored directly: POST /notes refuses a foreign NFT).
     let foreign = IouNote::create_and_sign(pk(&E), 10, at_residue(base, 3), &A, &OTHER_NFT, DenomKey::Erg).unwrap();
     t.add_note_directly(&A, foreign).await;
-    let r = t.transfer(&transfer_body(&B, &E, 100, 10, 30, ts)).await;
+    let r = t.transfer(&transfer_body(&B, &E, b0(base), (10, at_residue(base, 3)), 30, ts)).await;
     assert_refused(&r, StatusCode::CONFLICT, Some("tracker_id_mismatch"));
     assert_eq!(r.1["error"], "the two edges are bound to different tracker NFTs");
 
@@ -628,7 +674,7 @@ async fn a_staged_exchange_is_a_conflict() {
     rx.await.unwrap().unwrap();
     assert_eq!((t.total(&A, &B).await, t.total_in(&A, &B, token).await), (Some(90), Some(5)));
     let ts = at_residue(base + 2_000, 999);
-    let r = t.transfer(&transfer_body(&B, &C, 90, 10, 30, ts)).await;
+    let r = t.transfer(&transfer_body(&B, &C, (90, xts), c0(base), 30, ts)).await;
     assert_refused(&r, StatusCode::CONFLICT, Some("staged_exchange"));
     assert_eq!(r.1["error"], "an exchange on one of these issuer/creditor pairs is staged");
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(90), Some(10)));
@@ -645,7 +691,7 @@ async fn an_edge_with_on_chain_state_is_out_of_scope() {
         .unwrap();
     assert_eq!(rx.await.unwrap().unwrap(), 2);
     let ts = at_residue(base + 2_000, 999);
-    let r = t.transfer(&transfer_body(&B, &C, 100, 10, 30, ts)).await;
+    let r = t.transfer(&transfer_body(&B, &C, b0(base), c0(base), 30, ts)).await;
     assert_refused(&r, StatusCode::CONFLICT, Some("onchain_scope"));
     assert!(r.1["error"].as_str().unwrap().starts_with("the old creditor's edge has a committed or pending on-chain total"), "{}", r.1);
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(100), Some(10)));
@@ -664,7 +710,7 @@ async fn the_new_creditors_acceptance_policy_refuses_with_403_after_the_signatur
     assert_created(&t.note(&note_body(&A, &B, 100, at_residue(base, 0))).await);
     assert_created(&t.note(&note_body(&A, &C, 10, at_residue(base, 1))).await);
     let ts = at_residue(base + 2_000, 999);
-    let body = transfer_body(&B, &C, 100, 10, 30, ts); // A->C would reach 40
+    let body = transfer_body(&B, &C, b0(base), c0(base), 30, ts); // A->C would reach 40
     let r = t.transfer(&body).await;
     assert_refused(&r, StatusCode::FORBIDDEN, None);
     assert_eq!(r.1["error"], "rejected by the new creditor's acceptance policy 'cap-35'");
@@ -673,6 +719,6 @@ async fn the_new_creditors_acceptance_policy_refuses_with_403_after_the_signatur
     assert_refused(&t.transfer(&forged).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(100), Some(10)));
     // Within the cap the transfer applies.
-    assert_transferred(&t.transfer(&transfer_body(&B, &C, 100, 10, 25, ts)).await);
+    assert_transferred(&t.transfer(&transfer_body(&B, &C, b0(base), c0(base), 25, ts)).await);
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(75), Some(35)));
 }

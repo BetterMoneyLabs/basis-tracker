@@ -342,15 +342,19 @@ pub enum NoteError {
     ReservedTimestamp,
     /// The edge was changed by a novation (debt transfer, set-off) and is
     /// bound-only: a new note on it must be a bound note (residue 997 with the
-    /// issuer's prior acknowledgment of the edge's current total).
+    /// issuer's prior acknowledgment of the edge's current total and timestamp).
     BoundNoteRequired,
     /// A bound note's prior acknowledgment is not the issuer's signature over
-    /// the edge's current total at the note's timestamp.
+    /// the acknowledgment `basis/prior-ack/1` of the edge's current total and
+    /// timestamp at the note's timestamp (see [`schnorr::prior_ack_message`]).
     InvalidPriorSignature,
-    /// The acknowledged prior total is not the edge's current total.
+    /// An acknowledged prior total or prior timestamp sent with the request
+    /// (diagnostic only) is not the edge's current total or timestamp.
     StalePrior,
     /// A bound note must raise the edge's total above the acknowledged prior
-    /// total; otherwise the acknowledgment itself could be submitted as a note.
+    /// total. (Kept from bound notes version 2, where the acknowledgment was a
+    /// note message at the prior total and could otherwise have been submitted
+    /// as a note; a version-3 acknowledgment is never a note message.)
     NotAnIncrease,
     /// A novation's timestamp (a debt transfer's, a set-off edge's) or a bound
     /// note's is older than the maximum age, [`NOVATION_MAX_AGE_MS`].
@@ -515,25 +519,33 @@ pub struct TransferTotals {
     pub to_prior_total: u64,
 }
 
-/// The seven signatures of a debt transfer (version 3), see
-/// [`TrackerStateManager::transfer_debt`]. Each is over the standard 80-byte
-/// note message `M(I,R,t,ts) = signing_message(I, R, denomination, t, ts, nft)`
-/// at the transfer's timestamp T, where A is the issuer, B the old creditor, C
-/// the new creditor, a the amount, X the stored A->B total and Y the stored
-/// A->C total (0 when that edge is absent):
+/// The seven signatures of a debt transfer (version 4, tracker v3.2), see
+/// [`TrackerStateManager::transfer_debt`]. A is the issuer, B the old creditor,
+/// C the new creditor, a the amount, T the transfer's timestamp, X and p the
+/// stored A->B total and timestamp, Y and q the stored A->C total and timestamp
+/// (0 and 0 when that edge is absent). Five are over the standard 80-byte note
+/// message `M(I,R,t,ts) = signing_message(I, R, denomination, t, ts, nft)` at
+/// T; the two `_prior` ones are over the 105-byte prior acknowledgment
+/// `PA(I,R,t,p,T) = prior_ack_message(I, R, denomination, t, p, T, nft)`
+/// (tag `basis/prior-ack/1`):
 ///
 /// | field | signer | message |
 /// |---|---|---|
 /// | `issuer_from` | A | M(A,B,X-a,T) |
 /// | `issuer_to` | A | M(A,C,Y+a,T) |
-/// | `from_recipient_prior` | B | M(A,B,X,T) |
+/// | `from_recipient_prior` | B | PA(A,B,X,p,T) |
 /// | `from_recipient` | B | M(A,B,X-a,T) |
 /// | `from_recipient_to` | B | M(A,C,Y+a,T) |
-/// | `to_recipient_prior` | C | M(A,C,Y,T) |
+/// | `to_recipient_prior` | C | PA(A,C,Y,q,T) |
 /// | `to_recipient` | C | M(A,C,Y+a,T) |
 ///
 /// The two `_prior` signatures are the creditors' prior acknowledgments: the
-/// transfer applies only while X and Y are still the stored totals.
+/// transfer applies only while both edges are still in the acknowledged
+/// states (X, p) and (Y, q). An edge's timestamp strictly increases with every
+/// write, so each state occurs once: an acknowledgment can apply at most once,
+/// whatever totals the edge takes later (version 3 acknowledged M(A,B,X,T) and
+/// M(A,C,Y,T), the totals alone, so an attempt could apply again after both
+/// edges returned to X and Y: audit VS-1).
 ///
 /// `Debug` is redacted (signatures are never logged): each signature appears
 /// only as its fingerprint, see [`signature_fingerprint`].
@@ -618,25 +630,35 @@ pub fn is_bound_note_timestamp(timestamp: u64) -> bool {
 pub const NOVATION_MAX_AGE_MS: u64 = 3_600_000;
 
 /// An issuer prior acknowledgment, sent with a bound note (POST /notes at
-/// residue 997): the issuer's signature over the edge's standard note message at
-/// its CURRENT total P and the bound note's own timestamp,
-/// `signing_message(issuer, recipient, denomination, P, timestamp, nft)`, where
-/// P is the stored total (0 for an edge that does not exist yet). The tracker
-/// applies the bound note only while P is still the stored total and the note
-/// raises it, so a note signed against a stale total can never apply: the issuer
-/// pays exactly `new - P`, both values it signed. Like a novation, a bound note
-/// expires: one whose timestamp is older than [`NOVATION_MAX_AGE_MS`] is
-/// refused, so an unapplied bound note is dead an hour after its timestamp.
+/// residue 997; bound notes version 3, tracker v3.2): the issuer's signature
+/// over the prior acknowledgment of the edge's CURRENT state (P, p) at the
+/// bound note's own timestamp ts,
+/// `PA(I,R,P,p,ts) = prior_ack_message(issuer, recipient, denomination, P, p, ts, nft)`,
+/// where P is the stored total and p the stored note's timestamp (0 and 0 for an
+/// edge that does not exist yet). The tracker applies the bound note only while
+/// the edge is still in that state and the note raises it, so a note signed
+/// against a stale state can never apply: the issuer pays exactly `new - P`,
+/// both values it signed. Each state (P, p) of an edge occurs once (the
+/// timestamp strictly increases with every write), so two bound notes on the
+/// same prior exclude each other even if a transfer or set-off lowers the edge
+/// back to P in between (version 2 acknowledged the note message M(I,R,P,ts),
+/// the total alone). Like a novation, a bound note expires: one whose timestamp
+/// is older than [`NOVATION_MAX_AGE_MS`] is refused, so an unapplied bound note
+/// is dead an hour after its timestamp.
 ///
 /// `Debug` is redacted (signatures are never logged): the signature appears
 /// only as its fingerprint, see [`signature_fingerprint`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PriorAck {
-    /// The issuer's signature over the prior message (65 bytes).
+    /// The issuer's signature over the prior acknowledgment (65 bytes).
     pub signature: Signature,
     /// Optional and diagnostic: the prior total the issuer acknowledged. When
     /// present it must equal the stored total, else [`NoteError::StalePrior`].
     pub prior_total: Option<u64>,
+    /// Optional and diagnostic: the prior timestamp the issuer acknowledged (0
+    /// for an absent edge). When present it must equal the stored note's
+    /// timestamp, else [`NoteError::StalePrior`].
+    pub prior_timestamp: Option<u64>,
 }
 
 /// Upper bound on the edges of one set-off (keeps verification and the storage
@@ -743,6 +765,7 @@ impl std::fmt::Debug for PriorAck {
         f.debug_struct("PriorAck")
             .field("signature", &redacted_debug::Sig(&self.signature))
             .field("prior_total", &self.prior_total)
+            .field("prior_timestamp", &self.prior_timestamp)
             .finish()
     }
 }
@@ -1221,8 +1244,9 @@ impl TrackerStateManager {
         // which the contract pins, so the signed message and the on-chain commitment are unchanged.
         // The per-issuer reserve AVL tree (which is what the contract actually reads) is untouched.
         let mut note_to_store = note.clone();
-        // The edge's stored total (P for a bound note): 0 when the edge is absent.
+        // The edge's stored state (P and p for a bound note): 0 and 0 when the edge is absent.
         let mut stored_total = 0u64;
+        let mut stored_timestamp = 0u64;
 
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing).
@@ -1255,6 +1279,7 @@ impl TrackerStateManager {
                     });
                 }
                 stored_total = existing_note.amount_collected;
+                stored_timestamp = existing_note.timestamp;
             }
             Err(NoteError::NotFound) => {}
             Err(e) => return Err(e),
@@ -1278,6 +1303,7 @@ impl TrackerStateManager {
             note,
             &key.key_hash,
             stored_total,
+            stored_timestamp,
             prior,
             current_time,
         )?;
@@ -1321,23 +1347,26 @@ impl TrackerStateManager {
     /// (each refusal is checked only if the ones before it passed):
     /// 1. residue 995, 996, 998 or 999 (another operation's) -> `ReservedTimestamp`;
     /// 2. residue 997 (bound note) without `prior` -> `ReservedTimestamp`;
-    /// 3. residue 997 with `prior`, where P = `stored_total` (0 for an absent edge):
-    ///    a timestamp older than `now` - [`NOVATION_MAX_AGE_MS`] -> `NovationExpired`
-    ///    (a bound note is a payment attempt and expires like a novation, so an
-    ///    unapplied one is dead an hour after its timestamp); a `prior_total`
-    ///    other than P -> `StalePrior`; the issuer's signature over
-    ///    `signing_message(issuer, recipient, denomination, P, timestamp, nft)` must
-    ///    verify, else `InvalidPriorSignature`; the new total must be strictly
-    ///    greater than P, else `NotAnIncrease` (so the acknowledgment itself, a
-    ///    valid note message at P, can never be submitted as a note);
+    /// 3. residue 997 with `prior`, where P = `stored_total` and p =
+    ///    `stored_timestamp` (0 and 0 for an absent edge): a timestamp older than
+    ///    `now` - [`NOVATION_MAX_AGE_MS`] -> `NovationExpired` (a bound note is a
+    ///    payment attempt and expires like a novation, so an unapplied one is dead
+    ///    an hour after its timestamp); a `prior_total` other than P or a
+    ///    `prior_timestamp` other than p -> `StalePrior`; the issuer's signature
+    ///    over the prior acknowledgment (bound notes version 3)
+    ///    `prior_ack_message(issuer, recipient, denomination, P, p, timestamp, nft)`
+    ///    must verify, else `InvalidPriorSignature`; the new total must be
+    ///    strictly greater than P, else `NotAnIncrease`;
     /// 4. any other residue on a bound-only edge -> `BoundNoteRequired`;
     /// 5. a `prior` on a note that is not a bound note -> `InvalidRequest`.
+    #[allow(clippy::too_many_arguments)]
     fn check_residue_and_binding(
         &self,
         issuer_pubkey: &PubKey,
         note: &IouNote,
         key: &NoteKeyBytes,
         stored_total: u64,
+        stored_timestamp: u64,
         prior: Option<PriorAck>,
         now: u64,
     ) -> Result<(), NoteError> {
@@ -1350,16 +1379,19 @@ impl TrackerStateManager {
             if note.timestamp < now.saturating_sub(NOVATION_MAX_AGE_MS) {
                 return Err(NoteError::NovationExpired);
             }
-            if let Some(acknowledged) = prior.prior_total {
-                if acknowledged != stored_total {
-                    return Err(NoteError::StalePrior);
-                }
+            if prior.prior_total.is_some_and(|t| t != stored_total)
+                || prior.prior_timestamp.is_some_and(|p| p != stored_timestamp)
+            {
+                return Err(NoteError::StalePrior);
             }
-            let prior_message = schnorr::signing_message(
+            // The acknowledgment binds the edge's state (P, p) and this note's
+            // timestamp: an edge state occurs once, so it applies at most once.
+            let prior_message = schnorr::prior_ack_message(
                 issuer_pubkey,
                 &note.recipient_pubkey,
                 &note.denomination,
                 stored_total,
+                stored_timestamp,
                 note.timestamp,
                 &note.tracker_nft_id,
             );
@@ -2304,36 +2336,51 @@ impl TrackerStateManager {
         )
     }
 
-    /// Debt transfer (triad novation, specs/spec.md "Debt Transfer"), version 3:
-    /// move `amount` of the issuer's cumulative debt from the edge
-    /// (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
-    /// denomination. The old creditor is paid by the transfer; the new creditor
-    /// is owed by the issuer instead.
+    /// Debt transfer (triad novation, specs/spec.md "Debt Transfer"), version 4
+    /// (tracker v3.2): move `amount` of the issuer's cumulative debt from the
+    /// edge (issuer -> from_recipient) to the edge (issuer -> to_recipient) in
+    /// one denomination. The old creditor is paid by the transfer; the new
+    /// creditor is owed by the issuer instead.
     ///
     /// Notation: A issuer, B old creditor (`from_recipient`), C new creditor
-    /// (`to_recipient`), a `amount`, T `timestamp`, X the stored A->B total, Y
-    /// the stored A->C total (0 when that edge is absent), and M(I,R,t,ts) the
-    /// standard 80-byte note message (no new message format).
+    /// (`to_recipient`), a `amount`, T `timestamp`, X and p the stored A->B
+    /// total and timestamp, Y and q the stored A->C total and timestamp (0 and 0
+    /// when that edge is absent), M(I,R,t,ts) the standard 80-byte note message
+    /// and PA(I,R,t,p,T) the 105-byte prior acknowledgment
+    /// ([`schnorr::prior_ack_message`], tag `basis/prior-ack/1`).
     ///
     /// SIGNATURES: seven (see [`TransferSignatures`]), all verified BEFORE any
     /// state changes:
     /// - A over M(A,B,X-a,T): the lowered total stays a note the issuer signed,
     ///   so the edge remains redeemable;
     /// - A over M(A,C,Y+a,T): the debtor's consent to owe the new creditor;
-    /// - B over M(A,B,X,T), its creditor prior acknowledgment, and over
+    /// - B over PA(A,B,X,p,T), its creditor prior acknowledgment, and over
     ///   M(A,B,X-a,T), the consent the S3 rule requires for lowering an edge.
-    ///   The acknowledgment pins the stored total the decrease starts from, so
+    ///   The acknowledgment pins the stored state the decrease starts from, so
     ///   B loses exactly a, both values it signed. Without it, if A->B rose and
     ///   A->C fell between signing and submission, whoever holds the signatures
-    ///   could move more of B's claim than B agreed to (finding F-A);
+    ///   could move more of B's claim than B agreed to (finding F-A). It binds
+    ///   the stored timestamp p as well as X, so it applies at most once: the
+    ///   first attempt that applies moves A->B to a later timestamp, and no
+    ///   later total of the edge brings (X, p) back (audit VS-1: version 3
+    ///   acknowledged M(A,B,X,T), so an attempt could apply again after A->B
+    ///   and A->C returned to X and Y);
     /// - B over M(A,C,Y+a,T): binds B's consent to this destination. Without it,
     ///   the issuer and a key it controls could take B's from-edge signatures
     ///   and redirect the debt to themselves;
-    /// - C over M(A,C,Y,T), its prior acknowledgment, and over M(A,C,Y+a,T), its
-    ///   acceptance: C gains exactly a, so a payer cannot underpay C by signing
-    ///   a smaller decrease while a note C does not know of has raised A->C.
-    /// The issuer's total owed never changes: the decrease on one edge always
-    /// equals the increase on the other.
+    /// - C over PA(A,C,Y,q,T), its prior acknowledgment, and over M(A,C,Y+a,T),
+    ///   its acceptance: C gains exactly a, so a payer cannot underpay C by
+    ///   signing a smaller decrease while a note C does not know of has raised
+    ///   A->C.
+    /// No note, set-off edge or statement is a PA message (it is never 80 bytes
+    /// and starts with its tag), and it binds the edge's state and T, so an
+    /// acknowledgment cannot be lifted from another kind of operation or reused
+    /// at another T. It does not name the signer's role: B's acknowledgment of
+    /// A->B as the new creditor of a transfer INTO A->B at the same T is the
+    /// same message, which gives nothing away (paying out of A->B also needs
+    /// B's M(A,B,X-a,T) and M(A,C,Y+a,T), and both transfers move A->B to T, so
+    /// at most one of them applies). The issuer's total owed never changes: the
+    /// decrease on one edge always equals the increase on the other.
     ///
     /// CHECKS, all before anything is written, in this order:
     /// 1. B != C and A is neither of them, and a > 0 (`InvalidTransfer`);
@@ -2346,8 +2393,9 @@ impl TrackerStateManager {
     /// 7. the from-edge has no committed or pending on-chain total
     ///    (`OnchainScope`; also refused while the confirmation records failed
     ///    to load, see [`StoreLoadReport::confirmations_error`]);
-    /// 8. `from_prior_total` and `to_prior_total`, optional and diagnostic,
-    ///    equal X and Y when they are sent (`StalePrior`);
+    /// 8. `from_prior_total`, `to_prior_total`, `from_prior_timestamp` and
+    ///    `to_prior_timestamp`, optional and diagnostic, equal X, Y, p and q
+    ///    when they are sent (`StalePrior`);
     /// 9. X >= a and X - a >= the from-edge's redeemed amount
     ///    (`InvalidTransfer`); Y + a does not overflow (`AmountOverflow`);
     /// 10. T is newer than both edges' timestamps (`PastTimestamp`);
@@ -2362,10 +2410,11 @@ impl TrackerStateManager {
     /// TIMESTAMP: the transfer residue keeps every transfer signature out of
     /// POST /notes, which refuses it, so the issuer's signature on the raised
     /// edge cannot be submitted on its own as an ordinary note. Each edge's
-    /// timestamp strictly increases, so two attempts of the same payment
-    /// exclude each other: whichever applies first moves A->B past the other
-    /// attempt's prior acknowledgment or past its timestamp. The maximum age
-    /// bounds how long unapplied signatures stay usable.
+    /// timestamp strictly increases, so two attempts built on the same state
+    /// of A->B exclude each other for good: whichever applies first moves A->B
+    /// to its own T, past the other attempt's prior acknowledgment (X, p) and,
+    /// if the other is older, past its timestamp. The maximum age bounds how
+    /// long unapplied signatures stay usable.
     ///
     /// SCOPE: the from-edge must have no committed or pending on-chain total
     /// (always the case on a pure-credit tracker). Then no tracker box holds an
@@ -2391,6 +2440,8 @@ impl TrackerStateManager {
         signatures: &TransferSignatures,
         from_prior_total: Option<u64>,
         to_prior_total: Option<u64>,
+        from_prior_timestamp: Option<u64>,
+        to_prior_timestamp: Option<u64>,
     ) -> Result<TransferTotals, NoteError> {
         let plan = self.check_transfer(
             issuer_pubkey,
@@ -2402,6 +2453,8 @@ impl TrackerStateManager {
             signatures,
             from_prior_total,
             to_prior_total,
+            from_prior_timestamp,
+            to_prior_timestamp,
         )?;
         self.apply_transfer(issuer_pubkey, plan)
     }
@@ -2425,6 +2478,8 @@ impl TrackerStateManager {
         signatures: &TransferSignatures,
         from_prior_total: Option<u64>,
         to_prior_total: Option<u64>,
+        from_prior_timestamp: Option<u64>,
+        to_prior_timestamp: Option<u64>,
         acceptance_check: Option<ExchangeAcceptanceCheckFn>,
     ) -> Result<TransferTotals, NoteError> {
         let plan = self.check_transfer(
@@ -2437,6 +2492,8 @@ impl TrackerStateManager {
             signatures,
             from_prior_total,
             to_prior_total,
+            from_prior_timestamp,
+            to_prior_timestamp,
         )?;
         if let Some(check) = acceptance_check {
             let view = ExchangeAcceptanceView {
@@ -2465,6 +2522,8 @@ impl TrackerStateManager {
         signatures: &TransferSignatures,
         from_prior_total: Option<u64>,
         to_prior_total: Option<u64>,
+        from_prior_timestamp: Option<u64>,
+        to_prior_timestamp: Option<u64>,
     ) -> Result<TransferPlan, NoteError> {
         // 1. Three distinct parties, a positive amount.
         if from_recipient_pubkey == to_recipient_pubkey {
@@ -2533,11 +2592,16 @@ impl TrackerStateManager {
             }
         }
 
-        // 8. The stored totals the creditors' prior acknowledgments cover.
+        // 8. The stored states (total, timestamp) the creditors' prior
+        // acknowledgments cover: (0, 0) for an absent to-edge.
         let from_prior = from_note.amount_collected;
+        let from_prior_ts = from_note.timestamp;
         let to_prior = to_note_opt.as_ref().map(|n| n.amount_collected).unwrap_or(0);
+        let to_prior_ts = to_note_opt.as_ref().map(|n| n.timestamp).unwrap_or(0);
         if from_prior_total.is_some_and(|p| p != from_prior)
             || to_prior_total.is_some_and(|p| p != to_prior)
+            || from_prior_timestamp.is_some_and(|p| p != from_prior_ts)
+            || to_prior_timestamp.is_some_and(|p| p != to_prior_ts)
         {
             return Err(NoteError::StalePrior);
         }
@@ -2585,7 +2649,9 @@ impl TrackerStateManager {
             }
         }
 
-        // 13. All seven signatures, in the order of `TransferSignatures`.
+        // 13. All seven signatures, in the order of `TransferSignatures`: five
+        // over the note messages of the new totals at T, the two creditor prior
+        // acknowledgments over PA(A,B,X,p,T) and PA(A,C,Y,q,T).
         let message = |recipient: &PubKey, total: u64| {
             schnorr::signing_message(
                 issuer_pubkey,
@@ -2596,9 +2662,20 @@ impl TrackerStateManager {
                 &tracker_nft_id,
             )
         };
-        let msg_from_prior = message(from_recipient_pubkey, from_prior);
+        let prior_ack = |recipient: &PubKey, prior_total: u64, prior_timestamp: u64| {
+            schnorr::prior_ack_message(
+                issuer_pubkey,
+                recipient,
+                denomination,
+                prior_total,
+                prior_timestamp,
+                timestamp,
+                &tracker_nft_id,
+            )
+        };
+        let msg_from_prior = prior_ack(from_recipient_pubkey, from_prior, from_prior_ts);
         let msg_from = message(from_recipient_pubkey, from_new_total);
-        let msg_to_prior = message(to_recipient_pubkey, to_prior);
+        let msg_to_prior = prior_ack(to_recipient_pubkey, to_prior, to_prior_ts);
         let msg_to = message(to_recipient_pubkey, to_new_total);
         let verifier = SchnorrVerifier;
         for (slot, sig, msg, key) in [

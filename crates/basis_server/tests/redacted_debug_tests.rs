@@ -130,11 +130,14 @@ fn the_store_types_with_signatures_are_redacted_on_their_own() {
     }
     assert_eq!(format!("{:?}", note), format!("{:?}", redact::Note(&note)));
 
-    let prior = PriorAck { signature: sig(&A, 27), prior_total: Some(60) };
+    let prior = PriorAck { signature: sig(&A, 27), prior_total: Some(60), prior_timestamp: Some(1762569000500) };
     for out in both(&prior) {
         assert_redacted(&out, &[prior.signature]);
     }
-    assert_eq!(format!("{:?}", prior), format!("PriorAck {{ signature: {}, prior_total: Some(60) }}", fp(&prior.signature)));
+    assert_eq!(
+        format!("{:?}", prior),
+        format!("PriorAck {{ signature: {}, prior_total: Some(60), prior_timestamp: Some(1762569000500) }}", fp(&prior.signature))
+    );
     assert_eq!(format!("{:?}", prior), format!("{:?}", redact::Prior(&prior)));
 
     let s = transfer_signatures();
@@ -255,6 +258,8 @@ fn a_transfer_command_shows_fingerprints_never_signatures() {
         signatures,
         from_prior_total: Some(100),
         to_prior_total: Some(50),
+        from_prior_timestamp: Some(1762560000123),
+        to_prior_timestamp: None,
         acceptance_check: Some(ExchangeAcceptanceCheck(Box::new(
             |_view: basis_store::ExchangeAcceptanceView| -> Result<(), String> { Ok(()) },
         ))),
@@ -272,7 +277,7 @@ fn a_transfer_command_shows_fingerprints_never_signatures() {
     }
     // The compact form, exactly (the response channel is elided).
     let expected = format!(
-        "TransferNotes {{ issuer_pubkey: {}, from_recipient_pubkey: {}, to_recipient_pubkey: {}, denomination: \"erg\", amount: 20, timestamp: 1762570000999, signatures: TransferSignatures {{ issuer_from: {}, issuer_to: {}, from_recipient_prior: {}, from_recipient: {}, from_recipient_to: {}, to_recipient_prior: {}, to_recipient: {} }}, from_prior_total: Some(100), to_prior_total: Some(50), acceptance_check: Some(ExchangeAcceptanceCheck(..)), .. }}",
+        "TransferNotes {{ issuer_pubkey: {}, from_recipient_pubkey: {}, to_recipient_pubkey: {}, denomination: \"erg\", amount: 20, timestamp: 1762570000999, signatures: TransferSignatures {{ issuer_from: {}, issuer_to: {}, from_recipient_prior: {}, from_recipient: {}, from_recipient_to: {}, to_recipient_prior: {}, to_recipient: {} }}, from_prior_total: Some(100), to_prior_total: Some(50), from_prior_timestamp: Some(1762560000123), to_prior_timestamp: None, acceptance_check: Some(ExchangeAcceptanceCheck(..)), .. }}",
         hex::encode(pk(&A)),
         hex::encode(pk(&B)),
         hex::encode(pk(&C)),
@@ -291,7 +296,7 @@ fn a_transfer_command_shows_fingerprints_never_signatures() {
 fn every_command_with_a_signature_is_redacted() {
     // A bound note with its issuer prior acknowledgment.
     let note = IouNote::create_and_sign(pk(&B), 100, TS - 2, &A, &NFT, DenomKey::Erg).unwrap();
-    let prior = PriorAck { signature: sig(&A, 8), prior_total: Some(60) };
+    let prior = PriorAck { signature: sig(&A, 8), prior_total: Some(60), prior_timestamp: Some(TS - 3_000) };
     let (response_tx, _rx) = tokio::sync::oneshot::channel();
     let add = TrackerCommand::AddNote { issuer_pubkey: pk(&A), note: note.clone(), prior: Some(prior), response_tx };
     for out in both(&add) {
@@ -299,6 +304,7 @@ fn every_command_with_a_signature_is_redacted() {
     }
     let out = format!("{:?}", add);
     assert!(out.contains("amount_collected: 100") && out.contains("prior_total: Some(60)"), "{out}");
+    assert!(out.contains("prior_timestamp: Some(1762569997999)"), "{out}");
 
     // A set-off with two edges, two signatures each.
     let edges = vec![
@@ -374,11 +380,13 @@ fn note_and_novation_requests_are_redacted() {
         "denomination": "erg",
         "prior_signature": hex::encode(prior),
         "prior_total": 60,
+        "prior_timestamp": 1762569000500u64,
     }))
     .unwrap();
     for out in both(&create) {
         assert_redacted(&out, &[signature, prior]);
         assert!(out.contains(&hex::encode(pk(&A))) && out.contains("amount: 100") && out.contains("1762570000997"), "{out}");
+        assert!(out.contains("1762569000500"), "{out}");
     }
 
     let s = transfer_signatures();
@@ -396,10 +404,13 @@ fn note_and_novation_requests_are_redacted() {
         "from_recipient_to_signature": hex::encode(s.from_recipient_to),
         "to_recipient_prior_signature": hex::encode(s.to_recipient_prior),
         "to_recipient_signature": hex::encode(s.to_recipient),
+        "from_prior_timestamp": 1762560000123u64,
+        "to_prior_timestamp": 0,
     }))
     .unwrap();
     for out in both(&transfer) {
         assert_redacted(&out, &all(&s));
+        assert!(out.contains("1762560000123"), "{out}");
     }
 
     let edge_sigs = [sig(&A, 21), sig(&B, 22), sig(&B, 23), sig(&A, 24)];

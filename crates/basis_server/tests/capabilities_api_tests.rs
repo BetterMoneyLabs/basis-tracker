@@ -78,9 +78,17 @@ fn note_body(issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> Va
     })
 }
 
-/// The POST /notes/transfer body moving `amount` of A's debt from A->B (stored total `x`) to A->C (`y`) at `ts`,
-/// with all seven signatures.
-fn transfer_body(x: u64, y: u64, amount: u64, ts: u64) -> Value {
+/// `signer`'s prior acknowledgment (hex) of the ERG edge issuer -> recipient in the state `prior` (total,
+/// timestamp; (0, 0) for an absent edge) for the operation at `ts` (tracker v3.2, `basis/prior-ack/1`).
+fn ack(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), ts: u64) -> String {
+    let msg = basis_store::schnorr::prior_ack_message(&pk(issuer), &pk(recipient), &DenomKey::Erg, prior.0, prior.1, ts, &nft());
+    hex::encode(basis_store::schnorr::schnorr_sign(&msg, signer, &pk(signer)).unwrap())
+}
+
+/// The POST /notes/transfer body (version 4) moving `amount` of A's debt from A->B (stored state `x`: total,
+/// timestamp) to A->C (`y`) at `ts`, with all seven signatures.
+fn transfer_body(x: (u64, u64), y: (u64, u64), amount: u64, ts: u64) -> Value {
+    let ((x, px), (y, py)) = (x, y);
     json!({
         "issuer_pubkey": pk_hex(&A),
         "from_recipient_pubkey": pk_hex(&B),
@@ -90,10 +98,10 @@ fn transfer_body(x: u64, y: u64, amount: u64, ts: u64) -> Value {
         "timestamp": ts,
         "issuer_from_signature": sign(&A, &A, &B, x - amount, ts),
         "issuer_to_signature": sign(&A, &A, &C, y + amount, ts),
-        "from_recipient_prior_signature": sign(&B, &A, &B, x, ts),
+        "from_recipient_prior_signature": ack(&B, &A, &B, (x, px), ts),
         "from_recipient_signature": sign(&B, &A, &B, x - amount, ts),
         "from_recipient_to_signature": sign(&B, &A, &C, y + amount, ts),
-        "to_recipient_prior_signature": sign(&C, &A, &C, y, ts),
+        "to_recipient_prior_signature": ack(&C, &A, &C, (y, py), ts),
         "to_recipient_signature": sign(&C, &A, &C, y + amount, ts),
     })
 }
@@ -112,16 +120,19 @@ fn setoff_body(ab: u64, ba: u64, d: u64, ts: u64) -> Value {
     json!({"denomination": "erg", "timestamp": ts, "edges": [edge(&A, &B, ab), edge(&B, &A, ba)]})
 }
 
-/// The exact GET /capabilities body of this build (design §3.6, with decision D-1: bound notes version 2 with their
-/// one-hour maximum age, tracker v3.1) with the run-time values filled in.
+/// The exact GET /capabilities body of this build (tracker v3.2, design §3: build valun-circulating-credit/4, bound
+/// notes version 3 and transfer version 4 with the prior acknowledgment basis/prior-ack/1; decision D-1's one-hour
+/// maximum age for bound notes kept) with the run-time values filled in.
 fn expected_capabilities(pure_credit: bool, onchain_edges: u64, novations_disabled_reason: Value) -> Value {
     json!({"success": true, "data": {
-        "tracker": "basis", "build": "valun-circulating-credit/3", "commit": commit(),
+        "tracker": "basis", "build": "valun-circulating-credit/4", "commit": commit(),
         "pure_credit": pure_credit, "reserved_ms": [995, 996, 997, 998, 999],
-        "bound_notes": {"ms": 997, "version": 2, "max_age_ms": 3600000}, "bound_only_edges": true,
+        "bound_notes": {"ms": 997, "version": 3, "max_age_ms": 3600000, "prior_ack": "basis/prior-ack/1"},
+        "bound_only_edges": true,
         "novation": {"max_age_ms": 3600000,
-            "transfer": {"ms": 999, "version": 3, "signatures": ["issuer_from", "issuer_to",
-                "from_recipient_prior", "from_recipient", "from_recipient_to", "to_recipient_prior", "to_recipient"]},
+            "transfer": {"ms": 999, "version": 4, "signatures": ["issuer_from", "issuer_to",
+                "from_recipient_prior", "from_recipient", "from_recipient_to", "to_recipient_prior", "to_recipient"],
+                "prior_ack": "basis/prior-ack/1"},
             "setoff": {"ms": 998, "version": 3, "max_edges": 64, "per_edge_timestamps": true,
                 "signatures_per_edge": ["issuer", "recipient"]}},
         "onchain_edges": onchain_edges, "novations_disabled_reason": novations_disabled_reason}})
@@ -162,6 +173,8 @@ fn spawn_tracker() -> tokio::sync::mpsc::Sender<TrackerCommand> {
                     signatures,
                     from_prior_total,
                     to_prior_total,
+                    from_prior_timestamp,
+                    to_prior_timestamp,
                     acceptance_check,
                     response_tx,
                 } => {
@@ -175,6 +188,8 @@ fn spawn_tracker() -> tokio::sync::mpsc::Sender<TrackerCommand> {
                         &signatures,
                         from_prior_total,
                         to_prior_total,
+                        from_prior_timestamp,
+                        to_prior_timestamp,
                         acceptance_check.map(|check| check.0),
                     ));
                 }
@@ -331,7 +346,7 @@ impl Tracker {
 }
 
 #[tokio::test]
-async fn capabilities_report_the_exact_v3_contract() {
+async fn capabilities_report_the_exact_v3_2_contract() {
     let t = tracker(true, None).await;
     let (status, raw) = t.capabilities().await;
     assert_eq!(status, StatusCode::OK, "{raw}");
@@ -340,11 +355,12 @@ async fn capabilities_report_the_exact_v3_contract() {
     // ...and as the exact bytes, so the key order and the absence of an `error` field are pinned too.
     let exact = format!(
         concat!(
-            r#"{{"success":true,"data":{{"tracker":"basis","build":"valun-circulating-credit/3","commit":"{}","#,
-            r#""pure_credit":true,"reserved_ms":[995,996,997,998,999],"bound_notes":{{"ms":997,"version":2,"max_age_ms":3600000}},"#,
-            r#""bound_only_edges":true,"novation":{{"max_age_ms":3600000,"transfer":{{"ms":999,"version":3,"#,
+            r#"{{"success":true,"data":{{"tracker":"basis","build":"valun-circulating-credit/4","commit":"{}","#,
+            r#""pure_credit":true,"reserved_ms":[995,996,997,998,999],"#,
+            r#""bound_notes":{{"ms":997,"version":3,"max_age_ms":3600000,"prior_ack":"basis/prior-ack/1"}},"#,
+            r#""bound_only_edges":true,"novation":{{"max_age_ms":3600000,"transfer":{{"ms":999,"version":4,"#,
             r#""signatures":["issuer_from","issuer_to","from_recipient_prior","from_recipient","from_recipient_to","#,
-            r#""to_recipient_prior","to_recipient"]}},"setoff":{{"ms":998,"version":3,"max_edges":64,"#,
+            r#""to_recipient_prior","to_recipient"],"prior_ack":"basis/prior-ack/1"}},"setoff":{{"ms":998,"version":3,"max_edges":64,"#,
             r#""per_edge_timestamps":true,"signatures_per_edge":["issuer","recipient"]}}}},"onchain_edges":0,"#,
             r#""novations_disabled_reason":null}}}}"#
         ),
@@ -394,7 +410,7 @@ async fn novations_answer_503_while_the_confirmation_records_are_unreadable() {
     });
     // The transfer at tt (residue 999); the set-off one second later (residue 998), still in the past.
     let tt = at_residue(now_ms() - 1000, 999);
-    let transfer = transfer_body(100, 50, 20, tt);
+    let transfer = transfer_body((100, t0), (50, t0 + 1), 20, tt);
     assert_eq!(t.post("/notes/transfer", &transfer).await, (StatusCode::SERVICE_UNAVAILABLE, disabled.clone()));
     let setoff = setoff_body(100, 100, 30, tt + 999);
     assert_eq!(t.post("/notes/setoff", &setoff).await, (StatusCode::SERVICE_UNAVAILABLE, disabled.clone()));
@@ -500,7 +516,7 @@ async fn the_novation_routes_need_the_write_role_and_capabilities_the_read_role(
     };
     let app = authed_routes(&t.state, auth);
     // No such edges exist, so a request that passes authorization reaches the store and is refused there (404).
-    let transfer = transfer_body(100, 50, 20, at_residue(now_ms() - 1000, 999));
+    let transfer = transfer_body((100, 1), (50, 2), 20, at_residue(now_ms() - 1000, 999));
     let setoff = setoff_body(100, 100, 30, at_residue(now_ms() - 1000, 998));
 
     // Write is enough for both novation routes (they used to require Admin).

@@ -441,6 +441,8 @@ async fn main() {
                     signatures,
                     from_prior_total,
                     to_prior_total,
+                    from_prior_timestamp,
+                    to_prior_timestamp,
                     acceptance_check,
                     response_tx,
                 } => {
@@ -454,6 +456,8 @@ async fn main() {
                         &signatures,
                         from_prior_total,
                         to_prior_total,
+                        from_prior_timestamp,
+                        to_prior_timestamp,
                         acceptance_check.map(|check| check.0),
                     );
                     if result.is_ok() {

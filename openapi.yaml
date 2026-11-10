@@ -57,10 +57,13 @@ paths:
         1000) is 995-999 are reserved: 999 for transfers, 998 for set-offs, 996
         and 995 for future operations (all refused with code reserved_timestamp),
         and 997 for bound notes. A bound note carries prior_signature, the
-        issuer's signature over the edge's note message at its current total and
-        the bound note's timestamp; it applies only while that total is current
-        and is raised, and only while its timestamp is at most one hour old
-        (novation_expired; bound notes version 2, tracker v3.1). Ordinary notes
+        issuer's signature over the prior acknowledgment basis/prior-ack/1 of the
+        edge's current total and timestamp at the bound note's timestamp (bound
+        notes version 3, tracker v3.2: "basis/prior-ack/1" | debtKey | prior total
+        | prior timestamp | timestamp | trackerNftId, 105 bytes; 0 and 0 for a new
+        edge); it applies only while the edge is in that state and is raised, and
+        only while its timestamp is at most one hour old (novation_expired).
+        Ordinary notes
         use 000-994 ms and have no maximum age. An edge changed by a transfer or
         set-off is bound-only and accepts only bound notes (bound_note_required).
         Errors carry a machine-readable `code`.
@@ -94,8 +97,9 @@ paths:
         '409':
           description: >-
             Conflict - note's tracker_nft_id does not match this tracker's configured
-            tracker NFT ID (code tracker_id_mismatch), or a bound note's prior_total is
-            not the edge's current total (code stale_prior)
+            tracker NFT ID (code tracker_id_mismatch), or a bound note's prior_total or
+            prior_timestamp is not the edge's current total or timestamp (code
+            stale_prior)
           content:
             application/json:
               schema:
@@ -188,16 +192,21 @@ paths:
         Moves `amount` of the issuer's cumulative debt from the edge
         (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
         denomination, atomically: the old creditor is paid by the transfer and the
-        new creditor is owed by the issuer instead. Version 3: seven signatures,
-        each over the standard 80-byte note message at `timestamp`. With A the
-        issuer, B the old creditor, C the new creditor, a the amount, X the stored
-        A->B total and Y the stored A->C total (0 for a new edge): A signs
-        M(A,B,X-a) and M(A,C,Y+a); B signs M(A,B,X) (its prior acknowledgment),
-        M(A,B,X-a) (consent to the decrease) and M(A,C,Y+a) (bound to this
-        destination); C signs M(A,C,Y) (its prior acknowledgment) and M(A,C,Y+a)
-        (acceptance). The prior acknowledgments make the amount exact: the
-        transfer applies only while both edges are still at the acknowledged
-        totals, so two attempts of the same payment exclude each other. The
+        new creditor is owed by the issuer instead. Version 4 (tracker v3.2):
+        seven signatures. With A the issuer, B the old creditor, C the new
+        creditor, a the amount, T the timestamp, X and p the stored A->B total
+        and timestamp, Y and q the stored A->C total and timestamp (0 and 0 for a
+        new edge), M(I,R,t) the standard 80-byte note message at T and
+        PA(I,R,t,p) the 105-byte prior acknowledgment basis/prior-ack/1 at T
+        ("basis/prior-ack/1" | debtKey | total | prior timestamp | T |
+        trackerNftId): A signs M(A,B,X-a) and M(A,C,Y+a); B signs PA(A,B,X,p)
+        (its prior acknowledgment), M(A,B,X-a) (consent to the decrease) and
+        M(A,C,Y+a) (bound to this destination); C signs PA(A,C,Y,q) (its prior
+        acknowledgment) and M(A,C,Y+a) (acceptance). The prior acknowledgments
+        make the amount exact and the attempt single-use: the transfer applies
+        only while both edges are still in the acknowledged states, and an
+        edge's state never recurs (its timestamp strictly increases), so two
+        attempts built on the same state exclude each other for good. The
         timestamp must end in 999 ms (the transfer residue, refused by POST
         /notes), so the issuer's signature on the raised edge cannot be submitted
         on its own; it must be newer than both edges and at most one hour old
@@ -249,8 +258,9 @@ paths:
                 $ref: '#/components/schemas/ApiResponseError'
         '409':
           description: >-
-            stale_prior (from_prior_total or to_prior_total is not the edge's
-            current total), tracker_id_mismatch (the edges are bound to different
+            stale_prior (from_prior_total, to_prior_total, from_prior_timestamp or
+            to_prior_timestamp is not the edge's current total or timestamp),
+            tracker_id_mismatch (the edges are bound to different
             tracker NFTs), staged_exchange (an exchange is staged on one of the
             pairs), onchain_scope (the lowered edge has a committed or pending
             on-chain total)
@@ -1183,7 +1193,9 @@ paths:
       summary: Tracker capabilities (the rules this build enforces)
       description: >-
         The build identity and the rules this tracker enforces (Valun
-        circulating-credit tracker v3). A client enables a feature only when the
+        circulating-credit tracker v3.2: build valun-circulating-credit/4, bound
+        notes version 3 and transfer version 4 with prior_ack
+        "basis/prior-ack/1"). A client enables a feature only when the
         response matches what it expects exactly: every route answers OPTIONS
         whatever it enforces, so probing routes proves nothing. Trackers without
         this route answer 404. Read role; no credentials are needed when
@@ -1719,11 +1731,13 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        Debt transfer request (version 3). All seven signatures are over the
-        standard 80-byte note message (debtKey | totalDebt | timestamp |
-        trackerNftId) at the timestamp: five at an edge's NEW cumulative total,
-        and the two creditors' prior acknowledgments at their edge's CURRENT
-        total. Unknown fields are refused.
+        Debt transfer request (version 4, tracker v3.2). Five signatures are over
+        the standard 80-byte note message (debtKey | totalDebt | timestamp |
+        trackerNftId) at an edge's NEW cumulative total and the timestamp; the two
+        creditors' prior acknowledgments are over the 105-byte message
+        "basis/prior-ack/1" | debtKey | prior total | prior timestamp | timestamp |
+        trackerNftId of their edge's CURRENT total and timestamp (0 and 0 for a new
+        edge). Unknown fields are refused.
       required:
         - issuer_pubkey
         - from_recipient_pubkey
@@ -1767,7 +1781,7 @@ components:
           description: Issuer over the lowered edge's new note message (hex, 65 bytes)
         from_recipient_prior_signature:
           type: string
-          description: Old creditor over the lowered edge's note message at its CURRENT total (prior acknowledgment; hex, 65 bytes)
+          description: Old creditor over the acknowledgment basis/prior-ack/1 of the lowered edge's CURRENT total and timestamp at `timestamp` (prior acknowledgment; hex, 65 bytes)
         from_recipient_signature:
           type: string
           description: Old creditor over the lowered edge's new note message (consent)
@@ -1779,7 +1793,7 @@ components:
           description: Issuer over the raised edge's new note message (hex, 65 bytes)
         to_recipient_prior_signature:
           type: string
-          description: New creditor over the raised edge's note message at its CURRENT total, 0 for a new edge (prior acknowledgment; hex, 65 bytes)
+          description: New creditor over the acknowledgment basis/prior-ack/1 of the raised edge's CURRENT total and timestamp, 0 and 0 for a new edge, at `timestamp` (prior acknowledgment; hex, 65 bytes)
         to_recipient_signature:
           type: string
           description: New creditor over the raised edge's new note message (acceptance)
@@ -1793,6 +1807,16 @@ components:
           format: uint64
           nullable: true
           description: Optional and diagnostic; when present it must equal the raised edge's current total, 0 for a new edge (409 stale_prior)
+        from_prior_timestamp:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Optional and diagnostic; when present it must equal the lowered edge's current timestamp (409 stale_prior)
+        to_prior_timestamp:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Optional and diagnostic; when present it must equal the raised edge's current timestamp, 0 for a new edge (409 stale_prior)
     TransferNotesResponse:
       type: object
       properties:
@@ -1955,7 +1979,7 @@ components:
         build:
           type: string
           description: The rule set
-          example: valun-circulating-credit/3
+          example: valun-circulating-credit/4
         commit:
           type: string
           description: The git commit the binary was built from (BASIS_GIT_COMMIT at build time), or "unknown"
@@ -1988,20 +2012,27 @@ components:
     BoundNotesCapability:
       type: object
       description: >-
-        Bound notes (POST /notes at residue 997 with prior_signature). Version 2
-        (tracker v3.1) refuses a bound note older than max_age_ms (novation_expired);
-        version 1 had no maximum age.
+        Bound notes (POST /notes at residue 997 with prior_signature). Version 3
+        (tracker v3.2): prior_signature is over the prior acknowledgment prior_ack
+        of the edge's stored total and timestamp at the note's timestamp, and a
+        bound note older than max_age_ms is refused (novation_expired). Version 2
+        (tracker v3.1) acknowledged the note message at the stored total; version 1
+        had no maximum age.
       properties:
         ms:
           type: integer
           example: 997
         version:
           type: integer
-          example: 2
+          example: 3
         max_age_ms:
           type: integer
           format: uint64
           example: 3600000
+        prior_ack:
+          type: string
+          description: The tag the prior-acknowledgment message starts with
+          example: basis/prior-ack/1
     NovationCapabilities:
       type: object
       properties:
@@ -2021,12 +2052,19 @@ components:
           example: 999
         version:
           type: integer
-          example: 3
+          example: 4
         signatures:
           type: array
           items:
             type: string
           example: [issuer_from, issuer_to, from_recipient_prior, from_recipient, from_recipient_to, to_recipient_prior, to_recipient]
+        prior_ack:
+          type: string
+          description: >-
+            The tag of the message the two _prior slots are over (the prior
+            acknowledgment of the edge's stored total and timestamp); version 3
+            (tracker v3.1) used the note message at the stored total
+          example: basis/prior-ack/1
     SetOffCapability:
       type: object
       properties:
@@ -2372,9 +2410,11 @@ components:
         prior_signature:
           type: string
           description: >-
-            Bound notes only (timestamp ending in 997 ms): the issuer's Schnorr signature
-            (hex, 65 bytes) over the edge's note message at its current total and this
-            note's timestamp (0 for a new edge). Must be absent for every other note.
+            Bound notes only (timestamp ending in 997 ms; bound notes version 3): the
+            issuer's Schnorr signature (hex, 65 bytes) over the prior acknowledgment
+            "basis/prior-ack/1" | debtKey | current total | current timestamp | this
+            note's timestamp | trackerNftId (105 bytes; 0 and 0 for a new edge). Must be
+            absent for every other note.
           pattern: '^[0-9a-fA-F]{130}$'
         prior_total:
           type: integer
@@ -2385,6 +2425,14 @@ components:
             Without prior_signature it is refused at an ordinary residue (400
             invalid_request); at a reserved residue (995-999) the note is refused with
             400 reserved_timestamp (at 997: a bound note needs prior_signature)
+        prior_timestamp:
+          type: integer
+          format: uint64
+          description: >-
+            Optional, with prior_signature only: the current timestamp the
+            acknowledgment covers (0 for a new edge); a value other than the stored
+            note's timestamp is refused (409 stale_prior). Without prior_signature it
+            is refused like prior_total
 
     NoteStateRequest:
       type: object

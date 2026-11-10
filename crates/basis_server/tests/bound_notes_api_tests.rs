@@ -1,6 +1,7 @@
-//! POST /notes on the v3 tracker: timestamp residues (995-999 ms reserved), bound
-//! notes (residue 997 with the issuer's prior acknowledgment of the edge's current
-//! total) and bound-only edges (changed by a set-off or transfer), with the
+//! POST /notes on the v3.2 tracker: timestamp residues (995-999 ms reserved), bound
+//! notes (residue 997 with the issuer's prior acknowledgment, bound notes version
+//! 3: `basis/prior-ack/1` of the edge's current total and timestamp at the note's
+//! timestamp) and bound-only edges (changed by a set-off or transfer), with the
 //! machine-readable `code` on every refusal. Every request goes through the axum
 //! router and a tracker thread backed by a real store.
 
@@ -68,10 +69,25 @@ fn note_body(issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> Va
     })
 }
 
-/// `body` with a prior acknowledgment of `prior` signed by `signer`, and the optional `prior_total`.
-fn with_prior(mut body: Value, signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: u64, prior_total: Option<u64>) -> Value {
+/// `signer`'s prior acknowledgment (hex) of the ERG edge issuer -> recipient in the state `prior` (total,
+/// timestamp; (0, 0) for an absent edge) for the operation at `ts` (tracker v3.2, `basis/prior-ack/1`).
+fn ack(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), ts: u64) -> String {
+    let msg = basis_store::schnorr::prior_ack_message(&pk(issuer), &pk(recipient), &DenomKey::Erg, prior.0, prior.1, ts, &nft());
+    hex::encode(basis_store::schnorr::schnorr_sign(&msg, signer, &pk(signer)).unwrap())
+}
+
+/// `body` with `field` set to `value`.
+fn with(body: &Value, field: &str, value: Value) -> Value {
+    let mut b = body.clone();
+    b[field] = value;
+    b
+}
+
+/// `body` with a prior acknowledgment of the state `prior` (total, timestamp) signed by `signer`, and the optional
+/// `prior_total`.
+fn with_prior(mut body: Value, signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), prior_total: Option<u64>) -> Value {
     let ts = body["timestamp"].as_u64().unwrap();
-    body["prior_signature"] = json!(sign(signer, issuer, recipient, prior, ts));
+    body["prior_signature"] = json!(ack(signer, issuer, recipient, prior, ts));
     if let Some(p) = prior_total {
         body["prior_total"] = json!(p);
     }
@@ -246,7 +262,7 @@ async fn post_notes_refuses_reserved_residues_and_accepts_994_and_000() {
     assert_refused(&r, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
     assert_eq!(
         r.1["error"],
-        "a bound note needs prior_signature: timestamps ending in 997 ms are bound notes, accepted only with the issuer's acknowledgment of the edge's current total"
+        "a bound note needs prior_signature: timestamps ending in 997 ms are bound notes, accepted only with the issuer's acknowledgment of the edge's current total and timestamp"
     );
     // A transfer's raised-edge signature submitted alone (999) is refused on a new edge too.
     assert_refused(&t.note(&note_body(&A, &C, 5, at_residue(later, 999))).await, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
@@ -257,29 +273,45 @@ async fn post_notes_refuses_reserved_residues_and_accepts_994_and_000() {
 }
 
 #[tokio::test]
-async fn a_bound_note_needs_the_issuers_acknowledgment_of_the_current_total() {
+async fn a_bound_note_needs_the_issuers_acknowledgment_of_the_current_total_and_timestamp() {
     let t = tracker().await;
     let base = now_ms() - 60_000;
-    assert_created(&t.note(&note_body(&A, &B, 10, at_residue(base, 0))).await);
+    let p0 = at_residue(base, 0);
+    assert_created(&t.note(&note_body(&A, &B, 10, p0)).await);
     let ts = at_residue(base + 2_000, 997);
     // A prior at a wrong total: stale_prior (409) when its total is sent, invalid_prior_signature when not.
-    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, 9, Some(9))).await;
+    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (9, p0), Some(9))).await;
     assert_refused(&r, StatusCode::CONFLICT, Some("stale_prior"));
-    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, 9, None)).await;
+    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (9, p0), None)).await;
     assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
+    assert_eq!(
+        r.1["error"],
+        "prior_signature is not the issuer's signature over the acknowledgment basis/prior-ack/1 of the edge's current total and timestamp at this operation's timestamp"
+    );
+    // A prior at the right total and a wrong timestamp: stale_prior when prior_timestamp is sent, else
+    // invalid_prior_signature.
+    let r = t.note(&with(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (10, p0 - 1), None), "prior_timestamp", json!(p0 - 1))).await;
+    assert_refused(&r, StatusCode::CONFLICT, Some("stale_prior"));
+    assert_eq!(r.1["error"], "prior_total or prior_timestamp is not the edge's current total or timestamp");
+    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (10, p0 - 1), Some(10))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
+    // A bound notes version 2 acknowledgment (the note message at the stored total) is refused.
+    let v2 = with(&note_body(&A, &B, 15, ts), "prior_signature", json!(sign(&A, &A, &B, 10, ts)));
+    assert_refused(&t.note(&v2).await, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
     // A prior signed by the recipient instead of the issuer.
-    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &B, &A, &B, 10, Some(10))).await;
+    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &B, &A, &B, (10, p0), Some(10))).await;
     assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
     // An equal total is not an increase.
-    let r = t.note(&with_prior(note_body(&A, &B, 10, ts), &A, &A, &B, 10, Some(10))).await;
+    let r = t.note(&with_prior(note_body(&A, &B, 10, ts), &A, &A, &B, (10, p0), Some(10))).await;
     assert_refused(&r, StatusCode::BAD_REQUEST, Some("not_an_increase"));
     assert_eq!(t.total(&A, &B).await, Some(10));
-    // With the issuer's acknowledgment of the stored total the bound note applies.
-    assert_created(&t.note(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, 10, Some(10))).await);
+    // With the issuer's acknowledgment of the stored state the bound note applies (prior_timestamp sent too).
+    let ok = with(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (10, p0), Some(10)), "prior_timestamp", json!(p0));
+    assert_created(&t.note(&ok).await);
     assert_eq!(t.total(&A, &B).await, Some(15));
-    // prior_total is optional.
+    // prior_total and prior_timestamp are optional; the next bound note acknowledges the new state (15, ts).
     let ts2 = ts + 1_000;
-    assert_created(&t.note(&with_prior(note_body(&A, &B, 18, ts2), &A, &A, &B, 15, None)).await);
+    assert_created(&t.note(&with_prior(note_body(&A, &B, 18, ts2), &A, &A, &B, (15, ts), None)).await);
     assert_eq!(t.total(&A, &B).await, Some(18));
 }
 
@@ -287,10 +319,16 @@ async fn a_bound_note_needs_the_issuers_acknowledgment_of_the_current_total() {
 async fn a_first_bound_note_on_an_absent_edge_acknowledges_zero() {
     let t = tracker().await;
     let ts = at_residue(now_ms() - 60_000, 997);
-    let r = t.note(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, 3, Some(3))).await;
+    let r = t.note(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, (3, 0), Some(3))).await;
     assert_refused(&r, StatusCode::CONFLICT, Some("stale_prior"));
+    // The absent edge's state is (0, 0).
+    let r = t.note(&with(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, (0, 0), Some(0)), "prior_timestamp", json!(1))).await;
+    assert_refused(&r, StatusCode::CONFLICT, Some("stale_prior"));
+    let r = t.note(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, (0, 1), Some(0))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
     assert_eq!(t.total(&A, &C).await, None);
-    assert_created(&t.note(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, 0, Some(0))).await);
+    let ok = with(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, (0, 0), Some(0)), "prior_timestamp", json!(0));
+    assert_created(&t.note(&ok).await);
     assert_eq!(t.total(&A, &C).await, Some(7));
 }
 
@@ -298,16 +336,19 @@ async fn a_first_bound_note_on_an_absent_edge_acknowledges_zero() {
 async fn the_prior_acknowledgment_itself_is_refused_as_a_note() {
     let t = tracker().await;
     let base = now_ms() - 60_000;
-    assert_created(&t.note(&note_body(&A, &B, 10, at_residue(base, 0))).await);
+    let p0 = at_residue(base, 0);
+    assert_created(&t.note(&note_body(&A, &B, 10, p0)).await);
     let ts = at_residue(base + 2_000, 997);
-    // The issuer's acknowledgment of P = 10 is itself a valid note message at 10 and ts.
-    let ack = note_body(&A, &B, 10, ts);
-    assert_eq!(ack["signature"].as_str().unwrap().len(), 130);
-    assert_refused(&t.note(&ack).await, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
-    let mut with_itself = ack.clone();
-    with_itself["prior_signature"] = ack["signature"].clone();
-    with_itself["prior_total"] = json!(10);
-    assert_refused(&t.note(&with_itself).await, StatusCode::BAD_REQUEST, Some("not_an_increase"));
+    // Bound notes version 3: the issuer's acknowledgment of (10, p0) is a basis/prior-ack/1 message, never a note
+    // message, so as a note's signature it does not verify, with or without itself as the prior.
+    let pa = ack(&A, &A, &B, (10, p0), ts);
+    let as_note = with(&note_body(&A, &B, 10, ts), "signature", json!(pa));
+    assert_refused(&t.note(&as_note).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
+    let with_itself = with(&with(&as_note, "prior_signature", json!(pa)), "prior_total", json!(10));
+    assert_refused(&t.note(&with_itself).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
+    // The issuer's note message at P = 10 with a valid acknowledgment is still not an increase (kept from version 2).
+    let same_total = with(&note_body(&A, &B, 10, ts), "prior_signature", json!(pa));
+    assert_refused(&t.note(&same_total).await, StatusCode::BAD_REQUEST, Some("not_an_increase"));
     assert_eq!(t.total(&A, &B).await, Some(10));
 }
 
@@ -317,7 +358,7 @@ async fn a_prior_on_an_ordinary_note_or_a_malformed_prior_is_an_invalid_request(
     let base = now_ms() - 60_000;
     assert_created(&t.note(&note_body(&A, &B, 10, at_residue(base, 0))).await);
     let ts = at_residue(base + 2_000, 500);
-    let r = t.note(&with_prior(note_body(&A, &B, 20, ts), &A, &A, &B, 10, Some(10))).await;
+    let r = t.note(&with_prior(note_body(&A, &B, 20, ts), &A, &A, &B, (10, at_residue(base, 0)), Some(10))).await;
     assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_request"));
     let mut body = note_body(&A, &B, 20, ts);
     body["prior_signature"] = json!("not hex");
@@ -331,6 +372,9 @@ async fn a_prior_on_an_ordinary_note_or_a_malformed_prior_is_an_invalid_request(
     let mut body = note_body(&A, &B, 20, ts);
     body["prior_total"] = json!(10);
     assert_refused(&t.note(&body).await, StatusCode::BAD_REQUEST, Some("invalid_request"));
+    let r = t.note(&with(&note_body(&A, &B, 20, ts), "prior_timestamp", json!(at_residue(base, 0)))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_request"));
+    assert_eq!(r.1["error"], "prior_timestamp is only valid together with prior_signature");
     assert_eq!(t.total(&A, &B).await, Some(10));
     // The same note without the prior applies.
     assert_created(&t.note(&note_body(&A, &B, 20, ts)).await);
@@ -364,8 +408,12 @@ async fn on_a_bound_only_edge_unbound_notes_are_refused_and_bound_notes_accepted
         assert_refused(&r, StatusCode::BAD_REQUEST, Some("bound_note_required"));
     }
     assert_eq!((t.total(&A, &B).await, t.total(&B, &A).await), (Some(6), Some(0)));
-    assert_created(&t.note(&with_prior(note_body(&A, &B, 7, ts + 999), &A, &A, &B, 6, Some(6))).await);
-    assert_created(&t.note(&with_prior(note_body(&B, &A, 1, ts + 999), &B, &B, &A, 0, None)).await);
+    // Each acknowledges its edge's state after the set-off: A -> B (6, ts), and B -> A (0, ts), an existing edge
+    // at total 0, which is not the absent state (0, 0).
+    let absent = t.note(&with_prior(note_body(&B, &A, 1, ts + 999), &B, &B, &A, (0, 0), None)).await;
+    assert_refused(&absent, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
+    assert_created(&t.note(&with_prior(note_body(&A, &B, 7, ts + 999), &A, &A, &B, (6, ts), Some(6))).await);
+    assert_created(&t.note(&with_prior(note_body(&B, &A, 1, ts + 999), &B, &B, &A, (0, ts), None)).await);
     assert_eq!((t.total(&A, &B).await, t.total(&B, &A).await), (Some(7), Some(1)));
     // The edge the set-off did not touch still takes ordinary notes.
     assert_created(&t.note(&note_body(&A, &C, 3, ts + 2)).await);
@@ -413,25 +461,26 @@ async fn a_bound_note_older_than_the_maximum_age_is_refused_with_novation_expire
     // noted two hours ago, so an expired bound note is still newer than the edge's note.
     let t = tracker().await;
     let max_age = basis_store::NOVATION_MAX_AGE_MS;
-    assert_created(&t.note(&note_body(&A, &B, 10, at_residue(now_ms() - 2 * max_age, 0))).await);
+    let p0 = at_residue(now_ms() - 2 * max_age, 0);
+    assert_created(&t.note(&note_body(&A, &B, 10, p0)).await);
     let expired = at_residue(now_ms() - max_age - 1_000, 997);
-    let r = t.note(&with_prior(note_body(&A, &B, 15, expired), &A, &A, &B, 10, Some(10))).await;
+    let r = t.note(&with_prior(note_body(&A, &B, 15, expired), &A, &A, &B, (10, p0), Some(10))).await;
     assert_refused(&r, StatusCode::BAD_REQUEST, Some("novation_expired"));
     assert_eq!(
         r.1["error"],
         "the bound note's timestamp is older than the maximum age (one hour): an unapplied bound note expires like a novation"
     );
     // The age comes before the other bound-note rules (here a stale prior_total, else 409 stale_prior).
-    let r = t.note(&with_prior(note_body(&A, &B, 15, expired), &A, &A, &B, 9, Some(9))).await;
+    let r = t.note(&with_prior(note_body(&A, &B, 15, expired), &A, &A, &B, (9, p0), Some(9))).await;
     assert_refused(&r, StatusCode::BAD_REQUEST, Some("novation_expired"));
     // An expired first bound note on an absent edge.
-    let r = t.note(&with_prior(note_body(&A, &C, 5, expired), &A, &A, &C, 0, Some(0))).await;
+    let r = t.note(&with_prior(note_body(&A, &C, 5, expired), &A, &A, &C, (0, 0), Some(0))).await;
     assert_refused(&r, StatusCode::BAD_REQUEST, Some("novation_expired"));
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(10), None));
     // Fresh bound notes apply.
     let fresh = at_residue(now_ms() - 60_000, 997);
-    assert_created(&t.note(&with_prior(note_body(&A, &B, 15, fresh), &A, &A, &B, 10, Some(10))).await);
-    assert_created(&t.note(&with_prior(note_body(&A, &C, 5, fresh), &A, &A, &C, 0, None)).await);
+    assert_created(&t.note(&with_prior(note_body(&A, &B, 15, fresh), &A, &A, &B, (10, p0), Some(10))).await);
+    assert_created(&t.note(&with_prior(note_body(&A, &C, 5, fresh), &A, &A, &C, (0, 0), None)).await);
     assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(15), Some(5)));
 }
 
@@ -445,12 +494,17 @@ async fn prior_total_without_prior_signature_at_a_reserved_residue_is_reserved_t
     assert_created(&t.note(&note_body(&A, &B, 10, at_residue(base, 0))).await);
     let later = base + 2_000;
     for ms in [997, 995, 996, 998, 999] {
-        let mut body = note_body(&A, &B, 20, at_residue(later, ms));
-        body["prior_total"] = json!(10);
-        let r = t.note(&body).await;
-        assert_refused(&r, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
-        if ms == 997 {
-            assert!(r.1["error"].as_str().unwrap().starts_with("a bound note needs prior_signature"), "{}", r.1);
+        // prior_total alone, prior_timestamp alone (tracker v3.2), or both.
+        for fields in [&["prior_total"][..], &["prior_timestamp"][..], &["prior_total", "prior_timestamp"][..]] {
+            let mut body = note_body(&A, &B, 20, at_residue(later, ms));
+            for field in fields {
+                body[*field] = json!(if *field == "prior_total" { 10 } else { at_residue(base, 0) });
+            }
+            let r = t.note(&body).await;
+            assert_refused(&r, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
+            if ms == 997 {
+                assert!(r.1["error"].as_str().unwrap().starts_with("a bound note needs prior_signature"), "{}", r.1);
+            }
         }
     }
     // As for every reserved residue, the existing checks come first: a note signature over another total.
