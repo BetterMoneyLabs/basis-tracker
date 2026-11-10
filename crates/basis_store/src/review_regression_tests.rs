@@ -142,11 +142,10 @@ fn committed_proofs_survive_a_note_posted_while_the_update_is_built() {
 }
 
 /// Follow-up review N15: the JVM `AvlTree.insert` FAILS on an existing key, which is what the
-/// C1 fix in `basis.es` relies on (omitting var #7 forces `insert`). The vendored
-/// `ergo_avltree_rust` turns `Insert` into an upsert for the whole workspace, including
-/// sigma-rust's interpreter, so local reduction accepts a #7-less replay the node rejects.
+/// C1 fix in `basis.es` relies on (omitting var #7 forces `insert`). The workspace must use
+/// the unpatched crates.io `ergo_avltree_rust`, whose strict `Insert` matches the JVM;
+/// a vendored upsert patch would let local reduction accept a #7-less replay the node rejects.
 #[test]
-#[ignore = "follow-up review N15: vendored ergo_avltree_rust treats Insert as insert-or-update"]
 fn avl_insert_of_an_existing_key_fails_like_the_jvm() {
     use ergo_avltree_rust::operation::{KeyValue, Operation};
 

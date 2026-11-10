@@ -78,9 +78,12 @@ failed. `.github/workflows/test.yml` has 12 steps; **none of them have executed.
 `specs/SCHNORR_SIGNATURE_SPEC.md`, is currently unfalsifiable. A breaking change can and has
 landed on master unnoticed.
 
-**Note on the vendored fork:** `ergo_avltree_rust` is patched to `temp/vendors/ergo_avltree_rust`,
-which is committed and therefore *does* travel with the repo. That patch is genuinely required —
-see Issue H4. Only the three `sigma-rust` paths are machine-local.
+**Note on the vendored fork:** `ergo_avltree_rust` was previously patched to
+`temp/vendors/ergo_avltree_rust` on the belief that JVM `AvlTree.insert` updates existing
+keys. That belief was wrong (follow-up review N15): the JVM `insert` FAILS on an existing
+key, and the upsert patch let local sigma-rust reductions accept #7-less replays the node
+rejects, defeating the C1 fix in `basis.es`. The fork and its `[patch]` entry have been
+removed; the workspace uses crates.io `ergo_avltree_rust` 0.1.1 directly.
 
 **Root cause is a version mismatch, not just the paths.** The patch is silently dropped unless the
 patched version satisfies the declared requirement. The workspace declares `ergo-lib = "0.28.0"`
@@ -554,11 +557,11 @@ Identical patterns at `crates/basis_trees/src/avl_tree.rs:26-40` (resolver, used
 ```
 
 A digest-equality assertion was downgraded to a comment, meaning Rust-side and on-chain
-verification of the update path are **known to disagree**. `Cargo.toml:24-27` compensates with the
-vendored fork ("JVM-compatible insert semantics"), so the shipped `verify_insert_proof` path is
-untested against this divergence. Note this is **not** merely theoretical: the vendored fork is
-what makes the mainnet sequential redemptions in `tests/` succeed, so the divergence is currently
-only caught by spending real funds (Issue M13).
+verification of the update path are **known to disagree**. `Cargo.toml` previously compensated
+with a vendored fork ("JVM-compatible insert semantics"), so the shipped `verify_insert_proof`
+path was untested against this divergence. The fork has since been removed (follow-up review
+N15: the JVM `insert` FAILS on an existing key, and the upsert patch defeated the C1 fix in
+`basis.es`); the verifier-digest divergence on the update path itself remains unresolved.
 
 ---
 
@@ -846,9 +849,10 @@ and each redemption's collateral reduction is observed by the scanner
 (`wait_for_reserve_updated`, `:389-404`).
 
 **So the real contract does validate the `#7` lookup proof** — only the mainnet ErgoScript
-interpreter can reduce a valid `basis.es` script, and redemptions 2 and 3 confirm. This also means
-the vendored AVL fork (`Cargo.toml:24-27`) has live mainnet evidence behind it, not just one
-manual run.
+interpreter can reduce a valid `basis.es` script, and redemptions 2 and 3 confirm. At the time
+this ran under the vendored AVL fork (`Cargo.toml:24-27`); the fork has since been removed
+(follow-up review N15) because its upsert semantics let local reductions accept #7-less replays
+the node rejects.
 
 **The actual gap is regression protection, not correctness:**
 

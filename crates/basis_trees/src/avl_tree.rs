@@ -187,10 +187,14 @@ impl BasisAvlTree {
         // persistent tree's shared nodes and corrupt its state. The journal (not the
         // unordered cache) must be replayed: AVL+ tree shape depends on insertion
         // order, so iterating a HashMap could produce a different starting digest.
+        // The journal contains repeated keys (every update appends an entry), so the
+        // replay must use InsertOrUpdate: strict `Operation::Insert` fails when the
+        // key already exists (matching JVM scrypto). Insert and InsertOrUpdate share
+        // the same prover code path, so the rebuilt digests are identical.
         let mut temp_prover = BatchAVLProver::new(AVLTree::new(tree_resolver, 32, None), true);
         for (journaled_key, journaled_value) in &self.journal {
             temp_prover
-                .perform_one_operation(&Operation::Insert(KeyValue {
+                .perform_one_operation(&Operation::InsertOrUpdate(KeyValue {
                     key: journaled_key.clone().into(),
                     value: journaled_value.clone().into(),
                 }))
@@ -216,9 +220,11 @@ impl BasisAvlTree {
             )));
         }
 
-        // Match JVM scrypto `Insert` semantics used by the on-chain contract (`AvlTree.insert`
-        // replays `Insert` on the verifier, which updates the value when the key already
-        // exists). `Operation::Update` proofs do not verify on-chain as `insert`.
+        // The redemption proof must work for both a first redemption (key absent) and a
+        // repeat redemption (key present with an older value). JVM scrypto `Insert` —
+        // and strict `Operation::Insert` — fail when the key already exists, so use
+        // `InsertOrUpdate`, which covers both cases and is what the contract accepts
+        // via `insertOrUpdate` when context var #7 carries the previous value.
         let operation = Operation::InsertOrUpdate(KeyValue {
             key: key.into(),
             value: value.into(),
@@ -412,8 +418,9 @@ mod tests {
     }
 
     /// Regression test for the on-chain "Incorrect insert" failure: updating an existing key
-    /// must produce a proof that replays as an insert-style operation (JVM scrypto `Insert`
-    /// updates existing keys; `Operation::Update` proofs do not verify on-chain as `insert`).
+    /// must produce a proof that replays as an insert-or-update operation (JVM scrypto `Insert`
+    /// FAILS on an existing key, so cumulative redemptions cannot use plain `insert` proofs;
+    /// `Operation::Update` proofs do not verify on-chain as `insert` either).
     #[test]
     fn generate_insert_proof_updates_existing_key_with_verifiable_proof() {
         use bytes::Bytes;
