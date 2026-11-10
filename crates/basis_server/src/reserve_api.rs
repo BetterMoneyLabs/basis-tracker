@@ -187,6 +187,60 @@ pub async fn get_reserve_by_box_id(
     }
 }
 
+/// Serializable quarantine record for API responses (issue #19).
+#[derive(Debug, Serialize)]
+pub struct SerializableQuarantinedReserve {
+    pub box_id: String,
+    pub owner_pubkey: String,
+    pub denomination: String,
+    pub reason: String,
+    pub quarantined_at: u64,
+}
+
+/// List reserve boxes rejected by admission control (issue #19).
+///
+/// Quarantined boxes are never tracked: a duplicate carrying someone else's key
+/// in R4 cannot block the victim, and the record tells the operator why the box
+/// was rejected.
+#[axum::debug_handler]
+pub async fn get_quarantined_reserves(
+    State(state): State<AppState>,
+) -> (
+    StatusCode,
+    Json<ApiResponse<Vec<SerializableQuarantinedReserve>>>,
+) {
+    tracing::debug!("Getting quarantined reserves");
+
+    let scanner = state.ergo_scanner.lock().await;
+    let reserve_storage = scanner.reserve_storage();
+
+    match reserve_storage.get_all_quarantined() {
+        Ok(records) => {
+            let quarantined: Vec<SerializableQuarantinedReserve> = records
+                .into_iter()
+                .map(|r| SerializableQuarantinedReserve {
+                    box_id: r.box_id,
+                    owner_pubkey: decode_potentially_double_hex_encoded(&r.owner_pubkey),
+                    denomination: r.denomination,
+                    reason: r.reason,
+                    quarantined_at: r.quarantined_at,
+                })
+                .collect();
+
+            (StatusCode::OK, Json(success_response(quarantined)))
+        }
+        Err(e) => {
+            tracing::error!("Failed to get quarantined reserves from database: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Failed to retrieve quarantined reserves from database".to_string(),
+                )),
+            )
+        }
+    }
+}
+
 /// Serializable version of ExtendedReserveInfo for API responses
 #[derive(Debug, Serialize)]
 pub struct SerializableReserveInfo {

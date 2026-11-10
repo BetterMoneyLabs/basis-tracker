@@ -129,8 +129,39 @@ pub enum TrackerCommand {
         recipient_from_signature: basis_store::Signature,
         issuer_to_signature: basis_store::Signature,
         recipient_to_signature: basis_store::Signature,
+        /// Box id of the issuer's canonical from-denomination reserve at
+        /// request time; stored on the staged exchange so phase 2 can verify
+        /// the reserve was not drained while the to-edge increase was staged
+        /// (issue #17).
+        from_reserve_box_id: String,
         acceptance_check: Option<ExchangeAcceptanceCheck>,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
+    },
+    /// List staged two-phase exchanges whose to-edge increase awaits the
+    /// from-edge decrease being committed (issue #17 phase 2). The tracker box
+    /// updater observes each record's reserve box and reports back through
+    /// [`TrackerCommand::ProcessStagedExchanges`].
+    ListStagedExchanges {
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<Vec<basis_store::StagedExchangeInfo>, basis_store::NoteError>,
+        >,
+    },
+    /// Apply or cancel staged exchanges (issue #17 phase 2) using the updater's
+    /// on-chain observations of each staged record's reserve box.
+    ProcessStagedExchanges {
+        observations: Vec<basis_store::ExchangeObservation>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<basis_store::ProcessedExchanges, basis_store::NoteError>,
+        >,
+    },
+    /// List pending (staged or cancelled) exchanges for the
+    /// `/exchanges/pending` endpoint (issue #17).
+    ListPendingExchanges {
+        issuer_pubkey: Option<basis_store::PubKey>,
+        recipient_pubkey: Option<basis_store::PubKey>,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<Vec<([u8; 32], basis_store::PendingExchangeRecord)>, basis_store::NoteError>,
+        >,
     },
     InitiateRedemption {
         request: basis_store::RedemptionRequest,

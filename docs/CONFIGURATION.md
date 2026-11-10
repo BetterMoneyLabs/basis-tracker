@@ -102,10 +102,17 @@ tracker_nft_id = ""
 # 2. Ergo P2PK address: "9fRusAarL1KkrWQVsxSRVYnvWxaAT2A96cKtNn9tvPh5XUyCisr33"
 tracker_public_key = ""
 
-[ergo.node]
-url = "http://127.0.0.1:9053"   # Ergo node URL (default is localhost)
+[ergo.scanner]
+node_url = "http://127.0.0.1:9053"   # Scanner node: chain reads and box scanning; needs extraIndex = true
 api_key = "hello"                    # API key for authenticated nodes
 timeout_secs = 30                    # Request timeout in seconds
+
+# Optional: separate node hosting the tracker wallet (/wallet/* endpoints, schnorr
+# signing, transaction broadcast). No extra indices needed on this node; when the
+# section is unset, the scanner node is used for everything.
+# [ergo.wallet]
+# node_url = "http://127.0.0.1:9053"
+# api_key = "hello"
 ```
 
 ### Redemption Configuration
@@ -262,12 +269,17 @@ basis_reserve_contract_p2s = ""
 start_height = 0
 tracker_nft_id = ""
 
-[ergo.node]
-# Any public node works, but note the default is LOCALHOST. A plaintext remote node means the
-# node api_key -- which grants full wallet access -- crosses the network unencrypted.
-url = "http://127.0.0.1:9053"
+[ergo.scanner]
+# Any public node works, but note the default is LOCALHOST. A plaintext remote node sees every
+# scanning request; keep the tracker wallet on a LOCAL node via [ergo.wallet] so the wallet
+# api_key -- which grants full wallet access -- never crosses the network.
+node_url = "http://127.0.0.1:9053"
 api_key = "hello"
 timeout_secs = 30
+
+# [ergo.wallet]
+# node_url = "http://127.0.0.1:9053"
+# api_key = "hello"
 
 [redemption]
 enforce_acceptance_policy = true

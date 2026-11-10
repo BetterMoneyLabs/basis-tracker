@@ -335,6 +335,14 @@ pub enum NoteError {
     /// Accepting it would pin debt that can never redeem against this tracker's
     /// reserves (issue #15 C3).
     TrackerIdMismatch,
+    /// The note's committed on-chain total is greater than its current local
+    /// total, i.e. a consented debt decrease (exchange) has not been committed
+    /// yet. Building a redemption against the committed value would redeem more
+    /// than the issuer currently owes on the edge (issue #17).
+    StaleCommittedDebt {
+        committed: u64,
+        local: u64,
+    },
     RedemptionTooEarly,
     InsufficientCollateral,
     StorageError(String),
@@ -359,6 +367,93 @@ pub struct ExchangeAcceptanceView {
     /// Confirmation records (committed/pending cumulative totals) before the
     /// exchange, keyed by note-key hash.
     pub confirmations: std::collections::HashMap<[u8; 32], NoteConfirmation>,
+}
+
+/// Status of a persisted cross-denomination exchange (issue #17).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingExchangeStatus {
+    /// The to-edge increase is staged; it is applied once the from-edge
+    /// decrease is committed and the from-reserve is verified unchanged.
+    Staged,
+    /// The exchange was abandoned during staging; `reason` explains why.
+    Cancelled { reason: String },
+}
+
+/// Persisted record of a two-phase cross-denomination exchange (issue #17).
+///
+/// Phase 1 (request time) applies only the from-edge decrease and persists this
+/// record holding the signed to-edge note. Phase 2 (driven by tracker box
+/// confirmations) applies the to-edge increase once the from-decrease is
+/// confirmed on-chain and the from-denomination reserve is verified unchanged,
+/// so a creditor cannot redeem the old from-edge note AND collect the to-edge
+/// increase. Applied records are deleted by
+/// [`TrackerStateManager::process_staged_exchanges`]. See
+/// `specs/ergo/exchange_atomicity.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingExchangeRecord {
+    pub issuer_pubkey: PubKey,
+    pub recipient_pubkey: PubKey,
+    pub from_denomination: DenomKey,
+    /// The from-edge's collected total before the exchange decrease.
+    pub from_old_total: u64,
+    /// The from-edge's collected total after the decrease (applied in phase 1).
+    pub from_new_total: u64,
+    pub to_denomination: DenomKey,
+    /// The issuer-signed to-edge note to apply in phase 2
+    /// (`amount_collected == to_new_total`).
+    pub to_note: IouNote,
+    /// The to-edge's collected total before the exchange (`None` when the edge
+    /// was new). Phase 2 refuses to apply if the edge changed meanwhile.
+    pub to_base_collected: Option<u64>,
+    /// Box id of the issuer's canonical from-denomination reserve at exchange
+    /// time. Phase 2 requires it to still be unspent with an R5 digest equal to
+    /// the tracker's reserve-tree digest.
+    pub reserve_box_id: String,
+    /// Unix timestamp (millis) when the exchange was staged.
+    pub created_at: u64,
+    pub status: PendingExchangeStatus,
+}
+
+/// Minimal info the tracker box updater needs to observe a staged exchange
+/// (issue #17 phase 2).
+#[derive(Debug, Clone)]
+pub struct StagedExchangeInfo {
+    /// From-edge note key hash (the staged record's key).
+    pub key: [u8; 32],
+    /// The from-denomination reserve box whose on-chain state must be unchanged.
+    pub reserve_box_id: String,
+}
+
+/// On-chain observation of one staged exchange's reserve box, gathered by the
+/// tracker box updater (issue #17 phase 2).
+#[derive(Debug, Clone)]
+pub struct ExchangeObservation {
+    /// From-edge note key hash of the staged exchange.
+    pub key: [u8; 32],
+    /// The reserve box's on-chain R5 digest, or `None` when the box is no
+    /// longer unspent (spent by a redemption, top-up, or refund completion).
+    pub reserve_r5_digest: Option<[u8; 33]>,
+}
+
+/// Outcome of a phase-2 pending-exchange pass (issue #17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProcessedExchanges {
+    /// Staged exchanges whose to-edge increase was applied.
+    pub applied: usize,
+    /// Staged exchanges cancelled (reason recorded on the persisted record).
+    pub cancelled: usize,
+}
+
+/// Phase-2 decision for one staged exchange (issue #17).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StagedExchangeDecision {
+    /// Apply the staged to-edge increase.
+    Apply,
+    /// Cancel the exchange; the string is the persisted reason.
+    Cancel(String),
+    /// Keep the exchange staged (from-edge not confirmed yet, or no
+    /// observation available this cycle).
+    Wait,
 }
 
 /// Boxed acceptance-policy check for an exchange (see
@@ -400,6 +495,16 @@ pub struct TrackerStateManager {
     /// tracker box (issue #15 S6). `None` until an update confirms or the updater
     /// observes a matching on-chain digest after restart.
     confirmed_digest: Option<[u8; 33]>,
+    /// Set when a canonical tree rebuild failed after storage was committed
+    /// (issue #20): the live tree is then stale relative to storage, and
+    /// `update_state` retries the rebuild before refreshing the committed
+    /// digest. The old (valid) tree is kept in place meanwhile, so a
+    /// half-rebuilt tree is never committed.
+    tree_dirty: bool,
+    /// Test-only fault-injection hook: while set, `rebuild_tree_canonically`
+    /// returns an error without touching the live tree (issue #20 tests).
+    #[cfg(test)]
+    fail_tree_rebuild: bool,
 }
 
 impl TrackerStateManager {
@@ -456,6 +561,9 @@ impl TrackerStateManager {
             reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
             confirmed_digest: None,
+            tree_dirty: false,
+            #[cfg(test)]
+            fail_tree_rebuild: false,
         };
 
         if let Err(e) = manager.rebuild_avl_tree() {
@@ -483,36 +591,7 @@ impl TrackerStateManager {
     pub fn rebuild_avl_tree(&mut self) -> Result<(), NoteError> {
         tracing::info!("Rebuilding AVL tree from stored notes...");
 
-        let mut notes_with_issuer = self
-            .storage
-            .get_all_notes_with_issuer()
-            .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
-
-        if notes_with_issuer.is_empty() {
-            tracing::info!("No stored notes found, AVL tree remains empty");
-            return Ok(());
-        }
-
-        // Sort notes by timestamp ascending to ensure deterministic insertion order
-        // AVL tree structure depends on insertion order, so we must insert in the
-        // same order as when notes were originally created
-        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
-
-        tracing::info!(
-            "Inserting {} notes into AVL tree in chronological order...",
-            notes_with_issuer.len()
-        );
-
-        for (issuer_pubkey, note) in &notes_with_issuer {
-            let key =
-                NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
-            let key_bytes = key.to_bytes();
-            let value_bytes = note.amount_collected.to_be_bytes().to_vec();
-
-            self.avl_state.update(key_bytes, value_bytes).map_err(|e| {
-                NoteError::StorageError(format!("AVL tree update failed during rebuild: {:?}", e))
-            })?;
-        }
+        Self::populate_tree_from_storage(&self.storage, &mut self.avl_state)?;
 
         self.update_state();
         let root_digest = self.current_state.avl_root_digest;
@@ -521,6 +600,34 @@ impl TrackerStateManager {
             hex::encode(root_digest)
         );
 
+        Ok(())
+    }
+
+    /// Apply all stored notes to `tree` in canonical (timestamp-sorted) order.
+    /// Shared by `rebuild_avl_tree` (in-place, at startup) and
+    /// `rebuild_tree_canonically` (into a fresh tree, swapped in on success).
+    fn populate_tree_from_storage(
+        storage: &persistence::NoteStorage,
+        tree: &mut basis_trees::BasisAvlTree,
+    ) -> Result<(), NoteError> {
+        let mut notes_with_issuer = storage
+            .get_all_notes_with_issuer()
+            .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
+
+        // AVL tree structure depends on insertion order, so notes must be
+        // inserted in the canonical chronological order every rebuild uses.
+        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
+
+        for (issuer_pubkey, note) in &notes_with_issuer {
+            let key =
+                NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
+            let key_bytes = key.to_bytes();
+            let value_bytes = note.amount_collected.to_be_bytes().to_vec();
+
+            tree.update(key_bytes, value_bytes).map_err(|e| {
+                NoteError::StorageError(format!("AVL tree update failed during rebuild: {:?}", e))
+            })?;
+        }
         Ok(())
     }
 
@@ -616,6 +723,9 @@ impl TrackerStateManager {
             reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
             confirmed_digest: None,
+            tree_dirty: false,
+            #[cfg(test)]
+            fail_tree_rebuild: false,
         };
 
         // Rebuild AVL tree and confirmations so test instances mirror production.
@@ -725,28 +835,35 @@ impl TrackerStateManager {
         // This matches the contract spec: hash(A||B) -> totalDebt
         let value_bytes = note.amount_collected.to_be_bytes().to_vec();
 
-        // Update AVL tree state first to ensure consistency
-        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
-
-        // Only proceed with database storage if AVL tree update succeeded
-        match avl_result {
-            Ok(()) => {
-                // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, &note_to_store)?;
-                self.update_state();
-
-                // Recompute the confirmation status for this note based on the
-                // new local value versus the confirmed/pending values. The local
-                // value has just changed, so the note is only Confirmed/Pending
-                // if the new value matches what is already on-chain / in-flight.
-                let mut key32 = [0u8; 32];
-                key32.copy_from_slice(&key_bytes);
-                self.recompute_confirmation_status(&key32, note.amount_collected);
-
-                Ok(())
-            }
-            Err(e) => Err(NoteError::StorageError(e.to_string())),
+        // Persist FIRST (a single atomic batch inside store_note): a storage
+        // failure then leaves nothing changed anywhere. The in-memory tree is
+        // updated after, so a tree failure leaves storage merely AHEAD of the
+        // tree — the safe direction: the committed digest lacks a note the
+        // tracker cannot prove yet, which is indistinguishable from the normal
+        // "local, not yet committed" state, and the dirty flag makes
+        // update_state rebuild the tree from storage before the next commit.
+        // (The reverse order committed debt the tracker had no record of —
+        // issue #20 follow-up.)
+        self.storage.store_note(issuer_pubkey, &note_to_store)?;
+        if let Err(e) = self.avl_state.update(key_bytes.clone(), value_bytes) {
+            self.tree_dirty = true;
+            tracing::error!(
+                "Note stored but the live tree update failed; the tree is stale and will be rebuilt from storage before the next digest update: {:?}",
+                e
+            );
+            return Err(NoteError::StorageError(e.to_string()));
         }
+        self.update_state();
+
+        // Recompute the confirmation status for this note based on the
+        // new local value versus the confirmed/pending values. The local
+        // value has just changed, so the note is only Confirmed/Pending
+        // if the new value matches what is already on-chain / in-flight.
+        let mut key32 = [0u8; 32];
+        key32.copy_from_slice(&key_bytes);
+        self.recompute_confirmation_status(&key32, note.amount_collected);
+
+        Ok(())
     }
 
     /// Convert an issuer/recipient/denomination triple into the fixed-size confirmation key.
@@ -1093,19 +1210,22 @@ impl TrackerStateManager {
         // This matches the contract spec: hash(A||B) -> totalDebt
         let value_bytes = note.amount_collected.to_be_bytes().to_vec();
 
-        // Update AVL tree state first to ensure consistency
-        let avl_result = self.avl_state.update(key_bytes.clone(), value_bytes);
-
-        // Only proceed with database storage if AVL tree update succeeded
-        match avl_result {
-            Ok(()) => {
-                // Now store note in persistent storage
-                self.storage.store_note(issuer_pubkey, &note_to_store)?;
-                self.update_state();
-                Ok(())
-            }
-            Err(e) => Err(NoteError::StorageError(e.to_string())),
+        // Persist FIRST, then update the in-memory tree — same ordering and
+        // rationale as `add_note` (issue #20 follow-up): a storage failure
+        // leaves nothing changed; a tree failure leaves storage safely ahead
+        // and sets the dirty flag so the tree is rebuilt before the next
+        // digest update.
+        self.storage.store_note(issuer_pubkey, &note_to_store)?;
+        if let Err(e) = self.avl_state.update(key_bytes, value_bytes) {
+            self.tree_dirty = true;
+            tracing::error!(
+                "Note update stored but the live tree update failed; the tree is stale and will be rebuilt from storage before the next digest update: {:?}",
+                e
+            );
+            return Err(NoteError::StorageError(e.to_string()));
         }
+        self.update_state();
+        Ok(())
     }
 
     /// Atomically move debt between two denominations of the same (issuer, recipient)
@@ -1113,14 +1233,24 @@ impl TrackerStateManager {
     /// `to_amount`. This is the off-chain novation used for cross-denomination
     /// exchange (specs/ergo/multi_collateral_reserves.md §10).
     ///
-    /// Both edges live in the single tracker tree, so the whole exchange is one
-    /// logical state change: both AVL updates land together and the next tracker box
-    /// commit covers both.
+    /// TWO-PHASE (issue #17, `specs/ergo/exchange_atomicity.md`): only the
+    /// from-edge decrease is applied here. The to-edge increase is STAGED in the
+    /// `pending_exchanges` partition together with the issuer-signed to-edge note
+    /// and the from-denomination reserve box id, and is applied by
+    /// [`TrackerStateManager::process_staged_exchanges`] only after the decrease
+    /// is confirmed in a tracker box and the reserve is verified unchanged.
+    /// Applying both edges at once would let a creditor redeem the old from-edge
+    /// total with a pre-built transaction AND collect the to-edge increase.
     ///
     /// SECURITY: decreasing an edge is the S3 operation — it is only permitted here
     /// because the creditor consented, proven by the recipient's signature over the
     /// from-edge's new message. All four signatures (issuer and recipient over each
     /// edge's 80-byte message) are verified BEFORE any state changes.
+    ///
+    /// ATOMICITY (issue #20): the staged record, the decreased from-edge note and
+    /// its confirmation record are committed in one fjall batch — they land
+    /// together or not at all, so a storage failure mid-exchange cannot leave the
+    /// from-edge reduced without the exchange staged.
     #[allow(clippy::too_many_arguments)]
     pub fn exchange_debt(
         &mut self,
@@ -1135,6 +1265,7 @@ impl TrackerStateManager {
         recipient_from_signature: &Signature,
         issuer_to_signature: &Signature,
         recipient_to_signature: &Signature,
+        from_reserve_box_id: &str,
     ) -> Result<(), NoteError> {
         if from_denomination == to_denomination {
             return Err(NoteError::InvalidExchange(
@@ -1155,6 +1286,22 @@ impl TrackerStateManager {
             return Err(NoteError::FutureTimestamp);
         }
 
+        // Only one staged exchange may be in flight per (issuer, recipient)
+        // pair: a second staged exchange would compute its totals against the
+        // pre-stage state of an edge another staged exchange is about to move.
+        for (_, existing) in self.storage.get_all_pending_exchanges()? {
+            if matches!(existing.status, PendingExchangeStatus::Staged)
+                && existing.issuer_pubkey == *issuer_pubkey
+                && existing.recipient_pubkey == *recipient_pubkey
+            {
+                return Err(NoteError::InvalidExchange(format!(
+                    "another exchange for this issuer/recipient pair is already staged (from {} to {}); it resolves after the next tracker box commit",
+                    existing.from_denomination.denomination_id(),
+                    existing.to_denomination.denomination_id()
+                )));
+            }
+        }
+
         // Resolve both edges.
         let from_note = self.lookup_note(issuer_pubkey, recipient_pubkey, from_denomination)?;
         let to_note_opt =
@@ -1171,9 +1318,8 @@ impl TrackerStateManager {
                 from_new_total, from_note.amount_redeemed
             )));
         }
-        let to_new_total = to_note_opt
-            .as_ref()
-            .map(|n| n.amount_collected)
+        let to_base_collected = to_note_opt.as_ref().map(|n| n.amount_collected);
+        let to_new_total = to_base_collected
             .unwrap_or(0)
             .checked_add(to_amount)
             .ok_or(NoteError::AmountOverflow)?;
@@ -1236,7 +1382,37 @@ impl TrackerStateManager {
             }
         }
 
-        // Apply the from-edge update.
+        // The signed to-edge note. Its `amount_redeemed` is carried forward from
+        // the edge's CURRENT state at apply time (phase 2), in case a redemption
+        // was recorded while the exchange was staged.
+        let to_note_new = IouNote {
+            recipient_pubkey: *recipient_pubkey,
+            amount_collected: to_new_total,
+            amount_redeemed: to_note_opt.as_ref().map(|n| n.amount_redeemed).unwrap_or(0),
+            timestamp,
+            signature: *issuer_to_signature,
+            tracker_nft_id,
+            denomination: *to_denomination,
+        };
+
+        // Phase 1 commits in ONE atomic storage batch (issue #20): the staged
+        // record, the decreased from-edge note and its recomputed confirmation
+        // record land together or not at all. If the commit fails, nothing —
+        // storage, tree, confirmations — has changed, so no rollback is needed.
+        let from_key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, from_denomination);
+        let staged = PendingExchangeRecord {
+            issuer_pubkey: *issuer_pubkey,
+            recipient_pubkey: *recipient_pubkey,
+            from_denomination: *from_denomination,
+            from_old_total: from_note.amount_collected,
+            from_new_total,
+            to_denomination: *to_denomination,
+            to_note: to_note_new,
+            to_base_collected,
+            reserve_box_id: from_reserve_box_id.to_string(),
+            created_at: current_time,
+            status: PendingExchangeStatus::Staged,
+        };
         let from_note_new = IouNote {
             recipient_pubkey: *recipient_pubkey,
             amount_collected: from_new_total,
@@ -1246,32 +1422,97 @@ impl TrackerStateManager {
             tracker_nft_id,
             denomination: *from_denomination,
         };
-        let from_key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, from_denomination);
-        self.avl_state
-            .update(from_key.to_bytes(), from_new_total.to_be_bytes().to_vec())
-            .map_err(|e| NoteError::StorageError(e.to_string()))?;
-        self.storage.store_note(issuer_pubkey, &from_note_new)?;
-        self.recompute_confirmation_status(&from_key.key_hash, from_new_total);
+        let new_confirmation = self.recomputed_confirmation(&from_key.key_hash, from_new_total);
+        self.storage.commit_exchange_staged(
+            issuer_pubkey,
+            &staged,
+            &from_note_new,
+            &new_confirmation,
+        )?;
+        self.confirmations
+            .insert(from_key.key_hash, new_confirmation);
 
-        // Apply the to-edge update.
-        let to_note_new = IouNote {
-            recipient_pubkey: *recipient_pubkey,
-            amount_collected: to_new_total,
-            amount_redeemed: to_note_opt.map(|n| n.amount_redeemed).unwrap_or(0),
-            timestamp,
-            signature: *issuer_to_signature,
-            tracker_nft_id,
-            denomination: *to_denomination,
-        };
-        let to_key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, to_denomination);
-        self.avl_state
-            .update(to_key.to_bytes(), to_new_total.to_be_bytes().to_vec())
-            .map_err(|e| NoteError::StorageError(e.to_string()))?;
-        self.storage.store_note(issuer_pubkey, &to_note_new)?;
-        self.recompute_confirmation_status(&to_key.key_hash, to_new_total);
+        tracing::info!(
+            "Exchange staged: from-edge {} decreased {} -> {}; to-edge {} increase to {} applies after the decrease is confirmed (issue #17)",
+            from_denomination.denomination_id(),
+            from_note.amount_collected,
+            from_new_total,
+            to_denomination.denomination_id(),
+            to_new_total
+        );
 
+        // The exchange moves the from-edge's note timestamp forward, which can
+        // reorder it relative to other notes in the timestamp-sorted rebuild
+        // (`rebuild_avl_tree` after a restart, and the committed-tree rebuild
+        // behind lookup proofs). AVL+ digests depend on first-insertion order,
+        // so without this the live tree's shape would no longer be reproducible
+        // and every subsequent committed lookup proof would fail its digest
+        // check until a restart. Recreate the live tree in the canonical
+        // (timestamp-sorted) order so the shape stays reproducible; the digest
+        // change is committed by the next tracker box update as usual.
+        //
+        // Storage is already committed and consistent at this point, so a
+        // rebuild failure is not fatal: the previous (valid) tree stays in
+        // place and the rebuild is retried before the next digest update.
+        if let Err(e) = self.rebuild_tree_canonically() {
+            tracing::error!(
+                "Exchange committed but the live tree rebuild failed; retrying before the next digest update (issue #20): {:?}",
+                e
+            );
+        }
         self.update_state();
         Ok(())
+    }
+
+    /// Recreate the live AVL tree from storage in the canonical
+    /// timestamp-sorted insertion order, replacing the current tree shape.
+    ///
+    /// The new tree is built separately and swapped in only on success
+    /// (issue #20): on failure the previous, still-valid tree stays in place
+    /// and `tree_dirty` is set so `update_state` retries the rebuild before
+    /// publishing a digest. A half-rebuilt tree is never committed.
+    fn rebuild_tree_canonically(&mut self) -> Result<(), NoteError> {
+        #[cfg(test)]
+        if self.fail_tree_rebuild {
+            self.tree_dirty = true;
+            return Err(NoteError::StorageError(
+                "injected tree rebuild failure".to_string(),
+            ));
+        }
+        let mut fresh = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to create fresh AVL tree: {:?}", e))
+        })?;
+        match Self::populate_tree_from_storage(&self.storage, &mut fresh) {
+            Ok(()) => {
+                self.avl_state = fresh;
+                self.tree_dirty = false;
+                Ok(())
+            }
+            Err(e) => {
+                self.tree_dirty = true;
+                Err(e)
+            }
+        }
+    }
+
+    /// Compute the confirmation record for `key` as if its local value became
+    /// `local_value`, without mutating anything. The exchange paths persist
+    /// the result inside their atomic storage commit (issue #20) and update
+    /// the in-memory map afterwards.
+    fn recomputed_confirmation(&self, key: &NoteKeyBytes, local_value: u64) -> NoteConfirmation {
+        let mut entry = self
+            .confirmations
+            .get(key)
+            .cloned()
+            .unwrap_or_else(NoteConfirmation::local_only);
+        entry.status = if Some(local_value) == entry.confirmed_total_debt {
+            NoteConfirmationStatus::Confirmed
+        } else if Some(local_value) == entry.pending_total_debt {
+            NoteConfirmationStatus::Pending
+        } else {
+            NoteConfirmationStatus::LocalOnly
+        };
+        entry
     }
 
     /// Evaluate an exchange's acceptance-policy check against the pre-mutation
@@ -1304,6 +1545,7 @@ impl TrackerStateManager {
         recipient_from_signature: &Signature,
         issuer_to_signature: &Signature,
         recipient_to_signature: &Signature,
+        from_reserve_box_id: &str,
         acceptance_check: Option<ExchangeAcceptanceCheckFn>,
     ) -> Result<(), NoteError> {
         if let Some(check) = acceptance_check {
@@ -1332,7 +1574,271 @@ impl TrackerStateManager {
             recipient_from_signature,
             issuer_to_signature,
             recipient_to_signature,
+            from_reserve_box_id,
         )
+    }
+
+    /// List staged exchanges for the tracker box updater's phase-2 pass
+    /// (issue #17). The updater observes each record's reserve box on-chain and
+    /// feeds the observations back through [`Self::process_staged_exchanges`].
+    pub fn list_staged_exchanges(&self) -> Result<Vec<StagedExchangeInfo>, NoteError> {
+        let mut out = Vec::new();
+        for (key, record) in self.storage.get_all_pending_exchanges()? {
+            if matches!(record.status, PendingExchangeStatus::Staged) {
+                out.push(StagedExchangeInfo {
+                    key,
+                    reserve_box_id: record.reserve_box_id,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Phase 2 of a two-phase exchange (issue #17): apply or cancel staged
+    /// to-edge increases using the on-chain observations gathered by the
+    /// tracker box updater.
+    ///
+    /// A staged exchange is applied only when all of the following hold:
+    /// 1. The from-edge decrease is exactly what got committed
+    ///    (`Confirmed` with `confirmed_total_debt == from_new_total`), so the
+    ///    old from-edge note (signed for `from_old_total`) is dead on-chain.
+    /// 2. The observed reserve box is still unspent. Any redemption, top-up, or
+    ///    refund completion spends the reserve box, so a missing box is
+    ///    conclusive evidence of an on-chain reserve action.
+    /// 3. The observed reserve R5 digest equals the tracker's reserve-tree
+    ///    digest for `(issuer, from_denomination)` — reported redemptions
+    ///    advance both sides in lockstep, so a mismatch means an unreported
+    ///    on-chain redemption drained the reserve during staging.
+    /// 4. The to-edge base is unchanged, so applying the staged note cannot
+    ///    lower an edge that grew meanwhile. The applied note carries the
+    ///    to-edge's current `amount_redeemed` forward.
+    /// 5. The staged to-note's signature re-verifies.
+    ///
+    /// Otherwise the exchange is cancelled with the reason persisted on the
+    /// record (kept for observability; the from-edge decrease stays applied).
+    /// Records without an observation are left staged (wait — the updater could
+    /// not observe their reserve this cycle, e.g. a node error).
+    pub fn process_staged_exchanges(
+        &mut self,
+        observations: &[ExchangeObservation],
+    ) -> Result<ProcessedExchanges, NoteError> {
+        let mut result = ProcessedExchanges::default();
+        let staged = self.storage.get_all_pending_exchanges()?;
+
+        for (key, mut record) in staged {
+            if !matches!(record.status, PendingExchangeStatus::Staged) {
+                continue;
+            }
+            let observation = observations.iter().find(|o| o.key == key);
+            let decision = self.decide_staged_exchange(&key, &record, observation)?;
+            match decision {
+                StagedExchangeDecision::Wait => continue,
+                StagedExchangeDecision::Apply => {
+                    self.apply_staged_exchange(&key, &record)?;
+                    result.applied += 1;
+                }
+                StagedExchangeDecision::Cancel(reason) => {
+                    record.status = PendingExchangeStatus::Cancelled {
+                        reason: reason.clone(),
+                    };
+                    self.storage.store_pending_exchange(&key, &record)?;
+                    result.cancelled += 1;
+                    tracing::error!(
+                        "Staged exchange ({} -> {}) cancelled: {}",
+                        record.from_denomination.denomination_id(),
+                        record.to_denomination.denomination_id(),
+                        reason
+                    );
+                }
+            }
+        }
+
+        if result.applied > 0 || result.cancelled > 0 {
+            self.update_state();
+        }
+        Ok(result)
+    }
+
+    /// Evaluate one staged exchange against the current confirmation state and
+    /// the updater's on-chain observation.
+    fn decide_staged_exchange(
+        &self,
+        key: &[u8; 32],
+        record: &PendingExchangeRecord,
+        observation: Option<&ExchangeObservation>,
+    ) -> Result<StagedExchangeDecision, NoteError> {
+        // 1. The from-edge decrease must be exactly what got committed.
+        let confirmation = self.confirmations.get(key);
+        let confirmed = match confirmation {
+            Some(c) if c.status == NoteConfirmationStatus::Confirmed => c.confirmed_total_debt,
+            _ => return Ok(StagedExchangeDecision::Wait),
+        };
+        match confirmed {
+            Some(value) if value == record.from_new_total => {}
+            Some(value) => {
+                return Ok(StagedExchangeDecision::Cancel(format!(
+                    "from-edge committed total is {} but the exchange decreased it to {}; the tracker state moved past the exchange",
+                    value, record.from_new_total
+                )))
+            }
+            None => return Ok(StagedExchangeDecision::Wait),
+        }
+
+        // 2./3. The reserve must still be unspent and its R5 digest must match
+        // the tracker's reserve-tree digest for (issuer, from_denomination).
+        let Some(observation) = observation else {
+            return Ok(StagedExchangeDecision::Wait);
+        };
+        let Some(observed_digest) = observation.reserve_r5_digest else {
+            return Ok(StagedExchangeDecision::Cancel(format!(
+                "from-denomination reserve box {} is no longer unspent; an on-chain reserve action (redemption, top-up, or refund) occurred while the exchange was staged",
+                record.reserve_box_id
+            )));
+        };
+        let expected_digest =
+            self.reserve_state_digest(&record.issuer_pubkey, &record.from_denomination);
+        if observed_digest.to_vec() != expected_digest {
+            return Ok(StagedExchangeDecision::Cancel(format!(
+                "on-chain reserve R5 digest {} does not match the tracker's reserve-tree digest {}; an unreported on-chain redemption may have occurred while the exchange was staged",
+                hex::encode(observed_digest),
+                hex::encode(expected_digest)
+            )));
+        }
+
+        // 4. The to-edge base must be unchanged; carry the current redeemed
+        // amount forward.
+        let current_to = self.get_note_optional(
+            &record.issuer_pubkey,
+            &record.recipient_pubkey,
+            &record.to_denomination,
+        )?;
+        let base_unchanged = match (&record.to_base_collected, &current_to) {
+            (None, None) => true,
+            (Some(base), Some(note)) => note.amount_collected == *base,
+            _ => false,
+        };
+        if !base_unchanged {
+            return Ok(StagedExchangeDecision::Cancel(
+                "the to-edge changed while the exchange was staged (a new note was issued on it); the staged increase no longer matches the agreed state".to_string(),
+            ));
+        }
+
+        // 5. Re-verify the staged to-note's issuer signature.
+        let msg_to = schnorr::signing_message(
+            &record.issuer_pubkey,
+            &record.recipient_pubkey,
+            &record.to_denomination,
+            record.to_note.amount_collected,
+            record.to_note.timestamp,
+            &record.to_note.tracker_nft_id,
+        );
+        let verifier = SchnorrVerifier;
+        if verifier
+            .verify_signature(&record.to_note.signature, &msg_to, &record.issuer_pubkey)
+            .is_err()
+        {
+            return Ok(StagedExchangeDecision::Cancel(
+                "staged to-edge note signature failed re-verification".to_string(),
+            ));
+        }
+
+        Ok(StagedExchangeDecision::Apply)
+    }
+
+    /// Apply a staged exchange's to-edge increase (issue #17 phase 2).
+    ///
+    /// ATOMICITY (issue #20): the to-edge note, its index entries, its
+    /// confirmation record and the staged record's removal commit in one fjall
+    /// batch. On failure nothing is written, so the exchange stays staged and
+    /// the apply is retried on the next confirmation cycle (previously a failed
+    /// staged-record delete led to a spurious cancellation of an applied
+    /// exchange).
+    fn apply_staged_exchange(
+        &mut self,
+        key: &[u8; 32],
+        record: &PendingExchangeRecord,
+    ) -> Result<(), NoteError> {
+        let current_to = self.get_note_optional(
+            &record.issuer_pubkey,
+            &record.recipient_pubkey,
+            &record.to_denomination,
+        )?;
+        let mut to_note = record.to_note.clone();
+        to_note.amount_redeemed = current_to.as_ref().map(|n| n.amount_redeemed).unwrap_or(0);
+
+        let to_key = NoteKey::from_assets(
+            &record.issuer_pubkey,
+            &record.recipient_pubkey,
+            &record.to_denomination,
+        );
+        let new_confirmation =
+            self.recomputed_confirmation(&to_key.key_hash, to_note.amount_collected);
+        self.storage.commit_exchange_apply(
+            &record.issuer_pubkey,
+            &to_note,
+            &new_confirmation,
+            key,
+        )?;
+        self.confirmations.insert(to_key.key_hash, new_confirmation);
+
+        tracing::info!(
+            "Staged exchange applied: to-edge {} increased to {} after the from-edge decrease was confirmed (issue #17)",
+            record.to_denomination.denomination_id(),
+            to_note.amount_collected
+        );
+
+        // Same canonical rebuild as `exchange_debt`: the to-edge note's
+        // timestamp moved forward, so recreate the live tree in the order every
+        // rebuild uses to keep its shape reproducible (see the comment there).
+        // Storage is already consistent; a rebuild failure keeps the previous
+        // valid tree and is retried before the next digest update (issue #20).
+        if let Err(e) = self.rebuild_tree_canonically() {
+            tracing::error!(
+                "Staged exchange applied but the live tree rebuild failed; retrying before the next digest update (issue #20): {:?}",
+                e
+            );
+        }
+        Ok(())
+    }
+
+    /// List pending (staged or cancelled) exchanges, optionally filtered by
+    /// issuer and/or recipient, for the `/exchanges/pending` endpoint.
+    ///
+    /// Cancelled records older than 30 days are pruned on access; applied
+    /// records are deleted at apply time (the to-edge note's existence is the
+    /// completion signal).
+    pub fn list_pending_exchanges(
+        &self,
+        issuer: Option<&PubKey>,
+        recipient: Option<&PubKey>,
+    ) -> Result<Vec<([u8; 32], PendingExchangeRecord)>, NoteError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        const CANCELLED_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+        let mut out = Vec::new();
+        for (key, record) in self.storage.get_all_pending_exchanges()? {
+            if let Some(issuer) = issuer {
+                if record.issuer_pubkey != *issuer {
+                    continue;
+                }
+            }
+            if let Some(recipient) = recipient {
+                if record.recipient_pubkey != *recipient {
+                    continue;
+                }
+            }
+            if let PendingExchangeStatus::Cancelled { .. } = record.status {
+                if now_ms.saturating_sub(record.created_at) > CANCELLED_RETENTION_MS {
+                    let _ = self.storage.delete_pending_exchange(&key);
+                    continue;
+                }
+            }
+            out.push((key, record));
+        }
+        Ok(out)
     }
 
     /// Record that `amount_redeemed` was redeemed against an existing note.
@@ -1469,8 +1975,45 @@ impl TrackerStateManager {
         let key_bytes = key.to_bytes();
 
         // The note being redeemed must be committed on-chain with a known value.
-        let confirmed_total_debt = self
-            .get_confirmation(issuer_pubkey, recipient_pubkey, denomination)
+        let confirmation = self.get_confirmation(issuer_pubkey, recipient_pubkey, denomination);
+
+        // Defense in depth for issue #17: a committed total GREATER than the
+        // note's current local total means a consented debt decrease (exchange)
+        // has not been committed yet. A redemption built against the committed
+        // value would redeem more than the issuer currently owes on the edge,
+        // which is exactly the double-pay the two-phase exchange prevents.
+        // Checked before the status filter: right after an exchange the note's
+        // status is `LocalOnly` (local != confirmed) while the stale committed
+        // value is still what the chain would accept.
+        if let Some(stale_committed) = confirmation
+            .as_ref()
+            .and_then(|c| c.confirmed_total_debt)
+            .filter(|committed| {
+                self.get_note_optional(issuer_pubkey, recipient_pubkey, denomination)
+                    .map(|note| note.is_some_and(|n| *committed > n.amount_collected))
+                    .unwrap_or(false)
+            })
+        {
+            let local = self
+                .get_note_optional(issuer_pubkey, recipient_pubkey, denomination)
+                .ok()
+                .flatten()
+                .map(|n| n.amount_collected)
+                .unwrap_or_default();
+            tracing::warn!(
+                "Committed proof requested for note {} -> {} with stale committed total {} > local {} (uncommitted exchange decrease)",
+                hex::encode(issuer_pubkey),
+                hex::encode(recipient_pubkey),
+                stale_committed,
+                local
+            );
+            return Err(NoteError::StaleCommittedDebt {
+                committed: stale_committed,
+                local,
+            });
+        }
+
+        let confirmed_total_debt = confirmation
             .and_then(|c| {
                 if c.status == NoteConfirmationStatus::Confirmed {
                     c.confirmed_total_debt
@@ -1964,6 +2507,14 @@ impl TrackerStateManager {
 
     /// Update the current state with latest AVL tree root
     fn update_state(&mut self) {
+        if self.tree_dirty {
+            // The live tree is stale relative to storage (a rebuild failed
+            // after an atomic exchange commit, issue #20). Retry the rebuild
+            // before publishing a digest; while it keeps failing, the last
+            // valid tree's digest is kept — a liveness delay, never a
+            // half-applied state.
+            let _ = self.rebuild_tree_canonically();
+        }
         self.current_state.avl_root_digest = self.avl_state.root_digest();
         // Update timestamp would be set to current time in real implementation
         self.current_state.last_update_timestamp = std::time::SystemTime::now()

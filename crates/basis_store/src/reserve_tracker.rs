@@ -177,6 +177,10 @@ impl ReserveTracker {
     ///
     /// Note this is tracker policy, not a contract invariant: it holds only while this tracker is
     /// the one redeeming. The underlying per-box redemption state remains a protocol limitation.
+    ///
+    /// Since issue #19, scanner admission control quarantines duplicate reserve boxes before
+    /// they reach the tracker (see `specs/ergo/reserve_admission.md`), so this error is
+    /// defense in depth and should be unreachable in practice.
     pub fn resolve_issuer_reserve(
         &self,
         owner_pubkey: &str,

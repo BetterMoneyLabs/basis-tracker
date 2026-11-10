@@ -231,4 +231,157 @@ class BasisTokenSecuritySpec extends PropSpec with Matchers with basis.HttpClien
       assertTxFails(Array(reserveIn, funding), Array(), Array(reserveOut), Array())
     }
   }
+
+  // ==============================================================================================
+  // C1 - replay by omitting context var #7
+  // (same fix as basis.es: without #7 the contract uses AvlTree.insert, which throws when the
+  // key is already present; the reserve tree key is the unsuffixed blake2b256(owner || receiver))
+  // ==============================================================================================
+
+  property("C1: a fully redeemed note cannot be replayed by omitting context var #7") {
+    createMockedErgoClient(MockData(Nil, Nil)).execute { implicit ctx: BlockchainContext =>
+      val totalDebt = 1000000000L
+      val timestamp = System.currentTimeMillis()
+      // Token contract: the tracker tree and the signed message use the denomination-suffixed
+      // debt key, the reserve's own tree uses the unsuffixed reserve key.
+      val debtKey = t.mkKey(t.ownerPk, t.receiverPk)
+      val reserveKey = t.mkReserveKey(t.ownerPk, t.receiverPk)
+      val message = t.mkMessage(debtKey, totalDebt, timestamp)
+      val reserveSig = signAll(message, t.ownerSecret)
+      val trackerSig = signAll(message, t.trackerSecret)
+      val tracker = t.mkTrackerTreeAndProof(debtKey, totalDebt)
+
+      // The reserve tree says this note was ALREADY fully redeemed at this timestamp.
+      val map = freshReserveMap
+      map.insertOrUpdate(reserveKey -> reserveValue(timestamp, totalDebt))
+      val inputTree = map.ergoValue
+      val lookup = map.lookUp(reserveKey).proof.bytes
+      // The attacker re-submits the same note WITHOUT #7, hoping the contract reads
+      // storedTimestamp/redeemedDebt as 0. The output tree rewrites the same entry.
+      val insertProof = map.insertOrUpdate(reserveKey -> reserveValue(timestamp, totalDebt)).proof.bytes
+      val outputTree = map.ergoValue
+
+      val held = 2 * totalDebt // reserve holds more than the note, so token arithmetic is legitimate
+      val vars = Seq(
+        new ContextVar(0, ErgoValue.of(0: Byte)),
+        new ContextVar(1, ErgoValue.of(t.receiverPk)),
+        new ContextVar(2, ErgoValue.of(reserveSig)),
+        new ContextVar(3, ErgoValue.of(totalDebt)),
+        new ContextVar(4, ErgoValue.of(timestamp)),
+        new ContextVar(5, ErgoValue.of(insertProof)),
+        new ContextVar(6, ErgoValue.of(trackerSig)),
+        new ContextVar(8, ErgoValue.of(tracker.lookupProofBytes))
+        // NOTE: no context var 7 -- this is the attack.
+      )
+
+      val reserveIn = ctx.newTxBuilder().outBoxBuilder
+        .value(t.minValue)
+        .tokens(new ErgoToken(t.reserveNFTBytes, 1), new ErgoToken(t.reserveTokenIdBytes, held))
+        .registers(ErgoValue.of(t.ownerPk), inputTree, ErgoValue.of(t.trackerNFTBytes))
+        .contract(ctx.compileContract(ConstantsBuilder.empty(), BasisConstants.basisTokenContract))
+        .build()
+        .convertToInputWith("aa" * 32, 0.toShort)
+        .withContextVars(vars: _*)
+
+      // redeemed = held - (held - totalDebt) = totalDebt tokens and the ERG is fully preserved,
+      // so the ONLY thing wrong with this transaction is the omitted #7.
+      val reserveOut = t.createOut(
+        BasisConstants.basisTokenContract, t.minValue,
+        Array(ErgoValue.of(t.ownerPk), outputTree, ErgoValue.of(t.trackerNFTBytes)),
+        Array(new ErgoToken(t.reserveNFTBytes, 1), new ErgoToken(t.reserveTokenIdBytes, held - totalDebt))
+      )
+      val payout = t.createOut(
+        t.trueScript, t.minValue, Array(),
+        Array(new ErgoToken(t.reserveTokenIdBytes, totalDebt))
+      )
+      val funding = ctx.newTxBuilder().outBoxBuilder
+        .value(t.minValue + t.feeValue)
+        .contract(ctx.compileContract(ConstantsBuilder.empty(), "{sigmaProp(true)}"))
+        .build()
+        .convertToInputWith("bb" * 32, 0.toShort)
+
+      // Against the unfixed contract this is ACCEPTED -- the omission reads storedTimestamp and
+      // redeemedDebt as 0, leaving a full totalDebt of headroom, and insertOrUpdate overwrites the
+      // entry. Against the fix, the contract takes the `insert` branch and sigma yields None because
+      // the key is present, so the `.get` throws.
+      assertTxFails(
+        Array(reserveIn, funding),
+        Array(t.mkTrackerDataInput(tracker.tree)),
+        Array(reserveOut, payout),
+        Array(t.receiverSecret.toString())
+      )
+
+      // Control: the same transaction WITH #7 supplied is also rejected, because the note is already
+      // fully redeemed and leaves zero headroom. This shows the fix did not simply reject the shape.
+      assertTxFails(
+        Array(reserveIn.withContextVars((vars :+ new ContextVar(7, ErgoValue.of(lookup))): _*), funding),
+        Array(t.mkTrackerDataInput(tracker.tree)),
+        Array(reserveOut, payout),
+        Array(t.receiverSecret.toString())
+      )
+    }
+  }
+
+  property("C1: a genuine first redemption with #7 omitted still succeeds") {
+    createMockedErgoClient(MockData(Nil, Nil)).execute { implicit ctx: BlockchainContext =>
+      val totalDebt = 1000000000L
+      val timestamp = System.currentTimeMillis()
+      val debtKey = t.mkKey(t.ownerPk, t.receiverPk)
+      val reserveKey = t.mkReserveKey(t.ownerPk, t.receiverPk)
+      val message = t.mkMessage(debtKey, totalDebt, timestamp)
+      val reserveSig = signAll(message, t.ownerSecret)
+      val trackerSig = signAll(message, t.trackerSecret)
+      val tracker = t.mkTrackerTreeAndProof(debtKey, totalDebt)
+
+      // Empty reserve tree: this (owner, receiver) pair has never redeemed against this reserve.
+      val map = freshReserveMap
+      val inputTree = map.ergoValue
+      val insertProof = map.insertOrUpdate(reserveKey -> reserveValue(timestamp, totalDebt)).proof.bytes
+      val outputTree = map.ergoValue
+
+      val held = 2 * totalDebt
+      val reserveIn = ctx.newTxBuilder().outBoxBuilder
+        .value(t.minValue)
+        .tokens(new ErgoToken(t.reserveNFTBytes, 1), new ErgoToken(t.reserveTokenIdBytes, held))
+        .registers(ErgoValue.of(t.ownerPk), inputTree, ErgoValue.of(t.trackerNFTBytes))
+        .contract(ctx.compileContract(ConstantsBuilder.empty(), BasisConstants.basisTokenContract))
+        .build()
+        .convertToInputWith("aa" * 32, 0.toShort)
+        .withContextVars(
+          new ContextVar(0, ErgoValue.of(0: Byte)),
+          new ContextVar(1, ErgoValue.of(t.receiverPk)),
+          new ContextVar(2, ErgoValue.of(reserveSig)),
+          new ContextVar(3, ErgoValue.of(totalDebt)),
+          new ContextVar(4, ErgoValue.of(timestamp)),
+          new ContextVar(5, ErgoValue.of(insertProof)),
+          new ContextVar(6, ErgoValue.of(trackerSig)),
+          // #7 omitted: first redemption, the contract takes the `insert` branch
+          new ContextVar(8, ErgoValue.of(tracker.lookupProofBytes))
+        )
+
+      // redeemed = totalDebt tokens, exactly the debt headroom; ERG fully preserved.
+      val reserveOut = t.createOut(
+        BasisConstants.basisTokenContract, t.minValue,
+        Array(ErgoValue.of(t.ownerPk), outputTree, ErgoValue.of(t.trackerNFTBytes)),
+        Array(new ErgoToken(t.reserveNFTBytes, 1), new ErgoToken(t.reserveTokenIdBytes, held - totalDebt))
+      )
+      val payout = t.createOut(
+        t.trueScript, t.minValue, Array(),
+        Array(new ErgoToken(t.reserveTokenIdBytes, totalDebt))
+      )
+      val funding = ctx.newTxBuilder().outBoxBuilder
+        .value(t.minValue + t.feeValue)
+        .contract(ctx.compileContract(ConstantsBuilder.empty(), "{sigmaProp(true)}"))
+        .build()
+        .convertToInputWith("bb" * 32, 0.toShort)
+
+      t.assertTxSucceeds(
+        Array(reserveIn, funding),
+        Array(t.mkTrackerDataInput(tracker.tree)),
+        Array(reserveOut, payout),
+        Array(t.receiverSecret.toString())
+      )
+      ()
+    }
+  }
 }

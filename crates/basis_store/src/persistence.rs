@@ -5,7 +5,7 @@
 
 use crate::{
     reserve_tracker::ExtendedReserveInfo, DenomKey, IouNote, NoteConfirmation, NoteError, NoteKey,
-    PubKey, TrackerBoxInfo,
+    PendingExchangeRecord, PendingExchangeStatus, PubKey, TrackerBoxInfo,
 };
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
@@ -26,11 +26,21 @@ const JOURNAL_VALUE_LEN: usize = 49;
 /// - `issuer_index`: Secondary index (issuer_pubkey -> list of note keys)
 /// - `recipient_index`: Secondary index (recipient_pubkey -> list of note keys)
 pub struct NoteStorage {
+    keyspace: fjall::Keyspace,
     notes_partition: fjall::Partition,
     issuer_index: fjall::Partition,
     recipient_index: fjall::Partition,
     confirmations_partition: fjall::Partition,
     reserve_avl_journal_partition: fjall::Partition,
+    pending_exchanges_partition: fjall::Partition,
+    /// Test-only fault-injection hook: while set, the atomic exchange commit
+    /// methods return an error without writing anything (issue #20 tests).
+    #[cfg(test)]
+    pub fail_exchange_commits: std::sync::atomic::AtomicBool,
+    /// Test-only fault-injection hook: while set, `store_note` returns an
+    /// error without writing anything (add_note/update_note atomicity tests).
+    #[cfg(test)]
+    pub fail_note_store: std::sync::atomic::AtomicBool,
 }
 
 /// Database storage for scanner metadata
@@ -39,10 +49,28 @@ pub struct ScannerMetadataStorage {
     partition: fjall::Partition,
 }
 
+/// A reserve box rejected by scanner admission control (issue #19), kept for
+/// operator observability. Quarantined boxes are never tracked, so they cannot
+/// poison `resolve_issuer_reserve` with a duplicate (owner, denomination).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QuarantinedReserve {
+    /// Box ID (normalized hex encoding, same as `ExtendedReserveInfo.box_id`).
+    pub box_id: String,
+    /// Owner public key from R4 (hex).
+    pub owner_pubkey: String,
+    /// Denomination: "ERG" or the hex-encoded token id.
+    pub denomination: String,
+    /// Why the box was rejected.
+    pub reason: String,
+    /// Unix timestamp (millis) when the box was quarantined.
+    pub quarantined_at: u64,
+}
+
 /// Database storage for reserve information
 #[derive(Clone)]
 pub struct ReserveStorage {
     partition: fjall::Partition,
+    quarantine_partition: fjall::Partition,
 }
 
 /// Database storage for tracker information
@@ -201,12 +229,27 @@ impl NoteStorage {
                 ))
             })?;
 
+        let pending_exchanges_partition = keyspace
+            .open_partition("pending_exchanges", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!(
+                    "Failed to open pending exchanges partition: {}",
+                    e
+                ))
+            })?;
+
         Ok(Self {
+            keyspace,
             notes_partition,
             issuer_index,
             recipient_index,
             confirmations_partition,
             reserve_avl_journal_partition,
+            pending_exchanges_partition,
+            #[cfg(test)]
+            fail_exchange_commits: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_note_store: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -352,20 +395,41 @@ impl NoteStorage {
 
     /// Store an IOU note with its issuer public key
     pub fn store_note(&self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+        #[cfg(test)]
+        if self
+            .fail_note_store
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(NoteError::StorageError(
+                "injected note store failure".to_string(),
+            ));
+        }
+
         let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
 
         let value_bytes = Self::serialize_note_value(issuer_pubkey, note);
 
-        self.notes_partition
-            .insert(&key_bytes, &value_bytes)
-            .map_err(|e| NoteError::StorageError(format!("Failed to insert note: {}", e)))?;
+        // The note record and both index entries commit in ONE journaled
+        // batch, so a crash or I/O error cannot leave a stored note with
+        // stale indices (issue #20 follow-up). Index writes are computed
+        // read-first and skipped when the key is already listed.
+        let issuer_index_value =
+            self.index_value_with_key(&self.issuer_index, issuer_pubkey, &key)?;
+        let recipient_index_value =
+            self.index_value_with_key(&self.recipient_index, &note.recipient_pubkey, &key)?;
 
-        // Update indices for efficient querying
-        Self::add_to_index(&self.issuer_index, issuer_pubkey, &key)?;
-        Self::add_to_index(&self.recipient_index, &note.recipient_pubkey, &key)?;
-
-        Ok(())
+        let mut batch = self.keyspace.batch();
+        batch.insert(&self.notes_partition, &key_bytes, value_bytes);
+        if let Some(value) = issuer_index_value {
+            batch.insert(&self.issuer_index, issuer_pubkey, value);
+        }
+        if let Some(value) = recipient_index_value {
+            batch.insert(&self.recipient_index, &note.recipient_pubkey, value);
+        }
+        batch
+            .commit()
+            .map_err(|e| NoteError::StorageError(format!("Failed to insert note: {}", e)))
     }
 
     /// Retrieve an IOU note by issuer, recipient and denomination
@@ -448,6 +512,386 @@ impl NoteStorage {
             results.push((key_bytes, confirmation));
         }
         Ok(results)
+    }
+
+    /// Persist a staged (pending) cross-denomination exchange record, keyed by
+    /// the from-edge note key (issue #17).
+    pub fn store_pending_exchange(
+        &self,
+        key_bytes: &[u8; 32],
+        record: &PendingExchangeRecord,
+    ) -> Result<(), NoteError> {
+        let value = Self::serialize_pending_exchange(record)?;
+        self.pending_exchanges_partition
+            .insert(key_bytes, &value)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store pending exchange: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// Retrieve a staged exchange record for a from-edge note key.
+    pub fn get_pending_exchange(
+        &self,
+        key_bytes: &[u8; 32],
+    ) -> Result<Option<PendingExchangeRecord>, NoteError> {
+        match self.pending_exchanges_partition.get(key_bytes) {
+            Ok(Some(value_bytes)) => {
+                let record = Self::deserialize_pending_exchange(&value_bytes)?;
+                Ok(Some(record))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get pending exchange: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Retrieve all staged exchange records with their from-edge note keys.
+    pub fn get_all_pending_exchanges(
+        &self,
+    ) -> Result<Vec<([u8; 32], PendingExchangeRecord)>, NoteError> {
+        let mut results = Vec::new();
+        for entry in self.pending_exchanges_partition.iter() {
+            let (key, value) = entry.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate pending exchanges: {}", e))
+            })?;
+            if key.len() != 32 {
+                continue;
+            }
+            let mut key_bytes = [0u8; 32];
+            key_bytes.copy_from_slice(&key);
+            let record = Self::deserialize_pending_exchange(&value)?;
+            results.push((key_bytes, record));
+        }
+        Ok(results)
+    }
+
+    /// Delete a staged exchange record (called when the to-edge increase is applied).
+    pub fn delete_pending_exchange(&self, key_bytes: &[u8; 32]) -> Result<(), NoteError> {
+        self.pending_exchanges_partition
+            .remove(key_bytes)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to delete pending exchange: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// Compute the index-partition write needed to add `note_key` to `index`,
+    /// mirroring `add_to_index`'s dedup: `None` if the key is already listed,
+    /// `Some(serialized_list)` otherwise. Read-first so the write can join an
+    /// atomic batch.
+    fn index_value_with_key(
+        &self,
+        index: &fjall::Partition,
+        pubkey: &PubKey,
+        note_key: &NoteKey,
+    ) -> Result<Option<Vec<u8>>, NoteError> {
+        let existing = index
+            .get(pubkey)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read index: {}", e)))?;
+        let mut keys = match existing {
+            Some(bytes) => Self::deserialize_note_keys(&bytes)?,
+            None => Vec::new(),
+        };
+        let key_bytes = note_key.to_bytes();
+        if keys.iter().any(|k| k.to_bytes() == key_bytes) {
+            return Ok(None);
+        }
+        keys.push(note_key.clone());
+        Ok(Some(Self::serialize_note_keys(&keys)))
+    }
+
+    /// Atomically commit an exchange's phase 1 (issue #20): the staged exchange
+    /// record, the decreased from-edge note, and its recomputed confirmation
+    /// record land together or not at all (a single journaled fjall batch).
+    /// The from-edge key already exists, so the issuer/recipient indices are
+    /// unchanged. On `Err` nothing was written.
+    pub fn commit_exchange_staged(
+        &self,
+        issuer_pubkey: &PubKey,
+        staged_record: &PendingExchangeRecord,
+        from_note: &IouNote,
+        from_confirmation: &NoteConfirmation,
+    ) -> Result<(), NoteError> {
+        #[cfg(test)]
+        if self
+            .fail_exchange_commits
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(NoteError::StorageError(
+                "injected exchange commit failure".to_string(),
+            ));
+        }
+
+        let from_key = NoteKey::from_assets(
+            issuer_pubkey,
+            &from_note.recipient_pubkey,
+            &from_note.denomination,
+        );
+        let staged_value = Self::serialize_pending_exchange(staged_record)?;
+        let note_value = Self::serialize_note_value(issuer_pubkey, from_note);
+        let confirmation_value = serde_json::to_vec(from_confirmation).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+        })?;
+
+        let mut batch = self.keyspace.batch();
+        batch.insert(
+            &self.pending_exchanges_partition,
+            &from_key.key_hash,
+            staged_value,
+        );
+        batch.insert(&self.notes_partition, from_key.to_bytes(), note_value);
+        batch.insert(
+            &self.confirmations_partition,
+            &from_key.key_hash,
+            confirmation_value,
+        );
+        batch
+            .commit()
+            .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange: {}", e)))
+    }
+
+    /// Atomically commit an exchange's phase 2 (issue #20): the increased
+    /// to-edge note, its index entries (if the edge is new), its recomputed
+    /// confirmation record, and the removal of the staged record land together
+    /// or not at all. On `Err` nothing was written, so the staged record
+    /// survives and the apply is retried on the next confirmation cycle.
+    pub fn commit_exchange_apply(
+        &self,
+        issuer_pubkey: &PubKey,
+        to_note: &IouNote,
+        to_confirmation: &NoteConfirmation,
+        staged_key: &[u8; 32],
+    ) -> Result<(), NoteError> {
+        #[cfg(test)]
+        if self
+            .fail_exchange_commits
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(NoteError::StorageError(
+                "injected exchange commit failure".to_string(),
+            ));
+        }
+
+        let to_key = NoteKey::from_assets(
+            issuer_pubkey,
+            &to_note.recipient_pubkey,
+            &to_note.denomination,
+        );
+        let note_value = Self::serialize_note_value(issuer_pubkey, to_note);
+        let confirmation_value = serde_json::to_vec(to_confirmation).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+        })?;
+        let issuer_index_value =
+            self.index_value_with_key(&self.issuer_index, issuer_pubkey, &to_key)?;
+        let recipient_index_value =
+            self.index_value_with_key(&self.recipient_index, &to_note.recipient_pubkey, &to_key)?;
+
+        let mut batch = self.keyspace.batch();
+        batch.insert(&self.notes_partition, to_key.to_bytes(), note_value);
+        if let Some(value) = issuer_index_value {
+            batch.insert(&self.issuer_index, issuer_pubkey, value);
+        }
+        if let Some(value) = recipient_index_value {
+            batch.insert(&self.recipient_index, &to_note.recipient_pubkey, value);
+        }
+        batch.insert(
+            &self.confirmations_partition,
+            &to_key.key_hash,
+            confirmation_value,
+        );
+        batch.remove(&self.pending_exchanges_partition, staged_key);
+        batch
+            .commit()
+            .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange apply: {}", e)))
+    }
+
+    /// Serialize a denomination as a tag byte plus a fixed 32-byte token id
+    /// (zeroed for ERG).
+    fn serialize_denom(denom: &DenomKey) -> [u8; 33] {
+        let mut out = [0u8; 33];
+        if let DenomKey::Token(token_id) = denom {
+            out[0] = 1;
+            out[1..33].copy_from_slice(token_id);
+        }
+        out
+    }
+
+    /// Inverse of [`Self::serialize_denom`].
+    fn deserialize_denom(bytes: &[u8]) -> Result<DenomKey, NoteError> {
+        match bytes.first() {
+            Some(0) => Ok(DenomKey::Erg),
+            Some(1) => {
+                let token_id: [u8; 32] = bytes
+                    .get(1..33)
+                    .and_then(|s| s.try_into().ok())
+                    .ok_or_else(|| {
+                        NoteError::StorageError(
+                            "truncated token denomination in pending exchange record".to_string(),
+                        )
+                    })?;
+                Ok(DenomKey::Token(token_id))
+            }
+            _ => Err(NoteError::StorageError(
+                "invalid denomination tag in pending exchange record".to_string(),
+            )),
+        }
+    }
+
+    /// Append a length-prefixed UTF-8 string (u16 BE length).
+    fn write_len_prefixed(out: &mut Vec<u8>, s: &str) {
+        let bytes = s.as_bytes();
+        out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+
+    /// Read a length-prefixed UTF-8 string written by
+    /// [`Self::write_len_prefixed`]; returns the string and the consumed length.
+    fn read_len_prefixed(buf: &[u8], offset: usize) -> Result<(String, usize), NoteError> {
+        let len_end = offset
+            .checked_add(2)
+            .ok_or_else(|| NoteError::StorageError("truncated pending exchange record".into()))?;
+        let len = u16::from_be_bytes(
+            buf.get(offset..len_end)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| {
+                    NoteError::StorageError("truncated pending exchange record".into())
+                })?,
+        ) as usize;
+        let end = len_end
+            .checked_add(len)
+            .ok_or_else(|| NoteError::StorageError("truncated pending exchange record".into()))?;
+        let bytes = buf
+            .get(len_end..end)
+            .ok_or_else(|| NoteError::StorageError("truncated pending exchange record".into()))?;
+        let s = String::from_utf8(bytes.to_vec()).map_err(|e| {
+            NoteError::StorageError(format!("invalid UTF-8 in pending exchange record: {}", e))
+        })?;
+        Ok((s, end - offset))
+    }
+
+    /// Serialize a pending exchange record. Fixed-width core fields plus
+    /// length-prefixed strings (hand-rolled, no serde: the record embeds
+    /// 33/65-byte arrays serde cannot derive over). Layout:
+    /// issuer(33) ‖ recipient(33) ‖ from_denom(33) ‖ from_old_total(8) ‖
+    /// from_new_total(8) ‖ to_denom(33) ‖ to_note(220, same encoding as note
+    /// values) ‖ to_base_flag(1) ‖ to_base_collected(8) ‖
+    /// reserve_box_id_len(2) ‖ reserve_box_id ‖ created_at(8) ‖ status_tag(1) ‖
+    /// cancel_reason_len(2) ‖ cancel_reason.
+    fn serialize_pending_exchange(record: &PendingExchangeRecord) -> Result<Vec<u8>, NoteError> {
+        let mut out = Vec::with_capacity(256);
+        out.extend_from_slice(&record.issuer_pubkey);
+        out.extend_from_slice(&record.recipient_pubkey);
+        out.extend_from_slice(&Self::serialize_denom(&record.from_denomination));
+        out.extend_from_slice(&record.from_old_total.to_be_bytes());
+        out.extend_from_slice(&record.from_new_total.to_be_bytes());
+        out.extend_from_slice(&Self::serialize_denom(&record.to_denomination));
+        out.extend_from_slice(&Self::serialize_note_value(
+            &record.issuer_pubkey,
+            &record.to_note,
+        ));
+        match record.to_base_collected {
+            Some(base) => {
+                out.push(1);
+                out.extend_from_slice(&base.to_be_bytes());
+            }
+            None => {
+                out.push(0);
+                out.extend_from_slice(&0u64.to_be_bytes());
+            }
+        }
+        Self::write_len_prefixed(&mut out, &record.reserve_box_id);
+        out.extend_from_slice(&record.created_at.to_be_bytes());
+        match &record.status {
+            PendingExchangeStatus::Staged => {
+                out.push(0);
+                out.extend_from_slice(&0u16.to_be_bytes());
+            }
+            PendingExchangeStatus::Cancelled { reason } => {
+                out.push(1);
+                Self::write_len_prefixed(&mut out, reason);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Inverse of [`Self::serialize_pending_exchange`].
+    fn deserialize_pending_exchange(
+        value_bytes: &[u8],
+    ) -> Result<PendingExchangeRecord, NoteError> {
+        let truncated = || NoteError::StorageError("truncated pending exchange record".to_string());
+
+        // Fixed-size cursor helper: returns `len` bytes and the new offset.
+        fn take(buf: &[u8], offset: usize, len: usize) -> Result<(&[u8], usize), NoteError> {
+            let end = offset.checked_add(len).ok_or_else(|| {
+                NoteError::StorageError("truncated pending exchange record".into())
+            })?;
+            let slice = buf.get(offset..end).ok_or_else(|| {
+                NoteError::StorageError("truncated pending exchange record".into())
+            })?;
+            Ok((slice, end))
+        }
+
+        let (issuer_bytes, offset) = take(value_bytes, 0, 33)?;
+        let issuer_pubkey: PubKey = issuer_bytes.try_into().map_err(|_| truncated())?;
+        let (recipient_bytes, offset) = take(value_bytes, offset, 33)?;
+        let recipient_pubkey: PubKey = recipient_bytes.try_into().map_err(|_| truncated())?;
+        let (denom_bytes, offset) = take(value_bytes, offset, 33)?;
+        let from_denomination = Self::deserialize_denom(denom_bytes)?;
+        let (total_bytes, offset) = take(value_bytes, offset, 8)?;
+        let from_old_total = u64::from_be_bytes(total_bytes.try_into().map_err(|_| truncated())?);
+        let (total_bytes, offset) = take(value_bytes, offset, 8)?;
+        let from_new_total = u64::from_be_bytes(total_bytes.try_into().map_err(|_| truncated())?);
+        let (denom_bytes, offset) = take(value_bytes, offset, 33)?;
+        let to_denomination = Self::deserialize_denom(denom_bytes)?;
+        let (note_bytes, offset) = take(value_bytes, offset, NOTE_VALUE_LEN)?;
+        let (_, to_note) = Self::deserialize_note_value(note_bytes).ok_or_else(&truncated)?;
+        let (flag_bytes, offset) = take(value_bytes, offset, 1)?;
+        let (to_base_collected, offset) = if flag_bytes[0] == 0 {
+            // Flag 0 still carries the reserved 8 zero bytes.
+            let (_, offset) = take(value_bytes, offset, 8)?;
+            (None, offset)
+        } else {
+            let (base_bytes, offset) = take(value_bytes, offset, 8)?;
+            let base = u64::from_be_bytes(base_bytes.try_into().map_err(|_| truncated())?);
+            (Some(base), offset)
+        };
+        let (reserve_box_id, consumed) = Self::read_len_prefixed(value_bytes, offset)?;
+        let offset = offset + consumed;
+        let (created_bytes, offset) = take(value_bytes, offset, 8)?;
+        let created_at = u64::from_be_bytes(created_bytes.try_into().map_err(|_| truncated())?);
+        let (status_bytes, offset) = take(value_bytes, offset, 1)?;
+        let (status, offset) = if status_bytes[0] == 0 {
+            // Staged still carries the reserved zero length prefix.
+            let (_, offset) = take(value_bytes, offset, 2)?;
+            (PendingExchangeStatus::Staged, offset)
+        } else {
+            let (reason, consumed) = Self::read_len_prefixed(value_bytes, offset)?;
+            (
+                PendingExchangeStatus::Cancelled { reason },
+                offset + consumed,
+            )
+        };
+        if offset != value_bytes.len() {
+            return Err(NoteError::StorageError(
+                "trailing bytes in pending exchange record".to_string(),
+            ));
+        }
+        Ok(PendingExchangeRecord {
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denomination,
+            from_old_total,
+            from_new_total,
+            to_denomination,
+            to_note,
+            to_base_collected,
+            reserve_box_id,
+            created_at,
+            status,
+        })
     }
 
     /// Retrieve notes by their keys using the main partition
@@ -775,7 +1219,16 @@ impl ReserveStorage {
             .open_partition("reserves", PartitionCreateOptions::default())
             .map_err(|e| NoteError::StorageError(format!("Failed to open partition: {}", e)))?;
 
-        Ok(Self { partition })
+        let quarantine_partition = keyspace
+            .open_partition("quarantined_reserves", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open quarantine partition: {}", e))
+            })?;
+
+        Ok(Self {
+            partition,
+            quarantine_partition,
+        })
     }
 
     /// Store a reserve in the database
@@ -836,6 +1289,61 @@ impl ReserveStorage {
             .map_err(|e| NoteError::StorageError(format!("Failed to remove reserve: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Persist a quarantined reserve box (issue #19).
+    pub fn store_quarantined(&self, record: &QuarantinedReserve) -> Result<(), NoteError> {
+        let value = serde_json::to_vec(record).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize quarantined reserve: {}", e))
+        })?;
+
+        self.quarantine_partition
+            .insert(record.box_id.as_bytes(), &value)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store quarantined reserve: {}", e))
+            })?;
+
+        Ok(())
+    }
+
+    /// Retrieve a quarantined reserve box by box ID, if quarantined.
+    pub fn get_quarantined(&self, box_id: &str) -> Result<Option<QuarantinedReserve>, NoteError> {
+        match self.quarantine_partition.get(box_id.as_bytes()) {
+            Ok(Some(value_bytes)) => {
+                let record: QuarantinedReserve =
+                    serde_json::from_slice(&value_bytes).map_err(|e| {
+                        NoteError::StorageError(format!(
+                            "Failed to deserialize quarantined reserve: {}",
+                            e
+                        ))
+                    })?;
+                Ok(Some(record))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to get quarantined reserve: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Get all quarantined reserve boxes.
+    pub fn get_all_quarantined(&self) -> Result<Vec<QuarantinedReserve>, NoteError> {
+        let mut records = Vec::new();
+
+        for item in self.quarantine_partition.iter() {
+            let (_key_bytes, value_bytes) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate quarantine partition: {}", e))
+            })?;
+
+            let record: QuarantinedReserve = serde_json::from_slice(&value_bytes).map_err(|e| {
+                NoteError::StorageError(format!("Failed to deserialize quarantined reserve: {}", e))
+            })?;
+
+            records.push(record);
+        }
+
+        Ok(records)
     }
 }
 

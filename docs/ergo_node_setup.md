@@ -13,10 +13,17 @@ http://213.239.193.208:9053
 
 ### 1. `config/basis.toml`
 ```toml
-[ergo.node]
-url = "http://213.239.193.208:9053"
+[ergo.scanner]
+node_url = "http://213.239.193.208:9053"
 api_key = ""
 timeout_secs = 30
+
+# Optional: point [ergo.wallet] at a local node hosting the tracker wallet so the
+# wallet api_key and signing operations stay local while scanning uses the remote
+# extra-indexed node above. When unset, the scanner node is used for everything.
+# [ergo.wallet]
+# node_url = "http://127.0.0.1:9053"
+# api_key = ""
 ```
 
 ## Testing Instructions

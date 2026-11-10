@@ -272,6 +272,30 @@ mod cors_tests {
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::ExchangeNotes { .. } => {}
+                    TrackerCommand::ListStagedExchanges { response_tx } => {
+                        let result = redemption_manager.tracker.list_staged_exchanges();
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ProcessStagedExchanges {
+                        observations,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager
+                            .tracker
+                            .process_staged_exchanges(&observations);
+                        let _ = response_tx.send(result);
+                    }
+                    TrackerCommand::ListPendingExchanges {
+                        issuer_pubkey,
+                        recipient_pubkey,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.list_pending_exchanges(
+                            issuer_pubkey.as_ref(),
+                            recipient_pubkey.as_ref(),
+                        );
+                        let _ = response_tx.send(result);
+                    }
                 }
             }
         });
@@ -291,10 +315,11 @@ mod cors_tests {
                 redemption_build_max_per_pair_per_hour: 60,
             },
             ergo: basis_server::config::ErgoConfig {
-                node: basis_store::ergo_scanner::NodeConfig {
+                scanner: basis_store::ergo_scanner::NodeConfig {
                     node_url: "http://localhost:9053".to_string(),
                     ..Default::default()
                 },
+                wallet: Default::default(),
                 basis_reserve_contract_p2s: "test".to_string(),
                 basis_token_reserve_contract_p2s: "test_token".to_string(),
                 tracker_nft_id: Some(
