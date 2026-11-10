@@ -43,6 +43,32 @@ pub fn signing_message(
     )
 }
 
+/// Generate the prior-acknowledgment message `PA(I, R, X, p, T)` (tracker v3.2),
+/// see [`basis_core::types::prior_ack_message`]:
+///
+/// message = "basis/prior-ack/1" || debtKey || longToByteArray(priorTotal) || longToByteArray(priorTimestamp) || longToByteArray(timestamp) || trackerNftId
+///
+/// Total: 105 bytes (17 + 32 + 8 + 8 + 8 + 32).
+pub fn prior_ack_message(
+    owner_key: &PubKey,
+    receiver_key: &PubKey,
+    denomination: &basis_core::types::DenomKey,
+    prior_total: u64,
+    prior_timestamp: u64,
+    timestamp: u64,
+    tracker_nft_id: &[u8; 32],
+) -> Vec<u8> {
+    basis_core::types::prior_ack_message(
+        owner_key,
+        receiver_key,
+        denomination,
+        prior_total,
+        prior_timestamp,
+        timestamp,
+        tracker_nft_id,
+    )
+}
+
 /// Validate that a public key is a valid compressed secp256k1 point
 pub fn validate_public_key(pubkey: &PubKey) -> Result<(), NoteError> {
     match basis_core::impls::validate_public_key(pubkey) {
@@ -131,6 +157,21 @@ mod tests {
             &[0x42; 32],
         );
         assert_eq!(message.len(), 80);
+    }
+
+    #[test]
+    fn test_prior_ack_message_format() {
+        // Tracker v3.2: "basis/prior-ack/1" (17) || key (32) || priorTotal (8) || priorTimestamp (8) ||
+        // timestamp (8) || trackerNftId (32) = 105 bytes, the same bytes as basis_core's.
+        let (owner, receiver, nft) = ([0x02u8; 33], [0x03u8; 33], [0x42u8; 32]);
+        let d = basis_core::types::DenomKey::Erg;
+        let message = prior_ack_message(&owner, &receiver, &d, 1000, 1743379200000, 1743379260999, &nft);
+        assert_eq!(message.len(), 105);
+        assert_eq!(&message[..17], b"basis/prior-ack/1");
+        assert_eq!(
+            message,
+            basis_core::types::prior_ack_message(&owner, &receiver, &d, 1000, 1743379200000, 1743379260999, &nft)
+        );
     }
 
     #[test]
