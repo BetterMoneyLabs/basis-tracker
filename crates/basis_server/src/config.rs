@@ -62,6 +62,15 @@ pub struct ServerConfig {
     /// wallet (the tracker pays the fee inputs). Default: 60.
     #[serde(default = "default_redemption_build_max_per_pair_per_hour")]
     pub redemption_build_max_per_pair_per_hour: u32,
+    /// Pure-credit mode (`[server] pure_credit = true`; default false): a tracker
+    /// whose edges are credit only, never committed on-chain. The Ergo scanner,
+    /// the tracker scanner and the tracker box updater are not started, and the
+    /// server refuses to start when its store holds a committed or pending
+    /// on-chain total, a note record that does not decode, or notes or
+    /// confirmations that fail to load. `GET /capabilities` reports the setting.
+    /// `ServerConfig` does not deny unknown fields, so older binaries ignore it.
+    #[serde(default)]
+    pub pure_credit: bool,
 }
 
 fn default_reserve_creation_max_erg_nano() -> u64 {
@@ -881,6 +890,7 @@ mod tests {
                 auth: AuthConfig::default(),
                 reserve_creation_max_erg_nano: default_reserve_creation_max_erg_nano(),
                 reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
+                pure_credit: false,
                 redemption_build_max_per_pair_per_hour:
                     default_redemption_build_max_per_pair_per_hour(),
             },
@@ -971,6 +981,7 @@ mod tests {
                 auth: AuthConfig::default(),
                 reserve_creation_max_erg_nano: default_reserve_creation_max_erg_nano(),
                 reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
+                pure_credit: false,
                 redemption_build_max_per_pair_per_hour:
                     default_redemption_build_max_per_pair_per_hour(),
             },
@@ -1100,6 +1111,7 @@ mod tests {
                 auth,
                 reserve_creation_max_erg_nano: default_reserve_creation_max_erg_nano(),
                 reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
+                pure_credit: false,
                 redemption_build_max_per_pair_per_hour:
                     default_redemption_build_max_per_pair_per_hour(),
             },
@@ -1299,5 +1311,42 @@ mod tests {
             .build()
             .unwrap();
         assert!(reject_legacy_node_section(&config).is_ok());
+    }
+
+    #[test]
+    fn pure_credit_is_an_optional_server_setting() {
+        // Absent, it is off, so every existing configuration keeps its behaviour.
+        let server: ServerConfig = toml::from_str("host = \"127.0.0.1\"\nport = 3048").unwrap();
+        assert!(!server.pure_credit);
+        let server: ServerConfig =
+            toml::from_str("host = \"127.0.0.1\"\nport = 3048\npure_credit = true").unwrap();
+        assert!(server.pure_credit);
+        // ServerConfig does not deny unknown fields: that is why an older binary, which does not know
+        // `pure_credit`, ignores it instead of refusing the configuration.
+        let server: ServerConfig =
+            toml::from_str("host = \"127.0.0.1\"\nport = 3048\na_setting_from_the_future = 1").unwrap();
+        assert!(!server.pure_credit);
+        assert!(toml::from_str::<ServerConfig>("host = \"127.0.0.1\"\nport = 3048\npure_credit = 1").is_err());
+
+        // Through the configuration loader, as a tracker reads `config/basis.toml`.
+        let load = |server_section: &str| -> AppConfig {
+            let toml = format!(
+                "[server]\nhost = \"127.0.0.1\"\nport = 3161\n{}\n\
+                 [ergo]\nbasis_reserve_contract_p2s = \"test\"\nbasis_token_reserve_contract_p2s = \"test_token\"\n\
+                 tracker_nft_id = \"69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b\"\n\
+                 [ergo.scanner]\nnode_url = \"http://127.0.0.1:9\"\n\
+                 [transaction]\nfee = 1000000\n",
+                server_section
+            );
+            let config = config::Config::builder()
+                .add_source(config::File::from_str(&toml, config::FileFormat::Toml))
+                .build()
+                .unwrap();
+            reject_legacy_node_section(&config).unwrap();
+            config.try_deserialize().unwrap()
+        };
+        assert!(load("pure_credit = true").server.pure_credit);
+        assert!(!load("pure_credit = false").server.pure_credit);
+        assert!(!load("").server.pure_credit);
     }
 }

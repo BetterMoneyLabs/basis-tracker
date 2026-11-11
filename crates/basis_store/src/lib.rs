@@ -58,7 +58,10 @@ pub type PubKey = [u8; 33];
 pub type Signature = [u8; 65];
 
 /// IOU Note representing debt from A to B
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is redacted (signatures are never logged): the issuer's signature
+/// appears only as its fingerprint, see [`signature_fingerprint`].
+#[derive(Clone, PartialEq, Eq)]
 pub struct IouNote {
     /// Recipient's public key
     pub recipient_pubkey: PubKey,
@@ -326,6 +329,53 @@ pub enum NoteError {
     /// A cross-denomination exchange request was malformed (same denominations,
     /// zero amounts, or it would push an edge below its already-redeemed amount).
     InvalidExchange(String),
+    /// A debt transfer (triad novation) was malformed or is not possible in
+    /// this tracker's state: same creditors, zero amount, not the transfer
+    /// residue, or more than the issuer owes the old creditor (an old
+    /// creditor's edge with on-chain state is [`NoteError::OnchainScope`]).
+    InvalidTransfer(String),
+    /// The timestamp has a reserved residue (see [`TRANSFER_TS_MS`]): 999
+    /// (transfer), 998 (set-off), 996 or 995 (reserved), or 997 (bound note)
+    /// without the issuer's prior acknowledgment. Ordinary notes may not use
+    /// them, so a raised edge's issuer signature from a novation can never be
+    /// submitted on its own.
+    ReservedTimestamp,
+    /// The edge was changed by a novation (debt transfer, set-off) and is
+    /// bound-only: a new note on it must be a bound note (residue 997 with the
+    /// issuer's prior acknowledgment of the edge's current total and timestamp).
+    BoundNoteRequired,
+    /// A bound note's prior acknowledgment is not the issuer's signature over
+    /// the acknowledgment `basis/prior-ack/1` of the edge's current total and
+    /// timestamp at the note's timestamp (see [`schnorr::prior_ack_message`]).
+    InvalidPriorSignature,
+    /// An acknowledged prior total or prior timestamp sent with the request
+    /// (diagnostic only) is not the edge's current total or timestamp.
+    StalePrior,
+    /// A bound note must raise the edge's total above the acknowledged prior
+    /// total. (Kept from bound notes version 2, where the acknowledgment was a
+    /// note message at the prior total and could otherwise have been submitted
+    /// as a note; a version-3 acknowledgment is never a note message.)
+    NotAnIncrease,
+    /// A novation's timestamp (a debt transfer's, a set-off edge's) or a bound
+    /// note's is older than the maximum age, [`NOVATION_MAX_AGE_MS`].
+    NovationExpired,
+    /// The request is malformed (for example a prior acknowledgment on a note
+    /// that is not a bound note).
+    InvalidRequest(String),
+    /// The operation needs an edge without committed or pending on-chain state.
+    OnchainScope(String),
+    /// A cross-denomination exchange (issue #17) is staged on one of the
+    /// operation's (issuer, creditor) pairs. The exchange computed its totals
+    /// against the state the operation would change, so the operation has to
+    /// wait until the exchange resolves.
+    StagedExchange(String),
+    /// A multilateral set-off was malformed or is not possible in this tracker's
+    /// state: fewer than two or more than [`MAX_SETOFF_EDGES`] edges, duplicates,
+    /// an edge's timestamp without the set-off residue, a decrease larger than an
+    /// edge, or a participant whose decreases do not balance (an edge with
+    /// on-chain state is [`NoteError::OnchainScope`], a staged exchange
+    /// [`NoteError::StagedExchange`]).
+    InvalidSetOff(String),
     /// The exchange was rejected by the recipient's acceptance policy in the
     /// target denomination. Evaluated inside the tracker thread against the
     /// pre-mutation state (finding #8), so a rejection is atomic with the
@@ -456,11 +506,372 @@ enum StagedExchangeDecision {
     Wait,
 }
 
+/// Cumulative totals of the two edges of a debt transfer, after and before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferTotals {
+    pub from_new_total: u64,
+    pub to_new_total: u64,
+    /// The old creditor's edge before the transfer (X): the total its prior
+    /// acknowledgment covers.
+    pub from_prior_total: u64,
+    /// The new creditor's edge before the transfer (Y, 0 when the edge was new):
+    /// the total its prior acknowledgment covers.
+    pub to_prior_total: u64,
+}
+
+/// The seven signatures of a debt transfer (version 4, tracker v3.2), see
+/// [`TrackerStateManager::transfer_debt`]. A is the issuer, B the old creditor,
+/// C the new creditor, a the amount, T the transfer's timestamp, X and p the
+/// stored A->B total and timestamp, Y and q the stored A->C total and timestamp
+/// (0 and 0 when that edge is absent). Five are over the standard 80-byte note
+/// message `M(I,R,t,ts) = signing_message(I, R, denomination, t, ts, nft)` at
+/// T; the two `_prior` ones are over the 105-byte prior acknowledgment
+/// `PA(I,R,t,p,T) = prior_ack_message(I, R, denomination, t, p, T, nft)`
+/// (tag `basis/prior-ack/1`):
+///
+/// | field | signer | message |
+/// |---|---|---|
+/// | `issuer_from` | A | M(A,B,X-a,T) |
+/// | `issuer_to` | A | M(A,C,Y+a,T) |
+/// | `from_recipient_prior` | B | PA(A,B,X,p,T) |
+/// | `from_recipient` | B | M(A,B,X-a,T) |
+/// | `from_recipient_to` | B | M(A,C,Y+a,T) |
+/// | `to_recipient_prior` | C | PA(A,C,Y,q,T) |
+/// | `to_recipient` | C | M(A,C,Y+a,T) |
+///
+/// The two `_prior` signatures are the creditors' prior acknowledgments: the
+/// transfer applies only while both edges are still in the acknowledged
+/// states (X, p) and (Y, q). An edge's timestamp strictly increases with every
+/// write, so each state occurs once: an acknowledgment can apply at most once,
+/// whatever totals the edge takes later (version 3 acknowledged M(A,B,X,T) and
+/// M(A,C,Y,T), the totals alone, so an attempt could apply again after both
+/// edges returned to X and Y: audit VS-1).
+///
+/// `Debug` is redacted (signatures are never logged): each signature appears
+/// only as its fingerprint, see [`signature_fingerprint`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TransferSignatures {
+    pub issuer_from: Signature,
+    pub issuer_to: Signature,
+    pub from_recipient_prior: Signature,
+    pub from_recipient: Signature,
+    pub from_recipient_to: Signature,
+    pub to_recipient_prior: Signature,
+    pub to_recipient: Signature,
+}
+
+/// A debt transfer that passed every check of
+/// [`TrackerStateManager::transfer_debt`], with the two notes it writes.
+struct TransferPlan {
+    from_note: IouNote,
+    to_note: IouNote,
+    totals: TransferTotals,
+}
+
+/// Timestamp residues (`timestamp % 1000`, the millisecond part), allocated once
+/// for the whole roadmap. Every operation signs standard note messages, so a
+/// signature is told apart only by the residue of its timestamp: each kind of
+/// operation uses its own residue, and POST /notes refuses the residues of the
+/// other operations. A raised edge's issuer signature from a transfer is a valid
+/// note message on its own; its residue keeps it from being submitted through
+/// POST /notes, which would raise that edge without the matching decrease, and
+/// keeps one operation's signatures out of every other operation.
+///
+/// | residue | operation |
+/// |---|---|
+/// | 999 | debt transfer (POST /notes/transfer) |
+/// | 998 | multilateral set-off (POST /notes/setoff) |
+/// | 997 | bound note (POST /notes with the issuer's prior acknowledgment) |
+/// | 996 | triad compress (reserved, not implemented) |
+/// | 995 | exchange (reserved, not implemented) |
+/// | 000-994 | ordinary note (POST /notes) |
+pub const TRANSFER_TS_MS: u64 = 999;
+/// Residue of a multilateral set-off's timestamp (see [`TRANSFER_TS_MS`]).
+pub const SETOFF_TS_MS: u64 = 998;
+/// Residue of a bound note's timestamp (see [`TRANSFER_TS_MS`] and [`PriorAck`]).
+pub const BOUND_NOTE_TS_MS: u64 = 997;
+/// Residue reserved for a triad compress (not implemented; refused by POST /notes).
+pub const COMPRESS_TS_MS: u64 = 996;
+/// Residue reserved for an exchange (not implemented; refused by POST /notes).
+pub const EXCHANGE_TS_MS: u64 = 995;
+/// The lowest reserved residue: residues `RESERVED_FROM_MS..=999` are never
+/// ordinary notes, and ordinary notes use 000-994.
+pub const RESERVED_FROM_MS: u64 = 995;
+
+/// Does `timestamp` have a reserved residue (995-999 ms)? Ordinary notes may not.
+pub fn is_reserved_timestamp(timestamp: u64) -> bool {
+    timestamp % 1000 >= RESERVED_FROM_MS
+}
+
+/// Does `timestamp` have the debt-transfer residue (999 ms)?
+pub fn is_transfer_timestamp(timestamp: u64) -> bool {
+    timestamp % 1000 == TRANSFER_TS_MS
+}
+
+/// Does `timestamp` have the set-off residue (998 ms)?
+pub fn is_setoff_timestamp(timestamp: u64) -> bool {
+    timestamp % 1000 == SETOFF_TS_MS
+}
+
+/// Does `timestamp` have the bound-note residue (997 ms)?
+pub fn is_bound_note_timestamp(timestamp: u64) -> bool {
+    timestamp % 1000 == BOUND_NOTE_TS_MS
+}
+
+/// The maximum age of a novation's or a bound note's timestamp, in
+/// milliseconds (one hour). A debt transfer whose timestamp, a set-off with any
+/// edge whose timestamp, or a bound note (POST /notes at residue 997, see
+/// [`PriorAck`]) whose timestamp is older than `now - NOVATION_MAX_AGE_MS` is
+/// refused with [`NoteError::NovationExpired`]. This bounds how long unapplied
+/// signatures stay usable: a payment attempt (a transfer or a bound note) that
+/// has not applied by its timestamp plus this age never will, which is what
+/// lets a payer fall back to another kind of payment safely. Compiled in, not
+/// configurable.
+pub const NOVATION_MAX_AGE_MS: u64 = 3_600_000;
+
+/// An issuer prior acknowledgment, sent with a bound note (POST /notes at
+/// residue 997; bound notes version 3, tracker v3.2): the issuer's signature
+/// over the prior acknowledgment of the edge's CURRENT state (P, p) at the
+/// bound note's own timestamp ts,
+/// `PA(I,R,P,p,ts) = prior_ack_message(issuer, recipient, denomination, P, p, ts, nft)`,
+/// where P is the stored total and p the stored note's timestamp (0 and 0 for an
+/// edge that does not exist yet). The tracker applies the bound note only while
+/// the edge is still in that state and the note raises it, so a note signed
+/// against a stale state can never apply: the issuer pays exactly `new - P`,
+/// both values it signed. Each state (P, p) of an edge occurs once (the
+/// timestamp strictly increases with every write), so two bound notes on the
+/// same prior exclude each other even if a transfer or set-off lowers the edge
+/// back to P in between (version 2 acknowledged the note message M(I,R,P,ts),
+/// the total alone). Like a novation, a bound note expires: one whose timestamp
+/// is older than [`NOVATION_MAX_AGE_MS`] is refused, so an unapplied bound note
+/// is dead an hour after its timestamp.
+///
+/// `Debug` is redacted (signatures are never logged): the signature appears
+/// only as its fingerprint, see [`signature_fingerprint`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PriorAck {
+    /// The issuer's signature over the prior acknowledgment (65 bytes).
+    pub signature: Signature,
+    /// Optional and diagnostic: the prior total the issuer acknowledged. When
+    /// present it must equal the stored total, else [`NoteError::StalePrior`].
+    pub prior_total: Option<u64>,
+    /// Optional and diagnostic: the prior timestamp the issuer acknowledged (0
+    /// for an absent edge). When present it must equal the stored note's
+    /// timestamp, else [`NoteError::StalePrior`].
+    pub prior_timestamp: Option<u64>,
+}
+
+/// Upper bound on the edges of one set-off (keeps verification and the storage
+/// batch small).
+pub const MAX_SETOFF_EDGES: usize = 64;
+
+/// One edge lowered by a multilateral set-off (version 3), with both parties'
+/// signatures over the edge's standard note message at its new total and its
+/// own timestamp: `M(I,R,P-d,ts_e) = signing_message(I, R, denomination, P - d,
+/// ts_e, nft)`, where P is the edge's stored total and d its `decrease`.
+///
+/// `Debug` is redacted (signatures are never logged): both signatures appear
+/// only as fingerprints, see [`signature_fingerprint`].
+#[derive(Clone)]
+pub struct SetOffEdge {
+    pub issuer_pubkey: PubKey,
+    pub recipient_pubkey: PubKey,
+    pub decrease: u64,
+    /// This edge's timestamp ts_e (per-edge timestamps): it must end in 998 ms
+    /// ([`SETOFF_TS_MS`]), be at most now and at most [`NOVATION_MAX_AGE_MS`]
+    /// old, and be newer than the edge's stored timestamp. The lowered note is
+    /// stored at it. Edges of one set-off may have different timestamps, so a
+    /// moved edge can be re-signed on its own.
+    pub timestamp: u64,
+    pub issuer_signature: Signature,
+    pub recipient_signature: Signature,
+}
+
+/// One edge as a set-off left it: its new total and its new timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetOffEdgeTotal {
+    pub issuer_pubkey: PubKey,
+    pub recipient_pubkey: PubKey,
+    /// The edge's total after the set-off (its stored total minus the decrease).
+    pub new_total: u64,
+    /// The edge's timestamp after the set-off (the edge's ts_e).
+    pub timestamp: u64,
+}
+
+/// Result of a set-off: every lowered edge's new total and timestamp, in the
+/// order of the request's edges, and the gross debt cleared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetOffResult {
+    pub new_totals: Vec<SetOffEdgeTotal>,
+    pub total_cleared: u64,
+}
+
+/// The 8-hex-character fingerprint of a signature: the first 4 bytes of the
+/// SHA-256 of its bytes, as lowercase hex. Debug output shows a signature only
+/// as `sha256:<fingerprint>` (design §3.8: signatures are never logged). A
+/// fingerprint identifies a signature its holder already knows without
+/// revealing any of it. basis_server's `redact` module uses the same
+/// fingerprint, so a request's log line and its command's can be matched.
+pub fn signature_fingerprint(signature: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(signature)[..4])
+}
+
+/// Field renderings for the redacted `Debug` impls of the store types that
+/// carry signatures ([`IouNote`], [`PriorAck`], [`TransferSignatures`],
+/// [`SetOffEdge`]): their derived `Debug` printed every signature as a list of
+/// 65 numbers, and any `{:?}` of them would put it in a log.
+mod redacted_debug {
+    use std::fmt;
+
+    /// A signature, as `sha256:<fingerprint>`.
+    pub(crate) struct Sig<'a>(pub(crate) &'a [u8]);
+
+    impl fmt::Debug for Sig<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "sha256:{}", super::signature_fingerprint(self.0))
+        }
+    }
+
+    /// Bytes (a public key, an NFT id) as lowercase hex.
+    pub(crate) struct Hex<'a>(pub(crate) &'a [u8]);
+
+    impl fmt::Debug for Hex<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&hex::encode(self.0))
+        }
+    }
+}
+
+/// Redacted: the signature only as its fingerprint, the denomination as its id.
+impl std::fmt::Debug for IouNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use redacted_debug::{Hex, Sig};
+        f.debug_struct("IouNote")
+            .field("recipient_pubkey", &Hex(&self.recipient_pubkey))
+            .field("amount_collected", &self.amount_collected)
+            .field("amount_redeemed", &self.amount_redeemed)
+            .field("timestamp", &self.timestamp)
+            .field("signature", &Sig(&self.signature))
+            .field("tracker_nft_id", &Hex(&self.tracker_nft_id))
+            .field("denomination", &self.denomination.denomination_id())
+            .finish()
+    }
+}
+
+/// Redacted: the signature only as its fingerprint.
+impl std::fmt::Debug for PriorAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PriorAck")
+            .field("signature", &redacted_debug::Sig(&self.signature))
+            .field("prior_total", &self.prior_total)
+            .field("prior_timestamp", &self.prior_timestamp)
+            .finish()
+    }
+}
+
+/// Redacted: each of the seven signatures only as its fingerprint.
+impl std::fmt::Debug for TransferSignatures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use redacted_debug::Sig;
+        f.debug_struct("TransferSignatures")
+            .field("issuer_from", &Sig(&self.issuer_from))
+            .field("issuer_to", &Sig(&self.issuer_to))
+            .field("from_recipient_prior", &Sig(&self.from_recipient_prior))
+            .field("from_recipient", &Sig(&self.from_recipient))
+            .field("from_recipient_to", &Sig(&self.from_recipient_to))
+            .field("to_recipient_prior", &Sig(&self.to_recipient_prior))
+            .field("to_recipient", &Sig(&self.to_recipient))
+            .finish()
+    }
+}
+
+/// Redacted: both signatures only as fingerprints.
+impl std::fmt::Debug for SetOffEdge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use redacted_debug::{Hex, Sig};
+        f.debug_struct("SetOffEdge")
+            .field("issuer_pubkey", &Hex(&self.issuer_pubkey))
+            .field("recipient_pubkey", &Hex(&self.recipient_pubkey))
+            .field("decrease", &self.decrease)
+            .field("timestamp", &self.timestamp)
+            .field("issuer_signature", &Sig(&self.issuer_signature))
+            .field("recipient_signature", &Sig(&self.recipient_signature))
+            .finish()
+    }
+}
+
 /// Boxed acceptance-policy check for an exchange (see
 /// [`TrackerStateManager::exchange_debt_checked`]). `Err(reason)` aborts the
 /// exchange without mutating.
 pub type ExchangeAcceptanceCheckFn =
     Box<dyn FnOnce(ExchangeAcceptanceView) -> Result<(), String> + Send>;
+
+/// What opening the store found (see [`TrackerStateManager::load_report`]): the
+/// loading problems a pure-credit tracker refuses to start on, and the
+/// confirmation-load failure that makes every tracker refuse novations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreLoadReport {
+    /// Note records the index rebuild could not decode and skipped.
+    pub undecodable_note_records: usize,
+    /// Loading steps that failed while the store opened, each as
+    /// "<step>: <error>" (the note index rebuild, the tree rebuild).
+    pub load_errors: Vec<String>,
+    /// Why the confirmation records failed to load (from the latest
+    /// [`TrackerStateManager::rebuild_confirmations`]), if they did. While it is
+    /// set the store cannot tell which edges carry on-chain state, so it refuses
+    /// novations (debt transfer, set-off) with [`NoteError::OnchainScope`].
+    pub confirmations_error: Option<String>,
+}
+
+/// Why a store must not serve as a pure-credit tracker (design §3.7), from
+/// [`TrackerStateManager::check_pure_credit`]. Its `Display` is the startup
+/// error message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PureCreditRefusal {
+    /// Stored confirmation records with a committed or pending on-chain total.
+    pub onchain_confirmations: usize,
+    /// Note records that could not be decoded.
+    pub undecodable_note_records: usize,
+    /// Notes or confirmations that failed to load, each as "<step>: <error>".
+    pub load_errors: Vec<String>,
+}
+
+impl std::fmt::Display for PureCreditRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut problems = Vec::new();
+        if self.onchain_confirmations > 0 {
+            problems.push(format!(
+                "{} stored confirmation record(s) carry a committed or pending on-chain total",
+                self.onchain_confirmations
+            ));
+        }
+        if self.undecodable_note_records > 0 {
+            problems.push(format!(
+                "{} note record(s) could not be decoded",
+                self.undecodable_note_records
+            ));
+        }
+        for e in &self.load_errors {
+            problems.push(format!("loading failed ({})", e));
+        }
+        write!(
+            f,
+            "refusing to start in pure_credit mode: {}. A pure-credit tracker serves only \
+             credit edges that were never committed on-chain, and it must be able to read every \
+             stored record; start without server.pure_credit, or with a data directory that \
+             qualifies.",
+            problems.join("; ")
+        )
+    }
+}
+
+impl std::error::Error for PureCreditRefusal {}
+
+/// The public reason novations are refused while the confirmation records
+/// failed to load (GET /capabilities `novations_disabled_reason`, and the 503
+/// of the novation routes). Fixed text: the underlying error is only logged.
+pub const NOVATIONS_DISABLED_CONFIRMATIONS: &str = "the tracker's confirmation records failed to load, so it cannot tell which edges carry on-chain state; debt transfers and set-offs are refused until it restarts with readable records";
 
 /// Tracker state manager with persistent AVL tree
 pub struct TrackerStateManager {
@@ -501,6 +912,9 @@ pub struct TrackerStateManager {
     /// digest. The old (valid) tree is kept in place meanwhile, so a
     /// half-rebuilt tree is never committed.
     tree_dirty: bool,
+    /// What opening the store found (undecodable records, failed loading
+    /// steps, a confirmation-load failure); see [`Self::load_report`].
+    load_report: StoreLoadReport,
     /// Test-only fault-injection hook: while set, `rebuild_tree_canonically`
     /// returns an error without touching the live tree (issue #20 tests).
     #[cfg(test)]
@@ -509,8 +923,16 @@ pub struct TrackerStateManager {
 
 impl TrackerStateManager {
     /// Create a new tracker state manager with the configured storage location.
+    ///
+    /// Loading problems (undecodable note records, failed loading steps, a
+    /// confirmation-load failure) are logged and recorded in
+    /// [`Self::load_report`]; they do not stop the store from opening. A
+    /// pure-credit server refuses to start on them ([`Self::check_pure_credit`]),
+    /// and every server refuses novations while the confirmation records failed
+    /// to load ([`Self::novations_disabled_reason`]).
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
         tracing::debug!("Creating TrackerStateManager...");
+        let mut load_report = StoreLoadReport::default();
 
         // Use the configured storage location
         tracing::debug!("Opening note storage...");
@@ -521,8 +943,16 @@ impl TrackerStateManager {
                 // Rebuild indices to ensure all existing notes are indexed
                 // (especially important after upgrading to indexed storage)
                 match storage.rebuild_indices() {
-                    Ok(count) => tracing::info!("Note indices rebuilt: {} notes indexed", count),
-                    Err(e) => tracing::warn!("Failed to rebuild note indices: {:?}", e),
+                    Ok(scan) => {
+                        tracing::info!("Note indices rebuilt: {} notes indexed", scan.decoded);
+                        load_report.undecodable_note_records = scan.skipped;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to rebuild note indices: {:?}", e);
+                        load_report
+                            .load_errors
+                            .push(format!("note index rebuild: {:?}", e));
+                    }
                 }
                 storage
             }
@@ -562,17 +992,28 @@ impl TrackerStateManager {
             confirmations: std::collections::HashMap::new(),
             confirmed_digest: None,
             tree_dirty: false,
+            load_report,
             #[cfg(test)]
             fail_tree_rebuild: false,
         };
 
         if let Err(e) = manager.rebuild_avl_tree() {
             tracing::warn!("Failed to rebuild AVL tree from storage: {:?}", e);
+            manager
+                .load_report
+                .load_errors
+                .push(format!("tree rebuild: {:?}", e));
         }
 
         // Rebuild confirmation records from storage and mark every stored note as
-        // LocalOnly until the updater confirms otherwise.
-        manager.rebuild_confirmations();
+        // LocalOnly until the updater confirms otherwise. A failure is recorded
+        // in the load report (see `rebuild_confirmations`).
+        if let Err(e) = manager.rebuild_confirmations() {
+            tracing::error!(
+                "Confirmation records failed to load: {:?}. Debt transfers and set-offs are refused until the tracker restarts with readable records.",
+                e
+            );
+        }
 
         // Rebuild per-issuer reserve AVL trees from the persisted journal so that
         // redemptions can continue after a server restart without manual repair.
@@ -724,6 +1165,7 @@ impl TrackerStateManager {
             confirmations: std::collections::HashMap::new(),
             confirmed_digest: None,
             tree_dirty: false,
+            load_report: StoreLoadReport::default(),
             #[cfg(test)]
             fail_tree_rebuild: false,
         };
@@ -731,8 +1173,14 @@ impl TrackerStateManager {
         // Rebuild AVL tree and confirmations so test instances mirror production.
         if let Err(e) = manager.rebuild_avl_tree() {
             tracing::warn!("Failed to rebuild AVL tree in test instance: {:?}", e);
+            manager
+                .load_report
+                .load_errors
+                .push(format!("tree rebuild: {:?}", e));
         }
-        manager.rebuild_confirmations();
+        if let Err(e) = manager.rebuild_confirmations() {
+            tracing::warn!("Failed to rebuild confirmations in test instance: {:?}", e);
+        }
 
         manager
     }
@@ -759,9 +1207,53 @@ impl TrackerStateManager {
         Ok(())
     }
 
+    /// The last check before a write gives the (issuer, recipient,
+    /// denomination) edge of `note` a new state: `note.timestamp` must be later
+    /// than the edge's stored timestamp, else `PastTimestamp` and nothing is
+    /// written. An edge's timestamp then strictly increases with every write,
+    /// so each state (total, timestamp) of an edge occurs once, which the prior
+    /// acknowledgments (tracker v3.2) rely on: one applies at most once. Every
+    /// path that writes a new state calls it right before its storage commit:
+    /// `add_note`, `update_note`, `exchange_debt` (the from-edge),
+    /// `apply_staged_exchange` (the to-edge), `apply_transfer` (both edges) and
+    /// `set_off` (every edge). Each checks the timestamp earlier on its own
+    /// (`decide_staged_exchange` cancels an exchange whose to-edge moved past
+    /// it); this guard holds even where such a check is missed.
+    /// `record_redemption` is not a new state (it keeps the stored total,
+    /// timestamp and signature and raises only the redeemed amount), so it does
+    /// not call it.
+    fn require_later_timestamp(
+        &self,
+        issuer_pubkey: &PubKey,
+        note: &IouNote,
+    ) -> Result<(), NoteError> {
+        match self.get_note_optional(issuer_pubkey, &note.recipient_pubkey, &note.denomination)? {
+            Some(stored) if note.timestamp <= stored.timestamp => {
+                tracing::error!(
+                    "Write refused: the new timestamp {} is not later than the edge's stored timestamp {}",
+                    note.timestamp,
+                    stored.timestamp
+                );
+                Err(NoteError::PastTimestamp)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Add a new note to the tracker state
     /// Updates the AVL tree with hash(issuer||receiver) -> totalDebt mapping
-    pub fn add_note(&mut self, issuer_pubkey: &PubKey, note: &IouNote) -> Result<(), NoteError> {
+    ///
+    /// `prior` is the issuer's prior acknowledgment of a bound note (timestamp
+    /// residue 997, see [`PriorAck`]); it must be `None` for every other note.
+    /// Every check that existed before bound notes runs first, in its original
+    /// order, so existing error precedence is kept; then the residue and
+    /// bound-note rules (see [`Self::check_residue_and_binding`]).
+    pub fn add_note(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        note: &IouNote,
+        prior: Option<PriorAck>,
+    ) -> Result<(), NoteError> {
         Self::validate_contract_range(note)?;
 
         // Validate that timestamp is not in the future
@@ -785,6 +1277,9 @@ impl TrackerStateManager {
         // which the contract pins, so the signed message and the on-chain commitment are unchanged.
         // The per-issuer reserve AVL tree (which is what the contract actually reads) is untouched.
         let mut note_to_store = note.clone();
+        // The edge's stored state (P and p for a bound note): 0 and 0 when the edge is absent.
+        let mut stored_total = 0u64;
+        let mut stored_timestamp = 0u64;
 
         // Check if there is an existing note with the same issuer-recipient pair
         // and ensure the new timestamp is greater than the existing one (ever increasing).
@@ -816,6 +1311,8 @@ impl TrackerStateManager {
                         requested: note.amount_collected,
                     });
                 }
+                stored_total = existing_note.amount_collected;
+                stored_timestamp = existing_note.timestamp;
             }
             Err(NoteError::NotFound) => {}
             Err(e) => return Err(e),
@@ -831,6 +1328,19 @@ impl TrackerStateManager {
         let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
 
+        // Timestamp residues, bound notes (with their maximum age) and
+        // bound-only edges. Checked after every other validation, so every
+        // existing error keeps its priority.
+        self.check_residue_and_binding(
+            issuer_pubkey,
+            note,
+            &key.key_hash,
+            stored_total,
+            stored_timestamp,
+            prior,
+            current_time,
+        )?;
+
         // Value is just the totalDebt (amount_collected) as 8-byte big-endian
         // This matches the contract spec: hash(A||B) -> totalDebt
         let value_bytes = note.amount_collected.to_be_bytes().to_vec();
@@ -844,6 +1354,7 @@ impl TrackerStateManager {
         // update_state rebuild the tree from storage before the next commit.
         // (The reverse order committed debt the tracker had no record of —
         // issue #20 follow-up.)
+        self.require_later_timestamp(issuer_pubkey, &note_to_store)?;
         self.storage.store_note(issuer_pubkey, &note_to_store)?;
         if let Err(e) = self.avl_state.update(key_bytes.clone(), value_bytes) {
             self.tree_dirty = true;
@@ -866,6 +1377,94 @@ impl TrackerStateManager {
         Ok(())
     }
 
+    /// The timestamp-residue and bound-note rules of POST /notes, in this order
+    /// (each refusal is checked only if the ones before it passed):
+    /// 1. residue 995, 996, 998 or 999 (another operation's) -> `ReservedTimestamp`;
+    /// 2. residue 997 (bound note) without `prior` -> `ReservedTimestamp`;
+    /// 3. residue 997 with `prior`, where P = `stored_total` and p =
+    ///    `stored_timestamp` (0 and 0 for an absent edge): a timestamp older than
+    ///    `now` - [`NOVATION_MAX_AGE_MS`] -> `NovationExpired` (a bound note is a
+    ///    payment attempt and expires like a novation, so an unapplied one is dead
+    ///    an hour after its timestamp); a `prior_total` other than P or a
+    ///    `prior_timestamp` other than p -> `StalePrior`; the issuer's signature
+    ///    over the prior acknowledgment (bound notes version 3)
+    ///    `prior_ack_message(issuer, recipient, denomination, P, p, timestamp, nft)`
+    ///    must verify, else `InvalidPriorSignature`; the new total must be
+    ///    strictly greater than P, else `NotAnIncrease`;
+    /// 4. any other residue on a bound-only edge -> `BoundNoteRequired`;
+    /// 5. a `prior` on a note that is not a bound note -> `InvalidRequest`.
+    #[allow(clippy::too_many_arguments)]
+    fn check_residue_and_binding(
+        &self,
+        issuer_pubkey: &PubKey,
+        note: &IouNote,
+        key: &NoteKeyBytes,
+        stored_total: u64,
+        stored_timestamp: u64,
+        prior: Option<PriorAck>,
+        now: u64,
+    ) -> Result<(), NoteError> {
+        let bound_note = is_bound_note_timestamp(note.timestamp);
+        if is_reserved_timestamp(note.timestamp) && !bound_note {
+            return Err(NoteError::ReservedTimestamp);
+        }
+        if bound_note {
+            let prior = prior.ok_or(NoteError::ReservedTimestamp)?;
+            if note.timestamp < now.saturating_sub(NOVATION_MAX_AGE_MS) {
+                return Err(NoteError::NovationExpired);
+            }
+            if prior.prior_total.is_some_and(|t| t != stored_total)
+                || prior.prior_timestamp.is_some_and(|p| p != stored_timestamp)
+            {
+                return Err(NoteError::StalePrior);
+            }
+            // The acknowledgment binds the edge's state (P, p) and this note's
+            // timestamp: an edge state occurs once, so it applies at most once.
+            let prior_message = schnorr::prior_ack_message(
+                issuer_pubkey,
+                &note.recipient_pubkey,
+                &note.denomination,
+                stored_total,
+                stored_timestamp,
+                note.timestamp,
+                &note.tracker_nft_id,
+            );
+            if SchnorrVerifier
+                .verify_signature(&prior.signature, &prior_message, issuer_pubkey)
+                .is_err()
+            {
+                return Err(NoteError::InvalidPriorSignature);
+            }
+            if note.amount_collected <= stored_total {
+                return Err(NoteError::NotAnIncrease);
+            }
+            return Ok(());
+        }
+        if self.storage.is_bound_only(key)? {
+            return Err(NoteError::BoundNoteRequired);
+        }
+        if prior.is_some() {
+            return Err(NoteError::InvalidRequest(
+                "prior_signature is only valid on a bound note (timestamp ending in 997 ms)"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Is the (issuer, recipient, denomination) edge bound-only, i.e. changed by
+    /// a novation (debt transfer, set-off)? New notes on a bound-only edge must
+    /// be bound notes. A storage error is returned, never read as "not bound".
+    pub fn is_bound_only(
+        &self,
+        issuer_pubkey: &PubKey,
+        recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
+    ) -> Result<bool, NoteError> {
+        let key = NoteKey::from_assets(issuer_pubkey, recipient_pubkey, denomination);
+        self.storage.is_bound_only(&key.key_hash)
+    }
+
     /// Convert an issuer/recipient/denomination triple into the fixed-size confirmation key.
     fn confirmation_key(
         issuer_pubkey: &PubKey,
@@ -880,8 +1479,11 @@ impl TrackerStateManager {
     }
 
     /// Recompute a single note's confirmation status from its local value versus
-    /// the cached confirmed/pending values. Persists the result best-effort.
+    /// the cached confirmed/pending values. Persists the result best-effort,
+    /// unless confirmation write-backs are suspended
+    /// ([`Self::confirmation_write_back_allowed`]).
     fn recompute_confirmation_status(&mut self, key: &NoteKeyBytes, local_value: u64) {
+        let write_back = self.confirmation_write_back_allowed();
         let entry = self
             .confirmations
             .entry(*key)
@@ -898,7 +1500,41 @@ impl TrackerStateManager {
             NoteConfirmationStatus::LocalOnly
         };
 
-        let _ = self.storage.store_confirmation(key, entry);
+        if write_back {
+            let _ = self.storage.store_confirmation(key, entry);
+        } else {
+            Self::log_write_back_suspended("add_note", 1);
+        }
+    }
+
+    /// Whether confirmation records may be written back to storage: not while
+    /// the stored records failed to load ([`StoreLoadReport::confirmations_error`]).
+    /// The in-memory records are then built without them (every note
+    /// local-only), so writing one back would replace stored evidence of
+    /// on-chain state (a committed or pending total, or a record that does not
+    /// parse) with a readable local-only record: the evidence would be erased,
+    /// and after a restart the load would succeed and the edge would look
+    /// pure-credit, so novations would be allowed on it again. While this is
+    /// false, every write-back (a note's recomputed status, the tracker box
+    /// updater's pending, confirmed, reverted and reconciled totals, an
+    /// exchange's confirmation records) updates the in-memory record only, and
+    /// storage keeps what it had until a rebuild succeeds. Novations never get
+    /// as far as their write: their scope check refuses them first. A
+    /// pure-credit tracker never runs in this state (it refuses to start).
+    fn confirmation_write_back_allowed(&self) -> bool {
+        self.load_report.confirmations_error.is_none()
+    }
+
+    /// The warning for confirmation records `source` did not write back
+    /// (see [`Self::confirmation_write_back_allowed`]).
+    fn log_write_back_suspended(source: &str, count: usize) {
+        if count > 0 {
+            tracing::warn!(
+                "{}: {} confirmation record(s) updated in memory only, not written back: the stored confirmation records failed to load and are kept as they are until a rebuild succeeds",
+                source,
+                count
+            );
+        }
     }
 
     /// Rebuild the in-memory confirmation map from storage. Called on startup.
@@ -907,18 +1543,42 @@ impl TrackerStateManager {
     /// the persisted `confirmed_total_debt` metadata but recompute the status from
     /// the current local value and clear any pending in-flight state (pending
     /// transactions do not survive a restart).
-    pub fn rebuild_confirmations(&mut self) {
+    ///
+    /// Returns the number of confirmation records rebuilt. Fails closed: when
+    /// the notes or the stored confirmation records fail to load, it returns the
+    /// error and records it in the load report
+    /// ([`StoreLoadReport::confirmations_error`]); the store then refuses
+    /// novations until a rebuild succeeds. On an error the map holds what could
+    /// be built: nothing when the notes failed to load, every note local-only
+    /// when the stored records failed to load.
+    pub fn rebuild_confirmations(&mut self) -> Result<usize, NoteError> {
+        let result = self.load_confirmations();
+        self.load_report.confirmations_error = result
+            .as_ref()
+            .err()
+            .map(|e| format!("confirmation rebuild: {:?}", e));
+        result
+    }
+
+    /// The work of [`Self::rebuild_confirmations`].
+    fn load_confirmations(&mut self) -> Result<usize, NoteError> {
         self.confirmations.clear();
 
         let notes = match self.storage.get_all_notes_with_issuer() {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!("Failed to load notes for confirmation rebuild: {:?}", e);
-                return;
+                return Err(e);
             }
         };
 
-        let stored = self.storage.get_all_confirmations().unwrap_or_default();
+        let (stored, load_error) = match self.storage.get_all_confirmations() {
+            Ok(stored) => (stored, None),
+            Err(e) => {
+                tracing::warn!("Failed to load stored confirmation records: {:?}", e);
+                (Vec::new(), Some(e))
+            }
+        };
         let stored_map: std::collections::HashMap<NoteKeyBytes, NoteConfirmation> =
             stored.into_iter().collect();
 
@@ -941,10 +1601,102 @@ impl TrackerStateManager {
             self.confirmations.insert(key, record);
         }
 
+        if let Some(e) = load_error {
+            return Err(e);
+        }
         tracing::info!(
             "Rebuilt confirmation records for {} notes",
             self.confirmations.len()
         );
+        Ok(self.confirmations.len())
+    }
+
+    /// What opening the store found: undecodable note records, failed loading
+    /// steps and whether the confirmation records failed to load.
+    pub fn load_report(&self) -> &StoreLoadReport {
+        &self.load_report
+    }
+
+    /// Why debt transfers and set-offs must be refused on this store, if they
+    /// must: the confirmation records failed to load, so the store cannot tell
+    /// which edges carry on-chain state. Fixed public text
+    /// ([`NOVATIONS_DISABLED_CONFIRMATIONS`]); the underlying error is in
+    /// [`StoreLoadReport::confirmations_error`] and the log.
+    pub fn novations_disabled_reason(&self) -> Option<String> {
+        self.load_report
+            .confirmations_error
+            .as_ref()
+            .map(|_| NOVATIONS_DISABLED_CONFIRMATIONS.to_string())
+    }
+
+    /// The number of edges whose confirmation record has a committed or pending
+    /// on-chain total (the edges a novation may not lower). Always 0 on a
+    /// pure-credit tracker.
+    pub fn onchain_edge_count(&self) -> usize {
+        self.confirmations
+            .values()
+            .filter(|c| c.confirmed_total_debt.is_some() || c.pending_total_debt.is_some())
+            .count()
+    }
+
+    /// The pure-credit startup check (design §3.7). A pure-credit tracker
+    /// serves only credit edges that were never committed on-chain, so it
+    /// refuses to start (`Err`) when:
+    /// - any STORED confirmation record has a committed or pending on-chain
+    ///   total (`confirmed_total_debt` or `pending_total_debt`; pending totals
+    ///   count although a restart clears them in memory, because the
+    ///   transaction may still confirm);
+    /// - any note record fails to decode (normally such records are skipped);
+    /// - the notes or the confirmation records failed to load, when the store
+    ///   opened or now.
+    /// The note and confirmation partitions are read again here, so the check
+    /// does not rely on the in-memory state alone.
+    pub fn check_pure_credit(&self) -> Result<(), PureCreditRefusal> {
+        let mut refusal = PureCreditRefusal {
+            undecodable_note_records: self.load_report.undecodable_note_records,
+            load_errors: self.load_report.load_errors.clone(),
+            ..Default::default()
+        };
+        if let Some(e) = &self.load_report.confirmations_error {
+            refusal.load_errors.push(e.clone());
+        }
+        match self.storage.get_all_notes_with_issuer_counted() {
+            Ok((_, skipped)) => {
+                refusal.undecodable_note_records = refusal.undecodable_note_records.max(skipped)
+            }
+            Err(e) => refusal.load_errors.push(format!("note records: {:?}", e)),
+        }
+        match self.storage.get_all_confirmations() {
+            Ok(stored) => {
+                refusal.onchain_confirmations = stored
+                    .iter()
+                    .filter(|(_, c)| {
+                        c.confirmed_total_debt.is_some() || c.pending_total_debt.is_some()
+                    })
+                    .count()
+            }
+            Err(e) => refusal
+                .load_errors
+                .push(format!("confirmation records: {:?}", e)),
+        }
+        if refusal == PureCreditRefusal::default() {
+            Ok(())
+        } else {
+            Err(refusal)
+        }
+    }
+
+    /// Novations need to know which edges carry on-chain state: while the
+    /// confirmation records failed to load
+    /// ([`StoreLoadReport::confirmations_error`]) no edge can be shown to have
+    /// none, so the scope check refuses every edge ([`NoteError::OnchainScope`]).
+    fn require_known_onchain_state(&self) -> Result<(), NoteError> {
+        match self.load_report.confirmations_error {
+            None => Ok(()),
+            Some(_) => Err(NoteError::OnchainScope(
+                NOVATIONS_DISABLED_CONFIRMATIONS.to_string(),
+            )),
+        }
     }
 
     /// Get a clone of the confirmation record for a note, if one exists.
@@ -974,6 +1726,7 @@ impl TrackerStateManager {
     ) -> Result<usize, NoteError> {
         let _ = (digest, submitted_height);
         let notes = self.storage.get_all_notes_with_issuer()?;
+        let write_back = self.confirmation_write_back_allowed();
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
@@ -989,9 +1742,14 @@ impl TrackerStateManager {
                 entry.pending_total_debt = Some(local_value);
                 entry.pending_tx_id = Some(tx_id.to_string());
                 entry.status = NoteConfirmationStatus::Pending;
-                let _ = self.storage.store_confirmation(&key, entry);
+                if write_back {
+                    let _ = self.storage.store_confirmation(&key, entry);
+                }
                 count += 1;
             }
+        }
+        if !write_back {
+            Self::log_write_back_suspended("mark_notes_pending", count);
         }
 
         tracing::info!(
@@ -1016,6 +1774,7 @@ impl TrackerStateManager {
     ) -> Result<usize, NoteError> {
         self.confirmed_digest = Some(digest);
         let keys: Vec<NoteKeyBytes> = self.confirmations.keys().copied().collect();
+        let write_back = self.confirmation_write_back_allowed();
         let mut count = 0usize;
 
         for key in keys {
@@ -1033,10 +1792,15 @@ impl TrackerStateManager {
                     entry.confirmed_box_id = Some(box_id.to_string());
                     entry.confirmed_height = Some(height);
                     entry.status = NoteConfirmationStatus::Confirmed;
-                    let _ = self.storage.store_confirmation(&key, entry);
+                    if write_back {
+                        let _ = self.storage.store_confirmation(&key, entry);
+                    }
                     count += 1;
                 }
             }
+        }
+        if !write_back {
+            Self::log_write_back_suspended("confirm_pending_notes", count);
         }
 
         tracing::info!(
@@ -1054,6 +1818,7 @@ impl TrackerStateManager {
     /// number of notes reverted.
     pub fn revert_pending_notes(&mut self) -> Result<usize, NoteError> {
         let notes = self.storage.get_all_notes_with_issuer()?;
+        let write_back = self.confirmation_write_back_allowed();
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
@@ -1075,10 +1840,15 @@ impl TrackerStateManager {
                     } else {
                         NoteConfirmationStatus::LocalOnly
                     };
-                    let _ = self.storage.store_confirmation(&key, entry);
+                    if write_back {
+                        let _ = self.storage.store_confirmation(&key, entry);
+                    }
                     count += 1;
                 }
             }
+        }
+        if !write_back {
+            Self::log_write_back_suspended("revert_pending_notes", count);
         }
 
         tracing::info!("Reverted {} pending notes to local state", count);
@@ -1104,6 +1874,7 @@ impl TrackerStateManager {
         }
 
         let notes = self.storage.get_all_notes_with_issuer()?;
+        let write_back = self.confirmation_write_back_allowed();
         let mut count = 0usize;
 
         for (issuer_pubkey, note) in &notes {
@@ -1124,9 +1895,14 @@ impl TrackerStateManager {
                 entry.confirmed_box_id = Some(box_id.to_string());
                 entry.confirmed_height = Some(height);
                 entry.status = NoteConfirmationStatus::Confirmed;
-                let _ = self.storage.store_confirmation(&key, entry);
+                if write_back {
+                    let _ = self.storage.store_confirmation(&key, entry);
+                }
                 count += 1;
             }
+        }
+        if !write_back {
+            Self::log_write_back_suspended("reconcile_with_confirmed_digest", count);
         }
 
         if count > 0 {
@@ -1206,6 +1982,16 @@ impl TrackerStateManager {
         let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
 
+        // The residue and bound-only rules of `add_note`, after every existing
+        // check. This path takes no prior acknowledgment, so it can write
+        // neither a bound note (residue 997) nor any note on a bound-only edge.
+        if is_reserved_timestamp(note.timestamp) {
+            return Err(NoteError::ReservedTimestamp);
+        }
+        if self.storage.is_bound_only(&key.key_hash)? {
+            return Err(NoteError::BoundNoteRequired);
+        }
+
         // Value is just the totalDebt (amount_collected) as 8-byte big-endian
         // This matches the contract spec: hash(A||B) -> totalDebt
         let value_bytes = note.amount_collected.to_be_bytes().to_vec();
@@ -1215,6 +2001,7 @@ impl TrackerStateManager {
         // leaves nothing changed; a tree failure leaves storage safely ahead
         // and sets the dirty flag so the tree is rebuilt before the next
         // digest update.
+        self.require_later_timestamp(issuer_pubkey, &note_to_store)?;
         self.storage.store_note(issuer_pubkey, &note_to_store)?;
         if let Err(e) = self.avl_state.update(key_bytes, value_bytes) {
             self.tree_dirty = true;
@@ -1423,12 +2210,19 @@ impl TrackerStateManager {
             denomination: *from_denomination,
         };
         let new_confirmation = self.recomputed_confirmation(&from_key.key_hash, from_new_total);
+        // Not written back while the stored confirmation records failed to load
+        // (see `confirmation_write_back_allowed`): the stored record stays.
+        let write_back = self.confirmation_write_back_allowed();
+        self.require_later_timestamp(issuer_pubkey, &from_note_new)?;
         self.storage.commit_exchange_staged(
             issuer_pubkey,
             &staged,
             &from_note_new,
-            &new_confirmation,
+            write_back.then_some(&new_confirmation),
         )?;
+        if !write_back {
+            Self::log_write_back_suspended("exchange_debt", 1);
+        }
         self.confirmations
             .insert(from_key.key_hash, new_confirmation);
 
@@ -1578,6 +2372,709 @@ impl TrackerStateManager {
         )
     }
 
+    /// Debt transfer (triad novation, specs/spec.md "Debt Transfer"), version 4
+    /// (tracker v3.2): move `amount` of the issuer's cumulative debt from the
+    /// edge (issuer -> from_recipient) to the edge (issuer -> to_recipient) in
+    /// one denomination. The old creditor is paid by the transfer; the new
+    /// creditor is owed by the issuer instead.
+    ///
+    /// Notation: A issuer, B old creditor (`from_recipient`), C new creditor
+    /// (`to_recipient`), a `amount`, T `timestamp`, X and p the stored A->B
+    /// total and timestamp, Y and q the stored A->C total and timestamp (0 and 0
+    /// when that edge is absent), M(I,R,t,ts) the standard 80-byte note message
+    /// and PA(I,R,t,p,T) the 105-byte prior acknowledgment
+    /// ([`schnorr::prior_ack_message`], tag `basis/prior-ack/1`).
+    ///
+    /// SIGNATURES: seven (see [`TransferSignatures`]), all verified BEFORE any
+    /// state changes:
+    /// - A over M(A,B,X-a,T): the lowered total stays a note the issuer signed,
+    ///   so the edge remains redeemable;
+    /// - A over M(A,C,Y+a,T): the debtor's consent to owe the new creditor;
+    /// - B over PA(A,B,X,p,T), its creditor prior acknowledgment, and over
+    ///   M(A,B,X-a,T), the consent the S3 rule requires for lowering an edge.
+    ///   The acknowledgment pins the stored state the decrease starts from, so
+    ///   B loses exactly a, both values it signed. Without it, if A->B rose and
+    ///   A->C fell between signing and submission, whoever holds the signatures
+    ///   could move more of B's claim than B agreed to (finding F-A). It binds
+    ///   the stored timestamp p as well as X, so it applies at most once: the
+    ///   first attempt that applies moves A->B to a later timestamp, and no
+    ///   later total of the edge brings (X, p) back (audit VS-1: version 3
+    ///   acknowledged M(A,B,X,T), so an attempt could apply again after A->B
+    ///   and A->C returned to X and Y);
+    /// - B over M(A,C,Y+a,T): binds B's consent to this destination. Without it,
+    ///   the issuer and a key it controls could take B's from-edge signatures
+    ///   and redirect the debt to themselves;
+    /// - C over PA(A,C,Y,q,T), its prior acknowledgment, and over M(A,C,Y+a,T),
+    ///   its acceptance: C gains exactly a, so a payer cannot underpay C by
+    ///   signing a smaller decrease while a note C does not know of has raised
+    ///   A->C.
+    /// No note, set-off edge or statement is a PA message (it is never 80 bytes
+    /// and starts with its tag), and it binds the edge's state and T, so an
+    /// acknowledgment cannot be lifted from another kind of operation or reused
+    /// at another T. It does not name the signer's role: B's acknowledgment of
+    /// A->B as the new creditor of a transfer INTO A->B at the same T is the
+    /// same message, which gives nothing away (paying out of A->B also needs
+    /// B's M(A,B,X-a,T) and M(A,C,Y+a,T), and both transfers move A->B to T, so
+    /// at most one of them applies). The issuer's total owed never changes: the
+    /// decrease on one edge always equals the increase on the other.
+    ///
+    /// CHECKS, all before anything is written, in this order:
+    /// 1. B != C and A is neither of them, and a > 0 (`InvalidTransfer`);
+    /// 2. T ends in 999 ms, the transfer residue [`TRANSFER_TS_MS`]
+    ///    (`InvalidTransfer`);
+    /// 3. T <= now (`FutureTimestamp`);
+    /// 4. T >= now - [`NOVATION_MAX_AGE_MS`] (`NovationExpired`);
+    /// 5. no exchange is staged on either pair (`StagedExchange`);
+    /// 6. the from-edge exists (`NotFound`);
+    /// 7. the from-edge has no committed or pending on-chain total
+    ///    (`OnchainScope`; also refused while the confirmation records failed
+    ///    to load, see [`StoreLoadReport::confirmations_error`]);
+    /// 8. `from_prior_total`, `to_prior_total`, `from_prior_timestamp` and
+    ///    `to_prior_timestamp`, optional and diagnostic, equal X, Y, p and q
+    ///    when they are sent (`StalePrior`);
+    /// 9. X >= a and X - a >= the from-edge's redeemed amount
+    ///    (`InvalidTransfer`); Y + a does not overflow (`AmountOverflow`);
+    /// 10. T is newer than both edges' timestamps (`PastTimestamp`);
+    /// 11. both edges are bound to the same tracker NFT (`TrackerIdMismatch`);
+    /// 12. both new totals fit the contract's signed 64-bit range
+    ///     (`AmountExceedsContractRange`);
+    /// 13. all seven signatures verify (`InvalidSignature`; the failing slot is
+    ///     logged at warn, never a signature).
+    /// [`Self::transfer_debt_checked`] then evaluates the new creditor's
+    /// acceptance policy, still before anything is written.
+    ///
+    /// TIMESTAMP: the transfer residue keeps every transfer signature out of
+    /// POST /notes, which refuses it, so the issuer's signature on the raised
+    /// edge cannot be submitted on its own as an ordinary note. Each edge's
+    /// timestamp strictly increases, so two attempts built on the same state
+    /// of A->B exclude each other for good: whichever applies first moves A->B
+    /// to its own T, past the other attempt's prior acknowledgment (X, p) and,
+    /// if the other is older, past its timestamp. The maximum age bounds how
+    /// long unapplied signatures stay usable.
+    ///
+    /// SCOPE: the from-edge must have no committed or pending on-chain total
+    /// (always the case on a pure-credit tracker). Then no tracker box holds an
+    /// older, higher total that could still be redeemed, so both edges are
+    /// applied at once, and the next tracker box commits the new totals. An
+    /// edge with on-chain state is refused: there, as for exchanges (issue
+    /// #17), the decrease would have to be committed before the increase
+    /// applies, and that two-phase path is not implemented yet.
+    ///
+    /// ATOMICITY: both notes (A->B stores the `issuer_from` signature, A->C the
+    /// `issuer_to` signature), both confirmation records, the index entries of
+    /// a new to-edge and the bound-only marks of both edges are committed in one
+    /// storage batch. Afterwards new notes on either edge must be bound notes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfer_debt(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        from_recipient_pubkey: &PubKey,
+        to_recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
+        amount: u64,
+        timestamp: u64,
+        signatures: &TransferSignatures,
+        from_prior_total: Option<u64>,
+        to_prior_total: Option<u64>,
+        from_prior_timestamp: Option<u64>,
+        to_prior_timestamp: Option<u64>,
+    ) -> Result<TransferTotals, NoteError> {
+        let plan = self.check_transfer(
+            issuer_pubkey,
+            from_recipient_pubkey,
+            to_recipient_pubkey,
+            denomination,
+            amount,
+            timestamp,
+            signatures,
+            from_prior_total,
+            to_prior_total,
+            from_prior_timestamp,
+            to_prior_timestamp,
+        )?;
+        self.apply_transfer(issuer_pubkey, plan)
+    }
+
+    /// [`Self::transfer_debt`] with the new creditor's acceptance-policy check
+    /// evaluated against the pre-mutation state, atomically with the mutation
+    /// (finding #8, as for exchanges). It runs after every check of
+    /// [`Self::transfer_debt`] has passed, signatures included, and before
+    /// anything is written. The view's `to_note` is the
+    /// (issuer -> to_recipient) edge before the transfer. `Err(reason)` aborts
+    /// with [`NoteError::AcceptancePolicy`] and nothing is mutated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfer_debt_checked(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        from_recipient_pubkey: &PubKey,
+        to_recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
+        amount: u64,
+        timestamp: u64,
+        signatures: &TransferSignatures,
+        from_prior_total: Option<u64>,
+        to_prior_total: Option<u64>,
+        from_prior_timestamp: Option<u64>,
+        to_prior_timestamp: Option<u64>,
+        acceptance_check: Option<ExchangeAcceptanceCheckFn>,
+    ) -> Result<TransferTotals, NoteError> {
+        let plan = self.check_transfer(
+            issuer_pubkey,
+            from_recipient_pubkey,
+            to_recipient_pubkey,
+            denomination,
+            amount,
+            timestamp,
+            signatures,
+            from_prior_total,
+            to_prior_total,
+            from_prior_timestamp,
+            to_prior_timestamp,
+        )?;
+        if let Some(check) = acceptance_check {
+            let view = ExchangeAcceptanceView {
+                to_note: self.get_note_optional(issuer_pubkey, to_recipient_pubkey, denomination)?,
+                issuer_notes: self.get_issuer_notes(issuer_pubkey)?,
+                confirmations: self.all_confirmations(),
+            };
+            if let Err(reason) = check(view) {
+                return Err(NoteError::AcceptancePolicy(reason));
+            }
+        }
+        self.apply_transfer(issuer_pubkey, plan)
+    }
+
+    /// Checks 1-13 of [`Self::transfer_debt`], in that order, without changing
+    /// anything. Returns the two notes the transfer writes.
+    #[allow(clippy::too_many_arguments)]
+    fn check_transfer(
+        &self,
+        issuer_pubkey: &PubKey,
+        from_recipient_pubkey: &PubKey,
+        to_recipient_pubkey: &PubKey,
+        denomination: &DenomKey,
+        amount: u64,
+        timestamp: u64,
+        signatures: &TransferSignatures,
+        from_prior_total: Option<u64>,
+        to_prior_total: Option<u64>,
+        from_prior_timestamp: Option<u64>,
+        to_prior_timestamp: Option<u64>,
+    ) -> Result<TransferPlan, NoteError> {
+        // 1. Three distinct parties, a positive amount.
+        if from_recipient_pubkey == to_recipient_pubkey {
+            return Err(NoteError::InvalidTransfer(
+                "the old and the new creditor must differ".to_string(),
+            ));
+        }
+        if from_recipient_pubkey == issuer_pubkey || to_recipient_pubkey == issuer_pubkey {
+            return Err(NoteError::InvalidTransfer(
+                "the issuer cannot be its own creditor".to_string(),
+            ));
+        }
+        if amount == 0 {
+            return Err(NoteError::InvalidTransfer(
+                "the transfer amount must be positive".to_string(),
+            ));
+        }
+        // 2. The transfer residue.
+        if !is_transfer_timestamp(timestamp) {
+            return Err(NoteError::InvalidTransfer(
+                "a transfer's timestamp must end in 999 ms (the novation timestamp domain)".to_string(),
+            ));
+        }
+
+        // 3, 4. Not in the future, and not older than the maximum novation age.
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
+            .as_millis() as u64;
+        if timestamp > current_time {
+            return Err(NoteError::FutureTimestamp);
+        }
+        if timestamp < current_time.saturating_sub(NOVATION_MAX_AGE_MS) {
+            return Err(NoteError::NovationExpired);
+        }
+
+        // 5. A staged exchange on either pair would compute its totals against
+        // the state this transfer is about to change.
+        for (_, existing) in self.storage.get_all_pending_exchanges()? {
+            if matches!(existing.status, PendingExchangeStatus::Staged)
+                && existing.issuer_pubkey == *issuer_pubkey
+                && (existing.recipient_pubkey == *from_recipient_pubkey
+                    || existing.recipient_pubkey == *to_recipient_pubkey)
+            {
+                return Err(NoteError::StagedExchange(
+                    "an exchange on one of these issuer/creditor pairs is staged".to_string(),
+                ));
+            }
+        }
+
+        // 6. Both edges (the to-edge may be new).
+        let from_note = self.lookup_note(issuer_pubkey, from_recipient_pubkey, denomination)?;
+        let to_note_opt =
+            self.get_note_optional(issuer_pubkey, to_recipient_pubkey, denomination)?;
+
+        // 7. SCOPE (see `transfer_debt`): the from-edge has never been committed on-chain.
+        // Unknown while the confirmation records failed to load: then refused.
+        self.require_known_onchain_state()?;
+        let from_key_hash =
+            NoteKey::from_assets(issuer_pubkey, from_recipient_pubkey, denomination).key_hash;
+        if let Some(c) = self.confirmations.get(&from_key_hash) {
+            if c.confirmed_total_debt.is_some() || c.pending_total_debt.is_some() {
+                return Err(NoteError::OnchainScope(
+                    "the old creditor's edge has a committed or pending on-chain total; lowering it needs the two-phase path (the decrease committed before the increase applies), which is not implemented yet".to_string(),
+                ));
+            }
+        }
+
+        // 8. The stored states (total, timestamp) the creditors' prior
+        // acknowledgments cover: (0, 0) for an absent to-edge.
+        let from_prior = from_note.amount_collected;
+        let from_prior_ts = from_note.timestamp;
+        let to_prior = to_note_opt.as_ref().map(|n| n.amount_collected).unwrap_or(0);
+        let to_prior_ts = to_note_opt.as_ref().map(|n| n.timestamp).unwrap_or(0);
+        if from_prior_total.is_some_and(|p| p != from_prior)
+            || to_prior_total.is_some_and(|p| p != to_prior)
+            || from_prior_timestamp.is_some_and(|p| p != from_prior_ts)
+            || to_prior_timestamp.is_some_and(|p| p != to_prior_ts)
+        {
+            return Err(NoteError::StalePrior);
+        }
+
+        // 9. Amounts.
+        let from_new_total = from_prior.checked_sub(amount).ok_or_else(|| {
+            NoteError::InvalidTransfer(format!(
+                "the issuer owes the old creditor {} in this denomination, less than the {} to transfer",
+                from_prior, amount
+            ))
+        })?;
+        if from_new_total < from_note.amount_redeemed {
+            return Err(NoteError::InvalidTransfer(format!(
+                "the transfer would lower the from-edge total ({}) below its already-redeemed amount ({})",
+                from_new_total, from_note.amount_redeemed
+            )));
+        }
+        let to_new_total = to_prior.checked_add(amount).ok_or(NoteError::AmountOverflow)?;
+
+        // 10. Both edges move forward in time.
+        if timestamp <= from_note.timestamp
+            || to_note_opt
+                .as_ref()
+                .map(|n| timestamp <= n.timestamp)
+                .unwrap_or(false)
+        {
+            return Err(NoteError::PastTimestamp);
+        }
+
+        // 11. Both edges are bound to the same tracker.
+        let tracker_nft_id = from_note.tracker_nft_id;
+        if let Some(to_note) = &to_note_opt {
+            if to_note.tracker_nft_id != tracker_nft_id {
+                return Err(NoteError::TrackerIdMismatch);
+            }
+        }
+
+        // 12. Contract range (B2): ErgoScript reads amounts with signed byteArrayToLong.
+        for (field, value) in [
+            ("from_new_total", from_new_total),
+            ("to_new_total", to_new_total),
+        ] {
+            if value > i64::MAX as u64 {
+                return Err(NoteError::AmountExceedsContractRange { field, value });
+            }
+        }
+
+        // 13. All seven signatures, in the order of `TransferSignatures`: five
+        // over the note messages of the new totals at T, the two creditor prior
+        // acknowledgments over PA(A,B,X,p,T) and PA(A,C,Y,q,T).
+        let message = |recipient: &PubKey, total: u64| {
+            schnorr::signing_message(
+                issuer_pubkey,
+                recipient,
+                denomination,
+                total,
+                timestamp,
+                &tracker_nft_id,
+            )
+        };
+        let prior_ack = |recipient: &PubKey, prior_total: u64, prior_timestamp: u64| {
+            schnorr::prior_ack_message(
+                issuer_pubkey,
+                recipient,
+                denomination,
+                prior_total,
+                prior_timestamp,
+                timestamp,
+                &tracker_nft_id,
+            )
+        };
+        let msg_from_prior = prior_ack(from_recipient_pubkey, from_prior, from_prior_ts);
+        let msg_from = message(from_recipient_pubkey, from_new_total);
+        let msg_to_prior = prior_ack(to_recipient_pubkey, to_prior, to_prior_ts);
+        let msg_to = message(to_recipient_pubkey, to_new_total);
+        let verifier = SchnorrVerifier;
+        for (slot, sig, msg, key) in [
+            ("issuer_from", &signatures.issuer_from, &msg_from, issuer_pubkey),
+            ("issuer_to", &signatures.issuer_to, &msg_to, issuer_pubkey),
+            (
+                "from_recipient_prior",
+                &signatures.from_recipient_prior,
+                &msg_from_prior,
+                from_recipient_pubkey,
+            ),
+            ("from_recipient", &signatures.from_recipient, &msg_from, from_recipient_pubkey),
+            ("from_recipient_to", &signatures.from_recipient_to, &msg_to, from_recipient_pubkey),
+            (
+                "to_recipient_prior",
+                &signatures.to_recipient_prior,
+                &msg_to_prior,
+                to_recipient_pubkey,
+            ),
+            ("to_recipient", &signatures.to_recipient, &msg_to, to_recipient_pubkey),
+        ] {
+            if verifier.verify_signature(sig, msg, key).is_err() {
+                // The slot name only: never a signature or a message.
+                tracing::warn!("Debt transfer refused: the {} signature does not verify", slot);
+                return Err(NoteError::InvalidSignature);
+            }
+        }
+
+        Ok(TransferPlan {
+            from_note: IouNote {
+                recipient_pubkey: *from_recipient_pubkey,
+                amount_collected: from_new_total,
+                amount_redeemed: from_note.amount_redeemed,
+                timestamp,
+                signature: signatures.issuer_from,
+                tracker_nft_id,
+                denomination: *denomination,
+            },
+            to_note: IouNote {
+                recipient_pubkey: *to_recipient_pubkey,
+                amount_collected: to_new_total,
+                amount_redeemed: to_note_opt.as_ref().map(|n| n.amount_redeemed).unwrap_or(0),
+                timestamp,
+                signature: signatures.issuer_to,
+                tracker_nft_id,
+                denomination: *denomination,
+            },
+            totals: TransferTotals {
+                from_new_total,
+                to_new_total,
+                from_prior_total: from_prior,
+                to_prior_total: to_prior,
+            },
+        })
+    }
+
+    /// Commit a transfer that passed [`Self::check_transfer`] (see ATOMICITY in
+    /// [`Self::transfer_debt`]). On a storage error nothing was written.
+    fn apply_transfer(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        plan: TransferPlan,
+    ) -> Result<TransferTotals, NoteError> {
+        let TransferPlan {
+            from_note,
+            to_note,
+            totals,
+        } = plan;
+        let from_key =
+            NoteKey::from_assets(issuer_pubkey, &from_note.recipient_pubkey, &from_note.denomination);
+        let to_key =
+            NoteKey::from_assets(issuer_pubkey, &to_note.recipient_pubkey, &to_note.denomination);
+        let from_confirmation =
+            self.recomputed_confirmation(&from_key.key_hash, totals.from_new_total);
+        let to_confirmation = self.recomputed_confirmation(&to_key.key_hash, totals.to_new_total);
+        self.require_later_timestamp(issuer_pubkey, &from_note)?;
+        self.require_later_timestamp(issuer_pubkey, &to_note)?;
+        self.storage.commit_note_batch(
+            &[
+                (*issuer_pubkey, from_note, from_confirmation.clone()),
+                (*issuer_pubkey, to_note, to_confirmation.clone()),
+            ],
+            &[from_key.key_hash, to_key.key_hash],
+        )?;
+        self.confirmations.insert(from_key.key_hash, from_confirmation);
+        self.confirmations.insert(to_key.key_hash, to_confirmation);
+
+        tracing::info!(
+            "Debt transferred: {} of the issuer's debt moved from one creditor (total {} -> {}) to another (total {} -> {})",
+            totals.from_prior_total - totals.from_new_total,
+            totals.from_prior_total,
+            totals.from_new_total,
+            totals.to_prior_total,
+            totals.to_new_total
+        );
+
+        // Both edges' timestamps moved: keep the live tree in the canonical
+        // (timestamp-sorted) insertion order, as after an exchange.
+        if let Err(e) = self.rebuild_tree_canonically() {
+            tracing::error!(
+                "Transfer committed but the live tree rebuild failed; retrying before the next digest update: {:?}",
+                e
+            );
+        }
+        self.update_state();
+        Ok(totals)
+    }
+
+    /// Multilateral set-off (obligation clearing), version 3: lower several
+    /// edges at once so that every participant's net position is unchanged
+    /// while gross debt falls. Typical use: a cycle (A owes B, B owes C, C owes
+    /// A) cancelled by lowering each edge by the same amount; any circulation
+    /// of decreases is accepted.
+    ///
+    /// SIGNATURES: two per edge, both over the standard 80-byte note message
+    /// M(I,R,P-d,ts_e) at the edge's NEW total (its stored total P minus its
+    /// decrease d) and the edge's own timestamp ts_e (see [`SetOffEdge`]): the
+    /// issuer (so the lowered total is still a note the issuer signed,
+    /// redeemable as before) and the creditor (the consent the S3 rule requires
+    /// for lowering an edge). There are no prior acknowledgments: balance
+    /// already makes every accepted set-off net-neutral for every key, and the
+    /// signatures pin each edge's final total.
+    ///
+    /// BALANCE (flow conservation): for every key, the decreases on edges where it
+    /// is the creditor sum exactly to the decreases on edges where it is the
+    /// issuer. This is what makes consent safe to automate: any set-off this
+    /// tracker accepts is net-neutral for every participant, so a participant's
+    /// signatures can only ever be used in combinations that leave its net
+    /// position unchanged.
+    ///
+    /// PER-EDGE TIMESTAMPS: each edge carries its own timestamp, so an edge that
+    /// moved after the set-off was signed is re-signed on its own by its two
+    /// parties while the other edges keep their signatures. Every edge's
+    /// timestamp ends in 998 ms, the set-off residue [`SETOFF_TS_MS`], which
+    /// POST /notes and transfers refuse: set-off signatures are never usable in
+    /// another operation, and no other operation's signatures in a set-off.
+    /// Each edge's timestamp strictly increases, so a set-off cannot be
+    /// replayed, and the maximum age bounds how long unapplied signatures stay
+    /// usable.
+    ///
+    /// CHECKS, all before anything is written, in this order:
+    /// 1. 2 to [`MAX_SETOFF_EDGES`] edges (`InvalidSetOff`);
+    /// 2. edge by edge, its timestamp: ends in 998 ms (`InvalidSetOff`), is at
+    ///    most now (`FutureTimestamp`) and at least now - [`NOVATION_MAX_AGE_MS`]
+    ///    (`NovationExpired`);
+    /// 3. no self-edges, positive decreases, distinct (issuer, creditor) pairs
+    ///    (`InvalidSetOff`);
+    /// 4. balance for every key (`InvalidSetOff`);
+    /// 5. no exchange is staged on any of the pairs (`StagedExchange`);
+    /// 6. edge by edge: the edge exists (`NotFound`); it has no committed or
+    ///    pending on-chain total (`OnchainScope`; also refused while the
+    ///    confirmation records failed to load); the decrease is at most its
+    ///    total and leaves at least its redeemed amount (`InvalidSetOff`); its
+    ///    timestamp is newer than the edge's stored one (`PastTimestamp`); it
+    ///    is bound to the same tracker NFT as the other edges
+    ///    (`TrackerIdMismatch`); both signatures verify (`InvalidSignature`; the
+    ///    failing edge and slot are logged at warn, never a signature).
+    ///
+    /// SCOPE and ATOMICITY as for [`Self::transfer_debt`]: an edge with a
+    /// committed or pending on-chain total is refused (the two-phase path is
+    /// future work); all notes (each with its issuer's signature, at the edge's
+    /// timestamp), confirmation records and the bound-only marks of every edge
+    /// land in one storage batch. Afterwards new notes on any of the edges must
+    /// be bound notes.
+    pub fn set_off(
+        &mut self,
+        denomination: &DenomKey,
+        edges: &[SetOffEdge],
+    ) -> Result<SetOffResult, NoteError> {
+        // 1. Size.
+        if edges.len() < 2 {
+            return Err(NoteError::InvalidSetOff(
+                "a set-off lowers at least two edges".to_string(),
+            ));
+        }
+        if edges.len() > MAX_SETOFF_EDGES {
+            return Err(NoteError::InvalidSetOff(format!(
+                "a set-off lowers at most {} edges",
+                MAX_SETOFF_EDGES
+            )));
+        }
+
+        // 2. Every edge's own timestamp: the set-off residue, not in the future,
+        // not older than the maximum novation age.
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| NoteError::StorageError("Failed to get current time".to_string()))?
+            .as_millis() as u64;
+        for e in edges {
+            if !is_setoff_timestamp(e.timestamp) {
+                return Err(NoteError::InvalidSetOff(
+                    "every edge's timestamp must end in 998 ms (the set-off timestamp residue)".to_string(),
+                ));
+            }
+            if e.timestamp > current_time {
+                return Err(NoteError::FutureTimestamp);
+            }
+            if e.timestamp < current_time.saturating_sub(NOVATION_MAX_AGE_MS) {
+                return Err(NoteError::NovationExpired);
+            }
+        }
+
+        // 3. Distinct edges, no self-edges, positive decreases.
+        let mut seen = std::collections::HashSet::new();
+        for e in edges {
+            if e.issuer_pubkey == e.recipient_pubkey {
+                return Err(NoteError::InvalidSetOff(
+                    "an edge's issuer and creditor must differ".to_string(),
+                ));
+            }
+            if e.decrease == 0 {
+                return Err(NoteError::InvalidSetOff(
+                    "every decrease must be positive".to_string(),
+                ));
+            }
+            if !seen.insert((e.issuer_pubkey, e.recipient_pubkey)) {
+                return Err(NoteError::InvalidSetOff(
+                    "an edge appears more than once".to_string(),
+                ));
+            }
+        }
+
+        // 4. Balance: for every key, decreases as creditor == decreases as issuer.
+        let mut as_creditor: std::collections::HashMap<PubKey, u128> = std::collections::HashMap::new();
+        let mut as_issuer: std::collections::HashMap<PubKey, u128> = std::collections::HashMap::new();
+        for e in edges {
+            *as_creditor.entry(e.recipient_pubkey).or_insert(0) += e.decrease as u128;
+            *as_issuer.entry(e.issuer_pubkey).or_insert(0) += e.decrease as u128;
+        }
+        for key in as_creditor.keys().chain(as_issuer.keys()) {
+            let inn = as_creditor.get(key).copied().unwrap_or(0);
+            let out = as_issuer.get(key).copied().unwrap_or(0);
+            if inn != out {
+                return Err(NoteError::InvalidSetOff(format!(
+                    "the decreases do not balance for one participant: {} as creditor, {} as issuer",
+                    inn, out
+                )));
+            }
+        }
+
+        // 5. A staged exchange on any of these pairs would compute its totals
+        // against the state this set-off is about to change.
+        for (_, existing) in self.storage.get_all_pending_exchanges()? {
+            if matches!(existing.status, PendingExchangeStatus::Staged)
+                && edges.iter().any(|e| {
+                    e.issuer_pubkey == existing.issuer_pubkey
+                        && e.recipient_pubkey == existing.recipient_pubkey
+                })
+            {
+                return Err(NoteError::StagedExchange(
+                    "an exchange on one of these pairs is staged".to_string(),
+                ));
+            }
+        }
+
+        // 6. Per edge: current note, scope, new total, time, tracker binding and
+        // both signatures, all BEFORE any state changes.
+        let verifier = SchnorrVerifier;
+        let mut tracker_nft_id: Option<[u8; 32]> = None;
+        let mut entries: Vec<(PubKey, IouNote, NoteConfirmation)> = Vec::with_capacity(edges.len());
+        let mut keys: Vec<NoteKeyBytes> = Vec::with_capacity(edges.len());
+        let mut new_totals = Vec::with_capacity(edges.len());
+        for (index, e) in edges.iter().enumerate() {
+            let note = self.lookup_note(&e.issuer_pubkey, &e.recipient_pubkey, denomination)?;
+            let key = NoteKey::from_assets(&e.issuer_pubkey, &e.recipient_pubkey, denomination);
+            // Unknown while the confirmation records failed to load: then refused.
+            self.require_known_onchain_state()?;
+            if let Some(c) = self.confirmations.get(&key.key_hash) {
+                if c.confirmed_total_debt.is_some() || c.pending_total_debt.is_some() {
+                    return Err(NoteError::OnchainScope(
+                        "an edge has a committed or pending on-chain total; lowering it needs the two-phase path, which is not implemented yet".to_string(),
+                    ));
+                }
+            }
+            let new_total = note.amount_collected.checked_sub(e.decrease).ok_or_else(|| {
+                NoteError::InvalidSetOff(format!(
+                    "a decrease of {} exceeds the edge's total of {}",
+                    e.decrease, note.amount_collected
+                ))
+            })?;
+            if new_total < note.amount_redeemed {
+                return Err(NoteError::InvalidSetOff(format!(
+                    "a decrease would lower an edge's total ({}) below its already-redeemed amount ({})",
+                    new_total, note.amount_redeemed
+                )));
+            }
+            if e.timestamp <= note.timestamp {
+                return Err(NoteError::PastTimestamp);
+            }
+            match tracker_nft_id {
+                None => tracker_nft_id = Some(note.tracker_nft_id),
+                Some(id) if id != note.tracker_nft_id => return Err(NoteError::TrackerIdMismatch),
+                _ => {}
+            }
+            let msg = schnorr::signing_message(
+                &e.issuer_pubkey,
+                &e.recipient_pubkey,
+                denomination,
+                new_total,
+                e.timestamp,
+                &note.tracker_nft_id,
+            );
+            for (slot, sig, signer) in [
+                ("issuer", &e.issuer_signature, &e.issuer_pubkey),
+                ("recipient", &e.recipient_signature, &e.recipient_pubkey),
+            ] {
+                if verifier.verify_signature(sig, &msg, signer).is_err() {
+                    // The edge's index and the slot name only: never a signature or a message.
+                    tracing::warn!(
+                        "Set-off refused: the {} signature of edge {} does not verify",
+                        slot,
+                        index
+                    );
+                    return Err(NoteError::InvalidSignature);
+                }
+            }
+            let new_note = IouNote {
+                recipient_pubkey: e.recipient_pubkey,
+                amount_collected: new_total,
+                amount_redeemed: note.amount_redeemed,
+                timestamp: e.timestamp,
+                signature: e.issuer_signature,
+                tracker_nft_id: note.tracker_nft_id,
+                denomination: *denomination,
+            };
+            let confirmation = self.recomputed_confirmation(&key.key_hash, new_total);
+            entries.push((e.issuer_pubkey, new_note, confirmation));
+            keys.push(key.key_hash);
+            new_totals.push(SetOffEdgeTotal {
+                issuer_pubkey: e.issuer_pubkey,
+                recipient_pubkey: e.recipient_pubkey,
+                new_total,
+                timestamp: e.timestamp,
+            });
+        }
+
+        for (issuer_pubkey, note, _) in &entries {
+            self.require_later_timestamp(issuer_pubkey, note)?;
+        }
+        self.storage.commit_note_batch(&entries, &keys)?;
+        for (key, (_, _, confirmation)) in keys.iter().zip(entries.into_iter()) {
+            self.confirmations.insert(*key, confirmation);
+        }
+        let total_cleared: u128 = edges.iter().map(|e| e.decrease as u128).sum();
+        let total_cleared = u64::try_from(total_cleared).unwrap_or(u64::MAX);
+        tracing::info!(
+            "Set-off applied: {} edges lowered, {} of gross debt cleared",
+            edges.len(),
+            total_cleared
+        );
+        if let Err(e) = self.rebuild_tree_canonically() {
+            tracing::error!(
+                "Set-off committed but the live tree rebuild failed; retrying before the next digest update: {:?}",
+                e
+            );
+        }
+        self.update_state();
+        Ok(SetOffResult {
+            new_totals,
+            total_cleared,
+        })
+    }
+
     /// List staged exchanges for the tracker box updater's phase-2 pass
     /// (issue #17). The updater observes each record's reserve box on-chain and
     /// feeds the observations back through [`Self::process_staged_exchanges`].
@@ -1610,8 +3107,12 @@ impl TrackerStateManager {
     ///    advance both sides in lockstep, so a mismatch means an unreported
     ///    on-chain redemption drained the reserve during staging.
     /// 4. The to-edge base is unchanged, so applying the staged note cannot
-    ///    lower an edge that grew meanwhile. The applied note carries the
-    ///    to-edge's current `amount_redeemed` forward.
+    ///    lower an edge that grew meanwhile, and the to-edge's stored timestamp
+    ///    is still earlier than the staged note's, so applying it cannot move
+    ///    the edge's timestamp back (an edge's timestamp strictly increases with
+    ///    every write; a note written on the to-edge at the same total while the
+    ///    exchange was staged, at a later timestamp, cancels it). The applied
+    ///    note carries the to-edge's current `amount_redeemed` forward.
     /// 5. The staged to-note's signature re-verifies.
     ///
     /// Otherwise the exchange is cancelled with the reason persisted on the
@@ -1722,6 +3223,18 @@ impl TrackerStateManager {
                 "the to-edge changed while the exchange was staged (a new note was issued on it); the staged increase no longer matches the agreed state".to_string(),
             ));
         }
+        // The staged note must still be later than the to-edge's stored note:
+        // a note written on the to-edge at the same total, at a timestamp at or
+        // after the exchange's, would otherwise be followed by an earlier
+        // timestamp, and the edge's state (total, timestamp) could recur.
+        if let Some(note) = &current_to {
+            if note.timestamp >= record.to_note.timestamp {
+                return Ok(StagedExchangeDecision::Cancel(format!(
+                    "the to-edge was written at timestamp {} while the exchange was staged, not earlier than the exchange's timestamp {}; applying the staged increase would move the edge's timestamp back",
+                    note.timestamp, record.to_note.timestamp
+                )));
+            }
+        }
 
         // 5. Re-verify the staged to-note's issuer signature.
         let msg_to = schnorr::signing_message(
@@ -1773,12 +3286,19 @@ impl TrackerStateManager {
         );
         let new_confirmation =
             self.recomputed_confirmation(&to_key.key_hash, to_note.amount_collected);
+        // Not written back while the stored confirmation records failed to load
+        // (see `confirmation_write_back_allowed`): the stored record stays.
+        let write_back = self.confirmation_write_back_allowed();
+        self.require_later_timestamp(&record.issuer_pubkey, &to_note)?;
         self.storage.commit_exchange_apply(
             &record.issuer_pubkey,
             &to_note,
-            &new_confirmation,
+            write_back.then_some(&new_confirmation),
             key,
         )?;
+        if !write_back {
+            Self::log_write_back_suspended("apply_staged_exchange", 1);
+        }
         self.confirmations.insert(to_key.key_hash, new_confirmation);
 
         tracing::info!(

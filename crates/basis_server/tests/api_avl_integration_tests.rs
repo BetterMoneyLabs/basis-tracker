@@ -58,7 +58,7 @@ mod api_avl_integration_tests {
         );
 
         // Add note and verify AVL tree state changed
-        let result = tracker.add_note(&issuer_pubkey, &note);
+        let result = tracker.add_note(&issuer_pubkey, &note, None);
         assert!(result.is_ok(), "Should be able to add note");
 
         let updated_state = tracker.get_state();
@@ -102,7 +102,7 @@ mod api_avl_integration_tests {
                 &issuer_secret_key,
             );
 
-            let result = tracker.add_note(&issuer_pubkey, &note);
+            let result = tracker.add_note(&issuer_pubkey, &note, None);
             assert!(result.is_ok(), "Should be able to add note {}", i);
 
             let current_state = tracker.get_state();
@@ -148,7 +148,7 @@ mod api_avl_integration_tests {
         let original_note = create_signed_note(recipient_pubkey, 1500, 1000000, &issuer_secret_key);
 
         // Store the note and update AVL tree
-        let result = tracker.add_note(&issuer_pubkey, &original_note);
+        let result = tracker.add_note(&issuer_pubkey, &original_note, None);
         assert!(result.is_ok(), "Should be able to add note");
 
         // Retrieve the note back
@@ -209,7 +209,7 @@ mod api_avl_integration_tests {
         // Add a note
         let note1 = create_signed_note(recipient_pubkey, 1000, 1000000, &issuer_secret_key);
 
-        tracker.add_note(&issuer_pubkey, &note1).unwrap();
+        tracker.add_note(&issuer_pubkey, &note1, None).unwrap();
         let state_after_add = tracker.get_state();
         let root_after_add = state_after_add.avl_root_digest.clone();
 
@@ -221,7 +221,7 @@ mod api_avl_integration_tests {
             &issuer_secret_key,
         );
 
-        tracker.add_note(&issuer_pubkey, &note2).unwrap(); // add_note actually updates
+        tracker.add_note(&issuer_pubkey, &note2, None).unwrap(); // add_note actually updates
         let state_after_update = tracker.get_state();
         let root_after_update = state_after_update.avl_root_digest.clone();
 
@@ -259,7 +259,7 @@ mod api_avl_integration_tests {
         // Create and store a note
         let note = create_signed_note(recipient_pubkey, 1000, 1000000, &issuer_secret_key);
 
-        let add_result = tracker.add_note(&issuer_pubkey, &note);
+        let add_result = tracker.add_note(&issuer_pubkey, &note, None);
         assert!(add_result.is_ok(), "Should be able to add note");
 
         // Generate a proof for this note

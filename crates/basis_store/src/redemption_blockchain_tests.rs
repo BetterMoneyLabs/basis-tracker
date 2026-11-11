@@ -240,7 +240,7 @@ mod tests {
         // Add note to tracker
         redemption_manager
             .tracker
-            .add_note(&alice_pubkey, &note)
+            .add_note(&alice_pubkey, &note, None)
             .expect("Failed to add note");
 
         // Verify note was stored
@@ -727,7 +727,7 @@ mod tests {
 
         redemption_manager
             .tracker
-            .add_note(&alice_pubkey, &note)
+            .add_note(&alice_pubkey, &note, None)
             .expect("Failed to add note");
 
         // Generate signatures
@@ -1041,7 +1041,7 @@ mod tests {
         .expect("Failed to create note");
         redemption_manager
             .tracker
-            .add_note(&alice_pubkey, &note)
+            .add_note(&alice_pubkey, &note, None)
             .expect("Failed to add note");
 
         // Reserve NFT ID (32 bytes = 64 hex chars) simulating an issued reserve NFT.

@@ -28,7 +28,7 @@ fn manager_with_note(amount: u64) -> (TrackerStateManager, [u8; 32], [u8; 33], [
     )
     .expect("create_and_sign should succeed");
     manager
-        .add_note(&issuer_pubkey, &note)
+        .add_note(&issuer_pubkey, &note, None)
         .expect("add_note should succeed");
 
     (manager, secret, issuer_pubkey, recipient_pubkey)
@@ -91,7 +91,7 @@ fn test_get_total_debt_is_per_pair() {
     )
     .expect("create_and_sign should succeed");
     manager
-        .add_note(&issuer, &note_b)
+        .add_note(&issuer, &note_b, None)
         .expect("add_note should succeed");
 
     assert_eq!(

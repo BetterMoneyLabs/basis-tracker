@@ -64,9 +64,10 @@ mod pr16_security_remediation {
                     TrackerCommand::AddNote {
                         issuer_pubkey,
                         note,
+                        prior,
                         response_tx,
                     } => {
-                        let r = redemption_manager.tracker.add_note(&issuer_pubkey, &note);
+                        let r = redemption_manager.tracker.add_note(&issuer_pubkey, &note, prior);
                         let _ = response_tx.send(r);
                     }
                     TrackerCommand::GetNoteByIssuerAndRecipient {
@@ -125,6 +126,7 @@ mod pr16_security_remediation {
                 auth: basis_server::config::AuthConfig::default(),
                 reserve_creation_max_erg_nano: 10_000_000_000,
                 reserve_creation_max_token_amount: 1_000_000_000,
+                pure_credit: false,
                 redemption_build_max_per_pair_per_hour: max_builds_per_pair_per_hour,
             },
             ergo: basis_server::config::ErgoConfig {
@@ -205,6 +207,7 @@ mod pr16_security_remediation {
             pending_redemptions: Arc::new(
                 basis_server::redemption_build::PendingRedemptionRegistry::new(),
             ),
+            novations_disabled_reason: None,
             redemption_build_rate: Arc::new(basis_server::redemption_build::BuildRateLimiter::new()),
         }
     }
@@ -274,6 +277,7 @@ mod pr16_security_remediation {
             .send(TrackerCommand::AddNote {
                 issuer_pubkey: issuer,
                 note,
+                prior: None,
                 response_tx: tokio::sync::oneshot::channel().0,
             })
             .await
@@ -300,6 +304,7 @@ mod pr16_security_remediation {
             .send(TrackerCommand::AddNote {
                 issuer_pubkey: issuer,
                 note,
+                prior: None,
                 response_tx: tokio::sync::oneshot::channel().0,
             })
             .await

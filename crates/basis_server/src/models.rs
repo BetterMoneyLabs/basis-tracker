@@ -45,7 +45,8 @@ fn status_to_string(status: basis_store::NoteConfirmationStatus) -> String {
 
 // Request structure for creating a new IOU note
 // Using hex-encoded strings for public keys and signature
-#[derive(Debug, Deserialize)]
+// `Debug` is implemented by hand (redacted): `create_note` debug-logs the request.
+#[derive(Deserialize)]
 pub struct CreateNoteRequest {
     pub recipient_pubkey: String,
     pub amount: u64,
@@ -59,6 +60,44 @@ pub struct CreateNoteRequest {
     /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
     #[serde(default)]
     pub denomination: String,
+    /// Bound notes only (a timestamp ending in 997 ms; bound notes version 3):
+    /// the issuer's prior acknowledgment, its signature (hex, 65 bytes) over the
+    /// 105-byte acknowledgment `basis/prior-ack/1` of the edge's CURRENT total
+    /// and timestamp (0 and 0 for an absent edge) at this note's timestamp,
+    /// `basis_store::schnorr::prior_ack_message`. The note applies only while
+    /// the edge is still in that state. Must be absent for every other note.
+    #[serde(default)]
+    pub prior_signature: Option<String>,
+    /// Optional and diagnostic: the current total the prior acknowledgment
+    /// covers. When present it must equal the stored total (409 `stale_prior`).
+    /// Only valid together with `prior_signature`.
+    #[serde(default)]
+    pub prior_total: Option<u64>,
+    /// Optional and diagnostic: the current timestamp the prior acknowledgment
+    /// covers (0 for an absent edge). When present it must equal the stored
+    /// note's timestamp (409 `stale_prior`). Only valid together with
+    /// `prior_signature`.
+    #[serde(default)]
+    pub prior_timestamp: Option<u64>,
+}
+
+/// Redacted (see [`crate::redact`]): signatures appear only as fingerprints.
+impl std::fmt::Debug for CreateNoteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{Denom, HexField, SigHex};
+        f.debug_struct("CreateNoteRequest")
+            .field("recipient_pubkey", &HexField(&self.recipient_pubkey, 33))
+            .field("amount", &self.amount)
+            .field("timestamp", &self.timestamp)
+            .field("signature", &SigHex(&self.signature))
+            .field("issuer_pubkey", &HexField(&self.issuer_pubkey, 33))
+            .field("tracker_nft_id", &HexField(&self.tracker_nft_id, 32))
+            .field("denomination", &Denom(&self.denomination))
+            .field("prior_signature", &self.prior_signature.as_deref().map(SigHex))
+            .field("prior_total", &self.prior_total)
+            .field("prior_timestamp", &self.prior_timestamp)
+            .finish()
+    }
 }
 
 /// Cross-denomination debt exchange request (off-chain novation / triage).
@@ -106,6 +145,372 @@ pub struct ExchangeNotesResponse {
     pub to_edge_status: String,
 }
 
+/// Debt transfer request (triad novation, specs/spec.md "Debt Transfer"),
+/// version 4 (tracker v3.2).
+///
+/// Moves `amount` of the issuer's cumulative debt from the edge
+/// (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
+/// denomination. Seven signatures (hex, 65 bytes each), see
+/// `basis_store::TransferSignatures`: the issuer re-signs both edges at their
+/// new totals; the old creditor acknowledges its edge's current state and signs
+/// both new totals (the consent the S3 rule requires for lowering its edge,
+/// bound to this destination); the new creditor acknowledges its edge's current
+/// state (0 and 0 for a new edge) and signs its new total (its acceptance). The
+/// five new-total signatures are over the standard 80-byte note message at
+/// `timestamp`; the two prior acknowledgments are over the 105-byte message
+/// `basis/prior-ack/1` of the edge's stored total and timestamp at `timestamp`
+/// (`basis_store::schnorr::prior_ack_message`). The prior acknowledgments make
+/// the amount exact and the attempt single-use: the transfer applies only
+/// while both edges are still in the acknowledged states. Pure-credit trackers only: a tracker with on-chain
+/// state refuses. Unknown fields are refused, so a field this tracker does not
+/// know is never silently dropped. `Debug` is redacted (signatures appear only
+/// as fingerprints, see [`crate::redact`]).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferNotesRequest {
+    pub issuer_pubkey: String,
+    pub from_recipient_pubkey: String,
+    pub to_recipient_pubkey: String,
+    /// Required, and a denomination this tracker serves ("erg" or
+    /// "token:<64-hex>"); there is no default. A missing value reads as empty
+    /// and is refused like one (400 `invalid denomination`).
+    #[serde(default)]
+    pub denomination: String,
+    pub amount: u64,
+    /// New timestamp for both edges; must end in 999 ms, be newer than both
+    /// edges' current ones and be at most an hour old.
+    pub timestamp: u64,
+    /// Issuer signature over the from-edge's new note message (hex, 65 bytes)
+    pub issuer_from_signature: String,
+    /// Old creditor's prior acknowledgment: its signature over the
+    /// acknowledgment `basis/prior-ack/1` of the from-edge's CURRENT total and
+    /// timestamp at `timestamp` (hex, 65 bytes)
+    pub from_recipient_prior_signature: String,
+    /// Old creditor's signature over the from-edge's new note message (consent)
+    pub from_recipient_signature: String,
+    /// Old creditor's signature over the to-edge's new note message: binds its
+    /// consent to this destination and amount
+    pub from_recipient_to_signature: String,
+    /// Issuer signature over the to-edge's new note message (hex, 65 bytes)
+    pub issuer_to_signature: String,
+    /// New creditor's prior acknowledgment: its signature over the
+    /// acknowledgment `basis/prior-ack/1` of the to-edge's CURRENT total and
+    /// timestamp, 0 and 0 for a new edge, at `timestamp` (hex, 65 bytes)
+    pub to_recipient_prior_signature: String,
+    /// New creditor's signature over the to-edge's new note message (acceptance)
+    pub to_recipient_signature: String,
+    /// Optional and diagnostic: the from-edge total the old creditor
+    /// acknowledged. When present it must equal the stored total (409 `stale_prior`).
+    #[serde(default)]
+    pub from_prior_total: Option<u64>,
+    /// Optional and diagnostic: the to-edge total the new creditor acknowledged
+    /// (0 for a new edge). When present it must equal the stored total (409 `stale_prior`).
+    #[serde(default)]
+    pub to_prior_total: Option<u64>,
+    /// Optional and diagnostic: the from-edge timestamp the old creditor
+    /// acknowledged. When present it must equal the stored note's timestamp (409 `stale_prior`).
+    #[serde(default)]
+    pub from_prior_timestamp: Option<u64>,
+    /// Optional and diagnostic: the to-edge timestamp the new creditor
+    /// acknowledged (0 for a new edge). When present it must equal the stored
+    /// note's timestamp (409 `stale_prior`).
+    #[serde(default)]
+    pub to_prior_timestamp: Option<u64>,
+}
+
+/// Redacted (see [`crate::redact`]): signatures appear only as fingerprints.
+impl std::fmt::Debug for TransferNotesRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{Denom, HexField, SigHex};
+        f.debug_struct("TransferNotesRequest")
+            .field("issuer_pubkey", &HexField(&self.issuer_pubkey, 33))
+            .field("from_recipient_pubkey", &HexField(&self.from_recipient_pubkey, 33))
+            .field("to_recipient_pubkey", &HexField(&self.to_recipient_pubkey, 33))
+            .field("denomination", &Denom(&self.denomination))
+            .field("amount", &self.amount)
+            .field("timestamp", &self.timestamp)
+            .field("issuer_from_signature", &SigHex(&self.issuer_from_signature))
+            .field(
+                "from_recipient_prior_signature",
+                &SigHex(&self.from_recipient_prior_signature),
+            )
+            .field("from_recipient_signature", &SigHex(&self.from_recipient_signature))
+            .field(
+                "from_recipient_to_signature",
+                &SigHex(&self.from_recipient_to_signature),
+            )
+            .field("issuer_to_signature", &SigHex(&self.issuer_to_signature))
+            .field(
+                "to_recipient_prior_signature",
+                &SigHex(&self.to_recipient_prior_signature),
+            )
+            .field("to_recipient_signature", &SigHex(&self.to_recipient_signature))
+            .field("from_prior_total", &self.from_prior_total)
+            .field("to_prior_total", &self.to_prior_total)
+            .field("from_prior_timestamp", &self.from_prior_timestamp)
+            .field("to_prior_timestamp", &self.to_prior_timestamp)
+            .finish()
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferNotesResponse {
+    pub transferred: bool,
+    pub denomination: String,
+    pub from_new_total: u64,
+    pub to_new_total: u64,
+    pub timestamp: u64,
+    /// The from-edge's total before the transfer (the old creditor's acknowledged prior).
+    pub from_prior_total: u64,
+    /// The to-edge's total before the transfer, 0 for a new edge (the new creditor's acknowledged prior).
+    pub to_prior_total: u64,
+}
+
+/// One edge of a multilateral set-off request (set-off version 3). Unknown
+/// fields are refused. `Debug` is redacted (signatures appear only as
+/// fingerprints, see [`crate::redact`]).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetOffEdgeRequest {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    /// How much this edge's cumulative total falls.
+    pub decrease: u64,
+    /// Optional: this edge's own timestamp ts_e (per-edge timestamps), which
+    /// must end in 998 ms, be at most an hour old and be newer than the edge's
+    /// current timestamp. Absent (or null), the request's `timestamp` applies.
+    #[serde(default)]
+    pub timestamp: Option<u64>,
+    /// Issuer's signature over the edge's note message at its new total and
+    /// the edge's timestamp (hex, 65 bytes)
+    pub issuer_signature: String,
+    /// Creditor's signature over the same message (consent to lowering)
+    pub recipient_signature: String,
+}
+
+/// Redacted (see [`crate::redact`]): signatures appear only as fingerprints.
+impl std::fmt::Debug for SetOffEdgeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{HexField, SigHex};
+        f.debug_struct("SetOffEdgeRequest")
+            .field("issuer_pubkey", &HexField(&self.issuer_pubkey, 33))
+            .field("recipient_pubkey", &HexField(&self.recipient_pubkey, 33))
+            .field("decrease", &self.decrease)
+            .field("timestamp", &self.timestamp)
+            .field("issuer_signature", &SigHex(&self.issuer_signature))
+            .field("recipient_signature", &SigHex(&self.recipient_signature))
+            .finish()
+    }
+}
+
+/// Multilateral set-off (obligation clearing) request, version 3: lowers every
+/// listed edge by its decrease, each at its own timestamp (the edge's
+/// `timestamp`, else this request's `timestamp`), all ending in 998 ms. For
+/// every key, decreases as creditor must equal decreases as issuer
+/// (net-neutral). Unknown fields are refused, so a field this tracker does not
+/// know is never silently dropped. `Debug` is redacted (the edges'
+/// signatures appear only as fingerprints).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetOffRequest {
+    #[serde(default)]
+    pub denomination: String,
+    /// The timestamp of every edge that does not carry its own.
+    pub timestamp: u64,
+    pub edges: Vec<SetOffEdgeRequest>,
+}
+
+/// Redacted: each edge as [`SetOffEdgeRequest`]'s redacted `Debug`.
+impl std::fmt::Debug for SetOffRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetOffRequest")
+            .field("denomination", &crate::redact::Denom(&self.denomination))
+            .field("timestamp", &self.timestamp)
+            .field("edges", &self.edges)
+            .finish()
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetOffEdgeResult {
+    pub issuer_pubkey: String,
+    pub recipient_pubkey: String,
+    pub new_total: u64,
+    /// The edge's new timestamp: its own `timestamp`, else the request's.
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetOffResponse {
+    pub cleared: bool,
+    pub denomination: String,
+    pub timestamp: u64,
+    pub total_cleared: u64,
+    pub edges: Vec<SetOffEdgeResult>,
+}
+
+/// `GET /capabilities` body: `{"success": true, "data": {...}}`. A client
+/// enables a feature only when `data` is exactly what it expects (design
+/// §3.6): routes answer OPTIONS whatever they enforce, so probing them proves
+/// nothing. Trackers without this route (3df7ed93, caa2e86, a00233d) answer
+/// 404.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilitiesResponse {
+    pub success: bool,
+    pub data: TrackerCapabilities,
+}
+
+/// The build identity and the rules this tracker enforces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerCapabilities {
+    /// Always `"basis"`.
+    pub tracker: String,
+    /// The rule set: `"valun-circulating-credit/4"` ([`CAPABILITIES_BUILD`]).
+    pub build: String,
+    /// The git commit the binary was built from (`BASIS_GIT_COMMIT` at build
+    /// time), or `"unknown"`.
+    pub commit: String,
+    /// `[server] pure_credit`.
+    pub pure_credit: bool,
+    /// The timestamp residues (`ts % 1000`) reserved for operations; ordinary
+    /// notes use 000-994: `[995, 996, 997, 998, 999]`.
+    pub reserved_ms: Vec<u64>,
+    /// Bound notes (POST /notes with `prior_signature`).
+    pub bound_notes: BoundNotesCapability,
+    /// Every edge a novation changes becomes bound-only.
+    pub bound_only_edges: bool,
+    pub novation: NovationCapabilities,
+    /// Edges whose confirmation record has a committed or pending on-chain
+    /// total (0 on a pure-credit tracker).
+    pub onchain_edges: u64,
+    /// Why debt transfers and set-offs are refused (503 `novations_disabled`),
+    /// or `null`.
+    pub novations_disabled_reason: Option<String>,
+}
+
+/// Bound notes: residue 997, version 3 (tracker v3.2): the issuer's prior
+/// acknowledgment is over `prior_ack` (`basis/prior-ack/1`, the edge's stored
+/// total and timestamp at the note's timestamp), and a bound note older than
+/// `max_age_ms` is refused (`novation_expired`), like a novation. Version 2
+/// (tracker v3.1) acknowledged the note message at the stored total; version 1
+/// (tracker v3) also had no maximum age.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundNotesCapability {
+    pub ms: u64,
+    pub version: u32,
+    /// The maximum age of a bound note's timestamp (one hour, the novation
+    /// maximum age).
+    pub max_age_ms: u64,
+    /// The tag of the prior-acknowledgment message (`basis_core::PRIOR_ACK_TAG`).
+    pub prior_ack: String,
+}
+
+/// The novation routes and their shared maximum age.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NovationCapabilities {
+    /// The maximum age of a novation's timestamp (one hour).
+    pub max_age_ms: u64,
+    pub transfer: TransferCapability,
+    pub setoff: SetOffCapability,
+}
+
+/// POST /notes/transfer: residue 999, version 4 (tracker v3.2), its seven
+/// signature slots in request order of `basis_store::TransferSignatures`, the
+/// two `_prior` slots over `prior_ack` (`basis/prior-ack/1`). Version 3
+/// (tracker v3.1) acknowledged the note message at the stored total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferCapability {
+    pub ms: u64,
+    pub version: u32,
+    pub signatures: Vec<String>,
+    /// The tag of the prior-acknowledgment message (`basis_core::PRIOR_ACK_TAG`).
+    pub prior_ack: String,
+}
+
+/// POST /notes/setoff: residue 998, version 3, at most 64 edges, per-edge
+/// timestamps, two signatures per edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetOffCapability {
+    pub ms: u64,
+    pub version: u32,
+    pub max_edges: u64,
+    pub per_edge_timestamps: bool,
+    pub signatures_per_edge: Vec<String>,
+}
+
+/// The `build` of [`TrackerCapabilities`]: the Valun circulating-credit rule
+/// set, tracker v3.2 (`/3` was tracker v3 and v3.1).
+pub const CAPABILITIES_BUILD: &str = "valun-circulating-credit/4";
+
+/// The `prior_ack` of the bound-note and transfer capabilities: the tag of the
+/// prior-acknowledgment message, as text.
+fn prior_ack_tag() -> String {
+    String::from_utf8_lossy(basis_core::PRIOR_ACK_TAG).into_owned()
+}
+
+impl TrackerCapabilities {
+    /// This build's capabilities, with the run-time values: the `pure_credit`
+    /// setting, the number of on-chain edges and the novations-disabled reason.
+    /// Every rule value comes from the store's constants, so a changed rule
+    /// changes the response.
+    pub fn current(
+        pure_credit: bool,
+        onchain_edges: u64,
+        novations_disabled_reason: Option<String>,
+    ) -> Self {
+        let names = |slots: &[&str]| slots.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        Self {
+            tracker: "basis".to_string(),
+            build: CAPABILITIES_BUILD.to_string(),
+            commit: option_env!("BASIS_GIT_COMMIT")
+                .filter(|c| !c.is_empty())
+                .unwrap_or("unknown")
+                .to_string(),
+            pure_credit,
+            reserved_ms: vec![
+                basis_store::EXCHANGE_TS_MS,
+                basis_store::COMPRESS_TS_MS,
+                basis_store::BOUND_NOTE_TS_MS,
+                basis_store::SETOFF_TS_MS,
+                basis_store::TRANSFER_TS_MS,
+            ],
+            bound_notes: BoundNotesCapability {
+                ms: basis_store::BOUND_NOTE_TS_MS,
+                version: 3,
+                max_age_ms: basis_store::NOVATION_MAX_AGE_MS,
+                prior_ack: prior_ack_tag(),
+            },
+            bound_only_edges: true,
+            novation: NovationCapabilities {
+                max_age_ms: basis_store::NOVATION_MAX_AGE_MS,
+                transfer: TransferCapability {
+                    ms: basis_store::TRANSFER_TS_MS,
+                    version: 4,
+                    signatures: names(&[
+                        "issuer_from",
+                        "issuer_to",
+                        "from_recipient_prior",
+                        "from_recipient",
+                        "from_recipient_to",
+                        "to_recipient_prior",
+                        "to_recipient",
+                    ]),
+                    prior_ack: prior_ack_tag(),
+                },
+                setoff: SetOffCapability {
+                    ms: basis_store::SETOFF_TS_MS,
+                    version: 3,
+                    max_edges: basis_store::MAX_SETOFF_EDGES as u64,
+                    per_edge_timestamps: true,
+                    signatures_per_edge: names(&["issuer", "recipient"]),
+                },
+            },
+            onchain_edges,
+            novations_disabled_reason,
+        }
+    }
+}
+
 /// One pending (staged or cancelled) cross-denomination exchange, as returned
 /// by `GET /exchanges/pending` (issue #17).
 #[derive(Debug, Serialize)]
@@ -137,6 +542,11 @@ pub struct ApiResponse<T> {
     pub success: bool,
     pub data: Option<T>,
     pub error: Option<String>,
+    /// Machine-readable error code (POST /notes and the novation routes), such
+    /// as `reserved_timestamp` or `stale_prior`. Omitted from the JSON when
+    /// absent, so every response without a code is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 // Event types for tracker events
@@ -248,7 +658,8 @@ pub struct KeyStatusDenomination {
 }
 
 // Redemption request
-#[derive(Debug, Deserialize)]
+// `Debug` is implemented by hand (redacted): `initiate_redemption` debug-logs the request.
+#[derive(Deserialize)]
 pub struct RedeemRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
@@ -269,6 +680,25 @@ pub struct RedeemRequest {
     /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
     #[serde(default)]
     pub denomination: String,
+}
+
+/// Redacted (see [`crate::redact`]): the issuer's signature appears only as its
+/// fingerprint, and free-text fields only up to 72 characters (else by length).
+impl std::fmt::Debug for RedeemRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{Denom, HexField, SigHex, Text};
+        f.debug_struct("RedeemRequest")
+            .field("issuer_pubkey", &HexField(&self.issuer_pubkey, 33))
+            .field("recipient_pubkey", &HexField(&self.recipient_pubkey, 33))
+            .field("amount", &self.amount)
+            .field("timestamp", &self.timestamp)
+            .field("reserve_box_id", &Text(&self.reserve_box_id))
+            .field("recipient_address", &Text(&self.recipient_address))
+            .field("issuer_signature", &SigHex(&self.issuer_signature))
+            .field("emergency", &self.emergency)
+            .field("denomination", &Denom(&self.denomination))
+            .finish()
+    }
 }
 
 // Redemption completion request
@@ -695,6 +1125,7 @@ pub fn success_response<T>(data: T) -> ApiResponse<T> {
         success: true,
         data: Some(data),
         error: None,
+        code: None,
     }
 }
 
@@ -704,5 +1135,16 @@ pub fn error_response<T>(message: String) -> ApiResponse<T> {
         success: false,
         data: None,
         error: Some(message),
+        code: None,
+    }
+}
+
+/// Error response with a machine-readable `code` (see [`ApiResponse::code`]).
+pub fn error_response_with_code<T>(message: String, code: &str) -> ApiResponse<T> {
+    ApiResponse {
+        success: false,
+        data: None,
+        error: Some(message),
+        code: Some(code.to_string()),
     }
 }

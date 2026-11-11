@@ -51,7 +51,22 @@ paths:
   /notes:
     post:
       summary: Create a new IOU note
-      description: Creates a new IOU note with the specified parameters. The note must be signed by the issuer.
+      description: >-
+        Creates a new IOU note with the specified parameters. The note must be
+        signed by the issuer. Timestamps whose millisecond part (timestamp mod
+        1000) is 995-999 are reserved: 999 for transfers, 998 for set-offs, 996
+        and 995 for future operations (all refused with code reserved_timestamp),
+        and 997 for bound notes. A bound note carries prior_signature, the
+        issuer's signature over the prior acknowledgment basis/prior-ack/1 of the
+        edge's current total and timestamp at the bound note's timestamp (bound
+        notes version 3, tracker v3.2: "basis/prior-ack/1" | debtKey | prior total
+        | prior timestamp | timestamp | trackerNftId, 105 bytes; 0 and 0 for a new
+        edge); it applies only while the edge is in that state and is raised, and
+        only while its timestamp is at most one hour old (novation_expired).
+        Ordinary notes
+        use 000-994 ms and have no maximum age. An edge changed by a transfer or
+        set-off is bound-only and accepts only bound notes (bound_note_required).
+        Errors carry a machine-readable `code`.
       operationId: createNote
       tags:
         - Notes
@@ -69,13 +84,22 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseEmpty'
         '400':
-          description: Bad request - invalid input parameters (including malformed tracker_nft_id hex or wrong length)
+          description: >-
+            Bad request - invalid input parameters (including malformed tracker_nft_id
+            hex or wrong length). Codes: reserved_timestamp, bound_note_required,
+            invalid_prior_signature, not_an_increase, invalid_request, past_timestamp,
+            future_timestamp, novation_expired (a bound note older than one hour),
+            invalid_signature (other refusals carry no code)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
         '409':
-          description: Conflict - note's tracker_nft_id does not match this tracker's configured tracker NFT ID
+          description: >-
+            Conflict - note's tracker_nft_id does not match this tracker's configured
+            tracker NFT ID (code tracker_id_mismatch), or a bound note's prior_total or
+            prior_timestamp is not the edge's current total or timestamp (code
+            stale_prior)
           content:
             application/json:
               schema:
@@ -157,6 +181,199 @@ paths:
                 $ref: '#/components/schemas/ApiResponseError'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+  /notes/transfer:
+    post:
+      summary: Transfer debt to a new creditor (triad novation, pure-credit edges)
+      description: >-
+        Moves `amount` of the issuer's cumulative debt from the edge
+        (issuer -> from_recipient) to the edge (issuer -> to_recipient) in one
+        denomination, atomically: the old creditor is paid by the transfer and the
+        new creditor is owed by the issuer instead. Version 4 (tracker v3.2):
+        seven signatures. With A the issuer, B the old creditor, C the new
+        creditor, a the amount, T the timestamp, X and p the stored A->B total
+        and timestamp, Y and q the stored A->C total and timestamp (0 and 0 for a
+        new edge), M(I,R,t) the standard 80-byte note message at T and
+        PA(I,R,t,p) the 105-byte prior acknowledgment basis/prior-ack/1 at T
+        ("basis/prior-ack/1" | debtKey | total | prior timestamp | T |
+        trackerNftId): A signs M(A,B,X-a) and M(A,C,Y+a); B signs PA(A,B,X,p)
+        (its prior acknowledgment), M(A,B,X-a) (consent to the decrease) and
+        M(A,C,Y+a) (bound to this destination); C signs PA(A,C,Y,q) (its prior
+        acknowledgment) and M(A,C,Y+a) (acceptance). The prior acknowledgments
+        make the amount exact and the attempt single-use: the transfer applies
+        only while both edges are still in the acknowledged states, and an
+        edge's state never recurs (its timestamp strictly increases), so two
+        attempts built on the same state exclude each other for good. The
+        timestamp must end in 999 ms (the transfer residue, refused by POST
+        /notes), so the issuer's signature on the raised edge cannot be submitted
+        on its own; it must be newer than both edges and at most one hour old
+        (novation_expired). Refused when the lowered edge has a committed or
+        pending on-chain total (the two-phase path is not implemented yet). The
+        new creditor's acceptance policy is evaluated after every other check,
+        against the pre-mutation state, atomically with the mutation. Both edges
+        become bound-only. Unknown request fields are refused. Store refusals
+        carry a machine-readable `code`.
+      operationId: transferNotes
+      tags:
+        - Notes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferNotesRequest'
+      responses:
+        '200':
+          description: Both edges updated atomically
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseTransferNotes'
+        '400':
+          description: >-
+            invalid_transfer (malformed: equal creditors, zero amount, not the
+            transfer residue, more than the issuer owes the old creditor, below the
+            redeemed amount, or a total out of the contract's range),
+            invalid_signature (any of the seven), past_timestamp (not newer than
+            both edges), future_timestamp, novation_expired (older than one hour);
+            a malformed key, signature or denomination is refused without a code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '403':
+          description: Rejected by the new creditor's acceptance policy (no code)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '404':
+          description: not_found, the issuer has no note to the old creditor in this denomination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '409':
+          description: >-
+            stale_prior (from_prior_total, to_prior_total, from_prior_timestamp or
+            to_prior_timestamp is not the edge's current total or timestamp),
+            tracker_id_mismatch (the edges are bound to different
+            tracker NFTs), staged_exchange (an exchange is staged on one of the
+            pairs), onchain_scope (the lowered edge has a committed or pending
+            on-chain total)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '422':
+          description: The body does not match the request schema (an unknown field, or a missing required one)
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          description: storage_error, or an unexpected tracker error (a fixed message, no code)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '503':
+          description: >-
+            novations_disabled: the tracker's confirmation records failed to load
+            at startup, so it cannot tell which edges carry on-chain state; every
+            transfer is refused until it restarts with readable records (see GET
+            /capabilities novations_disabled_reason)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+  /notes/setoff:
+    post:
+      summary: Multilateral set-off (obligation clearing, pure-credit edges)
+      description: >-
+        Version 3. Lowers every listed edge by its decrease, atomically, each at
+        its own timestamp (the edge's `timestamp`, else the request's
+        `timestamp`). For every key, the decreases on edges where it is the
+        creditor must equal the decreases on edges where it is the issuer, so the
+        set-off is net-neutral for every participant (a cycle A->B->C->A cleared
+        by the same amount is the typical case). Two signatures per edge, both
+        over the standard 80-byte note message at the edge's NEW total and the
+        edge's timestamp: the issuer and the creditor. Because only balanced
+        combinations are accepted, a participant's signatures can never be used
+        in a set-off that changes its net position. Every edge's timestamp must
+        end in 998 ms (the set-off residue, refused by POST /notes and by
+        transfers), be at most one hour old (novation_expired) and be newer than
+        the edge's current timestamp; per-edge timestamps let a moved edge be
+        re-signed on its own. At most 64 edges; edges with a committed or pending
+        on-chain total are refused. Every lowered edge becomes bound-only.
+        Unknown request fields are refused. Store refusals carry a
+        machine-readable `code`.
+      operationId: setOffNotes
+      tags:
+        - Notes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetOffRequest'
+      responses:
+        '200':
+          description: All edges lowered atomically
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseSetOff'
+        '400':
+          description: >-
+            invalid_setoff (malformed: fewer than 2 or more than 64 edges, a
+            self-edge, a zero decrease, a repeated edge, unbalanced decreases, an
+            edge's timestamp not ending in 998 ms, a decrease above an edge's
+            total or below its redeemed amount), invalid_signature (either
+            signature of any edge), past_timestamp (an edge's timestamp not newer
+            than that edge's current one), future_timestamp, novation_expired (an
+            edge's timestamp older than one hour); a malformed key, signature or
+            denomination is refused without a code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '404':
+          description: not_found, one of the edges does not exist in this denomination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '409':
+          description: >-
+            tracker_id_mismatch (the edges are bound to different tracker NFTs),
+            staged_exchange (an exchange is staged on one of the pairs),
+            onchain_scope (an edge has a committed or pending on-chain total)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '422':
+          description: The body does not match the request schema (an unknown field, or a missing required one)
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          description: storage_error, or an unexpected tracker error (a fixed message, no code)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '503':
+          description: >-
+            novations_disabled: the tracker's confirmation records failed to load
+            at startup, so it cannot tell which edges carry on-chain state; every
+            set-off is refused until it restarts with readable records (see GET
+            /capabilities novations_disabled_reason)
           content:
             application/json:
               schema:
@@ -971,6 +1188,39 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponseError'
 
+  /capabilities:
+    get:
+      summary: Tracker capabilities (the rules this build enforces)
+      description: >-
+        The build identity and the rules this tracker enforces (Valun
+        circulating-credit tracker v3.2: build valun-circulating-credit/4, bound
+        notes version 3 and transfer version 4 with prior_ack
+        "basis/prior-ack/1"). A client enables a feature only when the
+        response matches what it expects exactly: every route answers OPTIONS
+        whatever it enforces, so probing routes proves nothing. Trackers without
+        this route answer 404. Read role; no credentials are needed when
+        auth.mode is none. The body has `success` and `data` only.
+        `onchain_edges` counts the edges with a committed or pending on-chain
+        total (always 0 on a pure-credit tracker); `novations_disabled_reason` is
+        null unless debt transfers and set-offs are refused (503
+        novations_disabled) because the confirmation records failed to load.
+      operationId: getCapabilities
+      tags:
+        - Tracker
+      responses:
+        '200':
+          description: The capabilities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseCapabilities'
+        '500':
+          description: The tracker thread is unavailable (no capabilities are reported then)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
   /tracker/latest-box-id:
     get:
       summary: Get latest tracker box ID
@@ -1477,6 +1727,365 @@ components:
           type: string
           nullable: true
 
+    TransferNotesRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        Debt transfer request (version 4, tracker v3.2). Five signatures are over
+        the standard 80-byte note message (debtKey | totalDebt | timestamp |
+        trackerNftId) at an edge's NEW cumulative total and the timestamp; the two
+        creditors' prior acknowledgments are over the 105-byte message
+        "basis/prior-ack/1" | debtKey | prior total | prior timestamp | timestamp |
+        trackerNftId of their edge's CURRENT total and timestamp (0 and 0 for a new
+        edge). Unknown fields are refused.
+      required:
+        - issuer_pubkey
+        - from_recipient_pubkey
+        - to_recipient_pubkey
+        - denomination
+        - amount
+        - timestamp
+        - issuer_from_signature
+        - from_recipient_prior_signature
+        - from_recipient_signature
+        - from_recipient_to_signature
+        - issuer_to_signature
+        - to_recipient_prior_signature
+        - to_recipient_signature
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Hex-encoded issuer (debtor) public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+        from_recipient_pubkey:
+          type: string
+          description: Hex-encoded old creditor public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+        to_recipient_pubkey:
+          type: string
+          description: Hex-encoded new creditor public key (66 characters)
+          pattern: '^[0-9a-fA-F]{66}$'
+        denomination:
+          type: string
+          description: '"erg" or "token:<64-hex>", a denomination this tracker serves; there is no default'
+        amount:
+          type: integer
+          format: uint64
+          description: Debt moved from the old creditor's edge to the new creditor's edge
+        timestamp:
+          type: integer
+          format: uint64
+          description: New timestamp for both edges (ms); must end in 999, be newer than both edges and be at most one hour old
+        issuer_from_signature:
+          type: string
+          description: Issuer over the lowered edge's new note message (hex, 65 bytes)
+        from_recipient_prior_signature:
+          type: string
+          description: Old creditor over the acknowledgment basis/prior-ack/1 of the lowered edge's CURRENT total and timestamp at `timestamp` (prior acknowledgment; hex, 65 bytes)
+        from_recipient_signature:
+          type: string
+          description: Old creditor over the lowered edge's new note message (consent)
+        from_recipient_to_signature:
+          type: string
+          description: Old creditor over the raised edge's new note message (binds the destination)
+        issuer_to_signature:
+          type: string
+          description: Issuer over the raised edge's new note message (hex, 65 bytes)
+        to_recipient_prior_signature:
+          type: string
+          description: New creditor over the acknowledgment basis/prior-ack/1 of the raised edge's CURRENT total and timestamp, 0 and 0 for a new edge, at `timestamp` (prior acknowledgment; hex, 65 bytes)
+        to_recipient_signature:
+          type: string
+          description: New creditor over the raised edge's new note message (acceptance)
+        from_prior_total:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Optional and diagnostic; when present it must equal the lowered edge's current total (409 stale_prior)
+        to_prior_total:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Optional and diagnostic; when present it must equal the raised edge's current total, 0 for a new edge (409 stale_prior)
+        from_prior_timestamp:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Optional and diagnostic; when present it must equal the lowered edge's current timestamp (409 stale_prior)
+        to_prior_timestamp:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Optional and diagnostic; when present it must equal the raised edge's current timestamp, 0 for a new edge (409 stale_prior)
+    TransferNotesResponse:
+      type: object
+      properties:
+        transferred:
+          type: boolean
+          example: true
+        denomination:
+          type: string
+        from_new_total:
+          type: integer
+          format: uint64
+        to_new_total:
+          type: integer
+          format: uint64
+        timestamp:
+          type: integer
+          format: uint64
+        from_prior_total:
+          type: integer
+          format: uint64
+          description: The lowered edge's total before the transfer (the old creditor's acknowledged prior)
+        to_prior_total:
+          type: integer
+          format: uint64
+          description: The raised edge's total before the transfer, 0 for a new edge (the new creditor's acknowledged prior)
+    ApiResponseTransferNotes:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/TransferNotesResponse'
+        error:
+          type: string
+          nullable: true
+    SetOffEdge:
+      type: object
+      additionalProperties: false
+      description: >-
+        One edge of a set-off (version 3): both signatures are over the standard
+        80-byte note message at the edge's NEW total and the edge's timestamp.
+        Unknown fields are refused.
+      required:
+        - issuer_pubkey
+        - recipient_pubkey
+        - decrease
+        - issuer_signature
+        - recipient_signature
+      properties:
+        issuer_pubkey:
+          type: string
+          pattern: '^[0-9a-fA-F]{66}$'
+        recipient_pubkey:
+          type: string
+          pattern: '^[0-9a-fA-F]{66}$'
+        decrease:
+          type: integer
+          format: uint64
+          description: How much this edge's cumulative total falls
+        timestamp:
+          type: integer
+          format: uint64
+          nullable: true
+          description: >-
+            Optional: this edge's own timestamp (ms; per-edge timestamps). Must
+            end in 998, be at most one hour old and be newer than the edge's
+            current timestamp. Absent or null, the request's timestamp applies.
+        issuer_signature:
+          type: string
+          description: Issuer over the edge's new note message at the edge's timestamp (hex, 65 bytes)
+        recipient_signature:
+          type: string
+          description: Creditor over the same message (consent to lowering)
+    SetOffRequest:
+      type: object
+      additionalProperties: false
+      description: Set-off request (version 3, per-edge timestamps). Unknown fields are refused.
+      required:
+        - timestamp
+        - edges
+      properties:
+        denomination:
+          type: string
+          description: '"erg" or "token:<64-hex>"; empty means the default'
+        timestamp:
+          type: integer
+          format: uint64
+          description: >-
+            The timestamp (ms) of every edge that does not carry its own, checked
+            for each such edge like an edge's own timestamp; when every edge
+            carries its own, it is only echoed in the response
+        edges:
+          type: array
+          minItems: 2
+          maxItems: 64
+          items:
+            $ref: '#/components/schemas/SetOffEdge'
+    SetOffResponse:
+      type: object
+      properties:
+        cleared:
+          type: boolean
+          example: true
+        denomination:
+          type: string
+        timestamp:
+          type: integer
+          format: uint64
+          description: The request's timestamp (the default for edges without their own)
+        total_cleared:
+          type: integer
+          format: uint64
+          description: Sum of all decreases (gross debt cleared)
+        edges:
+          type: array
+          items:
+            type: object
+            properties:
+              issuer_pubkey:
+                type: string
+              recipient_pubkey:
+                type: string
+              new_total:
+                type: integer
+                format: uint64
+              timestamp:
+                type: integer
+                format: uint64
+                description: The edge's new timestamp (its own, or the request's)
+    ApiResponseSetOff:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/SetOffResponse'
+        error:
+          type: string
+          nullable: true
+
+    ApiResponseCapabilities:
+      type: object
+      description: GET /capabilities body (`success` and `data` only)
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/TrackerCapabilities'
+    TrackerCapabilities:
+      type: object
+      required: [tracker, build, commit, pure_credit, reserved_ms, bound_notes, bound_only_edges, novation, onchain_edges, novations_disabled_reason]
+      properties:
+        tracker:
+          type: string
+          example: basis
+        build:
+          type: string
+          description: The rule set
+          example: valun-circulating-credit/4
+        commit:
+          type: string
+          description: The git commit the binary was built from (BASIS_GIT_COMMIT at build time), or "unknown"
+        pure_credit:
+          type: boolean
+          description: The `[server] pure_credit` setting
+        reserved_ms:
+          type: array
+          description: Timestamp residues (ts mod 1000) reserved for operations; ordinary notes use 000-994
+          items:
+            type: integer
+          example: [995, 996, 997, 998, 999]
+        bound_notes:
+          $ref: '#/components/schemas/BoundNotesCapability'
+        bound_only_edges:
+          type: boolean
+          description: Every edge a debt transfer or set-off changes becomes bound-only
+          example: true
+        novation:
+          $ref: '#/components/schemas/NovationCapabilities'
+        onchain_edges:
+          type: integer
+          format: uint64
+          description: Edges with a committed or pending on-chain total
+          example: 0
+        novations_disabled_reason:
+          type: string
+          nullable: true
+          description: Why debt transfers and set-offs are refused (503 novations_disabled), or null
+    BoundNotesCapability:
+      type: object
+      description: >-
+        Bound notes (POST /notes at residue 997 with prior_signature). Version 3
+        (tracker v3.2): prior_signature is over the prior acknowledgment prior_ack
+        of the edge's stored total and timestamp at the note's timestamp, and a
+        bound note older than max_age_ms is refused (novation_expired). Version 2
+        (tracker v3.1) acknowledged the note message at the stored total; version 1
+        had no maximum age.
+      properties:
+        ms:
+          type: integer
+          example: 997
+        version:
+          type: integer
+          example: 3
+        max_age_ms:
+          type: integer
+          format: uint64
+          example: 3600000
+        prior_ack:
+          type: string
+          description: The tag the prior-acknowledgment message starts with
+          example: basis/prior-ack/1
+    NovationCapabilities:
+      type: object
+      properties:
+        max_age_ms:
+          type: integer
+          format: uint64
+          example: 3600000
+        transfer:
+          $ref: '#/components/schemas/TransferCapability'
+        setoff:
+          $ref: '#/components/schemas/SetOffCapability'
+    TransferCapability:
+      type: object
+      properties:
+        ms:
+          type: integer
+          example: 999
+        version:
+          type: integer
+          example: 4
+        signatures:
+          type: array
+          items:
+            type: string
+          example: [issuer_from, issuer_to, from_recipient_prior, from_recipient, from_recipient_to, to_recipient_prior, to_recipient]
+        prior_ack:
+          type: string
+          description: >-
+            The tag of the message the two _prior slots are over (the prior
+            acknowledgment of the edge's stored total and timestamp); version 3
+            (tracker v3.1) used the note message at the stored total
+          example: basis/prior-ack/1
+    SetOffCapability:
+      type: object
+      properties:
+        ms:
+          type: integer
+          example: 998
+        version:
+          type: integer
+          example: 3
+        max_edges:
+          type: integer
+          example: 64
+        per_edge_timestamps:
+          type: boolean
+          example: true
+        signatures_per_edge:
+          type: array
+          items:
+            type: string
+          example: [issuer, recipient]
+
     ServedTokenInfo:
       type: object
       properties:
@@ -1582,6 +2191,13 @@ components:
             error:
               type: string
               example: "Invalid signature"
+            code:
+              type: string
+              description: >-
+                Machine-readable error code, present on POST /notes and POST
+                /notes/transfer refusals that have one (see those operations);
+                omitted otherwise
+              example: "invalid_signature"
 
     ApiResponseString:
       allOf:
@@ -1791,6 +2407,32 @@ components:
             Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
             resolves to the pair's existing note's denomination when unambiguous, else "erg".
           example: "erg"
+        prior_signature:
+          type: string
+          description: >-
+            Bound notes only (timestamp ending in 997 ms; bound notes version 3): the
+            issuer's Schnorr signature (hex, 65 bytes) over the prior acknowledgment
+            "basis/prior-ack/1" | debtKey | current total | current timestamp | this
+            note's timestamp | trackerNftId (105 bytes; 0 and 0 for a new edge). Must be
+            absent for every other note.
+          pattern: '^[0-9a-fA-F]{130}$'
+        prior_total:
+          type: integer
+          format: uint64
+          description: >-
+            Optional, with prior_signature only: the current total the acknowledgment
+            covers; a value other than the stored total is refused (409 stale_prior).
+            Without prior_signature it is refused at an ordinary residue (400
+            invalid_request); at a reserved residue (995-999) the note is refused with
+            400 reserved_timestamp (at 997: a bound note needs prior_signature)
+        prior_timestamp:
+          type: integer
+          format: uint64
+          description: >-
+            Optional, with prior_signature only: the current timestamp the
+            acknowledgment covers (0 for a new edge); a value other than the stored
+            note's timestamp is refused (409 stale_prior). Without prior_signature it
+            is refused like prior_total
 
     NoteStateRequest:
       type: object

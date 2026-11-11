@@ -694,6 +694,7 @@ async fn create_test_app(
             auth: config::AuthConfig::default(),
             reserve_creation_max_erg_nano: 10_000_000_000,
             reserve_creation_max_token_amount: 1_000_000_000,
+            pure_credit: false,
             redemption_build_max_per_pair_per_hour: 60,
         },
         ergo: config::ErgoConfig {
@@ -760,6 +761,7 @@ async fn create_test_app(
         pending_redemptions: std::sync::Arc::new(
             basis_server::redemption_build::PendingRedemptionRegistry::new(),
         ),
+        novations_disabled_reason: None,
         redemption_build_rate: std::sync::Arc::new(
             basis_server::redemption_build::BuildRateLimiter::new(),
         ),
@@ -798,6 +800,7 @@ async fn create_test_app_with_policy_routes(
             auth: config::AuthConfig::default(),
             reserve_creation_max_erg_nano: 10_000_000_000,
             reserve_creation_max_token_amount: 1_000_000_000,
+            pure_credit: false,
             redemption_build_max_per_pair_per_hour: 60,
         },
         ergo: config::ErgoConfig {
@@ -866,6 +869,7 @@ async fn create_test_app_with_policy_routes(
         pending_redemptions: std::sync::Arc::new(
             basis_server::redemption_build::PendingRedemptionRegistry::new(),
         ),
+        novations_disabled_reason: None,
         redemption_build_rate: std::sync::Arc::new(
             basis_server::redemption_build::BuildRateLimiter::new(),
         ),
@@ -908,6 +912,7 @@ async fn create_test_app_with_all_routes(
             auth: config::AuthConfig::default(),
             reserve_creation_max_erg_nano: 10_000_000_000,
             reserve_creation_max_token_amount: 1_000_000_000,
+            pure_credit: false,
             redemption_build_max_per_pair_per_hour: 60,
         },
         ergo: config::ErgoConfig {
@@ -975,6 +980,7 @@ async fn create_test_app_with_all_routes(
         pending_redemptions: std::sync::Arc::new(
             basis_server::redemption_build::PendingRedemptionRegistry::new(),
         ),
+        novations_disabled_reason: None,
         redemption_build_rate: std::sync::Arc::new(
             basis_server::redemption_build::BuildRateLimiter::new(),
         ),

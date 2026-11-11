@@ -5,7 +5,7 @@
 
 use crate::{
     reserve_tracker::ExtendedReserveInfo, DenomKey, IouNote, NoteConfirmation, NoteError, NoteKey,
-    PendingExchangeRecord, PendingExchangeStatus, PubKey, TrackerBoxInfo,
+    NoteKeyBytes, PendingExchangeRecord, PendingExchangeStatus, PubKey, TrackerBoxInfo,
 };
 use fjall::{Config, PartitionCreateOptions};
 use std::path::Path;
@@ -18,6 +18,19 @@ const NOTE_VALUE_LEN: usize = 220;
 /// Fixed-width reserve journal value length: timestamp(8) ‖ already_redeemed(8) ‖
 /// denomination(33) = 49 bytes.
 const JOURNAL_VALUE_LEN: usize = 49;
+
+/// The outcome of a full scan of the note records (`iou_notes`): how many
+/// records decoded and how many could not be decoded (a wrong length or a bad
+/// denomination byte) and were skipped. Skipped records are counted, never
+/// dropped silently: a pure-credit tracker refuses to start when any record was
+/// skipped (see `TrackerStateManager::check_pure_credit`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoteRecordScan {
+    /// Records that decoded (for an index rebuild: the records indexed).
+    pub decoded: usize,
+    /// Records that could not be decoded and were skipped.
+    pub skipped: usize,
+}
 
 /// Database storage for IOU notes with extra indices for efficient querying
 ///
@@ -33,6 +46,12 @@ pub struct NoteStorage {
     confirmations_partition: fjall::Partition,
     reserve_avl_journal_partition: fjall::Partition,
     pending_exchanges_partition: fjall::Partition,
+    /// `bound_only_edges`: the edges a novation (debt transfer, set-off) has
+    /// changed, keyed by the 32-byte debt key with an empty value. New notes on
+    /// such an edge must be bound notes. The partition is created when missing,
+    /// so data written by older binaries opens unchanged, and older binaries
+    /// ignore it.
+    bound_only_partition: fjall::Partition,
     /// Test-only fault-injection hook: while set, the atomic exchange commit
     /// methods return an error without writing anything (issue #20 tests).
     #[cfg(test)]
@@ -238,6 +257,15 @@ impl NoteStorage {
                 ))
             })?;
 
+        let bound_only_partition = keyspace
+            .open_partition("bound_only_edges", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!(
+                    "Failed to open bound-only edges partition: {}",
+                    e
+                ))
+            })?;
+
         Ok(Self {
             keyspace,
             notes_partition,
@@ -246,6 +274,7 @@ impl NoteStorage {
             confirmations_partition,
             reserve_avl_journal_partition,
             pending_exchanges_partition,
+            bound_only_partition,
             #[cfg(test)]
             fail_exchange_commits: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -607,13 +636,15 @@ impl NoteStorage {
     /// record, the decreased from-edge note, and its recomputed confirmation
     /// record land together or not at all (a single journaled fjall batch).
     /// The from-edge key already exists, so the issuer/recipient indices are
-    /// unchanged. On `Err` nothing was written.
+    /// unchanged. On `Err` nothing was written. `from_confirmation` is `None`
+    /// while confirmation records must not be written back (the stored records
+    /// failed to load); the stored record is then left as it is.
     pub fn commit_exchange_staged(
         &self,
         issuer_pubkey: &PubKey,
         staged_record: &PendingExchangeRecord,
         from_note: &IouNote,
-        from_confirmation: &NoteConfirmation,
+        from_confirmation: Option<&NoteConfirmation>,
     ) -> Result<(), NoteError> {
         #[cfg(test)]
         if self
@@ -632,9 +663,13 @@ impl NoteStorage {
         );
         let staged_value = Self::serialize_pending_exchange(staged_record)?;
         let note_value = Self::serialize_note_value(issuer_pubkey, from_note);
-        let confirmation_value = serde_json::to_vec(from_confirmation).map_err(|e| {
-            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
-        })?;
+        let confirmation_value = from_confirmation
+            .map(|c| {
+                serde_json::to_vec(c).map_err(|e| {
+                    NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+                })
+            })
+            .transpose()?;
 
         let mut batch = self.keyspace.batch();
         batch.insert(
@@ -643,11 +678,13 @@ impl NoteStorage {
             staged_value,
         );
         batch.insert(&self.notes_partition, from_key.to_bytes(), note_value);
-        batch.insert(
-            &self.confirmations_partition,
-            &from_key.key_hash,
-            confirmation_value,
-        );
+        if let Some(confirmation_value) = confirmation_value {
+            batch.insert(
+                &self.confirmations_partition,
+                &from_key.key_hash,
+                confirmation_value,
+            );
+        }
         batch
             .commit()
             .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange: {}", e)))
@@ -658,11 +695,14 @@ impl NoteStorage {
     /// confirmation record, and the removal of the staged record land together
     /// or not at all. On `Err` nothing was written, so the staged record
     /// survives and the apply is retried on the next confirmation cycle.
+    /// `to_confirmation` is `None` while confirmation records must not be
+    /// written back (the stored records failed to load); the stored record is
+    /// then left as it is.
     pub fn commit_exchange_apply(
         &self,
         issuer_pubkey: &PubKey,
         to_note: &IouNote,
-        to_confirmation: &NoteConfirmation,
+        to_confirmation: Option<&NoteConfirmation>,
         staged_key: &[u8; 32],
     ) -> Result<(), NoteError> {
         #[cfg(test)]
@@ -681,9 +721,13 @@ impl NoteStorage {
             &to_note.denomination,
         );
         let note_value = Self::serialize_note_value(issuer_pubkey, to_note);
-        let confirmation_value = serde_json::to_vec(to_confirmation).map_err(|e| {
-            NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
-        })?;
+        let confirmation_value = to_confirmation
+            .map(|c| {
+                serde_json::to_vec(c).map_err(|e| {
+                    NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+                })
+            })
+            .transpose()?;
         let issuer_index_value =
             self.index_value_with_key(&self.issuer_index, issuer_pubkey, &to_key)?;
         let recipient_index_value =
@@ -697,15 +741,102 @@ impl NoteStorage {
         if let Some(value) = recipient_index_value {
             batch.insert(&self.recipient_index, &to_note.recipient_pubkey, value);
         }
-        batch.insert(
-            &self.confirmations_partition,
-            &to_key.key_hash,
-            confirmation_value,
-        );
+        if let Some(confirmation_value) = confirmation_value {
+            batch.insert(
+                &self.confirmations_partition,
+                &to_key.key_hash,
+                confirmation_value,
+            );
+        }
         batch.remove(&self.pending_exchanges_partition, staged_key);
         batch
             .commit()
             .map_err(|e| NoteError::StorageError(format!("Failed to commit exchange apply: {}", e)))
+    }
+
+    /// Is the edge with this debt key bound-only (changed by a novation)?
+    pub fn is_bound_only(&self, key_bytes: &NoteKeyBytes) -> Result<bool, NoteError> {
+        self.bound_only_partition
+            .contains_key(key_bytes)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read bound-only edges: {}", e)))
+    }
+
+    /// Atomically commit a novation (debt transfer, set-off): every note, its
+    /// confirmation record, the index entries of edges that are new and the
+    /// bound-only marks of `bound_only` (debt keys) land together or not at all
+    /// (one journaled fjall batch). Index entries for several new edges of the
+    /// same key are merged, so none is lost. On `Err` nothing was written.
+    pub fn commit_note_batch(
+        &self,
+        entries: &[(PubKey, IouNote, NoteConfirmation)],
+        bound_only: &[NoteKeyBytes],
+    ) -> Result<(), NoteError> {
+        #[cfg(test)]
+        if self
+            .fail_exchange_commits
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(NoteError::StorageError(
+                "injected novation commit failure".to_string(),
+            ));
+        }
+
+        let mut batch = self.keyspace.batch();
+        let mut issuer_new: std::collections::BTreeMap<PubKey, Vec<NoteKey>> = std::collections::BTreeMap::new();
+        let mut recipient_new: std::collections::BTreeMap<PubKey, Vec<NoteKey>> = std::collections::BTreeMap::new();
+        for (issuer_pubkey, note, confirmation) in entries {
+            let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
+            let note_value = Self::serialize_note_value(issuer_pubkey, note);
+            let confirmation_value = serde_json::to_vec(confirmation).map_err(|e| {
+                NoteError::StorageError(format!("Failed to serialize confirmation: {}", e))
+            })?;
+            batch.insert(&self.notes_partition, key.to_bytes(), note_value);
+            batch.insert(&self.confirmations_partition, &key.key_hash, confirmation_value);
+            issuer_new.entry(*issuer_pubkey).or_default().push(key.clone());
+            recipient_new.entry(note.recipient_pubkey).or_default().push(key);
+        }
+        for (pubkey, keys) in &issuer_new {
+            if let Some(value) = self.index_value_with_keys(&self.issuer_index, pubkey, keys)? {
+                batch.insert(&self.issuer_index, pubkey, value);
+            }
+        }
+        for (pubkey, keys) in &recipient_new {
+            if let Some(value) = self.index_value_with_keys(&self.recipient_index, pubkey, keys)? {
+                batch.insert(&self.recipient_index, pubkey, value);
+            }
+        }
+        for key in bound_only {
+            batch.insert(&self.bound_only_partition, key, Vec::<u8>::new());
+        }
+        batch
+            .commit()
+            .map_err(|e| NoteError::StorageError(format!("Failed to commit novation: {}", e)))
+    }
+
+    /// Like `index_value_with_key` for several keys at once: `None` if all are
+    /// already listed, otherwise the serialized list with the missing ones added.
+    fn index_value_with_keys(
+        &self,
+        index: &fjall::Partition,
+        pubkey: &PubKey,
+        note_keys: &[NoteKey],
+    ) -> Result<Option<Vec<u8>>, NoteError> {
+        let existing = index
+            .get(pubkey)
+            .map_err(|e| NoteError::StorageError(format!("Failed to read index: {}", e)))?;
+        let mut keys = match existing {
+            Some(bytes) => Self::deserialize_note_keys(&bytes)?,
+            None => Vec::new(),
+        };
+        let mut changed = false;
+        for note_key in note_keys {
+            let key_bytes = note_key.to_bytes();
+            if !keys.iter().any(|k| k.to_bytes() == key_bytes) {
+                keys.push(note_key.clone());
+                changed = true;
+            }
+        }
+        Ok(if changed { Some(Self::serialize_note_keys(&keys)) } else { None })
     }
 
     /// Serialize a denomination as a tag byte plus a fixed 32-byte token id
@@ -1008,9 +1139,12 @@ impl NoteStorage {
     /// Rebuild secondary indices from existing notes in the database
     /// This should be called after upgrading to a version with indices when
     /// existing data may not have index entries
-    pub fn rebuild_indices(&self) -> Result<usize, NoteError> {
+    ///
+    /// Returns how many records were indexed and how many could not be decoded
+    /// and were skipped (counted and logged, so the caller can refuse them).
+    pub fn rebuild_indices(&self) -> Result<NoteRecordScan, NoteError> {
         tracing::info!("Rebuilding note indices from existing data...");
-        let mut count = 0;
+        let mut scan = NoteRecordScan::default();
 
         for item in self.notes_partition.iter() {
             let (key_bytes, value_bytes) = item.map_err(|e| {
@@ -1018,7 +1152,10 @@ impl NoteStorage {
             })?;
 
             let Some((issuer_pubkey, note)) = Self::deserialize_note_value(&value_bytes) else {
-                continue; // Skip invalid entries
+                // An undecodable record cannot be indexed. It is counted, so a
+                // pure-credit tracker can refuse to start on it.
+                scan.skipped += 1;
+                continue;
             };
 
             // Reconstruct the note key from the stored key bytes
@@ -1032,11 +1169,17 @@ impl NoteStorage {
             // Rebuild indices
             Self::add_to_index(&self.issuer_index, &issuer_pubkey, &note_key)?;
             Self::add_to_index(&self.recipient_index, &note.recipient_pubkey, &note_key)?;
-            count += 1;
+            scan.decoded += 1;
         }
 
-        tracing::info!("Index rebuild complete: {} notes indexed", count);
-        Ok(count)
+        if scan.skipped > 0 {
+            tracing::warn!(
+                "Index rebuild skipped {} note record(s) that could not be decoded",
+                scan.skipped
+            );
+        }
+        tracing::info!("Index rebuild complete: {} notes indexed", scan.decoded);
+        Ok(scan)
     }
 
     /// Get all notes in the database
@@ -1056,21 +1199,62 @@ impl NoteStorage {
         Ok(notes)
     }
 
-    /// Get all notes with issuer information
+    /// Get all notes with issuer information. Records that cannot be decoded
+    /// are skipped with a warning; [`Self::get_all_notes_with_issuer_counted`]
+    /// also returns how many.
     pub fn get_all_notes_with_issuer(&self) -> Result<Vec<(PubKey, IouNote)>, NoteError> {
+        let (notes_with_issuer, skipped) = self.get_all_notes_with_issuer_counted()?;
+        if skipped > 0 {
+            tracing::warn!(
+                "Skipped {} note record(s) that could not be decoded",
+                skipped
+            );
+        }
+        Ok(notes_with_issuer)
+    }
+
+    /// All notes with issuer information, and the number of note records that
+    /// could not be decoded (a wrong length or a bad denomination byte) and
+    /// were skipped.
+    pub fn get_all_notes_with_issuer_counted(
+        &self,
+    ) -> Result<(Vec<(PubKey, IouNote)>, usize), NoteError> {
         let mut notes_with_issuer = Vec::new();
+        let mut skipped = 0usize;
 
         for item in self.notes_partition.iter() {
             let (_key_bytes, value_bytes) = item.map_err(|e| {
                 NoteError::StorageError(format!("Failed to iterate partition: {}", e))
             })?;
 
-            if let Some(pair) = Self::deserialize_note_value(&value_bytes) {
-                notes_with_issuer.push(pair);
+            match Self::deserialize_note_value(&value_bytes) {
+                Some(pair) => notes_with_issuer.push(pair),
+                None => skipped += 1,
             }
         }
 
-        Ok(notes_with_issuer)
+        Ok((notes_with_issuer, skipped))
+    }
+
+    /// Test-only: write raw bytes into the note records partition (to plant a
+    /// record that does not decode).
+    #[cfg(test)]
+    pub(crate) fn insert_raw_note_record(&self, key: &[u8], value: &[u8]) {
+        self.notes_partition.insert(key, value).unwrap();
+    }
+
+    /// Test-only: write raw bytes into the confirmations partition (to plant a
+    /// record that does not parse).
+    #[cfg(test)]
+    pub(crate) fn insert_raw_confirmation_record(&self, key: &[u8], value: &[u8]) {
+        self.confirmations_partition.insert(key, value).unwrap();
+    }
+
+    /// Test-only: the raw bytes of a stored confirmation record, if there is one
+    /// (it need not parse).
+    #[cfg(test)]
+    pub(crate) fn raw_confirmation_record(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.confirmations_partition.get(key).unwrap().map(|v| v.to_vec())
     }
 
     /// Retrieve an IOU note by its 32-byte note key.

@@ -1,0 +1,534 @@
+//! POST /notes on the v3.2 tracker: timestamp residues (995-999 ms reserved), bound
+//! notes (residue 997 with the issuer's prior acknowledgment, bound notes version
+//! 3: `basis/prior-ack/1` of the edge's current total and timestamp at the note's
+//! timestamp) and bound-only edges (changed by a set-off or transfer), with the
+//! machine-readable `code` on every refusal. Every request goes through the axum
+//! router and a tracker thread backed by a real store.
+
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
+use basis_server::{api, store::EventStore, AppState, TrackerCommand};
+use basis_store::{DenomKey, IouNote, TrackerStateManager};
+use secp256k1::{Secp256k1, SecretKey};
+use serde_json::{json, Value};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+const NFT_HEX: &str = "69c5d7a4df2e72252b0015d981876fe338ca240d5576d4e731dfd848ae18fe2b";
+const A: [u8; 32] = [1u8; 32];
+const B: [u8; 32] = [2u8; 32];
+const C: [u8; 32] = [3u8; 32];
+
+/// Serializes fjall storage initialization across concurrent tests (as in the
+/// other integration tests).
+static STORAGE_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn nft() -> [u8; 32] {
+    hex::decode(NFT_HEX).unwrap().try_into().unwrap()
+}
+
+fn pk(secret: &[u8; 32]) -> [u8; 33] {
+    let secp = Secp256k1::new();
+    let sk = SecretKey::from_slice(secret).expect("valid secret key");
+    secp256k1::PublicKey::from_secret_key(&secp, &sk).serialize()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// The latest timestamp at or before `t` whose residue (`ts % 1000`) is `ms`.
+fn at_residue(t: u64, ms: u64) -> u64 {
+    let candidate = t - t % 1000 + ms;
+    if candidate <= t {
+        candidate
+    } else {
+        candidate - 1000
+    }
+}
+
+/// `signer`'s signature (hex) over the ERG note message (issuer -> recipient, `total`, `ts`).
+fn sign(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> String {
+    let msg = basis_store::schnorr::signing_message(&pk(issuer), &pk(recipient), &DenomKey::Erg, total, ts, &nft());
+    hex::encode(basis_store::schnorr::schnorr_sign(&msg, signer, &pk(signer)).unwrap())
+}
+
+/// The POST /notes body of `issuer`'s note to `recipient` at the cumulative `total` and `ts`.
+fn note_body(issuer: &[u8; 32], recipient: &[u8; 32], total: u64, ts: u64) -> Value {
+    json!({
+        "recipient_pubkey": hex::encode(pk(recipient)),
+        "amount": total,
+        "timestamp": ts,
+        "signature": sign(issuer, issuer, recipient, total, ts),
+        "issuer_pubkey": hex::encode(pk(issuer)),
+        "tracker_nft_id": NFT_HEX,
+        "denomination": "erg",
+    })
+}
+
+/// `signer`'s prior acknowledgment (hex) of the ERG edge issuer -> recipient in the state `prior` (total,
+/// timestamp; (0, 0) for an absent edge) for the operation at `ts` (tracker v3.2, `basis/prior-ack/1`).
+fn ack(signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), ts: u64) -> String {
+    let msg = basis_store::schnorr::prior_ack_message(&pk(issuer), &pk(recipient), &DenomKey::Erg, prior.0, prior.1, ts, &nft());
+    hex::encode(basis_store::schnorr::schnorr_sign(&msg, signer, &pk(signer)).unwrap())
+}
+
+/// `body` with `field` set to `value`.
+fn with(body: &Value, field: &str, value: Value) -> Value {
+    let mut b = body.clone();
+    b[field] = value;
+    b
+}
+
+/// `body` with a prior acknowledgment of the state `prior` (total, timestamp) signed by `signer`, and the optional
+/// `prior_total`.
+fn with_prior(mut body: Value, signer: &[u8; 32], issuer: &[u8; 32], recipient: &[u8; 32], prior: (u64, u64), prior_total: Option<u64>) -> Value {
+    let ts = body["timestamp"].as_u64().unwrap();
+    body["prior_signature"] = json!(ack(signer, issuer, recipient, prior, ts));
+    if let Some(p) = prior_total {
+        body["prior_total"] = json!(p);
+    }
+    body
+}
+
+struct Tracker {
+    app: axum::Router,
+    state: AppState,
+    _dirs: Vec<tempfile::TempDir>,
+}
+
+/// A router with POST /notes and POST /notes/setoff over a tracker thread with a fresh store.
+async fn tracker() -> Tracker {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<TrackerCommand>(100);
+    std::thread::spawn(move || {
+        let mut tracker = {
+            let _guard = STORAGE_INIT_LOCK.lock().unwrap();
+            TrackerStateManager::new_with_temp_storage()
+        };
+        while let Some(cmd) = rx.blocking_recv() {
+            match cmd {
+                TrackerCommand::AddNote { issuer_pubkey, note, prior, response_tx } => {
+                    let _ = response_tx.send(tracker.add_note(&issuer_pubkey, &note, prior));
+                }
+                TrackerCommand::GetNotesByIssuer { issuer_pubkey, response_tx } => {
+                    let _ = response_tx.send(tracker.get_issuer_notes(&issuer_pubkey));
+                }
+                TrackerCommand::GetNoteByIssuerAndRecipient { issuer_pubkey, recipient_pubkey, denomination, response_tx } => {
+                    let _ = response_tx.send(tracker.get_note_optional(&issuer_pubkey, &recipient_pubkey, &denomination));
+                }
+                TrackerCommand::SetOff { denomination, edges, response_tx } => {
+                    let _ = response_tx.send(tracker.set_off(&denomination, &edges));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let server_dir = tempfile::tempdir().unwrap();
+    let scanner_dir = tempfile::tempdir().unwrap();
+    let storage_dir = tempfile::tempdir().unwrap();
+    // Built from JSON so that settings with serde defaults keep their defaults.
+    let config: basis_server::config::AppConfig = serde_json::from_value(json!({
+        "server": {
+            "host": "127.0.0.1",
+            "port": 3048,
+            "data_dir": server_dir.path().to_string_lossy(),
+        },
+        "ergo": {
+            "scanner": { "node_url": "http://127.0.0.1:9" },
+            "basis_reserve_contract_p2s": "test",
+            "basis_token_reserve_contract_p2s": "test_token",
+            "tracker_nft_id": NFT_HEX,
+            "tracker_public_key": null,
+            "tracker_secret_key": null,
+        },
+        "transaction": { "fee": 1000000, "change_address": null },
+    }))
+    .unwrap();
+    let (scanner, tracker_storage, policy_storage) = {
+        let _guard = STORAGE_INIT_LOCK.lock().unwrap();
+        let scanner = basis_store::ergo_scanner::ServerState::new(config.ergo.scanner.clone(), scanner_dir.path()).unwrap();
+        let tracker_storage = basis_store::persistence::TrackerStorage::open(storage_dir.path().join("tracker")).unwrap();
+        let policy_storage =
+            basis_store::persistence::AcceptancePolicyStorage::open(storage_dir.path().join("policies")).unwrap();
+        (scanner, tracker_storage, policy_storage)
+    };
+    let state = AppState {
+        tx,
+        event_store: Arc::new(EventStore::new_in_memory()),
+        ergo_scanner: Arc::new(tokio::sync::Mutex::new(scanner)),
+        reserve_tracker: Arc::new(tokio::sync::Mutex::new(basis_store::ReserveTracker::new())),
+        config: Arc::new(config),
+        shared_tracker_state: Arc::new(tokio::sync::Mutex::new(
+            basis_server::tracker_box_updater::SharedTrackerState::new(),
+        )),
+        tracker_storage,
+        acceptance_predicate: None,
+        policy_storage,
+        pending_redemptions: Arc::new(basis_server::redemption_build::PendingRedemptionRegistry::new()),
+        novations_disabled_reason: None,
+        redemption_build_rate: Arc::new(basis_server::redemption_build::BuildRateLimiter::new()),
+    };
+    let app = axum::Router::new()
+        .route("/notes", axum::routing::post(api::create_note))
+        .route("/notes/setoff", axum::routing::post(api::setoff_notes))
+        .with_state(state.clone());
+    Tracker { app, state, _dirs: vec![server_dir, scanner_dir, storage_dir] }
+}
+
+impl Tracker {
+    /// POST `body` to `uri`; returns the status and the raw response body.
+    async fn post_raw(&self, uri: &str, body: &Value) -> (StatusCode, String) {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = self.app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn post(&self, uri: &str, body: &Value) -> (StatusCode, Value) {
+        let (status, raw) = self.post_raw(uri, body).await;
+        (status, serde_json::from_str(&raw).unwrap())
+    }
+
+    async fn note(&self, body: &Value) -> (StatusCode, Value) {
+        self.post("/notes", body).await
+    }
+
+    /// The stored ERG total of issuer -> recipient, if the edge exists.
+    async fn total(&self, issuer: &[u8; 32], recipient: &[u8; 32]) -> Option<u64> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.state
+            .tx
+            .send(TrackerCommand::GetNoteByIssuerAndRecipient {
+                issuer_pubkey: pk(issuer),
+                recipient_pubkey: pk(recipient),
+                denomination: DenomKey::Erg,
+                response_tx: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap().map(|n: IouNote| n.amount_collected)
+    }
+}
+
+/// Assert an error response: status, `code` (or no `code` key at all) and `success: false`.
+fn assert_refused(response: &(StatusCode, Value), status: StatusCode, code: Option<&str>) {
+    let (s, v) = response;
+    assert_eq!(*s, status, "response: {}", v);
+    assert_eq!(v["success"], false, "response: {}", v);
+    match code {
+        Some(c) => assert_eq!(v["code"], c, "response: {}", v),
+        None => assert!(v.get("code").is_none(), "unexpected code in {}", v),
+    }
+}
+
+fn assert_created(response: &(StatusCode, Value)) {
+    let (s, v) = response;
+    assert_eq!(*s, StatusCode::CREATED, "response: {}", v);
+    assert_eq!(v["success"], true);
+    assert!(v.get("code").is_none(), "a success has no code: {}", v);
+}
+
+#[tokio::test]
+async fn post_notes_refuses_reserved_residues_and_accepts_994_and_000() {
+    let t = tracker().await;
+    let base = now_ms() - 60_000;
+    assert_created(&t.note(&note_body(&A, &B, 10, at_residue(base, 0))).await);
+    let later = base + 2_000;
+    for ms in [995, 996, 998, 999] {
+        let r = t.note(&note_body(&A, &B, 20, at_residue(later, ms))).await;
+        assert_refused(&r, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
+        // The message names the operation the residue belongs to. (Tracker v3.1: the 999 text used to say
+        // "reserved for novations (debt transfer, set-off)", although set-offs use 998.)
+        let want = match ms {
+            999 => "timestamps ending in 999 ms are reserved for debt transfers (POST /notes/transfer); ordinary notes use 000-994 ms",
+            998 => "timestamps ending in 998 ms are reserved for set-offs (POST /notes/setoff); ordinary notes use 000-994 ms",
+            996 => "timestamps ending in 996 ms are reserved (triad compress); ordinary notes use 000-994 ms",
+            _ => "timestamps ending in 995 ms are reserved (exchange); ordinary notes use 000-994 ms",
+        };
+        assert_eq!(r.1["error"], want, "ms {}", ms);
+    }
+    // 997 without prior_signature is a bound note missing its acknowledgment.
+    let r = t.note(&note_body(&A, &B, 20, at_residue(later, 997))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
+    assert_eq!(
+        r.1["error"],
+        "a bound note needs prior_signature: timestamps ending in 997 ms are bound notes, accepted only with the issuer's acknowledgment of the edge's current total and timestamp"
+    );
+    // A transfer's raised-edge signature submitted alone (999) is refused on a new edge too.
+    assert_refused(&t.note(&note_body(&A, &C, 5, at_residue(later, 999))).await, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
+    assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(10), None));
+    // The largest ordinary residue is accepted.
+    assert_created(&t.note(&note_body(&A, &B, 20, at_residue(later, 994))).await);
+    assert_eq!(t.total(&A, &B).await, Some(20));
+}
+
+#[tokio::test]
+async fn a_bound_note_needs_the_issuers_acknowledgment_of_the_current_total_and_timestamp() {
+    let t = tracker().await;
+    let base = now_ms() - 60_000;
+    let p0 = at_residue(base, 0);
+    assert_created(&t.note(&note_body(&A, &B, 10, p0)).await);
+    let ts = at_residue(base + 2_000, 997);
+    // A prior at a wrong total: stale_prior (409) when its total is sent, invalid_prior_signature when not.
+    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (9, p0), Some(9))).await;
+    assert_refused(&r, StatusCode::CONFLICT, Some("stale_prior"));
+    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (9, p0), None)).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
+    assert_eq!(
+        r.1["error"],
+        "prior_signature is not the issuer's signature over the acknowledgment basis/prior-ack/1 of the edge's current total and timestamp at this operation's timestamp"
+    );
+    // A prior at the right total and a wrong timestamp: stale_prior when prior_timestamp is sent, else
+    // invalid_prior_signature.
+    let r = t.note(&with(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (10, p0 - 1), None), "prior_timestamp", json!(p0 - 1))).await;
+    assert_refused(&r, StatusCode::CONFLICT, Some("stale_prior"));
+    assert_eq!(r.1["error"], "prior_total or prior_timestamp is not the edge's current total or timestamp");
+    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (10, p0 - 1), Some(10))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
+    // A bound notes version 2 acknowledgment (the note message at the stored total) is refused.
+    let v2 = with(&note_body(&A, &B, 15, ts), "prior_signature", json!(sign(&A, &A, &B, 10, ts)));
+    assert_refused(&t.note(&v2).await, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
+    // A prior signed by the recipient instead of the issuer.
+    let r = t.note(&with_prior(note_body(&A, &B, 15, ts), &B, &A, &B, (10, p0), Some(10))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
+    // An equal total is not an increase.
+    let r = t.note(&with_prior(note_body(&A, &B, 10, ts), &A, &A, &B, (10, p0), Some(10))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("not_an_increase"));
+    assert_eq!(t.total(&A, &B).await, Some(10));
+    // With the issuer's acknowledgment of the stored state the bound note applies (prior_timestamp sent too).
+    let ok = with(&with_prior(note_body(&A, &B, 15, ts), &A, &A, &B, (10, p0), Some(10)), "prior_timestamp", json!(p0));
+    assert_created(&t.note(&ok).await);
+    assert_eq!(t.total(&A, &B).await, Some(15));
+    // prior_total and prior_timestamp are optional; the next bound note acknowledges the new state (15, ts).
+    let ts2 = ts + 1_000;
+    assert_created(&t.note(&with_prior(note_body(&A, &B, 18, ts2), &A, &A, &B, (15, ts), None)).await);
+    assert_eq!(t.total(&A, &B).await, Some(18));
+}
+
+#[tokio::test]
+async fn a_first_bound_note_on_an_absent_edge_acknowledges_zero() {
+    let t = tracker().await;
+    let ts = at_residue(now_ms() - 60_000, 997);
+    let r = t.note(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, (3, 0), Some(3))).await;
+    assert_refused(&r, StatusCode::CONFLICT, Some("stale_prior"));
+    // The absent edge's state is (0, 0).
+    let r = t.note(&with(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, (0, 0), Some(0)), "prior_timestamp", json!(1))).await;
+    assert_refused(&r, StatusCode::CONFLICT, Some("stale_prior"));
+    let r = t.note(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, (0, 1), Some(0))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
+    assert_eq!(t.total(&A, &C).await, None);
+    let ok = with(&with_prior(note_body(&A, &C, 7, ts), &A, &A, &C, (0, 0), Some(0)), "prior_timestamp", json!(0));
+    assert_created(&t.note(&ok).await);
+    assert_eq!(t.total(&A, &C).await, Some(7));
+}
+
+#[tokio::test]
+async fn the_prior_acknowledgment_itself_is_refused_as_a_note() {
+    let t = tracker().await;
+    let base = now_ms() - 60_000;
+    let p0 = at_residue(base, 0);
+    assert_created(&t.note(&note_body(&A, &B, 10, p0)).await);
+    let ts = at_residue(base + 2_000, 997);
+    // Bound notes version 3: the issuer's acknowledgment of (10, p0) is a basis/prior-ack/1 message, never a note
+    // message, so as a note's signature it does not verify, with or without itself as the prior.
+    let pa = ack(&A, &A, &B, (10, p0), ts);
+    let as_note = with(&note_body(&A, &B, 10, ts), "signature", json!(pa));
+    assert_refused(&t.note(&as_note).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
+    let with_itself = with(&with(&as_note, "prior_signature", json!(pa)), "prior_total", json!(10));
+    assert_refused(&t.note(&with_itself).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
+    // The issuer's note message at P = 10 with a valid acknowledgment is still not an increase (kept from version 2).
+    let same_total = with(&note_body(&A, &B, 10, ts), "prior_signature", json!(pa));
+    assert_refused(&t.note(&same_total).await, StatusCode::BAD_REQUEST, Some("not_an_increase"));
+    assert_eq!(t.total(&A, &B).await, Some(10));
+}
+
+#[tokio::test]
+async fn a_prior_on_an_ordinary_note_or_a_malformed_prior_is_an_invalid_request() {
+    let t = tracker().await;
+    let base = now_ms() - 60_000;
+    assert_created(&t.note(&note_body(&A, &B, 10, at_residue(base, 0))).await);
+    let ts = at_residue(base + 2_000, 500);
+    let r = t.note(&with_prior(note_body(&A, &B, 20, ts), &A, &A, &B, (10, at_residue(base, 0)), Some(10))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_request"));
+    let mut body = note_body(&A, &B, 20, ts);
+    body["prior_signature"] = json!("not hex");
+    let r = t.note(&body).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_request"));
+    assert_eq!(r.1["error"], "prior_signature must be hex-encoded");
+    body["prior_signature"] = json!("00".repeat(64));
+    let r = t.note(&body).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_request"));
+    assert_eq!(r.1["error"], "prior_signature must be 65 bytes");
+    let mut body = note_body(&A, &B, 20, ts);
+    body["prior_total"] = json!(10);
+    assert_refused(&t.note(&body).await, StatusCode::BAD_REQUEST, Some("invalid_request"));
+    let r = t.note(&with(&note_body(&A, &B, 20, ts), "prior_timestamp", json!(at_residue(base, 0)))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_request"));
+    assert_eq!(r.1["error"], "prior_timestamp is only valid together with prior_signature");
+    assert_eq!(t.total(&A, &B).await, Some(10));
+    // The same note without the prior applies.
+    assert_created(&t.note(&note_body(&A, &B, 20, ts)).await);
+}
+
+#[tokio::test]
+async fn on_a_bound_only_edge_unbound_notes_are_refused_and_bound_notes_accepted() {
+    let t = tracker().await;
+    let base = now_ms() - 60_000;
+    assert_created(&t.note(&note_body(&A, &B, 10, at_residue(base, 0))).await);
+    assert_created(&t.note(&note_body(&B, &A, 4, at_residue(base, 1))).await);
+    assert_created(&t.note(&note_body(&A, &C, 2, at_residue(base, 2))).await);
+    // A bilateral set-off (residue 998) lowers A -> B and B -> A by 4; both become bound-only.
+    let ts = at_residue(base + 3_000, 998);
+    let edge = |issuer: &[u8; 32], recipient: &[u8; 32], new_total: u64| {
+        json!({
+            "issuer_pubkey": hex::encode(pk(issuer)),
+            "recipient_pubkey": hex::encode(pk(recipient)),
+            "decrease": 4,
+            "issuer_signature": sign(issuer, issuer, recipient, new_total, ts),
+            "recipient_signature": sign(recipient, issuer, recipient, new_total, ts),
+        })
+    };
+    let setoff = json!({"denomination": "erg", "timestamp": ts, "edges": [edge(&A, &B, 6), edge(&B, &A, 0)]});
+    let (s, v) = t.post("/notes/setoff", &setoff).await;
+    assert_eq!(s, StatusCode::OK, "{}", v);
+    assert_eq!((t.total(&A, &B).await, t.total(&B, &A).await), (Some(6), Some(0)));
+    // ts ends in 998, so ts + 2 ends in 000 (ordinary) and ts + 999 in 997 (bound note).
+    for (issuer, recipient, total) in [(&A, &B, 7), (&B, &A, 1)] {
+        let r = t.note(&note_body(issuer, recipient, total, ts + 2)).await;
+        assert_refused(&r, StatusCode::BAD_REQUEST, Some("bound_note_required"));
+    }
+    assert_eq!((t.total(&A, &B).await, t.total(&B, &A).await), (Some(6), Some(0)));
+    // Each acknowledges its edge's state after the set-off: A -> B (6, ts), and B -> A (0, ts), an existing edge
+    // at total 0, which is not the absent state (0, 0).
+    let absent = t.note(&with_prior(note_body(&B, &A, 1, ts + 999), &B, &B, &A, (0, 0), None)).await;
+    assert_refused(&absent, StatusCode::BAD_REQUEST, Some("invalid_prior_signature"));
+    assert_created(&t.note(&with_prior(note_body(&A, &B, 7, ts + 999), &A, &A, &B, (6, ts), Some(6))).await);
+    assert_created(&t.note(&with_prior(note_body(&B, &A, 1, ts + 999), &B, &B, &A, (0, ts), None)).await);
+    assert_eq!((t.total(&A, &B).await, t.total(&B, &A).await), (Some(7), Some(1)));
+    // The edge the set-off did not touch still takes ordinary notes.
+    assert_created(&t.note(&note_body(&A, &C, 3, ts + 2)).await);
+    assert_eq!(t.total(&A, &C).await, Some(3));
+}
+
+#[tokio::test]
+async fn existing_refusals_get_codes_and_keep_their_messages() {
+    let t = tracker().await;
+    let base = now_ms() - 60_000;
+    let ts0 = at_residue(base, 0);
+    assert_created(&t.note(&note_body(&A, &B, 10, ts0)).await);
+    let r = t.note(&note_body(&A, &B, 20, ts0 - 1_000)).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("past_timestamp"));
+    assert_eq!(r.1["error"], "Past timestamp");
+    let r = t.note(&note_body(&A, &B, 20, at_residue(now_ms() + 3_600_000, 0))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("future_timestamp"));
+    assert_eq!(r.1["error"], "Future timestamp");
+    let mut forged = note_body(&A, &B, 20, ts0 + 100);
+    forged["signature"] = note_body(&A, &B, 21, ts0 + 100)["signature"].clone();
+    let r = t.note(&forged).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_signature"));
+    assert_eq!(r.1["error"], "Invalid signature");
+    let mut other_tracker = note_body(&A, &B, 20, ts0 + 100);
+    other_tracker["tracker_nft_id"] = json!("11".repeat(32));
+    let r = t.note(&other_tracker).await;
+    assert_refused(&r, StatusCode::CONFLICT, Some("tracker_id_mismatch"));
+    assert!(r.1["error"].as_str().unwrap().starts_with("Note is bound to tracker NFT"), "{}", r.1);
+    // Refusals without a code keep their earlier response exactly.
+    let r = t.note(&note_body(&A, &B, 5, ts0 + 100)).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, None);
+    assert!(r.1["error"].as_str().unwrap().starts_with("Cumulative debt cannot decrease"), "{}", r.1);
+    let mut bad_hex = note_body(&A, &B, 20, ts0 + 100);
+    bad_hex["recipient_pubkey"] = json!("zz");
+    assert_eq!(
+        t.post_raw("/notes", &bad_hex).await,
+        (StatusCode::BAD_REQUEST, r#"{"success":false,"data":null,"error":"recipient_pubkey must be hex-encoded"}"#.to_string())
+    );
+    assert_eq!(t.total(&A, &B).await, Some(10));
+}
+
+#[tokio::test]
+async fn a_bound_note_older_than_the_maximum_age_is_refused_with_novation_expired() {
+    // Tracker v3.1 (design decision D-1): a bound note is a payment attempt and expires like a novation. A owes B 10,
+    // noted two hours ago, so an expired bound note is still newer than the edge's note.
+    let t = tracker().await;
+    let max_age = basis_store::NOVATION_MAX_AGE_MS;
+    let p0 = at_residue(now_ms() - 2 * max_age, 0);
+    assert_created(&t.note(&note_body(&A, &B, 10, p0)).await);
+    let expired = at_residue(now_ms() - max_age - 1_000, 997);
+    let r = t.note(&with_prior(note_body(&A, &B, 15, expired), &A, &A, &B, (10, p0), Some(10))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("novation_expired"));
+    assert_eq!(
+        r.1["error"],
+        "the bound note's timestamp is older than the maximum age (one hour): an unapplied bound note expires like a novation"
+    );
+    // The age comes before the other bound-note rules (here a stale prior_total, else 409 stale_prior).
+    let r = t.note(&with_prior(note_body(&A, &B, 15, expired), &A, &A, &B, (9, p0), Some(9))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("novation_expired"));
+    // An expired first bound note on an absent edge.
+    let r = t.note(&with_prior(note_body(&A, &C, 5, expired), &A, &A, &C, (0, 0), Some(0))).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("novation_expired"));
+    assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(10), None));
+    // Fresh bound notes apply.
+    let fresh = at_residue(now_ms() - 60_000, 997);
+    assert_created(&t.note(&with_prior(note_body(&A, &B, 15, fresh), &A, &A, &B, (10, p0), Some(10))).await);
+    assert_created(&t.note(&with_prior(note_body(&A, &C, 5, fresh), &A, &A, &C, (0, 0), None)).await);
+    assert_eq!((t.total(&A, &B).await, t.total(&A, &C).await), (Some(15), Some(5)));
+}
+
+#[tokio::test]
+async fn prior_total_without_prior_signature_at_a_reserved_residue_is_reserved_timestamp() {
+    // Design §3.2: a note at 997 needs prior_signature, else 400 reserved_timestamp, and 995, 996, 998 and 999 are
+    // refused for every note; prior_total alone (diagnostic only) changes neither. Tracker v3 answered
+    // invalid_request here.
+    let t = tracker().await;
+    let base = now_ms() - 60_000;
+    assert_created(&t.note(&note_body(&A, &B, 10, at_residue(base, 0))).await);
+    let later = base + 2_000;
+    for ms in [997, 995, 996, 998, 999] {
+        // prior_total alone, prior_timestamp alone (tracker v3.2), or both.
+        for fields in [&["prior_total"][..], &["prior_timestamp"][..], &["prior_total", "prior_timestamp"][..]] {
+            let mut body = note_body(&A, &B, 20, at_residue(later, ms));
+            for field in fields {
+                body[*field] = json!(if *field == "prior_total" { 10 } else { at_residue(base, 0) });
+            }
+            let r = t.note(&body).await;
+            assert_refused(&r, StatusCode::BAD_REQUEST, Some("reserved_timestamp"));
+            if ms == 997 {
+                assert!(r.1["error"].as_str().unwrap().starts_with("a bound note needs prior_signature"), "{}", r.1);
+            }
+        }
+    }
+    // As for every reserved residue, the existing checks come first: a note signature over another total.
+    let ts = at_residue(later, 997);
+    let mut forged = note_body(&A, &B, 20, ts);
+    forged["signature"] = note_body(&A, &B, 21, ts)["signature"].clone();
+    forged["prior_total"] = json!(10);
+    assert_refused(&t.note(&forged).await, StatusCode::BAD_REQUEST, Some("invalid_signature"));
+    // At an ordinary residue prior_total alone is still a malformed request.
+    let mut body = note_body(&A, &B, 20, at_residue(later, 500));
+    body["prior_total"] = json!(10);
+    let r = t.note(&body).await;
+    assert_refused(&r, StatusCode::BAD_REQUEST, Some("invalid_request"));
+    assert_eq!(r.1["error"], "prior_total is only valid together with prior_signature");
+    assert_eq!(t.total(&A, &B).await, Some(10));
+}
+
+#[tokio::test]
+async fn a_request_without_the_new_fields_gets_the_same_response_as_before() {
+    let t = tracker().await;
+    let ts = at_residue(now_ms() - 60_000, 0);
+    assert_eq!(
+        t.post_raw("/notes", &note_body(&A, &B, 10, ts)).await,
+        (StatusCode::CREATED, r#"{"success":true,"data":null,"error":null}"#.to_string())
+    );
+    assert_eq!(t.total(&A, &B).await, Some(10));
+}

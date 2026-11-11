@@ -54,7 +54,7 @@ mod avl_tree_integration_tests {
         );
 
         // Store the note in the tracker
-        let result = tracker.add_note(&issuer_pubkey, &note);
+        let result = tracker.add_note(&issuer_pubkey, &note, None);
         assert!(result.is_ok(), "Should be able to add note to tracker");
 
         // Check that the AVL tree root digest has been updated
@@ -73,7 +73,7 @@ mod avl_tree_integration_tests {
             &issuer_secret_key,
         );
 
-        let result2 = tracker.add_note(&issuer_pubkey, &note2);
+        let result2 = tracker.add_note(&issuer_pubkey, &note2, None);
         assert!(
             result2.is_ok(),
             "Should be able to add second note to tracker"
@@ -109,7 +109,7 @@ mod avl_tree_integration_tests {
             &issuer_secret_key,
         );
 
-        let result = tracker.add_note(&issuer_pubkey, &original_note);
+        let result = tracker.add_note(&issuer_pubkey, &original_note, None);
         assert!(result.is_ok(), "Should be able to add note to tracker");
 
         // Read the note back from the tracker
@@ -168,7 +168,7 @@ mod avl_tree_integration_tests {
                 &issuer_secret_key,
             );
 
-            let result = tracker.add_note(&issuer_pubkey, &note);
+            let result = tracker.add_note(&issuer_pubkey, &note, None);
             assert!(
                 result.is_ok(),
                 "Should be able to add note {} to tracker",
@@ -235,14 +235,14 @@ mod avl_tree_integration_tests {
         // Add first note
         let note1 = create_signed_note(recipient_pubkey, 1000, 1000000, &issuer_secret_key);
 
-        tracker.add_note(&issuer_pubkey, &note1).unwrap();
+        tracker.add_note(&issuer_pubkey, &note1, None).unwrap();
         let state_after_first = tracker.get_state();
         let root_after_first = state_after_first.avl_root_digest.clone();
 
         // Add second note
         let note2 = create_signed_note(generate_test_pubkey(3), 2000, 1000001, &issuer_secret_key);
 
-        tracker.add_note(&issuer_pubkey, &note2).unwrap();
+        tracker.add_note(&issuer_pubkey, &note2, None).unwrap();
         let state_after_second = tracker.get_state();
         let root_after_second = state_after_second.avl_root_digest.clone();
 
