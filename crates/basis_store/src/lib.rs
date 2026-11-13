@@ -603,7 +603,7 @@ impl TrackerStateManager {
         Ok(())
     }
 
-    /// Apply all stored notes to `tree` in canonical (timestamp-sorted) order.
+    /// Apply all stored notes to `tree` in canonical (debt-key) order.
     /// Shared by `rebuild_avl_tree` (in-place, at startup) and
     /// `rebuild_tree_canonically` (into a fresh tree, swapped in on success).
     fn populate_tree_from_storage(
@@ -614,9 +614,16 @@ impl TrackerStateManager {
             .get_all_notes_with_issuer()
             .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
 
-        // AVL tree structure depends on insertion order, so notes must be
-        // inserted in the canonical chronological order every rebuild uses.
-        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
+        // AVL tree structure depends on insertion order. Every tree that must
+        // reproduce a committed digest (the live tree, its rebuild at startup,
+        // and the committed tree a proof is built from) inserts its keys in
+        // debt-key order, so a digest depends only on the (key, value) pairs,
+        // never on when the notes arrived. A timestamp order moves an edge each
+        // time it is raised, while an in-place update keeps it where it was
+        // first inserted.
+        notes_with_issuer.sort_by_key(|(issuer_pubkey, note)| {
+            NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination).to_bytes()
+        });
 
         for (issuer_pubkey, note) in &notes_with_issuer {
             let key =
@@ -831,10 +838,6 @@ impl TrackerStateManager {
         let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
         let key_bytes = key.to_bytes();
 
-        // Value is just the totalDebt (amount_collected) as 8-byte big-endian
-        // This matches the contract spec: hash(A||B) -> totalDebt
-        let value_bytes = note.amount_collected.to_be_bytes().to_vec();
-
         // Persist FIRST (a single atomic batch inside store_note): a storage
         // failure then leaves nothing changed anywhere. The in-memory tree is
         // updated after, so a tree failure leaves storage merely AHEAD of the
@@ -845,13 +848,18 @@ impl TrackerStateManager {
         // (The reverse order committed debt the tracker had no record of —
         // issue #20 follow-up.)
         self.storage.store_note(issuer_pubkey, &note_to_store)?;
-        if let Err(e) = self.avl_state.update(key_bytes.clone(), value_bytes) {
-            self.tree_dirty = true;
+        // The live tree is rebuilt in canonical (debt-key) order, not updated
+        // in place: an in-place update keeps a raised edge where it was first
+        // inserted, so the live digest (the one the box updater commits) would
+        // stop matching any rebuild, and committed proofs would fail with
+        // "Committed tree digest mismatch". Each key's value is still its
+        // totalDebt as 8-byte big-endian (hash(A||B) -> totalDebt).
+        if let Err(e) = self.rebuild_tree_canonically() {
             tracing::error!(
-                "Note stored but the live tree update failed; the tree is stale and will be rebuilt from storage before the next digest update: {:?}",
+                "Note stored but the live tree rebuild failed; the tree is stale and will be rebuilt from storage before the next digest update: {:?}",
                 e
             );
-            return Err(NoteError::StorageError(e.to_string()));
+            return Err(e);
         }
         self.update_state();
 
@@ -1202,27 +1210,18 @@ impl TrackerStateManager {
             Err(e) => return Err(e),
         }
 
-        // Prepare AVL tree key: the denomination-derived debt key
-        let key = NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
-        let key_bytes = key.to_bytes();
-
-        // Value is just the totalDebt (amount_collected) as 8-byte big-endian
-        // This matches the contract spec: hash(A||B) -> totalDebt
-        let value_bytes = note.amount_collected.to_be_bytes().to_vec();
-
-        // Persist FIRST, then update the in-memory tree — same ordering and
+        // Persist FIRST, then rebuild the in-memory tree — same ordering and
         // rationale as `add_note` (issue #20 follow-up): a storage failure
         // leaves nothing changed; a tree failure leaves storage safely ahead
         // and sets the dirty flag so the tree is rebuilt before the next
         // digest update.
         self.storage.store_note(issuer_pubkey, &note_to_store)?;
-        if let Err(e) = self.avl_state.update(key_bytes, value_bytes) {
-            self.tree_dirty = true;
+        if let Err(e) = self.rebuild_tree_canonically() {
             tracing::error!(
-                "Note update stored but the live tree update failed; the tree is stale and will be rebuilt from storage before the next digest update: {:?}",
+                "Note update stored but the live tree rebuild failed; the tree is stale and will be rebuilt from storage before the next digest update: {:?}",
                 e
             );
-            return Err(NoteError::StorageError(e.to_string()));
+            return Err(e);
         }
         self.update_state();
         Ok(())
@@ -2038,14 +2037,17 @@ impl TrackerStateManager {
         })?;
 
         // Rebuild the committed tree from every note's confirmed value, in
-        // chronological order by note timestamp (same ordering as
-        // `rebuild_avl_tree`). Notes without a confirmed value are not part of
-        // the committed state.
+        // debt-key order (the order every tree uses; see
+        // `populate_tree_from_storage`), so it reproduces the committed digest
+        // whatever was raised locally since. Notes without a confirmed value
+        // are not part of the committed state.
         let mut notes_with_issuer = self
             .storage
             .get_all_notes_with_issuer()
             .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
-        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
+        notes_with_issuer.sort_by_key(|(issuer, note)| {
+            Self::confirmation_key(issuer, &note.recipient_pubkey, &note.denomination)
+        });
 
         let mut committed_tree = basis_trees::BasisAvlTree::new().map_err(|e| {
             NoteError::StorageError(format!("Failed to create committed AVL tree: {:?}", e))
