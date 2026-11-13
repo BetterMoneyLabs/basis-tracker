@@ -951,6 +951,59 @@ mod confirmation_state_tests {
             other => panic!("expected digest mismatch StorageError, got {:?}", other),
         }
     }
+
+    /// The live digest must not depend on the order notes arrived in.
+    /// A->B, A->C, then A->B raised left the live tree unlike any rebuild.
+    #[test]
+    fn live_digest_equals_a_rebuild_whatever_order_notes_arrived() {
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let (b, c) = ([2u8; 33], [3u8; 33]);
+
+        let mut m1 = make_manager();
+        m1.add_note(&issuer, &create_note(&issuer_secret, &b, 1, 1)).unwrap();
+        m1.add_note(&issuer, &create_note(&issuer_secret, &c, 1, 2)).unwrap();
+        m1.add_note(&issuer, &create_note(&issuer_secret, &b, 2, 3)).unwrap();
+        let live = m1.get_state().avl_root_digest;
+        m1.rebuild_tree_canonically().unwrap();
+        m1.update_state();
+        assert_eq!(m1.get_state().avl_root_digest, live, "a rebuild from storage reproduces the live digest");
+
+        // The same final notes, arriving in another order, give the same digest.
+        let mut m2 = make_manager();
+        m2.add_note(&issuer, &create_note(&issuer_secret, &c, 1, 2)).unwrap();
+        m2.add_note(&issuer, &create_note(&issuer_secret, &b, 2, 3)).unwrap();
+        assert_eq!(m2.get_state().avl_root_digest, live, "the digest depends on the notes, not on when they arrived");
+    }
+
+    /// After that order is committed, a committed proof can be made, also
+    /// after a later local raise of another edge.
+    #[test]
+    fn committed_proof_matches_after_an_edge_is_raised_past_another() {
+        let mut manager = make_manager();
+        let issuer_secret = [1u8; 32];
+        let issuer = issuer_pubkey(&issuer_secret);
+        let (b, c) = ([2u8; 33], [3u8; 33]);
+
+        manager.add_note(&issuer, &create_note(&issuer_secret, &b, 1, 1)).unwrap();
+        manager.add_note(&issuer, &create_note(&issuer_secret, &c, 1, 2)).unwrap();
+        manager.add_note(&issuer, &create_note(&issuer_secret, &b, 2, 3)).unwrap();
+        let digest = manager.get_state().avl_root_digest;
+        manager.mark_notes_pending(digest, "tx1", 100).unwrap();
+        manager.confirm_pending_notes(digest, "box1", 200).unwrap();
+
+        let proof = manager
+            .generate_committed_tracker_lookup_proof(&issuer, &b, &crate::DenomKey::Erg)
+            .unwrap();
+        assert_eq!(proof.value, 2u64.to_be_bytes().to_vec());
+
+        // A->C raised locally after the commit: A->B's committed proof still rebuilds the committed digest.
+        manager.add_note(&issuer, &create_note(&issuer_secret, &c, 5, 4)).unwrap();
+        let proof = manager
+            .generate_committed_tracker_lookup_proof(&issuer, &b, &crate::DenomKey::Erg)
+            .unwrap();
+        assert_eq!(proof.value, 2u64.to_be_bytes().to_vec());
+    }
 }
 
 #[cfg(test)]
