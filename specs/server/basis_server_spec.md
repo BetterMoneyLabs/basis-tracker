@@ -54,7 +54,8 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `POST /tracker/signature` - Request tracker signature for redemption (real Schnorr signature generation)
 - `POST /redemption/prepare` - Prepare redemption with all necessary data (real AVL proofs + tracker signature)
 - `POST /redemption/build` - Tracker-assisted redemption step 1: build the unsigned redemption
-  transaction and sign the fee inputs
+  transaction around caller-supplied, recipient-owned fee inputs (the tracker funds and signs
+  nothing in the transaction)
 - `POST /redemption/submit` - Tracker-assisted redemption step 2: broadcast a signed redemption
   transaction and sync local state
 - `GET /proof/redemption` - Get redemption-specific proof with tracker state digest
@@ -306,6 +307,10 @@ Key configuration includes:
   tokens); larger requests are rejected with HTTP 400.
 - **`server.redemption_build_max_per_pair_per_hour`**: per-(issuer, recipient) rate limit on
   `POST /redemption/build` (default 60/hour, rolling window); excess requests get HTTP 429.
+- **`server.redemption_build_max_per_issuer_per_hour`**: per-issuer rate limit on
+  `POST /redemption/build` (default 240/hour, rolling window); an abuser rotating fresh
+  recipient keys resets the pair bucket but never the issuer bucket. Only builds that pass
+  validation consume quota, so junk builds cannot lock a victim pair out (issue #15 review N17).
 - **Ergo node connection details**: `ergo.scanner.node_url` defaults to `http://127.0.0.1:9053`; point it at your Ergo node (with `extraIndex = true`) for real deployments. Wallet operations (`/wallet/*`, schnorr signing, broadcast) go to `ergo.wallet.node_url`, which falls back to the scanner node when unset.
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)

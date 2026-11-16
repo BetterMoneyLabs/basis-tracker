@@ -165,7 +165,7 @@ configured Ergo node wallet.
 
 ### Redemption
 
-- `POST /redemption/build` - Build an unsigned redemption transaction and sign fee inputs (the tracker proof is generated against the last on-chain-confirmed tracker state; returns 400 if the note is not yet in the confirmed state)
+- `POST /redemption/build` - Build an unsigned redemption transaction around caller-supplied fee inputs (the tracker proof is generated against the last on-chain-confirmed tracker state; returns 400 if the note is not yet in the confirmed state). The redeemer funds the fee: `fee_box_ids` must name unspent, token-free P2PK boxes of the recipient
 - `POST /redemption/submit` - Broadcast a fully-signed redemption transaction. The echoed `unsigned_tx` from `/redemption/build` binds the submit to the stored build entry (unknown/expired entries return 409; a signed tx that is not the built one returns 400), and tracker state is synced from the stored entry after broadcast
 - `POST /redemption/prepare` - Prepare a redemption (legacy tracker-signature + proof endpoint; the note must exist and the stored note's cumulative debt and timestamp are signed — the request's `timestamp` field is ignored)
 - `POST /redeem/complete` - Admin-only repair hatch: mark a redemption as completed locally (amounts are validated against the stored note state; a mismatch returns 400). Normal clients never need it — `/redemption/submit` syncs state itself
@@ -319,13 +319,17 @@ curl -X POST http://localhost:3048/redemption/build \
     "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
     "amount": 500000000,
     "timestamp": 1234567890000,
-    "issuer_signature": "030303..."
+    "issuer_signature": "030303...",
+    "fee_box_ids": ["1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]
   }'
 ```
 
-The request's optional `change_address` field is deprecated and ignored:
-change is always paid to the tracker's own wallet (derived from the selected
-fee input, falling back to the configured change address).
+The redeemer funds the transaction: `fee_box_ids` names the boxes paying the
+miner fee (and, for token reserves, the recipient's min-ERG box). Every box
+must be unspent, token-free, and carry the recipient's P2PK ergoTree; the
+client signs every input with the recipient secret. The tracker pays nothing
+and signs nothing in the transaction. The optional `change_address` names the
+redeemer's change output and defaults to the recipient address.
 
 The tracker AVL proof in the response is generated against the last
 on-chain-confirmed tracker state digest (not the live local tree), so it

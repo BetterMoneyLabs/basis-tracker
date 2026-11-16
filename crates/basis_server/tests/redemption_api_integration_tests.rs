@@ -396,6 +396,7 @@ mod redemption_api_tests {
                 reserve_creation_max_erg_nano: 10_000_000_000,
                 reserve_creation_max_token_amount: 1_000_000_000,
                 redemption_build_max_per_pair_per_hour: 60,
+                redemption_build_max_per_issuer_per_hour: 240,
             },
             ergo: basis_server::config::ErgoConfig {
                 scanner: basis_store::ergo_scanner::NodeConfig {
@@ -667,6 +668,7 @@ mod redemption_api_tests {
             change_address: None,
 
             denomination: String::new(),
+            fee_box_ids: vec![],
         };
 
         let response =
@@ -737,6 +739,7 @@ mod redemption_api_tests {
             change_address: None,
 
             denomination: String::new(),
+            fee_box_ids: vec![],
         };
 
         let response =
@@ -1970,5 +1973,330 @@ mod redemption_api_tests {
         let data = body.data.as_ref().expect("response data");
         assert_eq!(data.to_new_total, 140);
         assert_eq!(data.to_edge_status, "pending");
+    }
+
+    // ============================================================================
+    // N17: /redemption/build fee-input validation (redeemer-funded fees)
+    //
+    // The redeemer funds the miner fee with their own P2PK boxes; the tracker
+    // pays and signs nothing. The server must reject builds whose fee inputs
+    // are missing, duplicated, the reserve box itself, unknown/spent on-chain,
+    // token-bearing, not the recipient's P2PK, or too small.
+    // ============================================================================
+
+    /// A fee box the routing mock node should serve. By default it carries the
+    /// recipient's P2PK tree and no tokens (an honestly-funded fee input);
+    /// tests override `assets`/`foreign_tree` to exercise rejections.
+    struct FeeBox {
+        id: String,
+        value: u64,
+        assets: &'static str,
+        foreign_tree: Option<String>,
+    }
+
+    fn fee_box(id: &str, value: u64) -> FeeBox {
+        FeeBox {
+            id: id.to_string(),
+            value,
+            assets: "[]",
+            foreign_tree: None,
+        }
+    }
+
+    /// P2PK ErgoTree (hex) of a compressed public key (hex).
+    fn p2pk_tree(pubkey_hex: &str) -> String {
+        let address = basis_offchain::ergo_tx::pubkey_to_address(pubkey_hex).unwrap();
+        basis_offchain::ergo_tx::address_to_ergo_tree(&address).unwrap()
+    }
+
+    /// Mock Ergo node that routes by request path: serves `GET /info` (height)
+    /// and `GET /utxo/byId/{id}` from a per-id box map. Unknown paths and
+    /// unknown box ids get a 404 — the fee-validation tests never reach the
+    /// binary/header endpoints.
+    async fn spawn_routing_mock_node(boxes: Vec<(String, String)>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock node");
+        let addr = listener.local_addr().unwrap();
+        let boxes: std::sync::Arc<std::collections::HashMap<String, String>> =
+            std::sync::Arc::new(boxes.into_iter().collect());
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let boxes = boxes.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = match socket.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("");
+                    let (status, body) = if path == "/info" {
+                        ("200 OK", "{\"fullHeight\":1000}".to_string())
+                    } else if let Some(id) = path.strip_prefix("/utxo/byId/") {
+                        match boxes.get(id) {
+                            Some(b) => ("200 OK", b.clone()),
+                            None => ("404 Not Found", "{\"error\":\"not found\"}".to_string()),
+                        }
+                    } else {
+                        ("404 Not Found", "{\"error\":\"not found\"}".to_string())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    fn mock_box_json(box_id: &str, value: u64, ergo_tree: &str, assets: &str) -> String {
+        format!(
+            "{{\"boxId\":\"{box_id}\",\"value\":{value},\"ergoTree\":\"{ergo_tree}\",\"assets\":{assets},\"additionalRegisters\":{{}}}}"
+        )
+    }
+
+    /// Promote every local note to the committed on-chain state, the sequence
+    /// the tracker box updater runs (prepare -> mark pending -> confirm), so
+    /// the committed tracker lookup proof exists (issue #15 S6 gate).
+    async fn commit_pending_notes(state: &AppState) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::PrepareTrackerUpdate { response_tx: tx })
+            .await
+            .unwrap();
+        let digest = rx.await.unwrap().unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::MarkNotesPending {
+                digest,
+                tx_id: "test_update_tx".to_string(),
+                submitted_height: 1,
+                response_tx: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::ConfirmPendingNotes {
+                digest,
+                box_id: "tracker_box_test".to_string(),
+                height: 1,
+                response_tx: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+    }
+
+    /// State with one committed ERG note and one reserve, backed by a routing
+    /// mock node serving the reserve box plus the given fee boxes. Returns
+    /// (state, issuer hex, recipient hex, reserve box id).
+    async fn fee_build_state(fee_boxes: Vec<FeeBox>) -> (AppState, String, String, String) {
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_recipient_secret, recipient_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let recipient_hex = hex::encode(recipient_pubkey);
+        let reserve_box_id = format!("box_{issuer_hex}");
+
+        let recipient_tree = p2pk_tree(&recipient_hex);
+        let reserve_json = format!(
+            "{{\"boxId\":\"{reserve_box_id}\",\"value\":10000000000,\"ergoTree\":\"00\",\"assets\":[],\"additionalRegisters\":{{\"R5\":\"{}\"}}}}",
+            reserve_r5_matching_tracker()
+        );
+        let mut boxes = vec![(reserve_box_id.clone(), reserve_json)];
+        for spec in fee_boxes {
+            let tree = spec.foreign_tree.unwrap_or_else(|| recipient_tree.clone());
+            boxes.push((
+                spec.id.clone(),
+                mock_box_json(&spec.id, spec.value, &tree, spec.assets),
+            ));
+        }
+        let node_url = spawn_routing_mock_node(boxes).await;
+        let state = create_mock_app_state_with_options(
+            basis_server::acceptance::config::AcceptanceConfig::empty(),
+            true,
+            &node_url,
+        )
+        .await;
+
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &recipient_hex,
+            1_000_000,
+            1000,
+        )
+        .await;
+        commit_pending_notes(&state).await;
+        add_test_reserve(&state, &issuer_hex, 10_000_000_000).await;
+        (state, issuer_hex, recipient_hex, reserve_box_id)
+    }
+
+    /// Emergency build request: skips the tracker-secret signing step and the
+    /// acceptance-policy check, so the test reaches fee-input validation with
+    /// no tracker secret configured.
+    fn fee_build_request(
+        issuer_hex: &str,
+        recipient_hex: &str,
+        fee_box_ids: Vec<String>,
+    ) -> RedemptionBuildRequest {
+        RedemptionBuildRequest {
+            issuer_pubkey: issuer_hex.to_string(),
+            recipient_pubkey: recipient_hex.to_string(),
+            amount: 1_000,
+            timestamp: 1000,
+            issuer_signature: "01".repeat(65),
+            emergency: true,
+            tracker_box_id: Some("aa".repeat(32)),
+            change_address: None,
+            denomination: String::new(),
+            fee_box_ids,
+        }
+    }
+
+    async fn assert_fee_rejection(state: AppState, request: RedemptionBuildRequest, needle: &str) {
+        let (status, body) =
+            build_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {:?}", body);
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(error.contains(needle), "expected '{needle}' in: {error}");
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_empty_fee_box_ids() {
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![]),
+            "fee_box_ids must list at least one",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_reserve_box_as_fee_input() {
+        let (state, issuer_hex, recipient_hex, reserve_box_id) = fee_build_state(vec![]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![reserve_box_id]),
+            "must not include the reserve box",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_unknown_fee_box() {
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec!["ff".repeat(32)]),
+            "not an unspent chain box",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_token_bearing_fee_box() {
+        let spec = FeeBox {
+            assets: "[{\"tokenId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"amount\":1}]",
+            ..fee_box("ee".repeat(32).as_str(), 2_000_000)
+        };
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![id]),
+            "carries tokens",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_fee_box_not_owned_by_recipient() {
+        let (_, other_pubkey) = generate_keypair();
+        let spec = FeeBox {
+            foreign_tree: Some(p2pk_tree(&hex::encode(other_pubkey))),
+            ..fee_box("ee".repeat(32).as_str(), 2_000_000)
+        };
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![id]),
+            "not a P2PK box of the recipient",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_insufficient_fee_total() {
+        // Configured fee is 1_000_000 nanoERG; a 500_000 box cannot cover it.
+        let spec = fee_box("ee".repeat(32).as_str(), 500_000);
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![id]),
+            "fee boxes total",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_duplicate_fee_box_ids() {
+        let spec = fee_box("ee".repeat(32).as_str(), 2_000_000);
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![id.clone(), id]),
+            "duplicate fee box id",
+        )
+        .await;
+    }
+
+    /// A well-formed fee input passes validation; the build then fails later on
+    /// the deliberately unparseable test reserve contract address, proving the
+    /// request got past every fee-input check.
+    #[tokio::test]
+    async fn build_redemption_accepts_valid_fee_boxes() {
+        let spec = fee_box("ee".repeat(32).as_str(), 2_000_000);
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        let (status, body) = build_redemption(
+            axum::extract::State(state),
+            axum::extract::Json(fee_build_request(&issuer_hex, &recipient_hex, vec![id])),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "body: {:?}",
+            body
+        );
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("reserve contract P2S"),
+            "expected to fail past fee validation, got: {error}"
+        );
     }
 }

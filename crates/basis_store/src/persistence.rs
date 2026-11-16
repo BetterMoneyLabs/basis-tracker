@@ -1331,12 +1331,14 @@ impl NoteStorage {
 
         let removed = matching.len();
         for key in matching {
-            self.reserve_avl_journal_partition.remove(&key).map_err(|e| {
-                NoteError::StorageError(format!(
-                    "Failed to remove reserve AVL journal entry: {}",
-                    e
-                ))
-            })?;
+            self.reserve_avl_journal_partition
+                .remove(&key)
+                .map_err(|e| {
+                    NoteError::StorageError(format!(
+                        "Failed to remove reserve AVL journal entry: {}",
+                        e
+                    ))
+                })?;
         }
 
         Ok(removed)

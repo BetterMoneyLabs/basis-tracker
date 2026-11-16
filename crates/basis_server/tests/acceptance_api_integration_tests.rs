@@ -695,6 +695,7 @@ async fn create_test_app(
             reserve_creation_max_erg_nano: 10_000_000_000,
             reserve_creation_max_token_amount: 1_000_000_000,
             redemption_build_max_per_pair_per_hour: 60,
+            redemption_build_max_per_issuer_per_hour: 240,
         },
         ergo: config::ErgoConfig {
             scanner: NodeConfig {
@@ -799,6 +800,7 @@ async fn create_test_app_with_policy_routes(
             reserve_creation_max_erg_nano: 10_000_000_000,
             reserve_creation_max_token_amount: 1_000_000_000,
             redemption_build_max_per_pair_per_hour: 60,
+            redemption_build_max_per_issuer_per_hour: 240,
         },
         ergo: config::ErgoConfig {
             scanner: NodeConfig {
@@ -909,6 +911,7 @@ async fn create_test_app_with_all_routes(
             reserve_creation_max_erg_nano: 10_000_000_000,
             reserve_creation_max_token_amount: 1_000_000_000,
             redemption_build_max_per_pair_per_hour: 60,
+            redemption_build_max_per_issuer_per_hour: 240,
         },
         ergo: config::ErgoConfig {
             scanner: NodeConfig {

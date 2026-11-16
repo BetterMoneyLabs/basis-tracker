@@ -992,18 +992,20 @@ pub struct RedemptionBuildRequest {
     pub emergency: bool,
     #[serde(default)]
     pub tracker_box_id: Option<String>,
-    /// Deprecated: ignored by the tracker, which always pays change to its own wallet.
+    /// Address paying the redeemer's change output; defaults to the recipient address.
     #[serde(default)]
     pub change_address: Option<String>,
     /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
     #[serde(default)]
     pub denomination: String,
+    /// Box ids funding the fee (and the token-recipient min-ERG box for token
+    /// reserves); every box must be a token-free P2PK box of the recipient (N17).
+    pub fee_box_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedemptionBuildResponse {
     pub unsigned_tx: serde_json::Value,
-    pub partial_tx: serde_json::Value,
     pub input_box_binaries: Vec<String>,
     pub data_box_binaries: Vec<String>,
     pub headers: Vec<ergo_lib::ergo_chain_types::Header>,

@@ -1327,10 +1327,11 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
 }
 
 /// Tracker-assisted redemption. The tracker builds the unsigned transaction and signs the fee
-/// input(s) (`POST /redemption/build`); the TUI supplies the issuer signature (local issuer
-/// account, or the stored note's), checks the build, adds the reserve input's
-/// `proveDlog(recipient)` proof over the same `bytes_to_sign`, and submits the fully-signed
-/// transaction (`POST /redemption/submit`).
+/// input(s) (`POST /redemption/build`) around fee boxes the redeemer funds; the TUI
+/// supplies the issuer signature (local issuer account, or the stored note's), checks the
+/// build, signs every input with the recipient key (the reserve input's
+/// `proveDlog(recipient)` and the fee inputs) over the same `bytes_to_sign`, and submits
+/// the fully-signed transaction (`POST /redemption/submit`).
 ///
 /// Returns the broadcast transaction id on success.
 async fn tracker_assisted_redeem(
@@ -1411,7 +1412,46 @@ async fn tracker_assisted_redeem(
     let receiver_sk = SecretKey::dlog_from_bytes(&receiver_secret)
         .ok_or("invalid receiver dlog secret".to_string())?;
 
-    // Tracker builds the unsigned tx and signs the fee input(s).
+    // The redeemer funds the fee (and, for token reserves, the recipient's min-ERG box)
+    // with their own P2PK boxes (issue #15 review N17): the tracker pays nothing. Select
+    // boxes of the recipient's own ergoTree from the node wallet — the same account key
+    // that proves the reserve input signs them.
+    let node_url = app
+        .node_url
+        .as_deref()
+        .ok_or("no node_url in cli.toml — configure a node to fund redemption fees")?
+        .to_string();
+    let recipient_address = basis_offchain::ergo_tx::pubkey_to_address(recipient)
+        .map_err(|e| format!("recipient address: {}", e))?;
+    let recipient_tree = basis_offchain::ergo_tx::address_to_ergo_tree(&recipient_address)
+        .map_err(|e| format!("recipient P2PK tree: {}", e))?;
+    let fee_target = basis_cli_lib::commands::transaction::REDEMPTION_FEE_TARGET_NANOERG
+        + if matches!(denomination, basis_store::DenomKey::Token(_)) {
+            basis_cli_lib::commands::transaction::TOKEN_RECIPIENT_MIN_VALUE_NANOERG
+        } else {
+            0
+        };
+    let wallet_boxes = app
+        .client
+        .get_wallet_boxes(&node_url, app.node_api_key.as_deref())
+        .await
+        .map_err(|e| format!("node wallet boxes for fee funding: {}", e))?;
+    let (fee_boxes, _) = basis_cli_lib::commands::transaction::select_fee_inputs(
+        &wallet_boxes,
+        fee_target,
+        "",
+        "",
+        Some(&recipient_tree),
+    )
+    .ok_or_else(|| {
+        format!(
+            "no recipient P2PK wallet boxes covering {} nanoERG for the redemption fee",
+            fee_target
+        )
+    })?;
+    let fee_box_ids: Vec<String> = fee_boxes.iter().map(|b| b.box_id.clone()).collect();
+
+    // Tracker builds the unsigned transaction around those fee inputs; it signs nothing.
     let build = app
         .client
         .redemption_build(basis_cli_lib::api::RedemptionBuildRequest {
@@ -1427,6 +1467,7 @@ async fn tracker_assisted_redeem(
             // Same denomination that signed the message above must scope the build;
             // empty lets the server fall back to ERG for multi-denomination pairs.
             denomination: denomination.denomination_id(),
+            fee_box_ids: fee_box_ids.clone(),
         })
         .await
         .map_err(|e| format!("tracker build failed: {}", e))?;
@@ -1434,8 +1475,6 @@ async fn tracker_assisted_redeem(
     // Reconstruct the signing material the tracker produced.
     let unsigned: UnsignedTransaction = serde_json::from_value(build.unsigned_tx.clone())
         .map_err(|e| format!("parse unsigned tx: {}", e))?;
-    let partial: Transaction =
-        serde_json::from_value(build.partial_tx).map_err(|e| format!("parse partial tx: {}", e))?;
     let parse_box = |h: &str| -> Result<ErgoBox, String> {
         let bytes = hex::decode(h).map_err(|e| format!("box hex: {}", e))?;
         ErgoBox::sigma_parse_bytes(&bytes).map_err(|e| format!("box parse: {:?}", e))
@@ -1461,7 +1500,7 @@ async fn tracker_assisted_redeem(
         .map_err(|_| "headers array".to_string())?;
 
     // Nothing the tracker built is signed with the receiver's key until it is checked to be
-    // this note's redemption.
+    // this note's redemption spending only the fee boxes selected above.
     basis_cli_lib::verify::verify_redemption_tx(
         &unsigned,
         &input_boxes,
@@ -1470,21 +1509,29 @@ async fn tracker_assisted_redeem(
         &recipient_pk,
         &denomination,
         amount,
+        &fee_box_ids,
     )
     .map_err(|e| format!("refusing to sign the tracker's redemption: {}", e))?;
 
-    // Add the reserve input (index 0) proveDlog(recipient) proof over the same bytes_to_sign.
-    let signed = add_input_proof(
-        &unsigned,
-        Some(&partial),
-        &input_boxes,
-        &data_boxes,
-        &pre_header,
-        &headers,
-        0,
-        &receiver_sk,
-    )
-    .map_err(|e| format!("reserve proof failed: {:?}", e))?;
+    // Sign every input with the receiver's key over the same bytes_to_sign: the reserve
+    // input (index 0) proveDlog(recipient) first, then the fee inputs.
+    let mut partial: Option<Transaction> = None;
+    for idx in 0..unsigned.inputs.len() {
+        partial = Some(
+            add_input_proof(
+                &unsigned,
+                partial.as_ref(),
+                &input_boxes,
+                &data_boxes,
+                &pre_header,
+                &headers,
+                idx,
+                &receiver_sk,
+            )
+            .map_err(|e| format!("input {} proof failed: {:?}", idx, e))?,
+        );
+    }
+    let signed = partial.ok_or_else(|| "transaction has no inputs".to_string())?;
 
     let tx_json = serde_json::to_value(&signed).map_err(|e| format!("serialize tx: {}", e))?;
     app.client

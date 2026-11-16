@@ -2326,6 +2326,7 @@ components:
         - amount
         - timestamp
         - issuer_signature
+        - fee_box_ids
       properties:
         issuer_pubkey:
           type: string
@@ -2365,7 +2366,7 @@ components:
         change_address:
           type: string
           nullable: true
-          description: Deprecated and ignored. Change always goes to the owner of the tracker's selected fee box (falling back to the configured change address); a caller-supplied address is never used.
+          description: Address paying the redeemer's change output; defaults to the recipient address. Only redeemer funds flow through it.
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
 
 
@@ -2373,6 +2374,13 @@ components:
           type: string
           description: "Denomination of the debt: erg or token:<64-hex>."
           example: "erg"
+        fee_box_ids:
+          type: array
+          description: "Box ids funding the miner fee (and, for token reserves, the recipient's min-ERG box). Every box must be unspent, token-free, and carry the recipient's P2PK ergoTree; the client signs them with the recipient secret. The tracker funds nothing."
+          items:
+            type: string
+          minItems: 1
+          example: ["1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]
     RedemptionBuildResponse:
       type: object
       description: Response for a built redemption transaction
@@ -2380,9 +2388,6 @@ components:
         unsigned_tx:
           type: object
           description: Node-canonical unsigned transaction JSON
-        partial_tx:
-          type: object
-          description: Fee-signed transaction JSON (reserve input proof empty)
         input_box_binaries:
           type: array
           description: Sigma-serialized input boxes (hex), in transaction-input order
@@ -2426,11 +2431,11 @@ components:
         change_amount:
           type: integer
           format: uint64
-          description: Change amount returned to the tracker
+          description: Change amount returned to the redeemer
           example: 123900000
         change_address:
           type: string
-          description: Address receiving change (always derived from the tracker's own wallet)
+          description: Address receiving change (the request's change_address, else the recipient)
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
         recipient_address:
           type: string

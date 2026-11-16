@@ -203,18 +203,34 @@ pub fn verify_reserve_input(
     Ok(())
 }
 
-/// Check a tracker-built redemption (`POST /redemption/build`) before the creditor signs input 0.
+/// Highest transaction fee a redemption build may charge the redeemer's own fee inputs
+/// (0.01 ERG, 10 times the tracker's default fee). The fee inputs are the redeemer's
+/// boxes (issue #15 review N17), so an uncapped fee output would let a dishonest tracker
+/// take them.
+pub const MAX_REDEMPTION_FEE: u64 = 10_000_000;
+
+/// Miner-fee contract ErgoTree (the well-known fee contract every build pays).
+const MINER_FEE_TREE_HEX: &str = "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304";
+
+/// Check a tracker-built redemption (`POST /redemption/build`) before the creditor signs.
 ///
-/// A `proveDlog(recipient)` proof covers the whole transaction and also satisfies every other
-/// input guarded by the recipient's P2PK script, so it is only produced for a transaction that:
-/// - describes its boxes truthfully: `input_boxes[i]` and `data_boxes[i]` hash to the ids in
+/// The creditor signs every input with the recipient secret (the reserve input's
+/// `proveDlog(receiver)` and the fee inputs' `proveDlog`, issue #15 review N17), so the
+/// transaction must:
+/// - describe its boxes truthfully: `input_boxes[i]` and `data_boxes[i]` hash to the ids in
 ///   `unsigned` (the prover evaluates the boxes it is given, the node the boxes the ids name);
-/// - spends the issuer's reserve at input 0 ([`verify_reserve_input`]) and no box with the
-///   recipient's P2PK script at any other input;
-/// - releases exactly `amount` from the reserve (context var #0 = redeem into output 0), so the
+/// - spend the issuer's reserve at input 0 ([`verify_reserve_input`]);
+/// - spend ONLY the fee boxes this client selected (`fee_box_ids`) besides the reserve, each
+///   a token-free box of the recipient's own P2PK — a tracker-added input guarded by the
+///   recipient's script would be spent by the very proofs the client produces;
+/// - release exactly `amount` from the reserve (context var #0 = redeem into output 0), so the
 ///   creditor's claim is not used up beyond what they are paid;
-/// - pays the recipient's P2PK at least `amount` (nanoERG, or the collateral token for a token
-///   note) in one output.
+/// - pay the recipient's P2PK at least `amount` (nanoERG, or the collateral token for a token
+///   note) in one output;
+/// - route every output to the reserve contract, the recipient's P2PK (payment and change),
+///   or the miner-fee contract capped at [`MAX_REDEMPTION_FEE`] — nothing else may receive
+///   value from the redeemer's fee inputs, and no ERG may be burned.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_redemption_tx(
     unsigned: &UnsignedTransaction,
     input_boxes: &[ErgoBox],
@@ -223,6 +239,7 @@ pub fn verify_redemption_tx(
     recipient_pk: &[u8; 33],
     denomination: &DenomKey,
     amount: u64,
+    fee_box_ids: &[String],
 ) -> Result<()> {
     let inputs = unsigned.inputs.as_slice();
     let input_ids: Vec<BoxId> = inputs.iter().map(|i| i.box_id).collect();
@@ -238,29 +255,40 @@ pub fn verify_redemption_tx(
     let reserve = &input_boxes[0];
     verify_reserve_input(reserve, issuer_pk, denomination)?;
     let recipient_tree = tree_bytes(&p2pk_tree(recipient_pk)?)?;
-    // Every other input must be a plain P2PK box of another key. The recipient's proof is valid
-    // for every input whose script reduces to proveDlog(recipient), not only boxes at the
-    // recipient's P2PK address: another Basis reserve redeeming one of the recipient's notes
-    // (the redeem path ends in `proveDlog(receiver)` and does not say where the funds go), the
-    // recipient's own reserve completing a refund, or a differently encoded or conditional
-    // script. The tracker's fee inputs are plain P2PK boxes of its wallet.
-    let recipient_point = parse_point(recipient_pk)?;
+    // Every other input must be one of the fee boxes THIS client selected and must carry
+    // the recipient's canonical P2PK tree, byte for byte: the client signs every input
+    // with the recipient secret, so a tracker-added input the secret can prove (another
+    // recipient box, a Basis reserve redeeming the recipient's note, a constant-segregated
+    // or conditional encoding of the recipient key) would be spent too. Box count and ids
+    // must match the request exactly.
+    if input_boxes.len() != 1 + fee_box_ids.len() {
+        return Err(anyhow!(
+            "transaction has {} inputs, expected the reserve plus the {} fee boxes sent",
+            input_boxes.len(),
+            fee_box_ids.len()
+        ));
+    }
+    let expected_fee_ids: std::collections::HashSet<&str> =
+        fee_box_ids.iter().map(String::as_str).collect();
     for (i, input) in input_boxes.iter().enumerate().skip(1) {
-        match Address::recreate_from_ergo_tree(&input.ergo_tree) {
-            Ok(Address::P2Pk(owner)) if *owner.h != recipient_point => {}
-            Ok(Address::P2Pk(_)) => {
-                return Err(anyhow!(
-                    "input {} is a box of the recipient's own P2PK; the reserve proof would \
-                     spend it",
-                    i
-                ))
-            }
-            _ => {
-                return Err(anyhow!(
-                    "input {} is not a plain P2PK box; the reserve proof could satisfy its script",
-                    i
-                ))
-            }
+        if tree_bytes(&input.ergo_tree)? != recipient_tree {
+            return Err(anyhow!(
+                "input {} is not the recipient's own P2PK box; refusing to sign it",
+                i
+            ));
+        }
+        if input.tokens.is_some() {
+            return Err(anyhow!(
+                "input {} carries tokens; fee inputs must be token-free",
+                i
+            ));
+        }
+        if !expected_fee_ids.contains(input.box_id().to_string().as_str()) {
+            return Err(anyhow!(
+                "input {} is box {}, which was not among the fee boxes this client selected",
+                i,
+                input.box_id()
+            ));
         }
     }
 
@@ -300,6 +328,56 @@ pub fn verify_redemption_tx(
             hex::encode(recipient_pk),
             amount,
             denomination.denomination_id()
+        ));
+    }
+
+    // Value routing: the fee inputs are the redeemer's own money, so every output must
+    // pay the reserve contract (the continuation), the recipient's P2PK (payment and
+    // change), or the miner-fee contract — and the fee must not exceed
+    // MAX_REDEMPTION_FEE. No ERG may vanish: outputs must sum to the inputs.
+    let reserve_tree = tree_bytes(&reserve.ergo_tree)?;
+    let fee_tree_bytes =
+        hex::decode(MINER_FEE_TREE_HEX).map_err(|e| anyhow!("fee contract hex: {}", e))?;
+    let fee_tree = tree_bytes(
+        &ErgoTree::sigma_parse_bytes(&fee_tree_bytes)
+            .map_err(|e| anyhow!("fee contract tree: {:?}", e))?,
+    )?;
+    let mut ergo_in: u64 = *reserve.value.as_u64();
+    for input in input_boxes.iter().skip(1) {
+        ergo_in = ergo_in.saturating_add(*input.value.as_u64());
+    }
+    let mut ergo_out: u64 = 0;
+    for (i, o) in outputs.iter().enumerate() {
+        let tree = tree_bytes(&o.ergo_tree)?;
+        if tree == reserve_tree || tree == recipient_tree {
+            // Reserve continuation, recipient payment, or redeemer change.
+        } else if tree == fee_tree {
+            if o.tokens.is_some() {
+                return Err(anyhow!("fee output {} carries tokens", i));
+            }
+            let v = *o.value.as_u64();
+            if v > MAX_REDEMPTION_FEE {
+                return Err(anyhow!(
+                    "fee output {} is {} nanoERG, more than the {} nanoERG cap",
+                    i,
+                    v,
+                    MAX_REDEMPTION_FEE
+                ));
+            }
+        } else {
+            return Err(anyhow!(
+                "output {} pays a script that is neither the reserve contract, the \
+                 recipient, nor the miner-fee contract",
+                i
+            ));
+        }
+        ergo_out = ergo_out.saturating_add(*o.value.as_u64());
+    }
+    if ergo_in != ergo_out {
+        return Err(anyhow!(
+            "outputs total {} nanoERG but inputs carry {}: value would be burned",
+            ergo_out,
+            ergo_in
         ));
     }
     Ok(())
@@ -732,12 +810,18 @@ mod tests {
         )
     }
 
-    /// A redemption shaped like basis_server's `/redemption/build`.
+    /// A redemption shaped like basis_server's `/redemption/build`: the reserve at input 0,
+    /// the recipient's own P2PK boxes funding the fee (N17), and outputs paying the reserve
+    /// continuation, the recipient, the miner fee, and the recipient's change.
     struct Case {
         denomination: DenomKey,
         inputs: Vec<ErgoBox>,
         data: Vec<ErgoBox>,
         outputs: Vec<ErgoBoxCandidate>,
+    }
+
+    fn miner_fee_tree() -> ErgoTree {
+        ErgoTree::sigma_parse_bytes(&hex::decode(MINER_FEE_TREE_HEX).unwrap()).unwrap()
     }
 
     impl Case {
@@ -746,7 +830,7 @@ mod tests {
             let fee_input = on_chain(
                 candidate(
                     10_000_000,
-                    p2pk(TRACKER_PK),
+                    p2pk(RECIPIENT_PK),
                     None,
                     NonMandatoryRegisters::empty(),
                 ),
@@ -791,9 +875,21 @@ mod tests {
                     ),
                 ),
             };
+            let fee_out = candidate(
+                1_000_000,
+                miner_fee_tree(),
+                None,
+                NonMandatoryRegisters::empty(),
+            );
+            // The redeemer's change returns to the recipient. Token reserves also fund
+            // the recipient's min-ERG box out of the fee inputs.
+            let change_value = match denomination {
+                DenomKey::Erg => 9_000_000,
+                DenomKey::Token(_) => 8_000_000,
+            };
             let change = candidate(
-                8_000_000,
-                p2pk(TRACKER_PK),
+                change_value,
+                p2pk(RECIPIENT_PK),
                 None,
                 NonMandatoryRegisters::empty(),
             );
@@ -801,7 +897,7 @@ mod tests {
                 denomination,
                 inputs: vec![reserve, fee_input],
                 data: vec![tracker_box],
-                outputs: vec![reserve_out, recipient_out, change],
+                outputs: vec![reserve_out, recipient_out, fee_out, change],
             }
         }
 
@@ -831,7 +927,7 @@ mod tests {
             UnsignedTransaction::new_from_vec(inputs, data, self.outputs.clone()).unwrap()
         }
 
-        fn verify(&self) -> Result<()> {
+        fn verify_with_fee_ids(&self, fee_box_ids: &[String]) -> Result<()> {
             verify_redemption_tx(
                 &self.unsigned(),
                 &self.inputs,
@@ -840,7 +936,16 @@ mod tests {
                 &pk(RECIPIENT_PK),
                 &self.denomination,
                 AMOUNT,
+                fee_box_ids,
             )
+        }
+
+        fn verify(&self) -> Result<()> {
+            let fee_box_ids: Vec<String> = self.inputs[1..]
+                .iter()
+                .map(|b| b.box_id().to_string())
+                .collect();
+            self.verify_with_fee_ids(&fee_box_ids)
         }
 
         fn err(&self) -> String {
@@ -860,6 +965,7 @@ mod tests {
     fn redemption_rejects_misdescribed_boxes() {
         let case = Case::honest(DenomKey::Erg);
         let unsigned = case.unsigned();
+        let fee_box_ids: Vec<String> = vec![case.inputs[1].box_id().to_string()];
         let other = on_chain(
             candidate(
                 1_000_000,
@@ -878,6 +984,7 @@ mod tests {
                 &pk(RECIPIENT_PK),
                 &DenomKey::Erg,
                 AMOUNT,
+                &fee_box_ids,
             )
             .expect_err("box list must be rejected")
             .to_string()
@@ -924,8 +1031,10 @@ mod tests {
         assert!(case.err().contains("not a reserve under the token:"));
     }
 
+    /// N17: the client signs every input, so any input beyond the reserve and the
+    /// client-selected fee boxes — even one of the recipient's own boxes — is rejected.
     #[test]
-    fn redemption_rejects_recipient_box_at_other_input() {
+    fn redemption_rejects_undeclared_extra_input() {
         let mut case = Case::honest(DenomKey::Erg);
         case.inputs.push(on_chain(
             candidate(
@@ -936,46 +1045,56 @@ mod tests {
             ),
             3,
         ));
-        case.outputs[2] = candidate(
-            5_008_000_000,
-            p2pk(TRACKER_PK),
+        case.outputs[3] = candidate(
+            5_009_000_000,
+            p2pk(RECIPIENT_PK),
             None,
             NonMandatoryRegisters::empty(),
         );
-        assert!(case.err().contains("input 2 is a box of the recipient"));
+        // fee_box_ids covers only inputs[1], so the pushed box trips the count check.
+        let fee_box_ids: Vec<String> = vec![case.inputs[1].box_id().to_string()];
+        let err = case
+            .verify_with_fee_ids(&fee_box_ids)
+            .expect_err("an undeclared input must be rejected")
+            .to_string();
+        assert!(err.contains("inputs, expected"), "{err}");
     }
 
-    /// A reserve redeems into whatever outputs the transaction has once the receiver signs
-    /// (`... && proveDlog(receiver)`), so another issuer's reserve, or the issuer's reserve in
-    /// another denomination, at a later input would let the tracker redeem the recipient's other
-    /// notes to itself with the same proof.
+    /// N17: a fee input that is not the recipient's own P2PK box is rejected even when
+    /// the tracker names it among the declared fee boxes.
     #[test]
-    fn redemption_rejects_other_reserves_at_other_inputs() {
-        for extra in [
-            reserve_box(&DenomKey::Erg, TRACKER_PK),
-            reserve_box(&token_denom(), ISSUER_PK),
-            reserve_box(&DenomKey::Erg, RECIPIENT_PK),
-        ] {
-            let mut case = Case::honest(DenomKey::Erg);
-            case.inputs.push(on_chain(
-                candidate(
-                    *extra.value.as_u64(),
-                    extra.ergo_tree.clone(),
-                    extra.tokens.clone(),
-                    extra.additional_registers.clone(),
-                ),
-                3,
-            ));
-            assert!(
-                case.err().contains("input 2 is not a plain P2PK box"),
-                "{}",
-                case.err()
-            );
-        }
+    fn redemption_rejects_foreign_fee_box() {
+        let mut case = Case::honest(DenomKey::Erg);
+        case.inputs[1] = on_chain(
+            candidate(
+                10_000_000,
+                p2pk(TRACKER_PK),
+                None,
+                NonMandatoryRegisters::empty(),
+            ),
+            1,
+        );
+        assert!(case.err().contains("not the recipient's own P2PK box"));
+    }
+
+    /// N17: a token-bearing fee input is rejected — its tokens would be stuck or stolen.
+    #[test]
+    fn redemption_rejects_token_bearing_fee_input() {
+        let mut case = Case::honest(DenomKey::Erg);
+        case.inputs[1] = on_chain(
+            candidate(
+                10_000_000,
+                p2pk(RECIPIENT_PK),
+                tokens(&[(TOKEN_ID, 5)]),
+                NonMandatoryRegisters::empty(),
+            ),
+            1,
+        );
+        assert!(case.err().contains("carries tokens"));
     }
 
     /// The recipient's key under another encoding of the same proposition (constant
-    /// segregation) is still the recipient's box.
+    /// segregation) is still not the plain P2PK tree the client agreed to sign.
     #[test]
     fn redemption_rejects_recipient_key_under_another_tree_encoding() {
         use ergo_lib::ergotree_ir::ergo_tree::ErgoTreeHeader;
@@ -992,16 +1111,79 @@ mod tests {
         );
 
         let mut case = Case::honest(DenomKey::Erg);
-        case.inputs.push(on_chain(
+        case.inputs[1] = on_chain(
+            candidate(10_000_000, segregated, None, NonMandatoryRegisters::empty()),
+            1,
+        );
+        assert!(case.err().contains("not the recipient's own P2PK box"));
+    }
+
+    /// A reserve redeems into whatever outputs the transaction has once the receiver signs
+    /// (`... && proveDlog(receiver)`), so another issuer's reserve, or the issuer's reserve in
+    /// another denomination, at a later input would let the tracker redeem the recipient's other
+    /// notes to itself with the same proof.
+    #[test]
+    fn redemption_rejects_other_reserves_at_other_inputs() {
+        for extra in [
+            reserve_box(&DenomKey::Erg, TRACKER_PK),
+            reserve_box(&token_denom(), ISSUER_PK),
+            reserve_box(&DenomKey::Erg, RECIPIENT_PK),
+        ] {
+            let mut case = Case::honest(DenomKey::Erg);
+            let extra = on_chain(
+                candidate(
+                    *extra.value.as_u64(),
+                    extra.ergo_tree.clone(),
+                    extra.tokens.clone(),
+                    extra.additional_registers.clone(),
+                ),
+                3,
+            );
+            let mut fee_box_ids: Vec<String> = vec![case.inputs[1].box_id().to_string()];
+            fee_box_ids.push(extra.box_id().to_string());
+            case.inputs.push(extra);
+            let err = case
+                .verify_with_fee_ids(&fee_box_ids)
+                .expect_err("a reserve at another input must be rejected")
+                .to_string();
+            assert!(err.contains("not the recipient's own P2PK box"), "{}", err);
+        }
+    }
+
+    /// N17: the fee output is paid from the redeemer's own boxes, so it is capped.
+    #[test]
+    fn redemption_rejects_excessive_fee_output() {
+        let mut case = Case::honest(DenomKey::Erg);
+        // A larger fee box keeps the transaction fundable with the excessive fee.
+        case.inputs[1] = on_chain(
             candidate(
-                5_000_000_000,
-                segregated,
+                20_000_000,
+                p2pk(RECIPIENT_PK),
                 None,
                 NonMandatoryRegisters::empty(),
             ),
-            3,
-        ));
-        assert!(case.err().contains("input 2 is a box of the recipient"));
+            1,
+        );
+        case.outputs[2].value = value(MAX_REDEMPTION_FEE + 1);
+        case.outputs[3].value = value(20_000_000 - MAX_REDEMPTION_FEE - 1);
+        assert!(case.err().contains("fee output"));
+    }
+
+    /// N17: no output may pay a script other than the reserve contract, the recipient,
+    /// or the miner-fee contract — that is how a tracker would siphon the change.
+    #[test]
+    fn redemption_rejects_change_paying_a_foreign_script() {
+        let mut case = Case::honest(DenomKey::Erg);
+        case.outputs[3].ergo_tree = p2pk(TRACKER_PK);
+        assert!(case.err().contains("neither the reserve contract"));
+    }
+
+    /// N17: outputs must conserve the inputs' ERG; a smaller change output burns value.
+    #[test]
+    fn redemption_rejects_burned_value() {
+        let mut case = Case::honest(DenomKey::Erg);
+        case.outputs[3].value = value(8_000_000);
+        assert!(case.err().contains("burned"));
     }
 
     #[test]
@@ -1014,10 +1196,10 @@ mod tests {
         // Recipient underpaid.
         let mut case = Case::honest(DenomKey::Erg);
         case.outputs[1].value = value(AMOUNT - 1);
-        case.outputs[2].value = value(8_000_001);
+        case.outputs[3].value = value(9_000_001);
         assert!(case.err().contains("no output pays the recipient"));
 
-        // Token note: ERG to the recipient, the collateral tokens to the tracker.
+        // Token note: ERG to the recipient, the collateral tokens routed to the tracker.
         let mut case = Case::honest(token_denom());
         case.outputs[1] = candidate(
             AMOUNT,
@@ -1025,7 +1207,8 @@ mod tests {
             None,
             NonMandatoryRegisters::empty(),
         );
-        case.outputs[2].tokens = tokens(&[(TOKEN_ID, AMOUNT)]);
+        case.outputs[3].ergo_tree = p2pk(TRACKER_PK);
+        case.outputs[3].tokens = tokens(&[(TOKEN_ID, AMOUNT)]);
         assert!(case.err().contains("no output pays the recipient"));
     }
 
@@ -1035,7 +1218,7 @@ mod tests {
         // recipient is paid as asked and the rest goes to the tracker.
         let mut case = Case::honest(DenomKey::Erg);
         case.outputs[0].value = value(RESERVE_COLLATERAL - 2 * AMOUNT);
-        case.outputs[2].value = value(8_000_000 + AMOUNT);
+        case.outputs[3].value = value(9_000_000 + AMOUNT);
         assert!(case.err().contains("releases"));
 
         let mut case = Case::honest(token_denom());
@@ -1043,7 +1226,7 @@ mod tests {
             (RESERVE_NFT, 1),
             (TOKEN_ID, RESERVE_COLLATERAL - 2 * AMOUNT),
         ]);
-        case.outputs[2].tokens = tokens(&[(TOKEN_ID, AMOUNT)]);
+        case.outputs[3].tokens = tokens(&[(TOKEN_ID, AMOUNT)]);
         assert!(case.err().contains("releases"));
     }
 

@@ -168,10 +168,13 @@ See the "Fifth Redemption Test" section in
 
 A second off-chain signing topology shifts more work to the tracker: the tracker's
 `POST /redemption/build` endpoint builds the unsigned transaction (reserve-input
-extension already in Scala order), signs the **fee input(s)** itself with the
-configured `tracker_secret_key`, and returns the partial transaction plus all signing
-material (input/data box binaries, last 10 headers). The client only adds the reserve
-input's `proveDlog(recipient)` over the same `bytes_to_sign` and posts the fully-signed
+extension already in Scala order) around **caller-supplied fee inputs** — the redeemer
+funds the miner fee (and, for token reserves, the recipient's min-ERG box) with their
+own P2PK boxes, so the tracker pays and signs nothing in the transaction (issue #15
+review N17). The build returns the unsigned transaction plus all signing material
+(input/data box binaries, last 10 headers). The client signs every input — the reserve
+input's `proveDlog(recipient)` and the fee inputs, all under the recipient key — over
+the same `bytes_to_sign` and posts the fully-signed
 transaction to `POST /redemption/submit`, which broadcasts it and syncs the tracker's
 note/reserve-tree state (see
 [redemption_state_spec.md](../server/redemption_state_spec.md#tracker-assisted-2-phase-endpoints-redemptionbuild-redemptionsubmit)).
@@ -186,8 +189,8 @@ in [redemption_execution_report.md](../redemption_execution_report.md)).
 | Party | Produces in this variant |
 |-------|--------------------------|
 | Issuer (client) | issuer Schnorr signature over the 80-byte message (build request) |
-| Tracker server | unsigned tx, all AVL proofs, tracker Schnorr signature (`#6`), **fee-input `proveDlog`**, broadcast, state sync |
-| Receiver (client) | `proveDlog(receiver)` over `bytes_to_sign` spliced into the reserve input |
+| Tracker server | unsigned tx, all AVL proofs, tracker Schnorr signature (`#6`), broadcast, state sync |
+| Receiver (client) | fee input boxes, `proveDlog(receiver)` over `bytes_to_sign` for the reserve input **and every fee input** |
 | Ergo node | validates only; does not sign |
 
 ## References

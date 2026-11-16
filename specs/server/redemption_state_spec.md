@@ -28,9 +28,9 @@ pub struct RedemptionRequest {
     pub current_height: u64,
     /// Recipient's address for the redemption output
     pub recipient_address: String,
-    /// Change address for transaction outputs (derived from the tracker pubkey if not
-    /// specified). Deprecated on server-built transactions: where the tracker builds the
-    /// transaction (`/redemption/build`) change always returns to the tracker.
+    /// Change address for transaction outputs. On server-built transactions
+    /// (`/redemption/build`) the redeemer funds the fee inputs, so change returns to the
+    /// redeemer: the caller-supplied change address, or the recipient address by default.
     pub change_address: String,
     /// Issuer's 65-byte Schnorr signature (130 hex chars)
     pub issuer_signature: String,
@@ -407,18 +407,24 @@ before the signature is issued. `emergency: true` requests are not policy-checke
 
 ## Tracker-Assisted 2-Phase Endpoints (`/redemption/build`, `/redemption/submit`)
 
-In this flow the tracker builds the unsigned transaction and signs the fee input(s)
-locally (using the configured `tracker_secret_key`); the client (CLI/TUI/cold signer)
-adds the reserve input's `proveDlog(recipient)` over the identical `bytes_to_sign` and
-returns the fully-signed transaction for broadcast. Neither end reorders the reserve
-input's context extension — the build emits it in the node's canonical (Scala index)
-order, and the client splices the proof into that exact transaction.
+In this flow the tracker builds the unsigned transaction around **caller-supplied fee
+inputs** (`fee_box_ids`): the redeemer funds the miner fee (and, for token reserves, the
+recipient's min-ERG box) with their own P2PK boxes, so a build costs the tracker nothing
+and cannot drain the tracker wallet (issue #15 review N17). The tracker signs nothing in
+the transaction — the client (CLI/TUI/cold signer) signs every input (the reserve input's
+`proveDlog(recipient)` and the fee inputs, all under the recipient key) over the identical
+`bytes_to_sign` and returns the fully-signed transaction for broadcast. Neither end
+reorders the reserve input's context extension — the build emits it in the node's
+canonical (Scala index) order, and the client splices the proof into that exact
+transaction.
 
 ### POST /redemption/build
 
 Builds the unsigned redemption transaction, generates all AVL proofs, computes the
-tracker Schnorr signature (context var `#6`), selects the reserve and fee boxes, and
-signs the fee input(s).
+tracker Schnorr signature (context var `#6`), and selects the reserve box. The client
+names the fee boxes; each must be unspent (`/utxo/byId`), token-free, and carry the
+recipient's P2PK ergoTree, and their total must cover the fee (plus the recipient's
+min-ERG box value for token reserves).
 
 **Reserve selection:** smallest sufficient reserve that is unspent (`/utxo/byId`) and
 whose on-chain R5 digest equals the tracker's local reserve-tree digest. A mismatch
@@ -434,7 +440,6 @@ tree entry; the on-chain contract only sees the spent reserve's tree.
 ```json
 {
   "unsigned_tx": { "...": "node-canonical unsigned tx (extension in Scala order)" },
-  "partial_tx": { "...": "fee-signed tx; reserve input proof empty" },
   "input_box_binaries": ["sigma-serialized boxes, tx-input order"],
   "data_box_binaries": ["tracker box"],
   "headers": ["last 10 block headers for PreHeader/ErgoStateContext"],
@@ -449,10 +454,14 @@ tree entry; the on-chain contract only sees the spent reserve's tree.
 note's `amount_collected`/`timestamp`/`tracker_nft_id`; request `amount`/`timestamp` values are
 ignored for signing. The endpoint returns `404 Not Found` when there is no stored note for the
 (issuer, recipient) pair, `409 Conflict` when the issuer has more than one tracked reserve
-(fail-closed against per-reserve replay), and `429 Too Many Requests` when the per-(issuer,
-recipient) rate limit is exceeded — `server.redemption_build_max_per_pair_per_hour`, default 60
-per hour over a rolling window (the tracker funds the fee inputs, so unbounded building would
-drain its wallet).
+(fail-closed against per-reserve replay), and `429 Too Many Requests` when a rate limit is
+exceeded — `server.redemption_build_max_per_pair_per_hour` (default 60/hour per
+(issuer, recipient) pair) and `server.redemption_build_max_per_issuer_per_hour` (default
+240/hour per issuer, which makes recipient-key rotation useless to an abuser), both over a
+rolling window. Only builds that pass every validation step consume quota, so junk builds
+cannot lock a victim out; the pending-redemption registry additionally caps entries per
+issuer (64) and evicts the oldest entry when globally full rather than rejecting everyone
+with 503 (issue #15 review N17).
 
 ### POST /redemption/submit
 

@@ -72,7 +72,8 @@ pub struct RedemptionRequest {
     pub current_height: u64, // Stored as u64 from API, converted to u32 for transaction builder
     /// Recipient's address for redemption output
     pub recipient_address: String,
-    /// Change address for transaction outputs (derived from tracker pubkey if not specified)
+    /// Change address for transaction outputs (the redeemer's own address: derived
+    /// from the first fee input's P2PK key, or the recipient address, if not specified)
     pub change_address: String,
     /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
     /// Signs: debtKey || totalDebt || timestamp || trackerNftId (80 bytes)

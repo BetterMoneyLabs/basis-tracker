@@ -126,6 +126,7 @@ mod pr16_security_remediation {
                 reserve_creation_max_erg_nano: 10_000_000_000,
                 reserve_creation_max_token_amount: 1_000_000_000,
                 redemption_build_max_per_pair_per_hour: max_builds_per_pair_per_hour,
+                redemption_build_max_per_issuer_per_hour: 240,
             },
             ergo: basis_server::config::ErgoConfig {
                 scanner: basis_store::ergo_scanner::NodeConfig {
@@ -584,21 +585,24 @@ mod pr16_security_remediation {
             tracker_box_id: None,
             change_address: None,
             denomination: String::new(),
+            fee_box_ids: vec![],
         }
     }
 
     #[tokio::test]
-    async fn build_redemption_rate_limits_per_pair() {
+    async fn build_redemption_junk_builds_do_not_consume_quota() {
+        // N17: the rate limiter counts only post-validation (successful) builds, so
+        // repeatedly submitting builds that fail validation (here: no note exists)
+        // must never exhaust the pair's quota — a victim cannot be locked out by
+        // junk requests. Limiter mechanics themselves are unit-tested in
+        // `redemption_build.rs`.
         let state = mock_state(2).await;
         let (_, issuer) = generate_keypair();
         let (_, recipient) = generate_keypair();
-        let (_, other_recipient) = generate_keypair();
         let issuer_hex = hex::encode(issuer);
         let recipient_hex = hex::encode(recipient);
 
-        // No note exists for the pair, so builds that pass the rate limiter fail with 400
-        // ("note not found"); the limit+1-th build must instead fail with 429.
-        for attempt in 0..2 {
+        for attempt in 0..5 {
             let (status, body) = build_redemption(
                 axum::extract::State(state.clone()),
                 axum::extract::Json(build_request(&issuer_hex, &recipient_hex)),
@@ -607,29 +611,9 @@ mod pr16_security_remediation {
             assert_eq!(
                 status,
                 StatusCode::BAD_REQUEST,
-                "attempt {attempt} should pass the rate limiter, body: {:?}",
+                "attempt {attempt}: junk builds must fail validation without hitting 429, body: {:?}",
                 body
             );
         }
-
-        let (status, body) = build_redemption(
-            axum::extract::State(state.clone()),
-            axum::extract::Json(build_request(&issuer_hex, &recipient_hex)),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::TOO_MANY_REQUESTS,
-            "limit+1 builds must be rate limited, body: {:?}",
-            body
-        );
-
-        // A different (issuer, recipient) pair is unaffected.
-        let (status, _) = build_redemption(
-            axum::extract::State(state),
-            axum::extract::Json(build_request(&issuer_hex, &hex::encode(other_recipient))),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

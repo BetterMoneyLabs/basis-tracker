@@ -101,13 +101,15 @@ curl -X GET "http://localhost:3048/proof?issuer=<alice_public_key>&recipient=<bo
 ### Create Redemption Request
 
 > **Note:** `POST /redeem` was removed (issue #15 review N7). Redemptions are built
-> with `POST /redemption/build` (the tracker returns the unsigned transaction and
-> signs the fee inputs), signed locally by the creditor, and broadcast with
+> with `POST /redemption/build` (the tracker returns the unsigned transaction around
+> caller-supplied, recipient-owned fee inputs — the redeemer funds the fee), signed
+> locally by the creditor, and broadcast with
 > `POST /redemption/submit` (which also syncs tracker state). The CLI
 > (`note redeem`) and the TUI drive this flow end to end.
 
 ```bash
-# Build the unsigned redemption transaction
+# Build the unsigned redemption transaction (fee boxes must be unspent,
+# token-free P2PK boxes of the recipient covering the miner fee)
 curl -X POST http://localhost:3048/redemption/build \
   -H "Content-Type: application/json" \
   -d '{
@@ -115,7 +117,8 @@ curl -X POST http://localhost:3048/redemption/build \
     "recipient_pubkey": "<bob_public_key>",
     "amount": 1000000,
     "timestamp": <note_timestamp>,
-    "issuer_signature": "<alice_signature_for_redemption>"
+    "issuer_signature": "<alice_signature_for_redemption>",
+    "fee_box_ids": ["<bob_fee_box_id>"]
   }'
 ```
 

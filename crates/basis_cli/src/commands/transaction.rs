@@ -19,7 +19,7 @@ const NODE_URL: &str = "http://127.0.0.1:9053";
 const API_KEY: &str = "hello";
 const TRANSACTION_FEE: u64 = 1_000_000;
 /// Minimum ERG value for the recipient output box when redeeming token-backed reserves.
-const TOKEN_RECIPIENT_MIN_VALUE_NANOERG: u64 = 1_000_000;
+pub const TOKEN_RECIPIENT_MIN_VALUE_NANOERG: u64 = 1_000_000;
 
 /// Encode an unsigned integer using Ergo's VLQ (Variable-Length Quantity) encoding.
 /// Bytes are emitted least-significant group first (little-endian VLQ).
@@ -919,7 +919,40 @@ pub async fn execute_local_redemption(
         crate::verify::redemption_issuer_signature(&issuer_pk, &note.signature, &message)?;
     let issuer_signature_hex = hex::encode(issuer_signature);
 
-    // The tracker builds the unsigned transaction and signs the fee input(s).
+    // The redeemer funds the fee (and, for token reserves, the recipient's min-ERG box)
+    // with their own P2PK boxes (issue #15 review N17): the tracker pays nothing. Select
+    // boxes of the recipient's own ergoTree from the node wallet — the same key that signs
+    // the reserve input signs them. The target is the standard fee with slack; the server
+    // validates that the boxes actually cover its configured fee and change returns to
+    // the redeemer.
+    let recipient_address = pubkey_to_address(recipient_pubkey)?;
+    let recipient_tree = basis_offchain::ergo_tx::address_to_ergo_tree(&recipient_address)
+        .map_err(|e| anyhow::anyhow!("recipient P2PK tree: {}", e))?;
+    let fee_target = REDEMPTION_FEE_TARGET_NANOERG
+        + if matches!(denom, basis_store::DenomKey::Token(_)) {
+            TOKEN_RECIPIENT_MIN_VALUE_NANOERG
+        } else {
+            0
+        };
+    let wallet_boxes = client
+        .get_wallet_boxes(NODE_URL, Some(API_KEY))
+        .await
+        .map_err(|e| anyhow::anyhow!("node wallet boxes for fee funding: {}", e))?;
+    // The reserve and tracker box ids are not known until the build returns; the server
+    // rejects a fee list containing the reserve box, and the recipient wallet does not
+    // hold either box in the normal setup.
+    let (fee_boxes, _) =
+        select_fee_inputs(&wallet_boxes, fee_target, "", "", Some(&recipient_tree)).ok_or_else(
+            || {
+                anyhow::anyhow!(
+                    "no recipient P2PK wallet boxes covering {} nanoERG for the redemption fee",
+                    fee_target
+                )
+            },
+        )?;
+    let fee_box_ids: Vec<String> = fee_boxes.iter().map(|b| b.box_id.clone()).collect();
+
+    // The tracker builds the unsigned transaction around those fee inputs.
     progress!("🔍 Requesting tracker build (POST /redemption/build)...");
     let build = client
         .redemption_build(crate::api::RedemptionBuildRequest {
@@ -932,6 +965,7 @@ pub async fn execute_local_redemption(
             tracker_box_id,
             change_address,
             denomination: denom.denomination_id(),
+            fee_box_ids: fee_box_ids.clone(),
         })
         .await
         .map_err(|e| anyhow::anyhow!("tracker build failed: {}", e))?;
@@ -947,9 +981,6 @@ pub async fn execute_local_redemption(
     // Reconstruct the signing material the tracker produced.
     let unsigned: UnsignedTransaction = serde_json::from_value(build.unsigned_tx.clone())
         .map_err(|e| anyhow::anyhow!("parse unsigned tx: {}", e))?;
-    let partial: ergo_lib::chain::transaction::Transaction =
-        serde_json::from_value(build.partial_tx)
-            .map_err(|e| anyhow::anyhow!("parse partial tx: {}", e))?;
     let parse_box = |h: &str| -> Result<ErgoBox> {
         let bytes = hex::decode(h).map_err(|e| anyhow::anyhow!("box hex: {}", e))?;
         ErgoBox::sigma_parse_bytes(&bytes).map_err(|e| anyhow::anyhow!("box parse: {:?}", e))
@@ -975,7 +1006,7 @@ pub async fn execute_local_redemption(
         .map_err(|_| anyhow::anyhow!("headers array"))?;
 
     // Nothing the tracker built is signed with the recipient's key until it is checked
-    // to be this note's redemption.
+    // to be this note's redemption spending only the fee boxes selected above.
     crate::verify::verify_redemption_tx(
         &unsigned,
         &input_boxes,
@@ -984,29 +1015,37 @@ pub async fn execute_local_redemption(
         &recipient_pk,
         &denom,
         amount,
+        &fee_box_ids,
     )
     .map_err(|e| anyhow::anyhow!("refusing to sign the tracker's redemption: {}", e))?;
 
-    // Recipient (receiver) secret for the reserve input's proveDlog(recipient).
-    let recipient_address = pubkey_to_address(recipient_pubkey)?;
+    // Recipient (receiver) secret: proves the reserve input's proveDlog(recipient) and
+    // the recipient-P2PK fee inputs.
     let recipient_secret =
         resolve_dlog_secret(&recipient_secret, client, &recipient_address, "recipient").await?;
     let recipient_sk = SecretKey::dlog_from_bytes(&recipient_secret)
         .ok_or_else(|| anyhow::anyhow!("invalid recipient dlog secret"))?;
 
-    // Add the reserve input (index 0) proof over the same bytes_to_sign.
-    progress!("🖊️  Signing the reserve input locally (proveDlog(recipient))...");
-    let signed = add_input_proof(
-        &unsigned,
-        Some(&partial),
-        &input_boxes,
-        &data_boxes,
-        &pre_header,
-        &headers,
-        0,
-        &recipient_sk,
-    )
-    .map_err(|e| anyhow::anyhow!("reserve proof failed: {:?}", e))?;
+    // Sign every input locally over the same bytes_to_sign: the reserve input (index 0)
+    // first, then the fee inputs.
+    progress!("🖊️  Signing the reserve and fee inputs locally (recipient key)...");
+    let mut partial: Option<ergo_lib::chain::transaction::Transaction> = None;
+    for idx in 0..unsigned.inputs.len() {
+        partial = Some(
+            add_input_proof(
+                &unsigned,
+                partial.as_ref(),
+                &input_boxes,
+                &data_boxes,
+                &pre_header,
+                &headers,
+                idx,
+                &recipient_sk,
+            )
+            .map_err(|e| anyhow::anyhow!("input {} proof failed: {:?}", idx, e))?,
+        );
+    }
+    let signed = partial.ok_or_else(|| anyhow::anyhow!("transaction has no inputs"))?;
 
     // Submit through the tracker: it broadcasts the fully-signed transaction and syncs
     // its note and reserve-tree state from the stored build entry (single-use).
@@ -1256,6 +1295,11 @@ pub async fn redeem_tracker_assisted(
     Ok(RedemptionBroadcastResult { tx_id })
 }
 
+/// Fee funding target for tracker-assisted redemptions of ERG notes, in nanoERG: the
+/// tracker's default fee (0.001 ERG) with slack. The server validates that the selected
+/// boxes actually cover its configured fee; change returns to the redeemer (N17).
+pub const REDEMPTION_FEE_TARGET_NANOERG: u64 = 2 * TRANSACTION_FEE;
+
 /// Select wallet boxes covering the required fee amount.
 ///
 /// Prefer boxes without tokens and exclude the reserve box being spent and the
@@ -1265,7 +1309,7 @@ pub async fn redeem_tracker_assisted(
 /// signing where every fee input must be provable with the same dlog secret.
 /// If the wallet only has token-bearing boxes, fall back to them and preserve
 /// their tokens in the change output.
-fn select_fee_inputs(
+pub fn select_fee_inputs(
     wallet_boxes: &[crate::api::ErgoBoxDetails],
     required: u64,
     reserve_box_id: &str,

@@ -64,7 +64,7 @@ The `transaction` command has two distinct subcommands, using different server e
 | Subcommand | Server endpoints | Signing | Notes |
 |---|---|---|---|
 | `generate-redemption` | `GET /tracker/proof`, `GET /reserve/proof`, `GET /config/*` | Client-side by default with `--local-sign`; otherwise emits an unsigned tx for the node wallet | Does **not** call `POST /redeem`, so the server does not verify the issuer signature for this path — the reserve contract is the enforcement point |
-| `redeem-assisted` | `POST /redemption/build` then `POST /redemption/submit` | Tracker signs the fee inputs; CLI signs the issuer message and adds the reserve `proveDlog(recipient)` | The 2-phase "new" server flow |
+| `redeem-assisted` | `POST /redemption/build` then `POST /redemption/submit` | The CLI funds the fee with recipient-owned boxes and signs every input with the recipient key; the tracker signs nothing in the transaction | The 2-phase "new" server flow |
 
 Both accept `--issuer-pubkey <hex> --recipient-pubkey <hex> --amount <nanoERG>`.
 

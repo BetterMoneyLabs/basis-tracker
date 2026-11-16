@@ -58,10 +58,15 @@ pub struct ServerConfig {
     #[serde(default = "default_reserve_creation_max_token_amount")]
     pub reserve_creation_max_token_amount: u64,
     /// Maximum `/redemption/build` calls per (issuer, recipient) pair per hour.
-    /// Bounds the fee cost a self-redeeming user can impose on the tracker
-    /// wallet (the tracker pays the fee inputs). Default: 60.
+    /// Counted only for builds that pass all validation (issue #15 review N17).
+    /// Default: 60.
     #[serde(default = "default_redemption_build_max_per_pair_per_hour")]
     pub redemption_build_max_per_pair_per_hour: u32,
+    /// Maximum `/redemption/build` calls per issuer per hour, across all recipients.
+    /// This is the rotation-proof cap: fresh recipient keys reset the per-pair budget
+    /// but never this one (issue #15 review N17). Default: 240.
+    #[serde(default = "default_redemption_build_max_per_issuer_per_hour")]
+    pub redemption_build_max_per_issuer_per_hour: u32,
 }
 
 fn default_reserve_creation_max_erg_nano() -> u64 {
@@ -74,6 +79,10 @@ fn default_reserve_creation_max_token_amount() -> u64 {
 
 fn default_redemption_build_max_per_pair_per_hour() -> u32 {
     60
+}
+
+fn default_redemption_build_max_per_issuer_per_hour() -> u32 {
+    240
 }
 
 /// Authentication configuration.
@@ -883,6 +892,8 @@ mod tests {
                 reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
                 redemption_build_max_per_pair_per_hour:
                     default_redemption_build_max_per_pair_per_hour(),
+                redemption_build_max_per_issuer_per_hour:
+                    default_redemption_build_max_per_issuer_per_hour(),
             },
             ergo: ErgoConfig {
                 scanner: NodeConfig {
@@ -973,6 +984,8 @@ mod tests {
                 reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
                 redemption_build_max_per_pair_per_hour:
                     default_redemption_build_max_per_pair_per_hour(),
+                redemption_build_max_per_issuer_per_hour:
+                    default_redemption_build_max_per_issuer_per_hour(),
             },
             ergo: ErgoConfig {
                 scanner: NodeConfig {
@@ -1102,6 +1115,8 @@ mod tests {
                 reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
                 redemption_build_max_per_pair_per_hour:
                     default_redemption_build_max_per_pair_per_hour(),
+                redemption_build_max_per_issuer_per_hour:
+                    default_redemption_build_max_per_issuer_per_hour(),
             },
             ergo: ErgoConfig {
                 scanner: NodeConfig::default(),

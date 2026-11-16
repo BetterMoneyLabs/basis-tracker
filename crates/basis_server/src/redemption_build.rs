@@ -3,11 +3,14 @@
 //! This mirrors the proven CLI local-sign flow (`basis_cli::commands::transaction`), split across
 //! two parties:
 //!   * `POST /redemption/build`  — the tracker constructs the unsigned redemption transaction
-//!     (same byte layout the node and reserve contract accept, context extension in Scala order),
-//!     selects wallet fee inputs, and signs ONLY the fee input(s) locally with its own secret.
-//!     It returns the unsigned tx, the fee-signed partial tx, and the sigma-serialized input/data
-//!     boxes the client needs to finish signing.
-//!   * the client (TUI) adds ONLY the reserve input's `proveDlog(receiver)` proof over the same
+//!     (same byte layout the node and reserve contract accept, context extension in Scala order)
+//!     around caller-supplied fee inputs: the REDEEMER funds the fee (and, for token reserves,
+//!     the recipient's min-ERG box) with their own P2PK boxes, so a build costs the tracker
+//!     nothing (issue #15 review N17). The tracker signs nothing in the transaction.
+//!     It returns the unsigned tx and the sigma-serialized input/data boxes the client needs
+//!     to finish signing.
+//!   * the client signs every input locally (the reserve input's `proveDlog(receiver)` proof
+//!     and the fee inputs' `proveDlog`, all under the recipient key) over the same
 //!     `bytes_to_sign`, then calls `POST /redemption/submit` with the fully-signed tx.
 //!   * `POST /redemption/submit` — the tracker broadcasts the fully-signed transaction, but only
 //!     when its echoed `unsigned_tx` matches a live entry recorded by `/redemption/build`
@@ -28,21 +31,17 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use ergo_lib::chain::ergo_state_context::ErgoStateContext;
-use ergo_lib::chain::parameters::Parameters;
 use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
 use ergo_lib::chain::transaction::Transaction;
-use ergo_lib::ergo_chain_types::{Header, PreHeader};
+use ergo_lib::ergo_chain_types::Header;
 use ergo_lib::ergotree_ir::chain::ergo_box::ErgoBox;
 use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-use ergo_lib::wallet::secret_key::SecretKey;
 
 use basis_offchain::ergo_tx::{
-    address_to_ergo_tree, build_savl_tree_from_digest, decode_box_id, ergo_tree_to_p2pk_address,
-    pubkey_to_address, reorder_reserve_extension_scala, serialize_coll_bytes, serialize_ergo_byte,
+    address_to_ergo_tree, build_savl_tree_from_digest, decode_box_id, pubkey_to_address,
+    reorder_reserve_extension_scala, serialize_coll_bytes, serialize_ergo_byte,
     serialize_ergo_long,
 };
-use basis_offchain::signing::add_input_proof;
 
 use crate::models::{error_response, success_response, ApiResponse};
 use crate::{AppState, TrackerCommand};
@@ -73,24 +72,26 @@ pub struct RedemptionBuildRequest {
     /// Optional tracker box id; fetched from storage if omitted.
     #[serde(default)]
     pub tracker_box_id: Option<String>,
-    /// Deprecated and ignored. Change always goes to the owner of the tracker's
-    /// selected fee box (or the configured change address as fallback); a
-    /// caller-supplied address would let anyone drain tracker wallet boxes.
+    /// Address paying the redeemer's change output. Defaults to the recipient address.
+    /// Only the redeemer's own fee inputs fund the transaction, so change is always
+    /// the redeemer's own money (issue #15 review N17).
     #[serde(default)]
     pub change_address: Option<String>,
     /// Denomination of the note being redeemed ("erg" or "token:<64-hex>"); default
     /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
     #[serde(default)]
     pub denomination: String,
+    /// Box ids funding the miner fee (and, for token reserves, the recipient's
+    /// min-ERG box). Every box must be unspent, token-free, and carry the recipient's
+    /// P2PK ergoTree — the client signs them with the recipient secret. The tracker
+    /// funds nothing (issue #15 review N17).
+    pub fee_box_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RedemptionBuildResponse {
     /// Node-canonical unsigned transaction (reserve-input extension in Scala order).
     pub unsigned_tx: Value,
-    /// Fee-signed transaction (reserve input proof empty); base for the client to splice the
-    /// reserve proof into.
-    pub partial_tx: Value,
     /// Sigma-serialized input boxes (hex), in transaction-input order.
     pub input_box_binaries: Vec<String>,
     /// Sigma-serialized data-input boxes (hex).
@@ -247,20 +248,6 @@ impl NodeClient {
         serde_json::from_value(v).map_err(|e| format!("parse box {box_id}: {e}"))
     }
 
-    async fn wallet_boxes(&self) -> Result<Vec<NodeBox>, String> {
-        let v = self
-            .get_json("/wallet/boxes/unspent?minConfirmations=0&maxConfirmations=-1")
-            .await?;
-        #[derive(Deserialize)]
-        struct Entry {
-            #[serde(rename = "box")]
-            details: NodeBox,
-        }
-        let entries: Vec<Entry> =
-            serde_json::from_value(v).map_err(|e| format!("parse wallet boxes: {e}"))?;
-        Ok(entries.into_iter().map(|e| e.details).collect())
-    }
-
     async fn last_headers(&self) -> Result<Vec<Header>, String> {
         let v = self.get_json("/blocks/lastHeaders/10").await?;
         serde_json::from_value(v).map_err(|e| format!("parse last headers: {e}"))
@@ -308,9 +295,21 @@ fn parse_broadcast_tx_id(body: &str) -> String {
 /// response is not a standing capability.
 pub const PENDING_REDEMPTION_TTL: Duration = Duration::from_secs(30 * 60);
 
-/// Largest number of outstanding pending entries. Each entry is small and the map is pruned
-/// on every call, so this only bounds memory if `/redemption/build` is hammered.
+/// Largest number of outstanding pending entries. When the cap is reached the OLDEST
+/// live entry is evicted to make room (issue #15 review N17): one client filling the
+/// registry must not turn every other issuer's build into a 503.
 const MAX_PENDING_REDEMPTIONS: usize = 1024;
+
+/// Largest number of outstanding pending entries per issuer. A self-redeemer with many
+/// notes can otherwise fill the global registry on their own (issue #15 review N17).
+const MAX_PENDING_PER_ISSUER: usize = 64;
+
+/// Why a pending-redemption entry could not be recorded.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecordError {
+    /// The issuer already holds [`MAX_PENDING_PER_ISSUER`] live entries.
+    IssuerFull,
+}
 
 /// SHA-256 of the canonical JSON serialization of an `unsigned_tx` value.
 pub type UnsignedTxFingerprint = [u8; 32];
@@ -403,16 +402,39 @@ impl PendingRedemptionRegistry {
 
     /// Record a pending redemption for `fingerprint`, valid for [`PENDING_REDEMPTION_TTL`].
     ///
-    /// Returns false when the registry is full, which the caller should surface as a
-    /// "try again" rather than silently dropping the entry.
-    pub fn record(&self, fingerprint: UnsignedTxFingerprint, entry: PendingRedemption) -> bool {
+    /// Returns [`RecordError::IssuerFull`] when the issuer already holds the per-issuer
+    /// maximum of live entries. When the global cap is reached, the oldest live entry is
+    /// evicted to make room rather than rejecting the build (a victim of eviction simply
+    /// rebuilds; a global 503 would let one client block every issuer).
+    pub fn record(
+        &self,
+        fingerprint: UnsignedTxFingerprint,
+        entry: PendingRedemption,
+    ) -> Result<(), RecordError> {
         let mut entries = self.lock();
         Self::prune(&mut entries);
-        if entries.len() >= MAX_PENDING_REDEMPTIONS && !entries.contains_key(&fingerprint) {
-            return false;
+        if let std::collections::hash_map::Entry::Occupied(mut slot) = entries.entry(fingerprint) {
+            slot.insert(entry);
+            return Ok(());
+        }
+        let issuer_entries = entries
+            .values()
+            .filter(|e| e.issuer_pubkey == entry.issuer_pubkey)
+            .count();
+        if issuer_entries >= MAX_PENDING_PER_ISSUER {
+            return Err(RecordError::IssuerFull);
+        }
+        if entries.len() >= MAX_PENDING_REDEMPTIONS {
+            if let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, e)| e.issued_at)
+                .map(|(k, _)| *k)
+            {
+                entries.remove(&oldest);
+            }
         }
         entries.insert(fingerprint, entry);
-        true
+        Ok(())
     }
 
     /// Validate `signed_tx` against the pending entry for `fingerprint` and consume the entry.
@@ -541,15 +563,19 @@ impl PendingRedemptionRegistry {
     }
 }
 
-// ----- per-pair build rate limiter (PR #16 M1) -----
+// ----- build rate limiter (PR #16 M1, reworked for issue #15 review N17) -----
 
-/// Sliding-window rate limiter for `/redemption/build`, keyed by (issuer, recipient).
+/// Sliding-window rate limiter for `/redemption/build`, keyed by (issuer, recipient) pair
+/// AND by issuer alone.
 ///
-/// The tracker pays the fee inputs of every build out of its own wallet, so an unbounded
-/// caller could drain it one fee at a time with self-redemption builds.
+/// The per-issuer cap is what makes recipient-key rotation useless to an abuser: fresh
+/// recipient keys reset the pair bucket but never the issuer bucket. Every call sweeps
+/// expired attempts and drops empty buckets, so the maps stay bounded by ACTUAL recent
+/// activity instead of every pair ever seen.
 #[derive(Debug, Default)]
 pub struct BuildRateLimiter {
-    buckets: std::sync::Mutex<HashMap<(String, String), Vec<Instant>>>,
+    pair_buckets: std::sync::Mutex<HashMap<(String, String), Vec<Instant>>>,
+    issuer_buckets: std::sync::Mutex<HashMap<String, Vec<Instant>>>,
 }
 
 impl BuildRateLimiter {
@@ -558,57 +584,67 @@ impl BuildRateLimiter {
         Self::default()
     }
 
-    /// Record a build attempt for `(issuer, recipient)`; returns Err when the pair has reached
-    /// `max_per_hour` builds within the last rolling hour.
+    /// Drop expired attempts and empty buckets, then return the live attempt count for `key`.
+    fn sweep_and_count<K: std::hash::Hash + Eq>(
+        buckets: &mut HashMap<K, Vec<Instant>>,
+        key: &K,
+        now: Instant,
+        window: Duration,
+    ) -> usize {
+        for attempts in buckets.values_mut() {
+            attempts.retain(|t| now.duration_since(*t) < window);
+        }
+        buckets.retain(|_, attempts| !attempts.is_empty());
+        buckets.get(key).map(Vec::len).unwrap_or(0)
+    }
+
+    /// Record a build attempt for `(issuer, recipient)`; returns Err when the pair has
+    /// reached `max_per_pair` or the issuer has reached `max_per_issuer` builds within
+    /// the last rolling hour.
     pub fn check_and_record(
         &self,
         issuer: &str,
         recipient: &str,
-        max_per_hour: u32,
+        max_per_pair: u32,
+        max_per_issuer: u32,
     ) -> Result<(), String> {
-        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let window = Duration::from_secs(3600);
-        let key = (issuer.to_string(), recipient.to_string());
-        let attempts = buckets.entry(key).or_default();
-        attempts.retain(|t| now.duration_since(*t) < window);
-        if attempts.len() >= max_per_hour as usize {
-            return Err(format!(
-                "rate limit exceeded: at most {} redemption builds per hour per \
-                 (issuer, recipient) pair",
-                max_per_hour
-            ));
+
+        {
+            let mut buckets = self
+                .issuer_buckets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let count = Self::sweep_and_count(&mut buckets, &issuer.to_string(), now, window);
+            if count >= max_per_issuer as usize {
+                return Err(format!(
+                    "rate limit exceeded: at most {} redemption builds per hour per issuer",
+                    max_per_issuer
+                ));
+            }
         }
-        attempts.push(now);
+        let pair_key = (issuer.to_string(), recipient.to_string());
+        {
+            let mut buckets = self.pair_buckets.lock().unwrap_or_else(|e| e.into_inner());
+            let count = Self::sweep_and_count(&mut buckets, &pair_key, now, window);
+            if count >= max_per_pair as usize {
+                return Err(format!(
+                    "rate limit exceeded: at most {} redemption builds per hour per \
+                     (issuer, recipient) pair",
+                    max_per_pair
+                ));
+            }
+            buckets.entry(pair_key).or_default().push(now);
+        }
+        self.issuer_buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(issuer.to_string())
+            .or_default()
+            .push(now);
         Ok(())
     }
-}
-
-/// Select wallet boxes covering the required fee, excluding the reserve box and token-bearing boxes.
-fn select_fee_inputs(
-    wallet_boxes: &[NodeBox],
-    required: u64,
-    reserve_box_id: &str,
-) -> Option<(Vec<NodeBox>, u64)> {
-    let mut candidates: Vec<&NodeBox> = wallet_boxes
-        .iter()
-        .filter(|b| b.box_id != reserve_box_id && b.assets.is_empty())
-        .collect();
-    candidates.sort_by_key(|b| b.value);
-
-    if let Some(b) = candidates.iter().find(|b| b.value >= required) {
-        return Some((vec![(*b).clone()], b.value));
-    }
-    let mut selected = Vec::new();
-    let mut total = 0u64;
-    for b in candidates {
-        total += b.value;
-        selected.push(b.clone());
-        if total >= required {
-            return Some((selected, total));
-        }
-    }
-    None
 }
 
 type ApiResult<T> = Result<T, (StatusCode, Json<ApiResponse<RedemptionBuildResponse>>)>;
@@ -926,23 +962,12 @@ async fn build_redemption_inner(
         }
     };
 
-    // M1: bound the fee cost a pair can impose on the tracker wallet — the tracker pays the
-    // fee inputs of every build, so an unbounded pair could drain it one fee at a time.
-    if let Err(msg) = state.redemption_build_rate.check_and_record(
-        &hex::encode(issuer_pk),
-        &hex::encode(recipient_pk),
-        state.config.server.redemption_build_max_per_pair_per_hour,
-    ) {
-        return api_err(StatusCode::TOO_MANY_REQUESTS, msg);
-    }
-
     let recipient_address = match pubkey_to_address(&payload.recipient_pubkey) {
         Ok(a) => a,
         Err(e) => return api_err(StatusCode::BAD_REQUEST, format!("recipient address: {e}")),
     };
 
     let chain_node = NodeClient::chain(state);
-    let wallet_node = NodeClient::wallet(state);
 
     // Look up the note to confirm it exists. The stored note's payment
     // timestamp is authoritative for the tracker signature, context var #4, and
@@ -1383,15 +1408,6 @@ async fn build_redemption_inner(
     // Token-backed reserves preserve the reserve's ERG value and move reserve tokens.
     let is_token_reserve = !reserve_token_id.is_empty();
 
-    let wallet_boxes = match wallet_node.wallet_boxes().await {
-        Ok(b) => b,
-        Err(e) => {
-            return api_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("wallet boxes: {e}"),
-            )
-        }
-    };
     let fee = state.config.transaction_fee();
     // For token reserves the fee inputs must also fund the recipient's min-value ERG box.
     let fee_input_required = if is_token_reserve {
@@ -1399,43 +1415,77 @@ async fn build_redemption_inner(
     } else {
         fee
     };
-    let (fee_boxes, fee_total) =
-        match select_fee_inputs(&wallet_boxes, fee_input_required, &reserve_box_id) {
-            Some(v) => v,
-            None => {
+
+    // The REDEEMER funds the fee (and the token-recipient min-ERG box) with their own
+    // P2PK boxes (issue #15 review N17): the tracker pays nothing, so building can never
+    // drain the tracker wallet. Every box must be unspent (`/utxo/byId` only serves the
+    // UTXO set), token-free, and carry the recipient's P2PK ergoTree — the client signs
+    // them all with the one recipient secret it already holds for the reserve input.
+    if payload.fee_box_ids.is_empty() {
+        return api_err(
+            StatusCode::BAD_REQUEST,
+            "fee_box_ids must list at least one recipient-owned box funding the fee",
+        );
+    }
+    let recipient_p2pk_tree = match address_to_ergo_tree(&recipient_address) {
+        Ok(t) => t,
+        Err(e) => return api_err(StatusCode::BAD_REQUEST, format!("recipient tree: {e}")),
+    };
+    let mut fee_boxes: Vec<NodeBox> = Vec::with_capacity(payload.fee_box_ids.len());
+    let mut seen_fee_ids = std::collections::HashSet::new();
+    let mut fee_total: u64 = 0;
+    for id in &payload.fee_box_ids {
+        if !seen_fee_ids.insert(id.clone()) {
+            return api_err(
+                StatusCode::BAD_REQUEST,
+                format!("duplicate fee box id {id}"),
+            );
+        }
+        if *id == reserve_box_id {
+            return api_err(
+                StatusCode::BAD_REQUEST,
+                "fee_box_ids must not include the reserve box being spent",
+            );
+        }
+        let b = match chain_node.box_details(id).await {
+            Ok(b) => b,
+            Err(e) => {
                 return api_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("no wallet boxes covering {fee_input_required} nanoERG fee"),
+                    StatusCode::BAD_REQUEST,
+                    format!("fee box {id} is not an unspent chain box: {e}"),
                 )
             }
         };
-
-    // Change address: the owner of the first selected fee box (which we sign), else config/recipient.
-    // SECURITY: change always goes back to the tracker's own address.
-    //
-    // The fee inputs come from the TRACKER's wallet (`select_fee_inputs` over `/wallet/boxes/unspent`)
-    // and are signed with the tracker key, so a caller-chosen `change_address` meant a caller could
-    // name any destination for the tracker's own ERG. Repeating a 1-nanoERG redemption against a
-    // tiny self-owned reserve handed out one wallet box minus the fee each time.
-    //
-    // `change_address` is still accepted on the wire for compatibility, but it is IGNORED. The
-    // configured change address wins; the fee box's own tree is the fallback when nothing is set.
-    let change_address = match &payload.change_address {
-        Some(a) => {
-            tracing::warn!(
-                "Ignoring caller-supplied change_address ({}): redemption change always returns to \
-                 the tracker's configured address.",
-                a
+        if !b.assets.is_empty() {
+            return api_err(
+                StatusCode::BAD_REQUEST,
+                format!("fee box {id} carries tokens; fee inputs must be token-free"),
             );
-            state
-                .config
-                .get_change_address()
-                .or_else(|_| ergo_tree_to_p2pk_address(&fee_boxes[0].ergo_tree))
-                .unwrap_or_else(|_| recipient_address.clone())
         }
-        None => ergo_tree_to_p2pk_address(&fee_boxes[0].ergo_tree)
-            .or_else(|_| state.config.get_change_address().map_err(|e| e.to_string()))
-            .unwrap_or_else(|_| recipient_address.clone()),
+        if !b.ergo_tree.eq_ignore_ascii_case(&recipient_p2pk_tree) {
+            return api_err(
+                StatusCode::BAD_REQUEST,
+                format!("fee box {id} is not a P2PK box of the recipient"),
+            );
+        }
+        fee_total = fee_total.saturating_add(b.value);
+        fee_boxes.push(b);
+    }
+    if fee_total < fee_input_required {
+        return api_err(
+            StatusCode::BAD_REQUEST,
+            format!("fee boxes total {fee_total} nanoERG, need at least {fee_input_required}"),
+        );
+    }
+
+    // Change goes back to the redeemer: the caller-supplied change address when given,
+    // else the recipient address. Only redeemer funds ever flow through it.
+    let change_address = match &payload.change_address {
+        Some(a) => match address_to_ergo_tree(a) {
+            Ok(_) => a.clone(),
+            Err(e) => return api_err(StatusCode::BAD_REQUEST, format!("change_address: {e}")),
+        },
+        None => recipient_address.clone(),
     };
 
     // Build the reserve R5 register (updated reserve state as SAvlTree constant).
@@ -1675,7 +1725,7 @@ async fn build_redemption_inner(
     };
     let mut fee_binaries = Vec::with_capacity(fee_boxes.len());
     for fb in &fee_boxes {
-        match wallet_node.box_binary(&fb.box_id).await {
+        match chain_node.box_binary(&fb.box_id).await {
             Ok(b) => fee_binaries.push(b),
             Err(e) => {
                 return api_err(
@@ -1697,6 +1747,10 @@ async fn build_redemption_inner(
     };
     let built_tx_id = String::from(unsigned.id());
 
+    // The tracker signs nothing in the transaction: the reserve input is a contract
+    // spend and the fee inputs belong to the redeemer, who signs every input locally.
+    // The client still needs the serialized boxes and headers to derive the signing
+    // context without its own node connection.
     let parse_box = |hexstr: &str, label: &str| -> ApiResult<ErgoBox> {
         let bytes = hex::decode(hexstr).map_err(|e| {
             (
@@ -1711,18 +1765,15 @@ async fn build_redemption_inner(
             )
         })
     };
-    let reserve_ebox = parse_box(&reserve_box_binary, "reserve box")?;
-    let tracker_ebox = parse_box(&tracker_box_binary, "tracker box")?;
-    let mut fee_eboxes = Vec::with_capacity(fee_binaries.len());
+    // Parse once to fail loudly on malformed node data rather than returning
+    // unsignable material to the client.
+    parse_box(&reserve_box_binary, "reserve box")?;
+    parse_box(&tracker_box_binary, "tracker box")?;
     for (i, fb) in fee_binaries.iter().enumerate() {
-        fee_eboxes.push(parse_box(fb, &format!("fee box {i}"))?);
+        parse_box(fb, &format!("fee box {i}"))?;
     }
 
-    let mut input_boxes = vec![reserve_ebox];
-    input_boxes.extend(fee_eboxes);
-    let data_boxes = vec![tracker_ebox];
-
-    // State context for proving (contract does not read headers/params; height from PreHeader).
+    // State context headers (the client derives its PreHeader/ErgoStateContext from these).
     let headers = match chain_node.last_headers().await {
         Ok(h) if h.len() >= 10 => h,
         Ok(h) => {
@@ -1733,73 +1784,30 @@ async fn build_redemption_inner(
         }
         Err(e) => return api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("headers: {e}")),
     };
-    let pre_header = PreHeader::from(headers[0].clone());
     let headers_array: [Header; 10] = headers[..10].to_vec().try_into().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(error_response("headers array".to_string())),
         )
     })?;
-    let _state_context = ErgoStateContext::new(
-        pre_header.clone(),
-        headers_array.clone(),
-        Parameters::default(),
-    );
-
-    // Sign the fee input(s) locally with the tracker secret.
-    let fee_secret = match state.config.tracker_secret_key_bytes() {
-        Some(s) => s,
-        None => {
-            return api_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "tracker secret key not configured",
-            )
-        }
-    };
-    let fee_sk = match SecretKey::dlog_from_bytes(&fee_secret) {
-        Some(sk) => sk,
-        None => {
-            return api_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid tracker dlog secret",
-            )
-        }
-    };
-
-    let n_inputs = unsigned.inputs.len();
-    let mut partial: Option<ergo_lib::chain::transaction::Transaction> = None;
-    for fee_idx in 1..n_inputs {
-        match add_input_proof(
-            &unsigned,
-            partial.as_ref(),
-            &input_boxes,
-            &data_boxes,
-            &pre_header,
-            &headers_array,
-            fee_idx,
-            &fee_sk,
-        ) {
-            Ok(tx) => partial = Some(tx),
-            Err(e) => {
-                return api_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("fee input {fee_idx} signing: {e:?}"),
-                )
-            }
-        }
-    }
-
-    let partial_tx = match partial {
-        Some(ref tx) => serde_json::to_value(tx).unwrap_or(Value::Null),
-        None => unsigned_tx.clone(), // no fee inputs (fee covered by reserve? not expected)
-    };
 
     let mut input_box_binaries = vec![reserve_box_binary];
     input_box_binaries.extend(fee_binaries);
 
+    // N17: only a build that survived every validation step above consumes rate-limit
+    // quota — junk builds (bad keys, unknown note, bad signature) must not be able to
+    // lock a victim pair out of the per-pair budget.
+    if let Err(msg) = state.redemption_build_rate.check_and_record(
+        &hex::encode(issuer_pk),
+        &hex::encode(recipient_pk),
+        state.config.server.redemption_build_max_per_pair_per_hour,
+        state.config.server.redemption_build_max_per_issuer_per_hour,
+    ) {
+        return api_err(StatusCode::TOO_MANY_REQUESTS, msg);
+    }
+
     let response = RedemptionBuildResponse {
         unsigned_tx,
-        partial_tx,
         input_box_binaries,
         data_box_binaries: vec![tracker_box_binary],
         headers: headers_array.to_vec(),
@@ -1830,7 +1838,7 @@ async fn build_redemption_inner(
             )
         }
     };
-    if !state.pending_redemptions.record(
+    if let Err(RecordError::IssuerFull) = state.pending_redemptions.record(
         fingerprint,
         PendingRedemption::new(
             built_tx_id,
@@ -1844,8 +1852,9 @@ async fn build_redemption_inner(
         ),
     ) {
         return api_err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Too many outstanding redemption builds; try again shortly.",
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many outstanding redemption builds for this issuer; submit or let some \
+             expire before building more.",
         );
     }
 
@@ -1965,85 +1974,6 @@ pub async fn submit_redemption(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn wallet_box(id: &str, value: u64, with_token: bool) -> NodeBox {
-        let assets = if with_token {
-            vec![NodeAsset {
-                token_id: "aa".repeat(32),
-                amount: 1,
-            }]
-        } else {
-            Vec::new()
-        };
-        NodeBox {
-            box_id: id.to_string(),
-            value,
-            ergo_tree: "00".to_string(),
-            assets,
-            additional_registers: Default::default(),
-        }
-    }
-
-    #[test]
-    fn select_fee_inputs_picks_exact_single_box() {
-        let boxes = vec![
-            wallet_box("a", 5_000_000, false),
-            wallet_box("b", 1_000_000, false),
-        ];
-        let (selected, total) = select_fee_inputs(&boxes, 1_000_000, "zz").unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].box_id, "b");
-        assert_eq!(total, 1_000_000);
-    }
-
-    #[test]
-    fn select_fee_inputs_prefers_smallest_sufficient() {
-        let boxes = vec![
-            wallet_box("big", 50_000_000, false),
-            wallet_box("mid", 2_000_000, false),
-            wallet_box("small", 500_000, false),
-        ];
-        let (selected, total) = select_fee_inputs(&boxes, 1_000_000, "zz").unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].box_id, "mid");
-        assert_eq!(total, 2_000_000);
-    }
-
-    #[test]
-    fn select_fee_inputs_aggregates_when_no_single_box_suffices() {
-        let boxes = vec![
-            wallet_box("a", 400_000, false),
-            wallet_box("b", 300_000, false),
-            wallet_box("c", 500_000, false),
-        ];
-        let (selected, total) = select_fee_inputs(&boxes, 1_000_000, "zz").unwrap();
-        assert_eq!(selected.len(), 3);
-        assert_eq!(total, 1_200_000);
-    }
-
-    #[test]
-    fn select_fee_inputs_excludes_reserve_box() {
-        let boxes = vec![wallet_box("reserve", 10_000_000, false)];
-        assert!(select_fee_inputs(&boxes, 1_000_000, "reserve").is_none());
-    }
-
-    #[test]
-    fn select_fee_inputs_excludes_token_boxes() {
-        let boxes = vec![
-            wallet_box("token", 10_000_000, true),
-            wallet_box("free", 2_000_000, false),
-        ];
-        let (selected, _) = select_fee_inputs(&boxes, 1_000_000, "zz").unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].box_id, "free");
-    }
-
-    #[test]
-    fn select_fee_inputs_returns_none_when_insufficient() {
-        let boxes = vec![wallet_box("a", 100_000, false)];
-        assert!(select_fee_inputs(&boxes, 1_000_000, "zz").is_none());
-        assert!(select_fee_inputs(&[], 1_000_000, "zz").is_none());
-    }
 
     fn r5_box(r5: Option<&str>) -> NodeBox {
         let mut registers = std::collections::HashMap::new();
@@ -2168,7 +2098,7 @@ mod tests {
     fn recorded(registry: &PendingRedemptionRegistry) -> (UnsignedTxFingerprint, Value) {
         let (unsigned, signed) = built_redemption();
         let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
-        assert!(registry.record(fp, pending_entry(&unsigned)));
+        assert!(registry.record(fp, pending_entry(&unsigned)).is_ok());
         (fp, signed)
     }
 
@@ -2299,14 +2229,14 @@ mod tests {
         // The matching signed copy is accepted.
         let registry = PendingRedemptionRegistry::new();
         let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
-        assert!(registry.record(fp, pending_entry(&unsigned)));
+        assert!(registry.record(fp, pending_entry(&unsigned)).is_ok());
         assert!(registry.validate_and_consume(&fp, &signed).is_ok());
 
         // A different extension changes the transaction id, even though the caller echoes the
         // original unsigned transaction (so the fingerprint still matches).
         let registry = PendingRedemptionRegistry::new();
         let fp = unsigned_tx_fingerprint(&unsigned).unwrap();
-        assert!(registry.record(fp, pending_entry(&unsigned)));
+        assert!(registry.record(fp, pending_entry(&unsigned)).is_ok());
         let (other_unsigned, other) = tx_pair_with_extension(
             &[RESERVE_BOX, FUNDING_BOX],
             vec![
@@ -2342,32 +2272,172 @@ mod tests {
         );
     }
 
-    // ----- per-pair build rate limiter (PR #16 M1) -----
+    /// N17: one issuer can hold at most MAX_PENDING_PER_ISSUER live entries, so a
+    /// self-redeemer cannot fill the global registry on their own.
+    #[test]
+    fn pending_registry_caps_entries_per_issuer() {
+        let registry = PendingRedemptionRegistry::new();
+        let (unsigned, _) = built_redemption();
+        let entry = pending_entry(&unsigned);
+        for i in 0..MAX_PENDING_PER_ISSUER {
+            let mut e = entry.clone();
+            e.unsigned_tx_id = format!("tx-{i}");
+            registry
+                .record([i as u8; 32], e)
+                .expect("entries below the per-issuer cap must be accepted");
+        }
+        let err = registry
+            .record([0xff; 32], pending_entry(&unsigned))
+            .unwrap_err();
+        assert_eq!(err, RecordError::IssuerFull);
+
+        // A different issuer is unaffected by the full issuer's bucket.
+        let mut other = pending_entry(&unsigned);
+        other.issuer_pubkey = "cc".repeat(33);
+        assert!(registry.record([0xfe; 32], other).is_ok());
+    }
+
+    /// N17: when the global cap is reached the OLDEST live entry is evicted to make
+    /// room; the build is never rejected with a global 503.
+    #[test]
+    fn pending_registry_evicts_oldest_when_globally_full() {
+        let registry = PendingRedemptionRegistry::new();
+        let (unsigned, _) = built_redemption();
+        // Distinct issuers stay under the per-issuer cap; entries get increasing
+        // (issuer, fingerprint) ages via direct insertion so eviction order is explicit.
+        let fp_of = |i: usize| {
+            let mut fp = [0u8; 32];
+            fp[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            fp
+        };
+        for i in 0..MAX_PENDING_REDEMPTIONS {
+            let mut e = pending_entry(&unsigned);
+            e.issuer_pubkey = format!("{:066x}", i + 1);
+            e.unsigned_tx_id = format!("tx-{i}");
+            e.issued_at =
+                Instant::now() - Duration::from_secs((MAX_PENDING_REDEMPTIONS - i) as u64);
+            registry.lock().insert(fp_of(i), e);
+        }
+        assert_eq!(registry.len(), MAX_PENDING_REDEMPTIONS);
+
+        let mut newcomer = pending_entry(&unsigned);
+        newcomer.issuer_pubkey = "dd".repeat(33);
+        newcomer.unsigned_tx_id = "newcomer".to_string();
+        registry
+            .record([0xaa; 32], newcomer)
+            .expect("a full registry must evict the oldest entry, not reject");
+
+        assert_eq!(registry.len(), MAX_PENDING_REDEMPTIONS);
+        assert!(
+            registry.lock().contains_key(&[0xaa; 32]),
+            "the new entry must be recorded"
+        );
+        assert!(
+            !registry.lock().contains_key(&fp_of(0)),
+            "the oldest entry (issuer 1) must have been evicted"
+        );
+        assert!(
+            registry.lock().contains_key(&fp_of(1)),
+            "the second-oldest entry must have survived"
+        );
+    }
+
+    // ----- build rate limiter (PR #16 M1, reworked for issue #15 review N17) -----
 
     #[test]
     fn build_rate_limiter_allows_up_to_limit_then_rejects() {
         let limiter = BuildRateLimiter::new();
-        assert!(limiter.check_and_record("issuer", "recipient", 2).is_ok());
-        assert!(limiter.check_and_record("issuer", "recipient", 2).is_ok());
+        assert!(limiter
+            .check_and_record("issuer", "recipient", 2, 100)
+            .is_ok());
+        assert!(limiter
+            .check_and_record("issuer", "recipient", 2, 100)
+            .is_ok());
         let err = limiter
-            .check_and_record("issuer", "recipient", 2)
+            .check_and_record("issuer", "recipient", 2, 100)
             .unwrap_err();
         assert!(err.contains("rate limit exceeded"), "got: {err}");
         // A different pair is unaffected.
-        assert!(limiter.check_and_record("issuer", "other", 2).is_ok());
+        assert!(limiter.check_and_record("issuer", "other", 2, 100).is_ok());
+    }
+
+    /// N17: rotating fresh recipient keys resets the per-pair bucket, but the per-issuer
+    /// budget still binds.
+    #[test]
+    fn build_rate_limiter_per_issuer_cap_defeats_recipient_rotation() {
+        let limiter = BuildRateLimiter::new();
+        for i in 0..3 {
+            assert!(
+                limiter
+                    .check_and_record("issuer", &format!("recipient-{i}"), 60, 3)
+                    .is_ok(),
+                "build {i} should fit the per-issuer budget"
+            );
+        }
+        let err = limiter
+            .check_and_record("issuer", "recipient-fresh", 60, 3)
+            .unwrap_err();
+        assert!(err.contains("per issuer"), "got: {err}");
+        // A different issuer is unaffected.
+        assert!(limiter
+            .check_and_record("other-issuer", "recipient", 1, 1)
+            .is_ok());
     }
 
     #[test]
     fn build_rate_limiter_prunes_attempts_older_than_an_hour() {
         let limiter = BuildRateLimiter::new();
         {
-            let mut buckets = limiter.buckets.lock().unwrap();
+            let mut buckets = limiter.pair_buckets.lock().unwrap();
             buckets.insert(
                 ("issuer".to_string(), "recipient".to_string()),
                 vec![Instant::now() - Duration::from_secs(3601)],
             );
         }
-        assert!(limiter.check_and_record("issuer", "recipient", 1).is_ok());
+        assert!(limiter
+            .check_and_record("issuer", "recipient", 1, 100)
+            .is_ok());
+    }
+
+    /// N17: buckets whose sliding window has emptied are removed, so the maps stay
+    /// bounded by recent activity rather than every pair ever seen.
+    #[test]
+    fn build_rate_limiter_evicts_empty_buckets() {
+        let limiter = BuildRateLimiter::new();
+        {
+            let mut pairs = limiter.pair_buckets.lock().unwrap();
+            pairs.insert(
+                ("stale-issuer".to_string(), "stale-recipient".to_string()),
+                vec![Instant::now() - Duration::from_secs(7200)],
+            );
+        }
+        {
+            let mut issuers = limiter.issuer_buckets.lock().unwrap();
+            issuers.insert(
+                "stale-issuer".to_string(),
+                vec![Instant::now() - Duration::from_secs(7200)],
+            );
+        }
+        // Any check sweeps both maps.
+        assert!(limiter
+            .check_and_record("issuer", "recipient", 1, 100)
+            .is_ok());
+        assert!(
+            !limiter
+                .pair_buckets
+                .lock()
+                .unwrap()
+                .contains_key(&("stale-issuer".to_string(), "stale-recipient".to_string())),
+            "an expired pair bucket must be evicted"
+        );
+        assert!(
+            !limiter
+                .issuer_buckets
+                .lock()
+                .unwrap()
+                .contains_key("stale-issuer"),
+            "an expired issuer bucket must be evicted"
+        );
     }
 
     // ------------------------------------------------------------------

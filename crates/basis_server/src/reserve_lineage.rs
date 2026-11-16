@@ -72,8 +72,7 @@ fn decode_receiver(value: &str) -> Result<[u8; 33], String> {
     let hex_part = value
         .strip_prefix("07")
         .ok_or_else(|| format!("extension var #1 is not a GroupElement: {value}"))?;
-    let bytes =
-        hex::decode(hex_part).map_err(|e| format!("extension var #1 is not hex: {e}"))?;
+    let bytes = hex::decode(hex_part).map_err(|e| format!("extension var #1 is not hex: {e}"))?;
     bytes
         .as_slice()
         .try_into()
@@ -85,8 +84,7 @@ fn decode_timestamp(value: &str) -> Result<u64, String> {
     let hex_part = value
         .strip_prefix("05")
         .ok_or_else(|| format!("extension var #4 is not a Long: {value}"))?;
-    let bytes =
-        hex::decode(hex_part).map_err(|e| format!("extension var #4 is not hex: {e}"))?;
+    let bytes = hex::decode(hex_part).map_err(|e| format!("extension var #4 is not hex: {e}"))?;
     let mut zigzag: u64 = 0;
     let mut shift = 0;
     for &byte in &bytes {
@@ -220,7 +218,10 @@ fn reserve_input_from_tx(
 
 /// Collateral carried by a box JSON value: nanoERG for ERG reserves, the collateral
 /// token amount for token reserves.
-fn box_collateral(box_json: &serde_json::Value, collateral_token_id: Option<&str>) -> Result<u64, String> {
+fn box_collateral(
+    box_json: &serde_json::Value,
+    collateral_token_id: Option<&str>,
+) -> Result<u64, String> {
     match collateral_token_id {
         None => box_json
             .get("value")
@@ -282,7 +283,9 @@ pub(crate) async fn collect_lineage_redemption_ops(
 
     let mut ops = Vec::new();
     for _ in 0..MAX_LINEAGE_WALK {
-        let tx = node.get_json(&format!("/blockchain/transaction/byId/{cur_tx_id}")).await?;
+        let tx = node
+            .get_json(&format!("/blockchain/transaction/byId/{cur_tx_id}"))
+            .await?;
         let input = reserve_input_from_tx(&tx, contract_address, collateral_token_id)?;
         let (op, step) = walk_step(&input, &cur_r5, cur_collateral, mirror_digest)?;
         if let Some(op) = op {
@@ -332,10 +335,7 @@ mod tests {
 
     fn redemption_extension() -> Vec<(&'static str, String)> {
         // Long 1000 zigzag-VLQ: 1000 << 1 = 2000 = 0x07D0 → VLQ d0 0f
-        vec![
-            ("1", format!("07{RECEIVER}")),
-            ("4", "05d00f".to_string()),
-        ]
+        vec![("1", format!("07{RECEIVER}")), ("4", "05d00f".to_string())]
     }
 
     #[test]
@@ -347,7 +347,10 @@ mod tests {
 
     #[test]
     fn decodes_receiver_and_timestamp() {
-        assert_eq!(decode_receiver(&format!("07{RECEIVER}")).unwrap()[..], hex::decode(RECEIVER).unwrap()[..]);
+        assert_eq!(
+            decode_receiver(&format!("07{RECEIVER}")).unwrap()[..],
+            hex::decode(RECEIVER).unwrap()[..]
+        );
         assert!(decode_receiver(RECEIVER).is_err()); // missing 0x07 prefix
         assert_eq!(decode_timestamp("05d00f").unwrap(), 1000);
         assert_eq!(decode_timestamp("0500").unwrap(), 0);

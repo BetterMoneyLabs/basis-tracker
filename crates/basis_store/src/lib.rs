@@ -356,7 +356,8 @@ pub enum ReserveSyncPoint {
 
 /// Status information for a public key
 #[derive(Debug, Clone, PartialEq)]
-pub struct KeyStatus {    /// Total issued debt
+pub struct KeyStatus {
+    /// Total issued debt
     pub total_debt: u64,
     /// On-chain collateral
     pub collateral: u64,
@@ -2624,7 +2625,9 @@ impl TrackerStateManager {
 
         tracing::info!("Replaying {} reserve AVL journal entries...", updates.len());
 
-        for (issuer_pubkey, note_key, denomination, timestamp, already_redeemed, recipient) in updates {
+        for (issuer_pubkey, note_key, denomination, timestamp, already_redeemed, recipient) in
+            updates
+        {
             // The recipient pubkey is embedded in v2 journal entries (issue #15 review N14:
             // chain-observed redemptions may reference notes the tracker never stored). Legacy
             // entries recover it from the stored note via the denomination-derived note key.

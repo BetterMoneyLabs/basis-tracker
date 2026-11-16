@@ -620,7 +620,13 @@ fn test_apply_chain_reserve_ops_genesis_drops_phantom() {
         .update_already_redeemed(&issuer, &recipient, &crate::DenomKey::Erg, 100, 1_000)
         .unwrap();
     diverged
-        .update_already_redeemed(&issuer, &phantom_recipient, &crate::DenomKey::Erg, 900, 7_777)
+        .update_already_redeemed(
+            &issuer,
+            &phantom_recipient,
+            &crate::DenomKey::Erg,
+            900,
+            7_777,
+        )
         .unwrap();
     assert_ne!(
         diverged.reserve_state_digest(&issuer, &crate::DenomKey::Erg),
