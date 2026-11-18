@@ -111,15 +111,25 @@ When no config exists, TUI auto-generates:
 ```toml
 [acceptance]
 default = "reject"
-root = "require_full_collateral"
+root = "default_policy"
 
 [[acceptance.predicates]]
 name = "require_full_collateral"
 type = "collateralization"
 min_ratio = 1.0  # 100%
+
+[[acceptance.predicates]]
+name = "no_pending_refund"
+type = "no_pending_refund"
+
+[[acceptance.predicates]]
+name = "default_policy"
+type = "all_of"
+predicates = ["require_full_collateral", "no_pending_refund"]
 ```
 
-**Behavior**: Reject all notes unless backed by 100% collateral.
+**Behavior**: Reject all notes unless backed by 100% collateral with no pending refund
+on the issuer's reserve.
 
 ## TUI Policy Screen
 

@@ -93,16 +93,25 @@ The `sign_policy_with_key()` helper generates valid Schnorr signatures using the
 
 ### Policy JSON Format
 
-Policies must use the correct JSON format with `type` fields:
+Policies must use the correct JSON format with `type` fields (shown: the default policy):
 ```json
 {
   "default": "reject",
-  "root": "require_full_collateral",
+  "root": "default_policy",
   "predicates": [
     {
       "name": "require_full_collateral",
       "type": "collateralization",
       "min_ratio": 1.0
+    },
+    {
+      "name": "no_pending_refund",
+      "type": "no_pending_refund"
+    },
+    {
+      "name": "default_policy",
+      "type": "all_of",
+      "predicates": ["require_full_collateral", "no_pending_refund"]
     }
   ]
 }
