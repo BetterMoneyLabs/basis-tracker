@@ -690,9 +690,8 @@ impl AppConfig {
                     tracing::info!("Failed to decode tracker public key as hex, attempting P2PK address parsing");
                 }
 
-                // If hex decoding failed or wrong length, try parsing as P2PK address
-                let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-                match encoder.parse_address_from_str(pubkey_input) {
+                // If hex decoding failed or wrong length, try parsing as P2PK address (mainnet or testnet)
+                match AddressEncoder::unchecked_parse_address_from_str(pubkey_input) {
                     Ok(ergo_lib::ergotree_ir::chain::address::Address::P2Pk(pubkey)) => {
                         tracing::info!(
                             "Successfully parsed as P2PK address, extracting public key"
@@ -743,10 +742,9 @@ impl AppConfig {
                     }
                 }
 
-                // If input is P2PK address, extract and return the public key as hex
-                let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
+                // If input is P2PK address (mainnet or testnet), extract and return the public key as hex
                 if let Ok(ergo_lib::ergotree_ir::chain::address::Address::P2Pk(pubkey)) =
-                    encoder.parse_address_from_str(pubkey_input)
+                    AddressEncoder::unchecked_parse_address_from_str(pubkey_input)
                 {
                     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
                     let pubkey_bytes = pubkey.h.sigma_serialize_bytes().ok()?;
@@ -760,6 +758,12 @@ impl AppConfig {
             }
             _ => None,
         }
+    }
+
+    /// Infer the active network prefix from `ergo.basis_reserve_contract_p2s` (defaults to Mainnet).
+    pub fn configured_network_prefix(&self) -> NetworkPrefix {
+        basis_offchain::ergo_tx::detect_address_network_prefix(&self.ergo.basis_reserve_contract_p2s)
+            .unwrap_or(NetworkPrefix::Mainnet)
     }
 
     /// Get the tracker secret key bytes (if configured)
@@ -810,7 +814,7 @@ impl AppConfig {
                 if pubkey_input.starts_with('9') || pubkey_input.starts_with('3') {
                     Ok(pubkey_input.clone())
                 } else {
-                    // It's a hex public key, derive address
+                    // It's a hex public key, derive address using configured network prefix
                     let pubkey_bytes = hex::decode(pubkey_input)?;
 
                     if pubkey_bytes.len() != 33 {
@@ -818,14 +822,14 @@ impl AppConfig {
                     }
 
                     use ergo_lib::ergo_chain_types::EcPoint;
-                    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
+                    use ergo_lib::ergotree_ir::chain::address::Address;
                     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
                     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
                     let ec_point = EcPoint::sigma_parse_bytes(&pubkey_bytes)?;
                     let prove_dlog = ProveDlog::new(ec_point);
                     let address = Address::P2Pk(prove_dlog);
-                    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
+                    let encoder = AddressEncoder::new(self.configured_network_prefix());
                     Ok(encoder.address_to_str(&address))
                 }
             }
@@ -1299,5 +1303,39 @@ mod tests {
             .build()
             .unwrap();
         assert!(reject_legacy_node_section(&config).is_ok());
+    }
+
+    #[test]
+    fn testnet_reserve_and_tracker_p2pk_addresses_are_supported() {
+        let pubkey_hex = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let testnet_p2pk = basis_offchain::ergo_tx::pubkey_to_address_for_network(
+            pubkey_hex,
+            NetworkPrefix::Testnet,
+        )
+        .unwrap();
+        assert!(testnet_p2pk.starts_with('3'));
+
+        let mainnet_reserve =
+            basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap();
+        let addr = AddressEncoder::unchecked_parse_address_from_str(&mainnet_reserve).unwrap();
+        let testnet_reserve =
+            AddressEncoder::encode_address_as_string(NetworkPrefix::Testnet, &addr);
+
+        // 1. Testnet-encoded tracker_public_key parses cleanly into bytes and hex.
+        let mut cfg = startup_test_config("127.0.0.1", AuthConfig::default());
+        cfg.ergo.basis_reserve_contract_p2s = testnet_reserve;
+        cfg.ergo.tracker_public_key = Some(testnet_p2pk.clone());
+        cfg.transaction.change_address = None;
+        assert_eq!(cfg.configured_network_prefix(), NetworkPrefix::Testnet);
+        assert_eq!(cfg.tracker_public_key_hex().as_deref(), Some(pubkey_hex));
+        assert_eq!(
+            hex::encode(cfg.tracker_public_key_bytes().unwrap().unwrap()),
+            pubkey_hex
+        );
+        assert_eq!(cfg.get_change_address().unwrap(), testnet_p2pk);
+
+        // 2. Hex tracker_public_key with testnet reserve contract derives a testnet change address.
+        cfg.ergo.tracker_public_key = Some(pubkey_hex.to_string());
+        assert_eq!(cfg.get_change_address().unwrap(), testnet_p2pk);
     }
 }

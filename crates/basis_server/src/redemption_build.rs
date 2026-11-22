@@ -38,8 +38,9 @@ use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 use ergo_lib::wallet::secret_key::SecretKey;
 
 use basis_offchain::ergo_tx::{
-    address_to_ergo_tree, build_savl_tree_from_digest, decode_box_id, ergo_tree_to_p2pk_address,
-    pubkey_to_address, reorder_reserve_extension_scala, serialize_coll_bytes, serialize_ergo_byte,
+    address_to_ergo_tree, build_savl_tree_from_digest, decode_box_id,
+    ergo_tree_to_p2pk_address_for_network, pubkey_to_address_for_network,
+    reorder_reserve_extension_scala, serialize_coll_bytes, serialize_ergo_byte,
     serialize_ergo_long,
 };
 use basis_offchain::signing::add_input_proof;
@@ -715,10 +716,12 @@ async fn build_redemption_inner(
         return api_err(StatusCode::TOO_MANY_REQUESTS, msg);
     }
 
-    let recipient_address = match pubkey_to_address(&payload.recipient_pubkey) {
-        Ok(a) => a,
-        Err(e) => return api_err(StatusCode::BAD_REQUEST, format!("recipient address: {e}")),
-    };
+    let network_prefix = state.config.configured_network_prefix();
+    let recipient_address =
+        match pubkey_to_address_for_network(&payload.recipient_pubkey, network_prefix) {
+            Ok(a) => a,
+            Err(e) => return api_err(StatusCode::BAD_REQUEST, format!("recipient address: {e}")),
+        };
 
     let chain_node = NodeClient::chain(state);
     let wallet_node = NodeClient::wallet(state);
@@ -1292,10 +1295,12 @@ async fn build_redemption_inner(
             state
                 .config
                 .get_change_address()
-                .or_else(|_| ergo_tree_to_p2pk_address(&fee_boxes[0].ergo_tree))
+                .or_else(|_| {
+                    ergo_tree_to_p2pk_address_for_network(&fee_boxes[0].ergo_tree, network_prefix)
+                })
                 .unwrap_or_else(|_| recipient_address.clone())
         }
-        None => ergo_tree_to_p2pk_address(&fee_boxes[0].ergo_tree)
+        None => ergo_tree_to_p2pk_address_for_network(&fee_boxes[0].ergo_tree, network_prefix)
             .or_else(|_| state.config.get_change_address().map_err(|e| e.to_string()))
             .unwrap_or_else(|_| recipient_address.clone()),
     };

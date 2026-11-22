@@ -1560,14 +1560,12 @@ fn pubkey_to_address(pubkey_hex: &str) -> Result<String> {
     Ok(encoder.address_to_str(&address))
 }
 
-// Helper function to convert a P2S or P2PK address string to its hex-encoded ergoTree.
+// Helper function to convert a P2S or P2PK address string (mainnet or testnet) to its hex-encoded ergoTree.
 fn address_to_ergo_tree(address_str: &str) -> Result<String> {
-    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
-    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-    let address = encoder
-        .parse_address_from_str(address_str)
+    let address = AddressEncoder::unchecked_parse_address_from_str(address_str)
         .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address_str, e))?;
     let tree = address.script().map_err(|e| {
         anyhow::anyhow!("Failed to get script for address '{}': {}", address_str, e)

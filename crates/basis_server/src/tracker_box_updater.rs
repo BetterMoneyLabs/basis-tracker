@@ -1426,13 +1426,12 @@ fn derive_change_address(tracker_pubkey: &[u8; 33]) -> Result<String, TrackerBox
     Ok(encoder.address_to_str(&address))
 }
 
-/// Convert a P2PK or P2S address string to its hex-encoded ergoTree bytes.
+/// Convert a P2PK or P2S address string (mainnet or testnet) to its hex-encoded ergoTree bytes.
 fn change_address_to_ergo_tree(address_str: &str) -> Result<String, TrackerBoxUpdaterError> {
-    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
-    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-    let address = encoder.parse_address_from_str(address_str).map_err(|e| {
+    let address = AddressEncoder::unchecked_parse_address_from_str(address_str).map_err(|e| {
         TrackerBoxUpdaterError::SerializationError(format!(
             "Invalid address '{}': {}",
             address_str, e

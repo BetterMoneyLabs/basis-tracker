@@ -114,10 +114,34 @@ pub fn blake2b256_hash(data: &[u8]) -> [u8; 32] {
     hasher.finalize().to_vec().try_into().unwrap()
 }
 
-/// Convert a 33-byte compressed secp256k1 public key (hex) to a mainnet P2PK address string.
-pub fn pubkey_to_address(pubkey_hex: &str) -> Result<String, String> {
+/// Detect whether a valid Ergo address string uses the mainnet or testnet prefix.
+pub fn detect_address_network_prefix(
+    address_str: &str,
+) -> Result<ergo_lib::ergotree_ir::chain::address::NetworkPrefix, String> {
+    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
+
+    if AddressEncoder::new(NetworkPrefix::Mainnet)
+        .parse_address_from_str(address_str)
+        .is_ok()
+    {
+        return Ok(NetworkPrefix::Mainnet);
+    }
+    if AddressEncoder::new(NetworkPrefix::Testnet)
+        .parse_address_from_str(address_str)
+        .is_ok()
+    {
+        return Ok(NetworkPrefix::Testnet);
+    }
+    Err(format!("invalid address '{address_str}'"))
+}
+
+/// Convert a 33-byte compressed secp256k1 public key (hex) to a P2PK address string for `network`.
+pub fn pubkey_to_address_for_network(
+    pubkey_hex: &str,
+    network: ergo_lib::ergotree_ir::chain::address::NetworkPrefix,
+) -> Result<String, String> {
     use ergo_lib::ergo_chain_types::EcPoint;
-    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::{Address, AddressEncoder};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
@@ -129,19 +153,22 @@ pub fn pubkey_to_address(pubkey_hex: &str) -> Result<String, String> {
     let ec_point = EcPoint::sigma_parse_bytes(&pubkey_bytes)
         .map_err(|e| format!("invalid public key format: {e:?}"))?;
     let address = Address::P2Pk(ProveDlog::new(ec_point));
-    let encoder =
-        ergo_lib::ergotree_ir::chain::address::AddressEncoder::new(NetworkPrefix::Mainnet);
+    let encoder = AddressEncoder::new(network);
     Ok(encoder.address_to_str(&address))
 }
 
-/// Convert a P2S or P2PK address string to its hex-encoded ergoTree.
+/// Convert a 33-byte compressed secp256k1 public key (hex) to a mainnet P2PK address string.
+pub fn pubkey_to_address(pubkey_hex: &str) -> Result<String, String> {
+    use ergo_lib::ergotree_ir::chain::address::NetworkPrefix;
+    pubkey_to_address_for_network(pubkey_hex, NetworkPrefix::Mainnet)
+}
+
+/// Convert a P2S or P2PK address string (mainnet or testnet) to its hex-encoded ergoTree.
 pub fn address_to_ergo_tree(address_str: &str) -> Result<String, String> {
-    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
-    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-    let address = encoder
-        .parse_address_from_str(address_str)
+    let address = AddressEncoder::unchecked_parse_address_from_str(address_str)
         .map_err(|e| format!("invalid address '{address_str}': {e}"))?;
     let tree = address
         .script()
@@ -153,12 +180,13 @@ pub fn address_to_ergo_tree(address_str: &str) -> Result<String, String> {
     .pipe(Ok)
 }
 
-/// Derive the P2PK address from a P2PK (proveDlog) ergoTree (hex). Used to find the address that
-/// owns a fee-input box so the correct local secret is used to sign it. A P2PK ergoTree serializes
-/// as `00 08 cd <33-byte compressed point>`, so the public key is bytes `[3..36]`.
-pub fn ergo_tree_to_p2pk_address(ergo_tree_hex: &str) -> Result<String, String> {
+/// Derive the P2PK address for `network` from a P2PK (proveDlog) ergoTree (hex).
+pub fn ergo_tree_to_p2pk_address_for_network(
+    ergo_tree_hex: &str,
+    network: ergo_lib::ergotree_ir::chain::address::NetworkPrefix,
+) -> Result<String, String> {
     use ergo_lib::ergo_chain_types::EcPoint;
-    use ergo_lib::ergotree_ir::chain::address::{Address, AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::{Address, AddressEncoder};
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
     use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
 
@@ -168,8 +196,16 @@ pub fn ergo_tree_to_p2pk_address(ergo_tree_hex: &str) -> Result<String, String> 
     }
     let point = EcPoint::sigma_parse_bytes(&bytes[3..])
         .map_err(|e| format!("failed to parse P2PK point: {e:?}"))?;
-    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
+    let encoder = AddressEncoder::new(network);
     Ok(encoder.address_to_str(&Address::P2Pk(ProveDlog::from(point))))
+}
+
+/// Derive the P2PK address from a P2PK (proveDlog) ergoTree (hex). Used to find the address that
+/// owns a fee-input box so the correct local secret is used to sign it. A P2PK ergoTree serializes
+/// as `00 08 cd <33-byte compressed point>`, so the public key is bytes `[3..36]`.
+pub fn ergo_tree_to_p2pk_address(ergo_tree_hex: &str) -> Result<String, String> {
+    use ergo_lib::ergotree_ir::chain::address::NetworkPrefix;
+    ergo_tree_to_p2pk_address_for_network(ergo_tree_hex, NetworkPrefix::Mainnet)
 }
 
 /// Scala `immutable.HashMap` (HashTrieMap, Scala 2.12) iteration order for the given byte keys.
@@ -466,5 +502,59 @@ mod tests {
         // (a plain 64-char box id must never be "unwrapped").
         let id = "9f1a413a239a9ad61561924834c0e2b9acbb6a3d0443fdc4b6aa355a83aaf450";
         assert_eq!(decode_box_id(id), id);
+    }
+
+    #[test]
+    fn address_to_ergo_tree_accepts_mainnet_and_testnet_and_rejects_bad_checksum() {
+        use ergo_lib::ergotree_ir::chain::address::{Address, AddressEncoder, NetworkPrefix};
+        use ergo_lib::ergotree_ir::ergo_tree::ErgoTree;
+        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+        // 1. P2S script (standard miner-fee ErgoTree) encoded for both Mainnet and Testnet.
+        let fee_tree_hex =
+            "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304";
+        let fee_tree = ErgoTree::sigma_parse_bytes(&hex::decode(fee_tree_hex).unwrap()).unwrap();
+        let fee_addr = Address::recreate_from_ergo_tree(&fee_tree).unwrap();
+        let p2s_mainnet = AddressEncoder::encode_address_as_string(NetworkPrefix::Mainnet, &fee_addr);
+        let p2s_testnet = AddressEncoder::encode_address_as_string(NetworkPrefix::Testnet, &fee_addr);
+        assert_ne!(p2s_mainnet, p2s_testnet);
+        assert_eq!(address_to_ergo_tree(&p2s_mainnet).unwrap(), fee_tree_hex);
+        assert_eq!(address_to_ergo_tree(&p2s_testnet).unwrap(), fee_tree_hex);
+        assert_eq!(
+            detect_address_network_prefix(&p2s_mainnet).unwrap(),
+            NetworkPrefix::Mainnet
+        );
+        assert_eq!(
+            detect_address_network_prefix(&p2s_testnet).unwrap(),
+            NetworkPrefix::Testnet
+        );
+
+        // 2. P2PK key encoded for both Mainnet and Testnet.
+        let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
+        let expected_p2pk_tree = format!("0008cd{}", pubkey);
+        let p2pk_mainnet =
+            pubkey_to_address_for_network(pubkey, NetworkPrefix::Mainnet).unwrap();
+        let p2pk_testnet =
+            pubkey_to_address_for_network(pubkey, NetworkPrefix::Testnet).unwrap();
+        assert!(p2pk_mainnet.starts_with('9'));
+        assert!(p2pk_testnet.starts_with('3'));
+        assert_eq!(address_to_ergo_tree(&p2pk_mainnet).unwrap(), expected_p2pk_tree);
+        assert_eq!(address_to_ergo_tree(&p2pk_testnet).unwrap(), expected_p2pk_tree);
+        assert_eq!(
+            ergo_tree_to_p2pk_address_for_network(&expected_p2pk_tree, NetworkPrefix::Testnet)
+                .unwrap(),
+            p2pk_testnet
+        );
+
+        // 3. Damaged checksums on either network are strictly rejected.
+        let flip_last = |s: &str| -> String {
+            let mut chars: Vec<char> = s.chars().collect();
+            let last = chars.len() - 1;
+            chars[last] = if chars[last] == 'A' { 'B' } else { 'A' };
+            chars.into_iter().collect()
+        };
+        assert!(address_to_ergo_tree(&flip_last(&p2s_mainnet)).is_err());
+        assert!(address_to_ergo_tree(&flip_last(&p2s_testnet)).is_err());
+        assert!(address_to_ergo_tree(&flip_last(&p2pk_testnet)).is_err());
     }
 }
