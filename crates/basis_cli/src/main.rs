@@ -1,12 +1,7 @@
-mod account;
-mod api;
-mod commands;
-mod config;
-mod crypto;
-mod demo_keys;
-mod interactive;
-mod output;
-mod verify;
+// The binary is a thin shell over the library: all modules live in
+// `basis_cli_lib` (lib.rs) so they are compiled once and dead-code analysis
+// covers the whole public API, not just what the binary happens to call.
+use basis_cli_lib::{account, api, commands, config, interactive, output};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

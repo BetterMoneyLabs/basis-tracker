@@ -1597,7 +1597,10 @@ mod tests {
         let digest = "ab".repeat(33);
         // 0x0e (Coll[Byte]) || VLQ length 33 (0x21) || 33 digest bytes.
         let r5 = format!("0e21{}", digest);
-        assert_eq!(tracker_box_r5_digest(&box_with_r5(Some(r5))).unwrap(), digest);
+        assert_eq!(
+            tracker_box_r5_digest(&box_with_r5(Some(r5))).unwrap(),
+            digest
+        );
     }
 
     #[test]
@@ -1605,9 +1608,15 @@ mod tests {
         // No R5 register at all.
         assert!(tracker_box_r5_digest(&box_with_r5(None)).is_err());
         // Wrong type prefix.
-        assert!(tracker_box_r5_digest(&box_with_r5(Some("0621".to_string() + &"ab".repeat(33)))).is_err());
+        assert!(
+            tracker_box_r5_digest(&box_with_r5(Some("0621".to_string() + &"ab".repeat(33))))
+                .is_err()
+        );
         // Declared length does not match the payload.
-        assert!(tracker_box_r5_digest(&box_with_r5(Some("0e20".to_string() + &"ab".repeat(33)))).is_err());
+        assert!(
+            tracker_box_r5_digest(&box_with_r5(Some("0e20".to_string() + &"ab".repeat(33))))
+                .is_err()
+        );
         // Not hex.
         assert!(tracker_box_r5_digest(&box_with_r5(Some("zz".to_string()))).is_err());
     }

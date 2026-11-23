@@ -66,12 +66,12 @@ already landed on master in `4bde3d9`.
   with an initiated refund no longer backs redemptions at full value.
 - **N17 — `/redemption/build` can be abused by any Write client** (`ab2b76c`).
   Redeemer-funded fees plus abuse-resistant build limits.
-- **N18 — clients ignore the denomination** (**uncommitted**). Acceptance
+- **N18 — clients ignore the denomination** (`e5b1f1d`). Acceptance
   checks are evaluated per denomination, the TUI wallet is overhauled for
   per-denomination operation, and redemption build is guarded against a
   diverged committed state. Plan: `specs/n18_client_denomination_plan.md`.
 - **N19 — a fresh database rejects every reserve with history**
-  (**uncommitted**). History-aware reserve admission: the scanner walks
+  (`e5b1f1d`). History-aware reserve admission: the scanner walks
   creating transactions back to an authenticated root (empty R5, R7 = 0,
   owner-P2PK deployment input), admits verified successors of a spent tracked
   box, retries (never quarantines) on inconclusive walks, and clears pre-N19
@@ -87,15 +87,23 @@ already landed on master in `4bde3d9`.
 
 ## Status note
 
-Everything through N17 is committed on the branch. N18 and N19 are complete
-and verified (full workspace suite green, clippy at baseline) but
-**uncommitted** per the operator's instruction; they appear as working-tree
-modifications plus the two untracked plan files listed above.
+All fixes are committed on the branch: N1–N17 in the individual commits
+listed above, N18 and N19 together in `e5b1f1d`. Master remains at `6a6ebfe`.
 
-A post-implementation review pass (2026-11-23) refined the uncommitted N19
-code without changing behavior: the history walk now fetches each
-generation's creating transaction once (previously twice — the loop
-re-fetched the parent's transaction after following it), `decide_admission`
-was reduced to the single `proof` parameter its call sites actually vary,
-and a storage-level unit test covers `migrate_quarantine_v2` idempotency and
-marker handling alongside the scanner-level end-to-end migration test.
+A post-implementation review pass (2026-11-23) refined the N19 code without
+changing behavior: the history walk now fetches each generation's creating
+transaction once (previously twice — the loop re-fetched the parent's
+transaction after following it), `decide_admission` was reduced to the single
+`proof` parameter its call sites actually vary, and a storage-level unit test
+covers `migrate_quarantine_v2` idempotency and marker handling alongside the
+scanner-level end-to-end migration test.
+
+A CI remediation pass (2026-11-23, after N13 made CI reach compilation for
+the first time since `bb0cfbd`) made the workspace build, test, clippy and
+fmt steps green under the workflow's `-D warnings`: the `basis_cli` binary no
+longer re-compiles the library modules (`src/main.rs` is a thin shell over
+`basis_cli_lib`, eliminating the bin-only dead-code errors), unused test
+constants/helpers and pattern bindings were removed or ignored, the needless
+borrows in `persistence.rs` were dropped with a `ReserveAvlUpdate` type alias
+for the journal tuple, and two targeted `#[allow]`s document the intentional
+exceptions (`TrackerCommand` variant size, `create_reserve` arity).

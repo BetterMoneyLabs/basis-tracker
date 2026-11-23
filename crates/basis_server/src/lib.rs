@@ -73,7 +73,9 @@ impl std::fmt::Debug for ExchangeAcceptanceCheck {
 
 // Commands that can be sent to the tracker thread
 #[derive(Debug)]
-#[allow(clippy::type_complexity)]
+// Commands cross an mpsc channel one at a time, so the widest variant's size
+// is not a hot-path cost; boxing every payload would only add churn.
+#[allow(clippy::type_complexity, clippy::large_enum_variant)]
 pub enum TrackerCommand {
     AddNote {
         issuer_pubkey: basis_store::PubKey,

@@ -1414,7 +1414,17 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
     };
 
     println!("\n  {}Building redemption via tracker...{}", CYAN, RESET);
-    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp, false, &selected_denom).await {
+    match tracker_assisted_redeem(
+        app,
+        &issuer,
+        &recipient,
+        amount,
+        note.timestamp,
+        false,
+        &selected_denom,
+    )
+    .await
+    {
         Ok(tx_id) => {
             let short = &tx_id[..16.min(tx_id.len())];
             app.set_notification(
@@ -1815,7 +1825,17 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
         "\n  {}Building emergency redemption via tracker...{}",
         CYAN, RESET
     );
-    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp, true, &selected_denom).await {
+    match tracker_assisted_redeem(
+        app,
+        &issuer,
+        &recipient,
+        amount,
+        note.timestamp,
+        true,
+        &selected_denom,
+    )
+    .await
+    {
         Ok(tx_id) => {
             let short = &tx_id[..16.min(tx_id.len())];
             app.set_notification(

@@ -1016,13 +1016,8 @@ impl ServerState {
                 return Ok(true);
             }
             // Follow the reserve-contract input (the previous generation), if any.
-            match inputs
-                .into_iter()
-                .find(|i| i.address == contract_address)
-            {
-                Some(parent) if !parent.creating_tx_id.is_empty() => {
-                    tx_id = parent.creating_tx_id
-                }
+            match inputs.into_iter().find(|i| i.address == contract_address) {
+                Some(parent) if !parent.creating_tx_id.is_empty() => tx_id = parent.creating_tx_id,
                 _ => return Ok(false),
             }
         }
@@ -1049,10 +1044,7 @@ impl ServerState {
     /// Whether a box is spent on-chain, via `GET /blockchain/box/byId/{boxId}`:
     /// the extra-indexed node returns spent boxes with a `spentTransactionId`.
     async fn is_box_spent_onchain(&self, box_id: &str) -> Result<bool, ScannerError> {
-        let url = format!(
-            "{}/blockchain/box/byId/{}",
-            self.config.node_url, box_id
-        );
+        let url = format!("{}/blockchain/box/byId/{}", self.config.node_url, box_id);
         let response = self
             .request_builder(reqwest::Method::GET, &url)
             .send()
@@ -1105,24 +1097,22 @@ impl ServerState {
 
         for _ in 0..self.config.admission_walk_depth {
             // The previous generation is the input at the reserve contract address.
-            let (parent_tx_id, parent_registers) = match inputs
-                .iter()
-                .find(|i| i.address == contract_address)
-            {
-                Some(p) if p.creating_tx_id.is_empty() => {
-                    return Err(ScannerError::NodeError(format!(
-                        "lineage walk: node returned no creating transaction for box {}",
-                        p.box_id
-                    )));
-                }
-                Some(p) => (p.creating_tx_id.clone(), p.registers.clone()),
-                None => {
-                    // The scanned box's own creating transaction has no contract
-                    // input: it is a root, not a successor — nothing the walk can
-                    // authenticate (the fast root path already judged it).
-                    return Ok(false);
-                }
-            };
+            let (parent_tx_id, parent_registers) =
+                match inputs.iter().find(|i| i.address == contract_address) {
+                    Some(p) if p.creating_tx_id.is_empty() => {
+                        return Err(ScannerError::NodeError(format!(
+                            "lineage walk: node returned no creating transaction for box {}",
+                            p.box_id
+                        )));
+                    }
+                    Some(p) => (p.creating_tx_id.clone(), p.registers.clone()),
+                    None => {
+                        // The scanned box's own creating transaction has no contract
+                        // input: it is a root, not a successor — nothing the walk can
+                        // authenticate (the fast root path already judged it).
+                        return Ok(false);
+                    }
+                };
             let parent_tx_inputs = self.fetch_tx_inputs(&parent_tx_id).await?;
             if !parent_tx_inputs
                 .iter()
@@ -1234,11 +1224,7 @@ impl ServerState {
                     }
                     AdmissionVerdict::Authenticate => {
                         match self
-                            .verify_authenticated_lineage(
-                                scan_box,
-                                reserve_info,
-                                contract_address,
-                            )
+                            .verify_authenticated_lineage(scan_box, reserve_info, contract_address)
                             .await
                         {
                             Ok(true) => ReserveAdmission::Admitted,
@@ -2908,7 +2894,10 @@ mod tests {
         // reserve, only verified successors are admitted. Either failed proof
         // goes to the chain-history walk (N19), not straight to quarantine.
         assert_eq!(decide_admission(Some(true)), AdmissionVerdict::Admit);
-        assert_eq!(decide_admission(Some(false)), AdmissionVerdict::Authenticate);
+        assert_eq!(
+            decide_admission(Some(false)),
+            AdmissionVerdict::Authenticate
+        );
         assert_eq!(decide_admission(None), AdmissionVerdict::Retry);
     }
 
@@ -3511,10 +3500,7 @@ mod tests {
         let tip_tx = "bb".repeat(32);
         let fake_root_box = "44".repeat(32);
         let fake_root_tx = "55".repeat(32);
-        let prefilled_r5 = format!(
-            "{{\"R5\":\"64{}032000\"}}",
-            "ab".repeat(33)
-        );
+        let prefilled_r5 = format!("{{\"R5\":\"64{}032000\"}}", "ab".repeat(33));
         let txs = HashMap::from([
             (
                 tip_tx.clone(),
@@ -3673,7 +3659,10 @@ mod tests {
         );
         let boxes_by_id = HashMap::from([(
             tracked_box.clone(),
-            format!("{{\"boxId\":\"{}\",\"spentTransactionId\":null}}", tracked_box),
+            format!(
+                "{{\"boxId\":\"{}\",\"spentTransactionId\":null}}",
+                tracked_box
+            ),
         )]);
         let state = mock_state(
             spawn_mock_node_full(
@@ -3791,8 +3780,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
         std::fs::create_dir_all(&data_dir).unwrap();
         {
-            let storage = ReserveStorage::open(data_dir.join("reserves"))
-                .expect("pre-seed storage opens");
+            let storage =
+                ReserveStorage::open(data_dir.join("reserves")).expect("pre-seed storage opens");
             storage
                 .store_quarantined(&QuarantinedReserve {
                     box_id: tip_box.clone(),
@@ -3812,7 +3801,11 @@ mod tests {
         };
         let state = ServerState::new(config, &data_dir).expect("Failed to create server state");
         assert!(
-            state.reserve_storage.get_all_quarantined().unwrap().is_empty(),
+            state
+                .reserve_storage
+                .get_all_quarantined()
+                .unwrap()
+                .is_empty(),
             "the startup migration must clear pre-N19 quarantine records"
         );
 

@@ -273,7 +273,11 @@ pub fn stats_by_denomination(
 
 impl App {
     pub fn compute_stats_by_denomination(&self) -> std::collections::BTreeMap<String, WalletStats> {
-        stats_by_denomination(&self.issued_notes, &self.received_notes, &self.reserve_statuses)
+        stats_by_denomination(
+            &self.issued_notes,
+            &self.received_notes,
+            &self.reserve_statuses,
+        )
     }
 
     pub async fn new() -> Result<Self> {
@@ -529,11 +533,7 @@ mod tests {
         };
         erg_reserve.denomination = "erg".to_string();
 
-        let stats = stats_by_denomination(
-            &issued,
-            &received,
-            &[erg_reserve, token_reserve],
-        );
+        let stats = stats_by_denomination(&issued, &received, &[erg_reserve, token_reserve]);
 
         let erg = stats.get("erg").expect("erg stats");
         assert_eq!(erg.total_liabilities, 5_000_000_000);

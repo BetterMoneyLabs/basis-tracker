@@ -2937,7 +2937,7 @@ mod multi_denomination_tests {
             )
         };
 
-        let mut manager2 = TrackerStateManager::new(dir.path());
+        let manager2 = TrackerStateManager::new(dir.path());
         assert_eq!(manager2.get_state().avl_root_digest, root_before);
         assert_eq!(
             manager2.reserve_state_digest(&issuer, &DenomKey::Erg),

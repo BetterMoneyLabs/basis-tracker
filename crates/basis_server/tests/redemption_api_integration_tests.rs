@@ -1797,7 +1797,7 @@ mod redemption_api_tests {
         let (issuer_secret, issuer_pubkey) = generate_keypair();
         let (recipient_secret, recipient_pubkey) = generate_keypair();
         let issuer_hex = hex::encode(issuer_pubkey);
-        let recipient_hex = hex::encode(recipient_pubkey);
+        let _recipient_hex = hex::encode(recipient_pubkey);
         let nft = [0x42u8; 32];
         let tok = basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap());
 
@@ -1889,7 +1889,7 @@ mod redemption_api_tests {
         let (issuer_secret, issuer_pubkey) = generate_keypair();
         let (recipient_secret, recipient_pubkey) = generate_keypair();
         let issuer_hex = hex::encode(issuer_pubkey);
-        let recipient_hex = hex::encode(recipient_pubkey);
+        let _recipient_hex = hex::encode(recipient_pubkey);
         let nft = [0x42u8; 32];
         let tok = basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap());
 

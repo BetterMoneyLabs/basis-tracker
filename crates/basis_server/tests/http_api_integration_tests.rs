@@ -95,7 +95,7 @@ mod http_api_tests {
                         recipient_pubkey,
                         redeemed_amount,
                         new_already_redeemed,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         let result = redemption_manager.complete_redemption(
@@ -115,7 +115,7 @@ mod http_api_tests {
                     TrackerCommand::GenerateProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // For testing purposes, return a mock proof
@@ -138,7 +138,7 @@ mod http_api_tests {
                     TrackerCommand::GetTrackerLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // Mock tracker lookup proof
@@ -152,7 +152,7 @@ mod http_api_tests {
                     TrackerCommand::GetCommittedTrackerLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // Mock committed tracker lookup proof
@@ -166,7 +166,7 @@ mod http_api_tests {
                     TrackerCommand::GetReserveLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // Mock reserve lookup proof
@@ -182,7 +182,7 @@ mod http_api_tests {
                         recipient_pubkey: _,
                         timestamp: _,
                         new_already_redeemed: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // Mock reserve insert proof
@@ -198,7 +198,7 @@ mod http_api_tests {
                     TrackerCommand::GetConfirmation {
                         issuer_pubkey,
                         recipient_pubkey,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         let result = Ok(redemption_manager.tracker.get_confirmation(

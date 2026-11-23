@@ -94,7 +94,7 @@ mod pr16_security_remediation {
                         recipient_pubkey,
                         redeemed_amount,
                         new_already_redeemed,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         let r = redemption_manager.complete_redemption(

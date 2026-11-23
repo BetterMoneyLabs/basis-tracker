@@ -77,6 +77,10 @@ pub struct QuarantinedReserve {
     pub quarantined_at: u64,
 }
 
+/// One reserve AVL journal entry: (issuer_pubkey, note_key, denomination,
+/// timestamp, already_redeemed, recipient_pubkey).
+pub type ReserveAvlUpdate = (PubKey, NoteKey, DenomKey, u64, u64, Option<PubKey>);
+
 /// Database storage for reserve information
 #[derive(Clone)]
 pub struct ReserveStorage {
@@ -453,7 +457,7 @@ impl NoteStorage {
             batch.insert(&self.issuer_index, issuer_pubkey, value);
         }
         if let Some(value) = recipient_index_value {
-            batch.insert(&self.recipient_index, &note.recipient_pubkey, value);
+            batch.insert(&self.recipient_index, note.recipient_pubkey, value);
         }
         batch
             .commit()
@@ -728,13 +732,13 @@ impl NoteStorage {
         let mut batch = self.keyspace.batch();
         batch.insert(
             &self.pending_exchanges_partition,
-            &from_key.key_hash,
+            from_key.key_hash,
             staged_value,
         );
         batch.insert(&self.notes_partition, from_key.to_bytes(), note_value);
         batch.insert(
             &self.confirmations_partition,
-            &from_key.key_hash,
+            from_key.key_hash,
             confirmation_value,
         );
         batch
@@ -784,11 +788,11 @@ impl NoteStorage {
             batch.insert(&self.issuer_index, issuer_pubkey, value);
         }
         if let Some(value) = recipient_index_value {
-            batch.insert(&self.recipient_index, &to_note.recipient_pubkey, value);
+            batch.insert(&self.recipient_index, to_note.recipient_pubkey, value);
         }
         batch.insert(
             &self.confirmations_partition,
-            &to_key.key_hash,
+            to_key.key_hash,
             confirmation_value,
         );
         batch.remove(&self.pending_exchanges_partition, staged_key);
@@ -1248,13 +1252,10 @@ impl NoteStorage {
 
     /// Iterate the reserve AVL journal in operation order.
     ///
-    /// Returns a vector of (issuer_pubkey, note_key, denomination, timestamp,
-    /// already_redeemed, recipient_pubkey) tuples. `recipient_pubkey` is `Some` for
-    /// v2 entries (which embed it) and `None` for legacy 49-byte entries, where the
-    /// caller must recover the recipient from the note store.
-    pub fn iter_reserve_avl_updates(
-        &self,
-    ) -> Result<Vec<(PubKey, NoteKey, DenomKey, u64, u64, Option<PubKey>)>, NoteError> {
+    /// `recipient_pubkey` is `Some` for v2 entries (which embed it) and `None`
+    /// for legacy 49-byte entries, where the caller must recover the recipient
+    /// from the note store.
+    pub fn iter_reserve_avl_updates(&self) -> Result<Vec<ReserveAvlUpdate>, NoteError> {
         let mut updates = Vec::new();
 
         for item in self.reserve_avl_journal_partition.iter() {
@@ -1544,10 +1545,7 @@ impl ReserveStorage {
 
         let cleared = self.clear_quarantined()?;
         self.quarantine_partition
-            .insert(
-                QUARANTINE_SCHEMA_VERSION_KEY,
-                [QUARANTINE_SCHEMA_VERSION],
-            )
+            .insert(QUARANTINE_SCHEMA_VERSION_KEY, [QUARANTINE_SCHEMA_VERSION])
             .map_err(|e| {
                 NoteError::StorageError(format!("Failed to write quarantine schema version: {}", e))
             })?;
@@ -1889,8 +1887,12 @@ mod tests {
     #[test]
     fn quarantine_migration_clears_once_and_skips_marker() {
         let (_dir, storage) = temp_storage("quarantine_migration");
-        storage.store_quarantined(&record(&"aa".repeat(32))).unwrap();
-        storage.store_quarantined(&record(&"bb".repeat(32))).unwrap();
+        storage
+            .store_quarantined(&record(&"aa".repeat(32)))
+            .unwrap();
+        storage
+            .store_quarantined(&record(&"bb".repeat(32)))
+            .unwrap();
         assert_eq!(storage.get_all_quarantined().unwrap().len(), 2);
 
         // First run clears the pre-N19 records and stamps the marker.
@@ -1903,7 +1905,9 @@ mod tests {
         assert!(storage.get_all_quarantined().unwrap().is_empty());
 
         // Records written after the migration survive later runs.
-        storage.store_quarantined(&record(&"cc".repeat(32))).unwrap();
+        storage
+            .store_quarantined(&record(&"cc".repeat(32)))
+            .unwrap();
         assert_eq!(storage.migrate_quarantine_v2().unwrap(), 0);
         let remaining = storage.get_all_quarantined().unwrap();
         assert_eq!(remaining.len(), 1);

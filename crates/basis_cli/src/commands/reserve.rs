@@ -98,6 +98,9 @@ fn resolve_pubkey(
 }
 
 /// Build the reserve creation payload via the tracker server.
+// Positional CLI mirror of the /reserves/create request fields; a params
+// struct for one argument over the lint threshold is not worth the churn.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_reserve(
     account_manager: &AccountManager,
     client: &TrackerClient,

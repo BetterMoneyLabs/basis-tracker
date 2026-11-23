@@ -99,7 +99,12 @@ pub async fn handle_acceptance_command(
             denomination,
         } => {
             let response = client
-                .check_acceptance(&issuer, total_debt, Some(&recipient), denomination.as_deref())
+                .check_acceptance(
+                    &issuer,
+                    total_debt,
+                    Some(&recipient),
+                    denomination.as_deref(),
+                )
                 .await
                 .context("Acceptance check request failed")?;
 
