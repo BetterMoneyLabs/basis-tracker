@@ -172,6 +172,150 @@ fn compute_challenge(
     secp256k1::Scalar::from_be_bytes(e_bytes_32).map_err(|_| CryptoError::InvalidSignature)
 }
 
+/// Generate a new keypair for testing and development
+pub fn generate_keypair() -> ([u8; 32], PubKey) {
+    use secp256k1::{Secp256k1, SecretKey};
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
+    let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+    let pubkey_bytes = public_key.serialize();
+
+    (secret_key.secret_bytes(), pubkey_bytes)
+}
+
+/// Convert a public key to hexadecimal string
+pub fn pubkey_to_hex(pubkey: &PubKey) -> String {
+    hex::encode(pubkey)
+}
+
+/// Convert a hexadecimal string to a public key
+pub fn pubkey_from_hex(hex_str: &str) -> Result<PubKey, CryptoError> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| CryptoError::InternalError("Hex decode failed".to_string()))?;
+
+    if bytes.len() != 33 {
+        return Err(CryptoError::InvalidPublicKey);
+    }
+
+    let mut pubkey = [0u8; 33];
+    pubkey.copy_from_slice(&bytes);
+    validate_public_key(&pubkey)?;
+    Ok(pubkey)
+}
+
+/// Convert a signature to hexadecimal string
+pub fn signature_to_hex(signature: &Signature) -> String {
+    hex::encode(signature)
+}
+
+/// Convert a hexadecimal string to a signature
+pub fn signature_from_hex(hex_str: &str) -> Result<Signature, CryptoError> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| CryptoError::InternalError("Hex decode failed".to_string()))?;
+
+    if bytes.len() != 65 {
+        return Err(CryptoError::InvalidSignatureFormat);
+    }
+
+    let mut signature = [0u8; 65];
+    signature.copy_from_slice(&bytes);
+    validate_signature_format(&signature)?;
+    Ok(signature)
+}
+
+/// Schnorr signature implementation following chaincash-rs approach
+pub fn schnorr_sign(
+    message: &[u8],
+    secret_key_bytes: &[u8; 32],
+    issuer_pubkey: &PubKey,
+) -> Result<Signature, CryptoError> {
+    use secp256k1::Secp256k1;
+
+    let secp = Secp256k1::new();
+
+    // Parse the secret key
+    let secret_key =
+        SecretKey::from_slice(secret_key_bytes).map_err(|_| CryptoError::InvalidSignature)?;
+
+    // Curve order for secp256k1
+    let n = num_bigint::BigUint::from_bytes_be(&[
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
+        0x41, 0x41,
+    ]);
+
+    loop {
+        // Generate a random nonce for the Schnorr signature
+        let nonce_secret = SecretKey::new(&mut secp256k1::rand::thread_rng());
+        let a_point = secp256k1::PublicKey::from_secret_key(&secp, &nonce_secret);
+        let a_bytes = a_point.serialize();
+
+        // Compute challenge e = H(a || message || issuer_pubkey)
+        let e_scalar = compute_challenge(&a_bytes, message, issuer_pubkey)?;
+
+        // Ensure e is interpreted as a positive integer in Scala/ErgoScript, which
+        // treats 32-byte values as signed big-endian integers. If the first byte is
+        // >= 0x80, the challenge would be negative in Scala, breaking verification.
+        if e_scalar.to_be_bytes()[0] >= 0x80 {
+            continue;
+        }
+
+        // Convert scalars to their big integer representations for modular arithmetic
+        let k_big = num_bigint::BigUint::from_bytes_be(&nonce_secret.secret_bytes());
+        let s_big = num_bigint::BigUint::from_bytes_be(&secret_key.secret_bytes());
+        let e_big = num_bigint::BigUint::from_bytes_be(&e_scalar.to_be_bytes());
+
+        // Compute z = k + e * s (mod n)
+        let e_times_s = (&e_big * &s_big) % &n;
+        let z_big = (&k_big + &e_times_s) % &n;
+
+        // Ensure z is in the valid range [1, n-1] and bitLength <= 255
+        // Scala compatibility: reject signatures where z.bitLength > 255 and retry
+        let z_bit_length = z_big.bits();
+        if z_bit_length > 255 || z_big == num_bigint::BigUint::from(0u32) || z_big >= n {
+            // Retry with new nonce (matching Scala behavior)
+            continue;
+        }
+
+        // Convert back to bytes
+        let z_vec = z_big.to_bytes_be();
+        let mut z_bytes = [0u8; 32];
+        if z_vec.len() > 32 {
+            z_bytes.copy_from_slice(&z_vec[z_vec.len() - 32..]);
+        } else if z_vec.len() < 32 {
+            let start_idx = 32 - z_vec.len();
+            z_bytes[start_idx..].copy_from_slice(&z_vec);
+        } else {
+            z_bytes.copy_from_slice(&z_vec);
+        }
+
+        // Create the signature (a || z) - 33 bytes for a, 32 bytes for z
+        let mut signature = [0u8; 65];
+        signature[0..33].copy_from_slice(&a_bytes);
+        signature[33..65].copy_from_slice(&z_bytes);
+
+        return Ok(signature);
+    }
+}
+
+/// Schnorr signature verification following chaincash-rs approach
+pub fn schnorr_verify(
+    signature: &Signature,
+    message: &[u8],
+    issuer_pubkey: &PubKey,
+) -> Result<(), CryptoError> {
+    let verifier = SchnorrVerifier;
+    match verifier.verify_signature(signature, message, issuer_pubkey) {
+        Ok(()) => Ok(()),
+        Err(CryptoError::InvalidSignature) => Err(CryptoError::InvalidSignature),
+        Err(CryptoError::InvalidPublicKey) => Err(CryptoError::InvalidPublicKey),
+        Err(CryptoError::InvalidSignatureFormat) => Err(CryptoError::InvalidSignatureFormat),
+        Err(CryptoError::InternalError(_)) => Err(CryptoError::InternalError(
+            "Verification failed".to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     const TEST_TRACKER_NFT_ID: [u8; 32] = [7u8; 32];
@@ -499,149 +643,5 @@ mod tests {
         verifier
             .verify_signature(&tracker_sig, &message, &tracker)
             .expect("tracker signature should verify");
-    }
-}
-
-/// Generate a new keypair for testing and development
-pub fn generate_keypair() -> ([u8; 32], PubKey) {
-    use secp256k1::{Secp256k1, SecretKey};
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::new(&mut secp256k1::rand::thread_rng());
-    let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
-    let pubkey_bytes = public_key.serialize();
-
-    (secret_key.secret_bytes(), pubkey_bytes)
-}
-
-/// Convert a public key to hexadecimal string
-pub fn pubkey_to_hex(pubkey: &PubKey) -> String {
-    hex::encode(pubkey)
-}
-
-/// Convert a hexadecimal string to a public key
-pub fn pubkey_from_hex(hex_str: &str) -> Result<PubKey, CryptoError> {
-    let bytes = hex::decode(hex_str)
-        .map_err(|_| CryptoError::InternalError("Hex decode failed".to_string()))?;
-
-    if bytes.len() != 33 {
-        return Err(CryptoError::InvalidPublicKey);
-    }
-
-    let mut pubkey = [0u8; 33];
-    pubkey.copy_from_slice(&bytes);
-    validate_public_key(&pubkey)?;
-    Ok(pubkey)
-}
-
-/// Convert a signature to hexadecimal string
-pub fn signature_to_hex(signature: &Signature) -> String {
-    hex::encode(signature)
-}
-
-/// Convert a hexadecimal string to a signature
-pub fn signature_from_hex(hex_str: &str) -> Result<Signature, CryptoError> {
-    let bytes = hex::decode(hex_str)
-        .map_err(|_| CryptoError::InternalError("Hex decode failed".to_string()))?;
-
-    if bytes.len() != 65 {
-        return Err(CryptoError::InvalidSignatureFormat);
-    }
-
-    let mut signature = [0u8; 65];
-    signature.copy_from_slice(&bytes);
-    validate_signature_format(&signature)?;
-    Ok(signature)
-}
-
-/// Schnorr signature implementation following chaincash-rs approach
-pub fn schnorr_sign(
-    message: &[u8],
-    secret_key_bytes: &[u8; 32],
-    issuer_pubkey: &PubKey,
-) -> Result<Signature, CryptoError> {
-    use secp256k1::Secp256k1;
-
-    let secp = Secp256k1::new();
-
-    // Parse the secret key
-    let secret_key =
-        SecretKey::from_slice(secret_key_bytes).map_err(|_| CryptoError::InvalidSignature)?;
-
-    // Curve order for secp256k1
-    let n = num_bigint::BigUint::from_bytes_be(&[
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
-        0x41, 0x41,
-    ]);
-
-    loop {
-        // Generate a random nonce for the Schnorr signature
-        let nonce_secret = SecretKey::new(&mut secp256k1::rand::thread_rng());
-        let a_point = secp256k1::PublicKey::from_secret_key(&secp, &nonce_secret);
-        let a_bytes = a_point.serialize();
-
-        // Compute challenge e = H(a || message || issuer_pubkey)
-        let e_scalar = compute_challenge(&a_bytes, message, issuer_pubkey)?;
-
-        // Ensure e is interpreted as a positive integer in Scala/ErgoScript, which
-        // treats 32-byte values as signed big-endian integers. If the first byte is
-        // >= 0x80, the challenge would be negative in Scala, breaking verification.
-        if e_scalar.to_be_bytes()[0] >= 0x80 {
-            continue;
-        }
-
-        // Convert scalars to their big integer representations for modular arithmetic
-        let k_big = num_bigint::BigUint::from_bytes_be(&nonce_secret.secret_bytes());
-        let s_big = num_bigint::BigUint::from_bytes_be(&secret_key.secret_bytes());
-        let e_big = num_bigint::BigUint::from_bytes_be(&e_scalar.to_be_bytes());
-
-        // Compute z = k + e * s (mod n)
-        let e_times_s = (&e_big * &s_big) % &n;
-        let z_big = (&k_big + &e_times_s) % &n;
-
-        // Ensure z is in the valid range [1, n-1] and bitLength <= 255
-        // Scala compatibility: reject signatures where z.bitLength > 255 and retry
-        let z_bit_length = z_big.bits();
-        if z_bit_length > 255 || z_big == num_bigint::BigUint::from(0u32) || z_big >= n {
-            // Retry with new nonce (matching Scala behavior)
-            continue;
-        }
-
-        // Convert back to bytes
-        let z_vec = z_big.to_bytes_be();
-        let mut z_bytes = [0u8; 32];
-        if z_vec.len() > 32 {
-            z_bytes.copy_from_slice(&z_vec[z_vec.len() - 32..]);
-        } else if z_vec.len() < 32 {
-            let start_idx = 32 - z_vec.len();
-            z_bytes[start_idx..].copy_from_slice(&z_vec);
-        } else {
-            z_bytes.copy_from_slice(&z_vec);
-        }
-
-        // Create the signature (a || z) - 33 bytes for a, 32 bytes for z
-        let mut signature = [0u8; 65];
-        signature[0..33].copy_from_slice(&a_bytes);
-        signature[33..65].copy_from_slice(&z_bytes);
-
-        return Ok(signature);
-    }
-}
-
-/// Schnorr signature verification following chaincash-rs approach
-pub fn schnorr_verify(
-    signature: &Signature,
-    message: &[u8],
-    issuer_pubkey: &PubKey,
-) -> Result<(), CryptoError> {
-    let verifier = SchnorrVerifier;
-    match verifier.verify_signature(signature, message, issuer_pubkey) {
-        Ok(()) => Ok(()),
-        Err(CryptoError::InvalidSignature) => Err(CryptoError::InvalidSignature),
-        Err(CryptoError::InvalidPublicKey) => Err(CryptoError::InvalidPublicKey),
-        Err(CryptoError::InvalidSignatureFormat) => Err(CryptoError::InvalidSignatureFormat),
-        Err(CryptoError::InternalError(_)) => Err(CryptoError::InternalError(
-            "Verification failed".to_string(),
-        )),
     }
 }

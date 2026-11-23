@@ -547,6 +547,12 @@ impl PendingRedemptionRegistry {
         entries.len()
     }
 
+    /// Whether there are no live entries. Used by tests.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Drop expired entries. Called on every record/validate, so no timer is needed.
     fn prune(entries: &mut HashMap<UnsignedTxFingerprint, PendingRedemption>) {
         let now = Instant::now();

@@ -522,11 +522,7 @@ impl RedemptionManager {
         let avl_valid =
             basis_trees::BasisAvlTree::verify_proof(avl_root_digest, proof, &key, &value);
 
-        if !avl_valid {
-            return Ok(false);
-        }
-
-        Ok(true)
+        Ok(avl_valid)
     }
 }
 
@@ -538,6 +534,210 @@ fn parse_pubkey(hex_str: &str) -> Result<PubKey, RedemptionError> {
     bytes
         .try_into()
         .map_err(|_| RedemptionError::InvalidPublicKey("Must be 33 bytes".to_string()))
+}
+
+// Helper function to build redemption transaction using the transaction builder
+fn build_redemption_transaction(
+    tracker: &mut TrackerStateManager,
+    note: &IouNote,
+    proof: &crate::NoteProof,
+    request: &RedemptionRequest,
+) -> Result<RedemptionData, RedemptionError> {
+    // In a real implementation, this would:
+    // 1. Fetch the reserve box from the blockchain
+    // 2. Create the redemption transaction following the contract logic
+    // 3. Include the AVL proof and signatures
+    // 4. Calculate appropriate fees
+
+    // For now, create a mock transaction structure using the unified builder
+    let redemption_id = format!(
+        "redeem_{}_{}_{}",
+        &request.issuer_pubkey[..16],
+        &request.recipient_pubkey[..16],
+        note.timestamp
+    );
+
+    // Use blockchain data from request (fetched by API layer)
+    let actual_tracker_box_id = request.tracker_box_id.clone();
+    let actual_tracker_nft_id = request.tracker_nft_id.clone();
+    let current_height = request.current_height as u32; // Convert u64 to u32 for transaction builder
+
+    // Decode issuer signature from hex
+    let issuer_signature_bytes = hex::decode(&request.issuer_signature).map_err(|e| {
+        RedemptionError::TransactionError(format!("Invalid issuer signature hex: {}", e))
+    })?;
+
+    if issuer_signature_bytes.len() != 65 {
+        return Err(RedemptionError::TransactionError(format!(
+            "Issuer signature must be 65 bytes, got {}",
+            issuer_signature_bytes.len()
+        )));
+    }
+
+    // Get tracker signature from request, or an empty Coll[Byte] for emergency.
+    let tracker_signature_bytes = if request.emergency {
+        // Emergency redemption: the tracker signature is not required by the
+        // contract after the waiting period. Context var #6 must be an EMPTY
+        // Coll[Byte] here -- the contract branches on `trackerSigBytes.size > 0`,
+        // so a 65-byte zero "signature" would be verified (and rejected) instead
+        // of taking the emergency path. This matches the server's redemption
+        // build and the Scala reference implementation.
+        Vec::new()
+    } else if let Some(ref tracker_sig_hex) = request.tracker_signature {
+        // Normal redemption with tracker signature provided
+        hex::decode(tracker_sig_hex).map_err(|e| {
+            RedemptionError::TransactionError(format!("Invalid tracker signature hex: {}", e))
+        })?
+    } else {
+        // Normal redemption without tracker signature - this should not happen in production
+        // The API layer should have provided the tracker signature
+        return Err(RedemptionError::TransactionError(
+            "Tracker signature required for normal redemption".to_string(),
+        ));
+    };
+
+    // The 65-byte length check applies only to real signatures; the emergency
+    // path's empty Coll[Byte] is valid by construction.
+    if !request.emergency && tracker_signature_bytes.len() != 65 {
+        return Err(RedemptionError::TransactionError(format!(
+            "Tracker signature must be 65 bytes, got {}",
+            tracker_signature_bytes.len()
+        )));
+    }
+
+    // Use the unified transaction builder with provided values
+    // First, get reserve lookup proof from tracker state
+    // Parse public keys for reserve lookup proof generation
+    let issuer_pubkey_bytes = parse_pubkey(&request.issuer_pubkey)
+        .map_err(|e| RedemptionError::TransactionError(format!("Invalid issuer pubkey: {}", e)))?;
+    let recipient_pubkey_bytes = parse_pubkey(&request.recipient_pubkey).map_err(|e| {
+        RedemptionError::TransactionError(format!("Invalid recipient pubkey: {}", e))
+    })?;
+
+    // Generate reserve lookup proof FIRST (before inserting, for old state)
+    // For first redemption, this will return None proof
+    let reserve_lookup_proof = tracker
+        .generate_reserve_lookup_proof(
+            &issuer_pubkey_bytes,
+            &recipient_pubkey_bytes,
+            &note.denomination,
+        )
+        .map_err(|e| {
+            RedemptionError::TransactionError(format!(
+                "Failed to generate reserve lookup proof: {:?}",
+                e
+            ))
+        })?;
+
+    // Generate reserve insert proof (for inserting redeemed amount into reserve tree)
+    // This also updates the reserve AVL tree and returns the updated tree digest for R5
+    let new_already_redeemed = note.amount_redeemed + request.amount;
+    let (reserve_insert_proof, updated_reserve_tree) = tracker
+        .generate_reserve_insert_proof(
+            &issuer_pubkey_bytes,
+            &recipient_pubkey_bytes,
+            &note.denomination,
+            note.timestamp,
+            new_already_redeemed,
+        )
+        .map_err(|e| {
+            RedemptionError::TransactionError(format!(
+                "Failed to generate reserve insert proof: {:?}",
+                e
+            ))
+        })?;
+
+    // Generate tracker lookup proof (for totalDebt)
+    let tracker_lookup_proof = tracker
+        .generate_tracker_lookup_proof(
+            &issuer_pubkey_bytes,
+            &recipient_pubkey_bytes,
+            &note.denomination,
+        )
+        .map_err(|e| {
+            RedemptionError::TransactionError(format!(
+                "Failed to generate tracker lookup proof: {:?}",
+                e
+            ))
+        })?;
+
+    // Convert proofs to bytes for transaction builder
+    let reserve_lookup_proof_bytes: Option<Vec<u8>> = reserve_lookup_proof.proof;
+    let tracker_lookup_proof_bytes: Vec<u8> = tracker_lookup_proof.proof;
+
+    // Pass proofs to transaction builder
+    let mut transaction_data = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
+        &request.reserve_box_id,
+        &actual_tracker_box_id,
+        &actual_tracker_nft_id,
+        note,
+        &request.recipient_address,
+        &reserve_insert_proof,
+        &issuer_signature_bytes,
+        &tracker_signature_bytes,
+        &issuer_pubkey_bytes,
+        &TxContext {
+            current_height,
+            fee: 1000000, // 0.001 ERG fee from config
+            change_address: request.change_address.clone(),
+            network_prefix: 0,
+        },
+        request.reserve_box_value, // Use actual reserve box value from blockchain
+        request.reserve_refund_initiation_height,
+        reserve_lookup_proof_bytes,
+        tracker_lookup_proof_bytes,
+        request.amount,
+        &request.reserve_ergo_tree,
+    )
+    .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
+
+    // Set the updated reserve tree for R5 register
+    transaction_data.updated_reserve_tree = Some(updated_reserve_tree);
+
+    // Add fee inputs. If the request provides them, use those; otherwise use a
+    // placeholder so offline/tests can still build a balanced transaction.
+    let required_fee = transaction_data.fee;
+    if !request.fee_input_box_ids.is_empty() {
+        transaction_data.fee_input_box_ids = request.fee_input_box_ids.clone();
+        transaction_data.fee_input_total_value = request.fee_input_total_value;
+        transaction_data.change_address = Some(request.change_address.clone());
+    } else {
+        transaction_data.fee_input_box_ids = vec!["test_fee_input_placeholder".to_string()];
+        transaction_data.fee_input_total_value = required_fee;
+        transaction_data.change_address = Some(request.change_address.clone());
+    }
+
+    // Use real transaction builder to create the actual transaction bytes
+    let transaction_bytes =
+        RedemptionTransactionBuilder::build_redemption_transaction(&transaction_data)
+            .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
+
+    // Required signatures: issuer and tracker
+    // Note: Tracker pubkey should be fetched from tracker configuration
+    let required_signatures = vec![
+        request.issuer_pubkey.clone(),
+        "tracker_pubkey_required".to_string(),
+    ];
+
+    // Estimated fee (0.001 ERG)
+    let estimated_fee = 1000000;
+
+    // Redemption time is recorded for tracking purposes
+    // Note: Time lock validation is handled by the ErgoScript contract
+    let redemption_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    Ok(RedemptionData {
+        redemption_id,
+        note: note.clone(),
+        avl_proof: proof.avl_proof.clone(),
+        transaction_bytes: hex::encode(transaction_bytes),
+        required_signatures,
+        estimated_fee,
+        redemption_time,
+    })
 }
 
 #[cfg(test)]
@@ -593,7 +793,7 @@ mod tests {
 
         let request = RedemptionRequest {
             issuer_pubkey: "invalid_hex".to_string(),
-            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            recipient_pubkey: hex::encode(recipient_pubkey_bytes),
             amount: 1000,
             timestamp: 1672531200,
             reserve_box_id: "box123".to_string(),
@@ -667,7 +867,7 @@ mod tests {
         };
 
         let request = RedemptionRequest {
-            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
+            issuer_pubkey: hex::encode(issuer_pubkey_bytes),
             recipient_pubkey: "invalid_hex".to_string(),
             amount: 1000,
             timestamp: 1672531200,
@@ -742,8 +942,8 @@ mod tests {
         };
 
         let request = RedemptionRequest {
-            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
-            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            issuer_pubkey: hex::encode(issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(recipient_pubkey_bytes),
             amount: 1000,
             timestamp: 1672531200,
             reserve_box_id: "".to_string(),
@@ -816,8 +1016,8 @@ mod tests {
         };
 
         let request = RedemptionRequest {
-            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
-            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            issuer_pubkey: hex::encode(issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(recipient_pubkey_bytes),
             amount: 1000,
             timestamp: 1672531200,
             reserve_box_id: "box123".to_string(),
@@ -890,8 +1090,8 @@ mod tests {
         };
 
         let request = RedemptionRequest {
-            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
-            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            issuer_pubkey: hex::encode(issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(recipient_pubkey_bytes),
             amount: 1000,
             timestamp: 1672531200,
             reserve_box_id: "box123".to_string(),
@@ -964,8 +1164,8 @@ mod tests {
         };
 
         let request = RedemptionRequest {
-            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
-            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            issuer_pubkey: hex::encode(issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(recipient_pubkey_bytes),
             amount: 0, // Zero amount
             timestamp: 1672531200,
             reserve_box_id: "box123".to_string(),
@@ -1038,8 +1238,8 @@ mod tests {
         };
 
         let request = RedemptionRequest {
-            issuer_pubkey: hex::encode(&issuer_pubkey_bytes),
-            recipient_pubkey: hex::encode(&recipient_pubkey_bytes),
+            issuer_pubkey: hex::encode(issuer_pubkey_bytes),
+            recipient_pubkey: hex::encode(recipient_pubkey_bytes),
             amount: 20000, // Exceeds outstanding debt
             timestamp: 1672531200,
             reserve_box_id: "box123".to_string(),
@@ -1609,208 +1809,4 @@ mod tests {
             normal
         );
     }
-}
-
-// Helper function to build redemption transaction using the transaction builder
-fn build_redemption_transaction(
-    tracker: &mut TrackerStateManager,
-    note: &IouNote,
-    proof: &crate::NoteProof,
-    request: &RedemptionRequest,
-) -> Result<RedemptionData, RedemptionError> {
-    // In a real implementation, this would:
-    // 1. Fetch the reserve box from the blockchain
-    // 2. Create the redemption transaction following the contract logic
-    // 3. Include the AVL proof and signatures
-    // 4. Calculate appropriate fees
-
-    // For now, create a mock transaction structure using the unified builder
-    let redemption_id = format!(
-        "redeem_{}_{}_{}",
-        &request.issuer_pubkey[..16],
-        &request.recipient_pubkey[..16],
-        note.timestamp
-    );
-
-    // Use blockchain data from request (fetched by API layer)
-    let actual_tracker_box_id = request.tracker_box_id.clone();
-    let actual_tracker_nft_id = request.tracker_nft_id.clone();
-    let current_height = request.current_height as u32; // Convert u64 to u32 for transaction builder
-
-    // Decode issuer signature from hex
-    let issuer_signature_bytes = hex::decode(&request.issuer_signature).map_err(|e| {
-        RedemptionError::TransactionError(format!("Invalid issuer signature hex: {}", e))
-    })?;
-
-    if issuer_signature_bytes.len() != 65 {
-        return Err(RedemptionError::TransactionError(format!(
-            "Issuer signature must be 65 bytes, got {}",
-            issuer_signature_bytes.len()
-        )));
-    }
-
-    // Get tracker signature from request, or an empty Coll[Byte] for emergency.
-    let tracker_signature_bytes = if request.emergency {
-        // Emergency redemption: the tracker signature is not required by the
-        // contract after the waiting period. Context var #6 must be an EMPTY
-        // Coll[Byte] here -- the contract branches on `trackerSigBytes.size > 0`,
-        // so a 65-byte zero "signature" would be verified (and rejected) instead
-        // of taking the emergency path. This matches the server's redemption
-        // build and the Scala reference implementation.
-        Vec::new()
-    } else if let Some(ref tracker_sig_hex) = request.tracker_signature {
-        // Normal redemption with tracker signature provided
-        hex::decode(tracker_sig_hex).map_err(|e| {
-            RedemptionError::TransactionError(format!("Invalid tracker signature hex: {}", e))
-        })?
-    } else {
-        // Normal redemption without tracker signature - this should not happen in production
-        // The API layer should have provided the tracker signature
-        return Err(RedemptionError::TransactionError(
-            "Tracker signature required for normal redemption".to_string(),
-        ));
-    };
-
-    // The 65-byte length check applies only to real signatures; the emergency
-    // path's empty Coll[Byte] is valid by construction.
-    if !request.emergency && tracker_signature_bytes.len() != 65 {
-        return Err(RedemptionError::TransactionError(format!(
-            "Tracker signature must be 65 bytes, got {}",
-            tracker_signature_bytes.len()
-        )));
-    }
-
-    // Use the unified transaction builder with provided values
-    // First, get reserve lookup proof from tracker state
-    // Parse public keys for reserve lookup proof generation
-    let issuer_pubkey_bytes = parse_pubkey(&request.issuer_pubkey)
-        .map_err(|e| RedemptionError::TransactionError(format!("Invalid issuer pubkey: {}", e)))?;
-    let recipient_pubkey_bytes = parse_pubkey(&request.recipient_pubkey).map_err(|e| {
-        RedemptionError::TransactionError(format!("Invalid recipient pubkey: {}", e))
-    })?;
-
-    // Generate reserve lookup proof FIRST (before inserting, for old state)
-    // For first redemption, this will return None proof
-    let reserve_lookup_proof = tracker
-        .generate_reserve_lookup_proof(
-            &issuer_pubkey_bytes,
-            &recipient_pubkey_bytes,
-            &note.denomination,
-        )
-        .map_err(|e| {
-            RedemptionError::TransactionError(format!(
-                "Failed to generate reserve lookup proof: {:?}",
-                e
-            ))
-        })?;
-
-    // Generate reserve insert proof (for inserting redeemed amount into reserve tree)
-    // This also updates the reserve AVL tree and returns the updated tree digest for R5
-    let new_already_redeemed = note.amount_redeemed + request.amount;
-    let (reserve_insert_proof, updated_reserve_tree) = tracker
-        .generate_reserve_insert_proof(
-            &issuer_pubkey_bytes,
-            &recipient_pubkey_bytes,
-            &note.denomination,
-            note.timestamp,
-            new_already_redeemed,
-        )
-        .map_err(|e| {
-            RedemptionError::TransactionError(format!(
-                "Failed to generate reserve insert proof: {:?}",
-                e
-            ))
-        })?;
-
-    // Generate tracker lookup proof (for totalDebt)
-    let tracker_lookup_proof = tracker
-        .generate_tracker_lookup_proof(
-            &issuer_pubkey_bytes,
-            &recipient_pubkey_bytes,
-            &note.denomination,
-        )
-        .map_err(|e| {
-            RedemptionError::TransactionError(format!(
-                "Failed to generate tracker lookup proof: {:?}",
-                e
-            ))
-        })?;
-
-    // Convert proofs to bytes for transaction builder
-    let reserve_lookup_proof_bytes: Option<Vec<u8>> = reserve_lookup_proof.proof;
-    let tracker_lookup_proof_bytes: Vec<u8> = tracker_lookup_proof.proof;
-
-    // Pass proofs to transaction builder
-    let mut transaction_data = RedemptionTransactionBuilder::build_unsigned_redemption_transaction(
-        &request.reserve_box_id,
-        &actual_tracker_box_id,
-        &actual_tracker_nft_id,
-        note,
-        &request.recipient_address,
-        &reserve_insert_proof,
-        &issuer_signature_bytes,
-        &tracker_signature_bytes,
-        &issuer_pubkey_bytes,
-        &TxContext {
-            current_height,
-            fee: 1000000, // 0.001 ERG fee from config
-            change_address: request.change_address.clone(),
-            network_prefix: 0,
-        },
-        request.reserve_box_value, // Use actual reserve box value from blockchain
-        request.reserve_refund_initiation_height,
-        reserve_lookup_proof_bytes,
-        tracker_lookup_proof_bytes,
-        request.amount,
-        &request.reserve_ergo_tree,
-    )
-    .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
-
-    // Set the updated reserve tree for R5 register
-    transaction_data.updated_reserve_tree = Some(updated_reserve_tree);
-
-    // Add fee inputs. If the request provides them, use those; otherwise use a
-    // placeholder so offline/tests can still build a balanced transaction.
-    let required_fee = transaction_data.fee;
-    if !request.fee_input_box_ids.is_empty() {
-        transaction_data.fee_input_box_ids = request.fee_input_box_ids.clone();
-        transaction_data.fee_input_total_value = request.fee_input_total_value;
-        transaction_data.change_address = Some(request.change_address.clone());
-    } else {
-        transaction_data.fee_input_box_ids = vec!["test_fee_input_placeholder".to_string()];
-        transaction_data.fee_input_total_value = required_fee;
-        transaction_data.change_address = Some(request.change_address.clone());
-    }
-
-    // Use real transaction builder to create the actual transaction bytes
-    let transaction_bytes =
-        RedemptionTransactionBuilder::build_redemption_transaction(&transaction_data)
-            .map_err(|e| RedemptionError::TransactionError(e.to_string()))?;
-
-    // Required signatures: issuer and tracker
-    // Note: Tracker pubkey should be fetched from tracker configuration
-    let required_signatures = vec![
-        request.issuer_pubkey.clone(),
-        "tracker_pubkey_required".to_string(),
-    ];
-
-    // Estimated fee (0.001 ERG)
-    let estimated_fee = 1000000;
-
-    // Redemption time is recorded for tracking purposes
-    // Note: Time lock validation is handled by the ErgoScript contract
-    let redemption_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
-    Ok(RedemptionData {
-        redemption_id,
-        note: note.clone(),
-        avl_proof: proof.avl_proof.clone(),
-        transaction_bytes: hex::encode(transaction_bytes),
-        required_signatures,
-        estimated_fee,
-        redemption_time,
-    })
 }

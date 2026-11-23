@@ -667,6 +667,6 @@ mod http_api_tests {
         assert_eq!(data.local, 1000);
         assert_eq!(data.status, "local_only");
         assert_eq!(data.confirmed, None);
-        assert_eq!(data.redeemable, false);
+        assert!(!data.redeemable);
     }
 }

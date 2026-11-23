@@ -51,9 +51,11 @@ async fn anonymous_mode_allows_all_requests() {
 
 #[tokio::test]
 async fn api_key_mode_accepts_valid_key() {
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::ApiKey;
-    config.api_key = Some("super-secret".to_string());
+    let config = AuthConfig {
+        mode: AuthMode::ApiKey,
+        api_key: Some("super-secret".to_string()),
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let response = app
@@ -71,9 +73,11 @@ async fn api_key_mode_accepts_valid_key() {
 
 #[tokio::test]
 async fn api_key_mode_rejects_missing_key() {
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::ApiKey;
-    config.api_key = Some("super-secret".to_string());
+    let config = AuthConfig {
+        mode: AuthMode::ApiKey,
+        api_key: Some("super-secret".to_string()),
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let response = app
@@ -90,9 +94,11 @@ async fn api_key_mode_rejects_missing_key() {
 
 #[tokio::test]
 async fn api_key_mode_rejects_wrong_key() {
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::ApiKey;
-    config.api_key = Some("super-secret".to_string());
+    let config = AuthConfig {
+        mode: AuthMode::ApiKey,
+        api_key: Some("super-secret".to_string()),
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let response = app
@@ -111,12 +117,14 @@ async fn api_key_mode_rejects_wrong_key() {
 #[tokio::test]
 async fn signature_mode_accepts_valid_signature() {
     let (pubkey_hex, secret_key) = generate_keypair();
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::Signature;
-    config.authorized_clients.push(AuthorizedClient {
-        pubkey: pubkey_hex.clone(),
-        role: ClientRole::Write,
-    });
+    let config = AuthConfig {
+        mode: AuthMode::Signature,
+        authorized_clients: vec![AuthorizedClient {
+            pubkey: pubkey_hex.clone(),
+            role: ClientRole::Write,
+        }],
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let request = sign_request(
@@ -132,12 +140,14 @@ async fn signature_mode_accepts_valid_signature() {
 #[tokio::test]
 async fn read_role_cannot_post_admin_route() {
     let (pubkey_hex, secret_key) = generate_keypair();
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::Signature;
-    config.authorized_clients.push(AuthorizedClient {
-        pubkey: pubkey_hex.clone(),
-        role: ClientRole::Read,
-    });
+    let config = AuthConfig {
+        mode: AuthMode::Signature,
+        authorized_clients: vec![AuthorizedClient {
+            pubkey: pubkey_hex.clone(),
+            role: ClientRole::Read,
+        }],
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let request = sign_request(
@@ -153,9 +163,11 @@ async fn read_role_cannot_post_admin_route() {
 #[tokio::test]
 async fn signature_mode_rejects_unauthorized_pubkey() {
     let (pubkey_hex, secret_key) = generate_keypair();
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::Signature;
     // No authorized clients.
+    let config = AuthConfig {
+        mode: AuthMode::Signature,
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let request = sign_request(
@@ -171,12 +183,14 @@ async fn signature_mode_rejects_unauthorized_pubkey() {
 #[tokio::test]
 async fn signature_mode_rejects_bad_signature() {
     let (pubkey_hex, secret_key) = generate_keypair();
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::Signature;
-    config.authorized_clients.push(AuthorizedClient {
-        pubkey: pubkey_hex.clone(),
-        role: ClientRole::Write,
-    });
+    let config = AuthConfig {
+        mode: AuthMode::Signature,
+        authorized_clients: vec![AuthorizedClient {
+            pubkey: pubkey_hex.clone(),
+            role: ClientRole::Write,
+        }],
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let mut request = sign_request(
@@ -201,12 +215,14 @@ async fn signature_mode_rejects_bad_signature() {
 #[tokio::test]
 async fn signature_mode_rejects_replayed_nonce() {
     let (pubkey_hex, secret_key) = generate_keypair();
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::Signature;
-    config.authorized_clients.push(AuthorizedClient {
-        pubkey: pubkey_hex.clone(),
-        role: ClientRole::Write,
-    });
+    let config = AuthConfig {
+        mode: AuthMode::Signature,
+        authorized_clients: vec![AuthorizedClient {
+            pubkey: pubkey_hex.clone(),
+            role: ClientRole::Write,
+        }],
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let timestamp = current_timestamp_ms();
@@ -310,13 +326,14 @@ fn sign_request_full(
 }
 
 fn write_mode_config(pubkey_hex: &str) -> AuthConfig {
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::Signature;
-    config.authorized_clients.push(AuthorizedClient {
-        pubkey: pubkey_hex.to_string(),
-        role: ClientRole::Write,
-    });
-    config
+    AuthConfig {
+        mode: AuthMode::Signature,
+        authorized_clients: vec![AuthorizedClient {
+            pubkey: pubkey_hex.to_string(),
+            role: ClientRole::Write,
+        }],
+        ..Default::default()
+    }
 }
 
 #[tokio::test]
@@ -402,9 +419,11 @@ async fn signature_mode_rejects_oversized_body() {
 async fn api_key_without_admin_key_keeps_admin_role() {
     // Backward compatibility: when admin_api_key is not configured, the shared
     // api_key keeps its full-Admin meaning.
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::ApiKey;
-    config.api_key = Some("super-secret".to_string());
+    let config = AuthConfig {
+        mode: AuthMode::ApiKey,
+        api_key: Some("super-secret".to_string()),
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let response = app
@@ -429,10 +448,12 @@ async fn api_key_without_admin_key_keeps_admin_role() {
 async fn api_key_with_admin_key_set_grants_only_write() {
     // With a separate admin_api_key configured, the shared api_key is Write-only:
     // readable and Write routes pass, the operator-only (Admin) route is rejected with 403.
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::ApiKey;
-    config.api_key = Some("shared-key".to_string());
-    config.admin_api_key = Some("operator-key".to_string());
+    let config = AuthConfig {
+        mode: AuthMode::ApiKey,
+        api_key: Some("shared-key".to_string()),
+        admin_api_key: Some("operator-key".to_string()),
+        ..Default::default()
+    };
 
     let app = test_app(config);
 
@@ -499,10 +520,12 @@ async fn api_key_with_admin_key_set_grants_only_write() {
 
 #[tokio::test]
 async fn admin_api_key_grants_admin_role() {
-    let mut config = AuthConfig::default();
-    config.mode = AuthMode::ApiKey;
-    config.api_key = Some("shared-key".to_string());
-    config.admin_api_key = Some("operator-key".to_string());
+    let config = AuthConfig {
+        mode: AuthMode::ApiKey,
+        api_key: Some("shared-key".to_string()),
+        admin_api_key: Some("operator-key".to_string()),
+        ..Default::default()
+    };
 
     let app = test_app(config);
     let response = app

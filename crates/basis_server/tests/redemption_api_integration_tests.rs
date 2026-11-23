@@ -1492,7 +1492,7 @@ mod redemption_api_tests {
         );
         assert_eq!(request.total_debt, 10000);
         assert_eq!(request.timestamp, 1234567890);
-        assert_eq!(request.emergency, true);
+        assert!(request.emergency);
     }
 
     #[tokio::test]
@@ -1621,7 +1621,6 @@ mod redemption_api_tests {
         // Add an ERG note (100) and a USE note (50) for the pair.
         let add_note = |denom: basis_store::DenomKey, amount: u64, ts: u64| {
             let state = state.clone();
-            let issuer_secret = issuer_secret;
             async move {
                 let note = basis_store::IouNote::create_and_sign(
                     recipient_pubkey,
@@ -1803,7 +1802,6 @@ mod redemption_api_tests {
 
         let add_note = |denom: basis_store::DenomKey, amount: u64, ts: u64| {
             let state = state.clone();
-            let issuer_secret = issuer_secret;
             async move {
                 let note = basis_store::IouNote::create_and_sign(
                     recipient_pubkey,
@@ -1895,7 +1893,6 @@ mod redemption_api_tests {
 
         let add_note = |denom: basis_store::DenomKey, amount: u64, ts: u64| {
             let state = state.clone();
-            let issuer_secret = issuer_secret;
             async move {
                 let note = basis_store::IouNote::create_and_sign(
                     recipient_pubkey,

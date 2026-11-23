@@ -1251,8 +1251,10 @@ mod tests {
         let config = startup_test_config("0.0.0.0", AuthConfig::default());
         assert!(config.validate_startup().is_err());
 
-        let mut auth = AuthConfig::default();
-        auth.allow_anonymous_non_loopback = true;
+        let auth = AuthConfig {
+            allow_anonymous_non_loopback: true,
+            ..Default::default()
+        };
         let config = startup_test_config("0.0.0.0", auth);
         assert!(config.validate_startup().is_ok());
     }

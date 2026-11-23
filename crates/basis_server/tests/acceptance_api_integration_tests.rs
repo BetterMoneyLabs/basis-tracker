@@ -404,8 +404,8 @@ async fn test_upload_and_retrieve_policy_roundtrip() {
 
     // Sign the policy JSON using the core Schnorr implementation
     let policy_bytes = policy_json.as_bytes();
-    let signature = sign_policy_with_key(&policy_bytes, &secret_key);
-    let signature_hex = hex::encode(&signature);
+    let signature = sign_policy_with_key(policy_bytes, &secret_key);
+    let signature_hex = hex::encode(signature);
 
     // Upload the policy
     let upload_request = Request::builder()
@@ -527,7 +527,7 @@ async fn test_check_acceptance_uses_per_recipient_policy() {
 
     // Sign the policy
     let signature = sign_policy_with_key(policy_json.as_bytes(), &recipient_secret);
-    let signature_hex = hex::encode(&signature);
+    let signature_hex = hex::encode(signature);
 
     // Upload the policy
     let upload_request = Request::builder()

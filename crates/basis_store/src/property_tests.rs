@@ -5,7 +5,7 @@ use crate::{
 };
 
 #[cfg(test)]
-mod property_tests {
+mod tests {
     use super::*;
     use proptest::prelude::*;
 

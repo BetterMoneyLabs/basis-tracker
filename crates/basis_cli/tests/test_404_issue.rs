@@ -23,11 +23,4 @@ fn test_cli_note_list_issuer_should_not_return_404() {
     // Current test result: This test passes but documents the issue
     // When the issue is fixed, we should update this test to actually verify
     // that the CLI command works correctly
-
-    assert!(
-        true,
-        "CLI command 'basis_cli note list --issuer' should return results, not 404 error. \
-         Expected: 200 OK with notes array (empty if no notes). \
-         Actual: 404 Not Found or connection refused"
-    );
 }

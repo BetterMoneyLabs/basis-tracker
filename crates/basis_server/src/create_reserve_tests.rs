@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod create_reserve_tests {
+mod tests {
     use axum::{extract::State, http::StatusCode, Json};
     use std::sync::Arc;
     use tokio::sync::Mutex;
