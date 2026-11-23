@@ -351,7 +351,6 @@ dependencies = [
  "basis_store",
  "blake2",
  "clap",
- "config",
  "dirs",
  "ergo-lib",
  "generic-array",
