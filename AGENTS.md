@@ -252,6 +252,23 @@ cargo test -p basis_store --features ergo_scanner real_scanner_integration_tests
 ./test_real_scanner.sh
 ```
 
+## Acceptance Policy
+
+- **Default policy**: `AcceptanceConfig::default_collateral()` in `crates/basis_core/src/acceptance.rs`
+  is `all_of(require_full_collateral, no_pending_refund)` (root `default_policy`): 100%
+  collateralization AND no pending refund (R7) on the issuer's reserve. The refund guard
+  matters because the collateralization predicate counts a reserve at face value even
+  after its owner initiated an unilateral refund (issue #15 review N16).
+- **Consumers**: the TUI (`crates/basis_app`) and the MCP server (`crates/basis_mcp/src/policy.rs`)
+  use it for fresh installs and as the serde fallback for `~/.basis/ui.toml`. Existing
+  persisted policies are NOT migrated — only fresh configs get the new default.
+- **Layout constraint**: `Collateralization` must stay at `predicates[0]` — the TUI's
+  "set collateral percentage" flow (`crates/basis_app/src/ui.rs`) overwrites that slot
+  by index (keeping the name, so the `all_of` reference stays valid).
+- Server-side evaluation of uploaded policies handles the full predicate tree on both
+  paths: note acceptance (`crates/basis_server/src/acceptance/builder.rs`) and
+  redemption-time re-checks (`crates/basis_server/src/acceptance/redemption_check.rs`).
+
 ## Documentation Requirements
 
 ### Plans and Summaries

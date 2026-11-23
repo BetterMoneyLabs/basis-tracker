@@ -253,7 +253,10 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
       - `amount`: Always 1 for NFTs
     - `registers`: Map of register values
       - `R4`: Owner public key from request (GroupElement)
-      - `R5`: Initial AVL tree (empty tree for new reserve)
+      - `R5`: Initial AVL tree (empty tree for a fresh reserve; on a rotation the
+        carried-forward reserve-state digest for the (owner, denomination) pair, so the
+        redeemed-amount history survives the refund — issue #15 review N9. Clients can
+        fetch the expected value from `GET /reserves/state-digest`)
       - `R6`: Tracker NFT ID (bytes) - identifies which tracker server this reserve is linked to
   - `fee`: Transaction fee amount from configuration
   - `change_address`: Owner's P2PK address derived from the request's `owner_pubkey`

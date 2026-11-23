@@ -65,7 +65,9 @@ Anyone (presumably, owner in most cases) can top the reserve up.
 
  A reserve only counts as collateral once the tracker has validated its setup when first seen on-chain
  (box creation is not a spend, so the contract cannot check it): R5 must hold the empty AVL+ tree
- (flags `0x03`, 32-byte keys), R7 must be absent or `Long 0` (no pre-initiated refund), R6 must reference
+ (flags `0x03`, 32-byte keys) — or, when the reserve is a rotation of a refunded one, the
+ carried-forward redemption-history digest recorded by the tracker's `/reserves/create`
+ (issue #15 review N9) — R7 must be absent or `Long 0` (no pre-initiated refund), R6 must reference
  the tracker's own NFT (a singleton token), and R4 must be a valid secp256k1 point. A reserve with a
  pending refund is never counted as collateral.
 

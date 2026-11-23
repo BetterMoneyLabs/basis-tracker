@@ -88,6 +88,11 @@ start_height = 0
 node_url = "http://127.0.0.1:9053"
 api_key = "your_node_api_key_here"
 timeout_secs = 30
+# Maximum number of reserve-box generations the history-aware admission walk
+# (issue #19, N19) follows backwards before giving up and retrying next cycle.
+# Only reached when the fast C4/P2PK proof fails; raise for reserves with very
+# long update histories. Default: 512.
+# admission_walk_depth = 512
 
 # Tracker wallet node: /wallet/* endpoints, schnorr signing, and transaction
 # broadcast. Hosts the tracker wallet; no extra indices needed. Uncomment to use

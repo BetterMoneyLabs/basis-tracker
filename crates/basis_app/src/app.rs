@@ -179,6 +179,9 @@ pub struct NoteInfo {
     pub amount: u64,
     pub redeemed: u64,
     pub _timestamp: u64,
+    /// Denomination of this note: "erg" or "token:<64-hex>". Never sum note
+    /// amounts across denominations.
+    pub denomination: String,
 }
 
 #[derive(Clone)]
@@ -190,7 +193,7 @@ pub struct ReserveInfo {
     pub note_count: usize,
     pub _last_updated: u64,
     pub has_pending_refund: bool,
-    pub reserve_token_id: Option<String>,
+    pub _reserve_token_id: Option<String>,
     /// Denomination of this debt/collateral pair: "erg" or "token:<64-hex>".
     pub denomination: String,
     pub symbol: String,
@@ -233,15 +236,44 @@ pub fn compute_wallet_stats(
     }
 }
 
+/// Per-denomination wallet stats: one entry per denomination present in the
+/// notes or reserves, each summing only its own notes, with the coverage ratio
+/// from the matching reserve entry. Amounts are never summed across
+/// denominations (N18).
+pub fn stats_by_denomination(
+    issued_notes: &[NoteInfo],
+    received_notes: &[NoteInfo],
+    reserve_statuses: &[ReserveInfo],
+) -> std::collections::BTreeMap<String, WalletStats> {
+    let mut denoms: std::collections::BTreeSet<String> = reserve_statuses
+        .iter()
+        .map(|r| r.denomination.clone())
+        .collect();
+    denoms.extend(issued_notes.iter().map(|n| n.denomination.clone()));
+    denoms.extend(received_notes.iter().map(|n| n.denomination.clone()));
+
+    denoms
+        .into_iter()
+        .map(|denom| {
+            let issued: Vec<NoteInfo> = issued_notes
+                .iter()
+                .filter(|n| n.denomination == denom)
+                .cloned()
+                .collect();
+            let received: Vec<NoteInfo> = received_notes
+                .iter()
+                .filter(|n| n.denomination == denom)
+                .cloned()
+                .collect();
+            let reserve = reserve_statuses.iter().find(|r| r.denomination == denom);
+            (denom, compute_wallet_stats(&issued, &received, reserve))
+        })
+        .collect()
+}
+
 impl App {
-    pub fn compute_stats(&self) -> WalletStats {
-        // The headline coverage ratio uses the ERG entry when present, else the first.
-        let reserve = self
-            .reserve_statuses
-            .iter()
-            .find(|r| r.denomination == "erg")
-            .or_else(|| self.reserve_statuses.first());
-        compute_wallet_stats(&self.issued_notes, &self.received_notes, reserve)
+    pub fn compute_stats_by_denomination(&self) -> std::collections::BTreeMap<String, WalletStats> {
+        stats_by_denomination(&self.issued_notes, &self.received_notes, &self.reserve_statuses)
     }
 
     pub async fn new() -> Result<Self> {
@@ -333,7 +365,7 @@ impl App {
                         note_count: d.note_count,
                         _last_updated: status.last_updated,
                         has_pending_refund: d.has_pending_refund,
-                        reserve_token_id: None,
+                        _reserve_token_id: None,
                         denomination: d.denomination.clone(),
                         symbol: d.symbol.clone(),
                         decimals: d.decimals,
@@ -351,6 +383,7 @@ impl App {
                         amount: n.amount_collected,
                         redeemed: n.amount_redeemed,
                         _timestamp: n.timestamp,
+                        denomination: n.denomination,
                     })
                     .collect();
             }
@@ -364,6 +397,7 @@ impl App {
                         amount: n.amount_collected,
                         redeemed: n.amount_redeemed,
                         _timestamp: n.timestamp,
+                        denomination: n.denomination,
                     })
                     .collect();
             }
@@ -396,6 +430,7 @@ mod tests {
             amount,
             redeemed: 0,
             _timestamp: 0,
+            denomination: "erg".to_string(),
         }
     }
 
@@ -408,7 +443,7 @@ mod tests {
             note_count: 0,
             _last_updated: 0,
             has_pending_refund: false,
-            reserve_token_id: None,
+            _reserve_token_id: None,
             denomination: "erg".to_string(),
             symbol: "ERG".to_string(),
             decimals: 9,
@@ -469,7 +504,46 @@ mod tests {
             amount,
             redeemed,
             _timestamp: 0,
+            denomination: "erg".to_string(),
         }
+    }
+
+    fn token_note(amount: u64) -> NoteInfo {
+        NoteInfo {
+            denomination: "token:aa".to_string(),
+            ..note(amount)
+        }
+    }
+
+    #[test]
+    fn stats_never_sum_across_denominations() {
+        // 5 ERG issued + 300 token units issued, 4 ERG received + 200 token
+        // units received: each denomination gets its own totals (N18).
+        let issued = vec![note(5_000_000_000), token_note(300)];
+        let received = vec![note(4_000_000_000), token_note(200)];
+        let mut erg_reserve = reserve(1.5);
+        let token_reserve = ReserveInfo {
+            denomination: "token:aa".to_string(),
+            ratio: 2.0,
+            ..reserve(1.5)
+        };
+        erg_reserve.denomination = "erg".to_string();
+
+        let stats = stats_by_denomination(
+            &issued,
+            &received,
+            &[erg_reserve, token_reserve],
+        );
+
+        let erg = stats.get("erg").expect("erg stats");
+        assert_eq!(erg.total_liabilities, 5_000_000_000);
+        assert_eq!(erg.total_assets, 4_000_000_000);
+        assert!((erg.coverage_ratio.unwrap() - 1.5).abs() < 1e-6);
+
+        let token = stats.get("token:aa").expect("token stats");
+        assert_eq!(token.total_liabilities, 300);
+        assert_eq!(token.total_assets, 200);
+        assert!((token.coverage_ratio.unwrap() - 2.0).abs() < 1e-6);
     }
 
     #[test]

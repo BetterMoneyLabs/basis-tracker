@@ -22,9 +22,13 @@ pub enum AcceptanceCommands {
         /// Recipient public key (33-byte hex)
         #[arg(long)]
         recipient: String,
-        /// Total cumulative debt in nanoERG
+        /// Total cumulative debt in nanoERG (or raw token units with --denomination)
         #[arg(long)]
         total_debt: u64,
+        /// Denomination of the note ("erg" or "token:<64-hex>"); omitted resolves to
+        /// the pair's existing note denomination, else ERG
+        #[arg(long)]
+        denomination: Option<String>,
     },
 }
 
@@ -92,9 +96,10 @@ pub async fn handle_acceptance_command(
             issuer,
             recipient,
             total_debt,
+            denomination,
         } => {
             let response = client
-                .check_acceptance(&issuer, total_debt, Some(&recipient))
+                .check_acceptance(&issuer, total_debt, Some(&recipient), denomination.as_deref())
                 .await
                 .context("Acceptance check request failed")?;
 
@@ -118,4 +123,60 @@ pub async fn handle_acceptance_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        cmd: AcceptanceCommands,
+    }
+
+    #[test]
+    fn check_parses_denomination_flag() {
+        // N18: the acceptance check must be able to scope the policy
+        // evaluation to a token denomination.
+        let cli = TestCli::try_parse_from([
+            "test",
+            "check",
+            "--issuer",
+            &"02".repeat(33),
+            "--recipient",
+            &"03".repeat(33),
+            "--total-debt",
+            "1000",
+            "--denomination",
+            &format!("token:{}", "ab".repeat(32)),
+        ])
+        .expect("check with --denomination parses");
+        match cli.cmd {
+            AcceptanceCommands::Check { denomination, .. } => {
+                assert_eq!(denomination, Some(format!("token:{}", "ab".repeat(32))));
+            }
+            _ => panic!("expected Check"),
+        }
+
+        // Omitted stays None (server resolves the pair's denomination).
+        let cli = TestCli::try_parse_from([
+            "test",
+            "check",
+            "--issuer",
+            &"02".repeat(33),
+            "--recipient",
+            &"03".repeat(33),
+            "--total-debt",
+            "1000",
+        ])
+        .expect("check without --denomination parses");
+        match cli.cmd {
+            AcceptanceCommands::Check { denomination, .. } => {
+                assert_eq!(denomination, None);
+            }
+            _ => panic!("expected Check"),
+        }
+    }
 }

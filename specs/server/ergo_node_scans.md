@@ -159,7 +159,7 @@ error and never counted as collateral:
    - R5: Contains the AVL tree root digest (commitment to all notes owed by this issuer)
    - R6: Contains the NFT ID of the tracker server (bytes, exactly 32) — when `tracker_nft_id` is configured, a reserve referencing a different tracker is rejected
    - R7: Contains the refund initiation height (Long); any non-Long type (missing `0x05` prefix) is rejected because `SELF.R7[Long]` would throw on-chain
-3. **First-Seen Setup Validation**: when a reserve is first seen it must be clean — R7 must be `0` (a reserve created with a pending refund could be withdrawn immediately) and R5 must be the empty AVL tree (a poisoned tree could block creditors from ever redeeming). Reserves failing these checks are not tracked as collateral.
+3. **First-Seen Setup Validation**: when a reserve is first seen it must be clean — R7 must be `0` (a reserve created with a pending refund could be withdrawn immediately) and R5 must be the empty AVL tree (a poisoned tree could block creditors from ever redeeming) — unless R5 equals the pending-rotation digest recorded by `/reserves/create` for that (owner, denomination), which carries the redeemed-amount history forward from the refunded reserve (issue #15 review N9). Reserves failing these checks are not tracked as collateral.
 4. **Reserve State Updates**: Update the reserve tracker with collateralization ratios and reserve status
 
 ## Data Models

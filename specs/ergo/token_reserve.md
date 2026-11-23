@@ -126,23 +126,34 @@ reserves it leaves conversion to the user (or UI) using
 
 ## TUI Wallet Support
 
-The interactive TUI wallet (`crates/basis_app`) is token-reserve aware:
+The interactive TUI wallet (`crates/basis_app`) is denomination-aware
+(issue #15 follow-up N18):
 
-- On refresh it fetches `GET /config/reserve-token` and caches the configured
-  token ID and decimals in `App::reserve_token_config`.
-- `My Reserves` shows the reserve token ID for token-backed reserves and
-  displays liabilities/collateral in raw token units plus a converted value
-  using `reserve_token_decimals`.
-- `Create Reserve` prompts for an ERG box-value amount and, when the tracker is
-  in token mode, an additional token amount to lock. The configured token ID is
-  sent automatically.
-- Wallet stats, note lists, note creation, redemption, and acceptance-policy
-  labels switch from "nanoERG"/"ERG" to "units"/"token" when the tracker is
-  configured for token reserves.
+- On refresh it fetches `GET /config/reserve-collateral` and caches the full
+  served-denomination table (ERG plus every served token, with symbol and
+  decimals) in `App::collateral_config`; the legacy
+  `GET /config/reserve-token` (first served token only) is still fetched for
+  the tracker-health display.
+- Every note carries its denomination (`NoteInfo::denomination`). Wallet
+  stats, note totals, and note lists are computed and displayed **per
+  denomination** — amounts are never summed across denominations. Display
+  labels and decimals are resolved per denomination from the served table.
+- `Create Note` prompts for the denomination (served list, ERG default) and
+  signs the denomination-derived debt key (`DenomKey::debt_key`:
+  `blake2b256(issuer ‖ recipient ‖ tokenId)` for tokens), sending the explicit
+  denomination to the tracker.
+- `Create Reserve` prompts for the denomination from the served set; token
+  denominations then prompt for the token amount to lock.
+- Redemption (normal and emergency) is scoped to the selected note's
+  denomination: the note is fetched via the denominated lookup, the issuer
+  signature is verified against the note's own cumulative total (the tracker
+  build enforces committed on-chain state, issue #15 S6), and the build
+  request carries the denomination.
+- `My Reserves` shows each reserve's denomination, symbol, and decimals from
+  the per-denomination reserve status.
 - The USE token (`a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669`)
-  is displayed with the `$` symbol in the TUI (e.g. `1000.000000 $`). Other
-  custom tokens keep the generic "token" label. The display still uses the
-  configured `reserve_token_decimals` for unit conversion.
+  keeps its `$` symbol in the legacy token-mode label helpers; denomination
+  display otherwise uses the served table's symbols.
 
 ## Testing
 

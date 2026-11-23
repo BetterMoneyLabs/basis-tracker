@@ -85,6 +85,15 @@ pub struct ReserveStorage {
     pending_root_partition: fjall::Partition,
 }
 
+/// Marker key in the quarantine partition holding the schema version of the
+/// records there. Box ids are hex, so the underscored name cannot collide
+/// with a record key.
+const QUARANTINE_SCHEMA_VERSION_KEY: &[u8] = b"__quarantine_schema_version__";
+
+/// Current quarantine record schema. v1 was written by the pre-N19 admission
+/// rules and is dropped by [`ReserveStorage::migrate_quarantine_v2`].
+const QUARANTINE_SCHEMA_VERSION: u8 = 2;
+
 /// Database storage for tracker information
 #[derive(Clone)]
 pub struct TrackerStorage {
@@ -1491,6 +1500,60 @@ impl ReserveStorage {
         Ok(())
     }
 
+    /// Remove every quarantined reserve record. Returns the number removed.
+    pub fn clear_quarantined(&self) -> Result<usize, NoteError> {
+        let mut keys = Vec::new();
+        for item in self.quarantine_partition.iter() {
+            let (key, _value) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate quarantine partition: {}", e))
+            })?;
+            if key.as_ref() == QUARANTINE_SCHEMA_VERSION_KEY {
+                continue;
+            }
+            keys.push(key.to_vec());
+        }
+
+        let removed = keys.len();
+        for key in keys {
+            self.quarantine_partition.remove(&key).map_err(|e| {
+                NoteError::StorageError(format!("Failed to remove quarantined reserve: {}", e))
+            })?;
+        }
+        Ok(removed)
+    }
+
+    /// One-time migration for the quarantine records written by the pre-N19
+    /// admission rules. Those records were written by checks that had no
+    /// history-aware fallback, so some of them quarantined legitimate reserves
+    /// (e.g. a reserve whose C4/P2PK proof failed transiently). The N19 walk
+    /// re-evaluates every candidate box on sight, so the old records are simply
+    /// dropped and the boxes are re-judged on the next scan. Returns the number
+    /// of records cleared (0 when the migration already ran).
+    pub fn migrate_quarantine_v2(&self) -> Result<usize, NoteError> {
+        let current = self
+            .quarantine_partition
+            .get(QUARANTINE_SCHEMA_VERSION_KEY)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to read quarantine schema version: {}", e))
+            })?
+            .and_then(|v| v.as_ref().first().copied())
+            .unwrap_or(0);
+        if current >= QUARANTINE_SCHEMA_VERSION {
+            return Ok(0);
+        }
+
+        let cleared = self.clear_quarantined()?;
+        self.quarantine_partition
+            .insert(
+                QUARANTINE_SCHEMA_VERSION_KEY,
+                [QUARANTINE_SCHEMA_VERSION],
+            )
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to write quarantine schema version: {}", e))
+            })?;
+        Ok(cleared)
+    }
+
     /// Persist a quarantined reserve box (issue #19).
     pub fn store_quarantined(&self, record: &QuarantinedReserve) -> Result<(), NoteError> {
         let value = serde_json::to_vec(record).map_err(|e| {
@@ -1532,9 +1595,12 @@ impl ReserveStorage {
         let mut records = Vec::new();
 
         for item in self.quarantine_partition.iter() {
-            let (_key_bytes, value_bytes) = item.map_err(|e| {
+            let (key_bytes, value_bytes) = item.map_err(|e| {
                 NoteError::StorageError(format!("Failed to iterate quarantine partition: {}", e))
             })?;
+            if key_bytes.as_ref() == QUARANTINE_SCHEMA_VERSION_KEY {
+                continue;
+            }
 
             let record: QuarantinedReserve = serde_json::from_slice(&value_bytes).map_err(|e| {
                 NoteError::StorageError(format!("Failed to deserialize quarantined reserve: {}", e))
@@ -1788,5 +1854,59 @@ impl AcceptancePolicyStorage {
             }
         }
         Ok(policies)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_storage(tag: &str) -> (std::path::PathBuf, ReserveStorage) {
+        let dir = std::env::temp_dir().join(format!(
+            "basis_persistence_test_{}_{}_{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let storage = ReserveStorage::open(&dir).expect("storage opens");
+        (dir, storage)
+    }
+
+    fn record(box_id: &str) -> QuarantinedReserve {
+        QuarantinedReserve {
+            box_id: box_id.to_string(),
+            owner_pubkey: "02".to_string() + &"11".repeat(32),
+            denomination: "ERG".to_string(),
+            reason: "test record".to_string(),
+            quarantined_at: 0,
+        }
+    }
+
+    #[test]
+    fn quarantine_migration_clears_once_and_skips_marker() {
+        let (_dir, storage) = temp_storage("quarantine_migration");
+        storage.store_quarantined(&record(&"aa".repeat(32))).unwrap();
+        storage.store_quarantined(&record(&"bb".repeat(32))).unwrap();
+        assert_eq!(storage.get_all_quarantined().unwrap().len(), 2);
+
+        // First run clears the pre-N19 records and stamps the marker.
+        assert_eq!(storage.migrate_quarantine_v2().unwrap(), 2);
+        assert!(storage.get_all_quarantined().unwrap().is_empty());
+
+        // Idempotent: the marker suppresses further clears, and the marker key
+        // itself never leaks into the record listing.
+        assert_eq!(storage.migrate_quarantine_v2().unwrap(), 0);
+        assert!(storage.get_all_quarantined().unwrap().is_empty());
+
+        // Records written after the migration survive later runs.
+        storage.store_quarantined(&record(&"cc".repeat(32))).unwrap();
+        assert_eq!(storage.migrate_quarantine_v2().unwrap(), 0);
+        let remaining = storage.get_all_quarantined().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].box_id, "cc".repeat(32));
     }
 }

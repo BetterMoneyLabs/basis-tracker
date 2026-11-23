@@ -357,7 +357,12 @@ The C4 first-seen validation is unchanged: R4 must be a valid secp256k1 point, R
 equal the empty-tree constant with flags `0x03`, R6 must equal this tracker's own NFT,
 R7 must be zero. Because the edited token contract keeps the reserve-tree key
 derivation unchanged (§4.1), a token reserve's initial R5 is the **same** empty-tree
-constant as before — no new constant and no validation divergence.
+constant as before — no new constant and no validation divergence. The one exception
+is a **rotation** (issue #15 review N9): when the owner refunds and recreates a
+reserve, `/reserves/create` sets the new box's R5 to the carried-forward
+redemption-history digest for the (owner, denomination) pair (recorded as the
+pending-rotation digest, `GET /reserves/state-digest`), and the scanner accepts
+exactly that digest instead of the empty tree.
 
 ## 9. Redemption pipeline
 

@@ -904,6 +904,7 @@ mod tests {
                     node_url: "http://localhost:9053".to_string(),
                     scan_name: None,
                     api_key: Some("test".to_string()),
+                    ..Default::default()
                 },
                 wallet: WalletNodeConfig::default(),
                 basis_reserve_contract_p2s: "test".to_string(),
@@ -996,6 +997,7 @@ mod tests {
                     node_url: "http://localhost:9053".to_string(),
                     scan_name: None,
                     api_key: Some("test".to_string()),
+                    ..Default::default()
                 },
                 wallet: WalletNodeConfig::default(),
                 basis_reserve_contract_p2s: "test".to_string(),

@@ -35,10 +35,6 @@ fn is_token_mode_for(config: Option<&basis_cli_lib::api::ReserveTokenConfig>) ->
     config.is_some()
 }
 
-fn is_token_mode(app: &App) -> bool {
-    is_token_mode_for(token_config(app))
-}
-
 fn is_use_token_for(config: Option<&basis_cli_lib::api::ReserveTokenConfig>) -> bool {
     config
         .and_then(|c| c.reserve_token_id.as_deref())
@@ -78,6 +74,72 @@ fn decimals_for(config: Option<&basis_cli_lib::api::ReserveTokenConfig>) -> u8 {
 
 fn decimals(app: &App) -> u8 {
     decimals_for(token_config(app))
+}
+
+/// Display symbol and decimals for one denomination, resolved from the
+/// tracker's served-denomination table (N18: never render one denomination's
+/// amounts with another's units).
+fn denom_symbol_decimals(app: &App, denom_id: &str) -> (String, u8) {
+    if let Some(cfg) = &app.collateral_config {
+        if let Some(d) = cfg
+            .denominations
+            .iter()
+            .find(|d| d.id.eq_ignore_ascii_case(denom_id))
+        {
+            return (d.symbol.clone(), d.decimals);
+        }
+    }
+    if denom_id == "erg" {
+        ("ERG".to_string(), 9)
+    } else {
+        ("units".to_string(), 0)
+    }
+}
+
+/// Short label for a denomination id: the served symbol when known.
+fn denom_label(app: &App, denom_id: &str) -> String {
+    denom_symbol_decimals(app, denom_id).0
+}
+
+/// Interactive denomination picker: every denomination the tracker serves
+/// (ERG plus served tokens) from the collateral config, defaulting to ERG.
+/// Returns the denomination id ("erg" or "token:<64-hex>"), or None when the
+/// user cancels with empty input and no served list is available.
+fn select_denomination(app: &App) -> Option<String> {
+    let served: Vec<basis_cli_lib::api::ServedDenomination> = app
+        .collateral_config
+        .as_ref()
+        .map(|c| c.denominations.clone())
+        .unwrap_or_default();
+    if served.is_empty() {
+        // No served list (offline or legacy tracker): free-form input, ERG default.
+        let input = read_input("Denomination (\"erg\" or \"token:<64-hex>\", Enter for erg): ");
+        let input = input.trim();
+        return Some(if input.is_empty() {
+            "erg".to_string()
+        } else {
+            input.to_string()
+        });
+    }
+    println!("  {}Denominations served by this tracker:{}", BOLD, RESET);
+    for (i, d) in served.iter().enumerate() {
+        println!("  {}[{}]{} {} ({})", CYAN, i + 1, RESET, d.symbol, d.id);
+    }
+    let input = read_input("Select denomination (Press Enter for erg): ");
+    let input = input.trim();
+    if input.is_empty() {
+        return Some("erg".to_string());
+    }
+    match input.parse::<usize>() {
+        Ok(n) if n >= 1 && n <= served.len() => Some(served[n - 1].id.clone()),
+        _ => {
+            // Also accept a raw id typed directly.
+            served
+                .iter()
+                .find(|d| d.id.eq_ignore_ascii_case(input))
+                .map(|d| d.id.clone())
+        }
+    }
 }
 
 fn format_units(amount: u64, decimals: u8) -> String {
@@ -213,12 +275,28 @@ fn draw_notification(app: &App) {
     }
 }
 
-fn draw_wallet_stats(app: &App, stats: &WalletStats) {
+fn draw_wallet_stats(app: &App) {
     println!("{}  WALLET STATS{}", BOLD, RESET);
     println!("{}  ────────────{}", CYAN, RESET);
 
-    let d = decimals(app);
-    let label = asset_label(app);
+    let per_denom = app.compute_stats_by_denomination();
+    if per_denom.is_empty() {
+        println!("  {}No notes or reserves yet{}\n", GRAY, RESET);
+        return;
+    }
+    // One section per denomination; amounts are never summed across
+    // denominations (N18).
+    let show_header = per_denom.len() > 1;
+    for (denom_id, stats) in &per_denom {
+        draw_wallet_stats_denom(app, denom_id, stats, show_header);
+    }
+}
+
+fn draw_wallet_stats_denom(app: &App, denom_id: &str, stats: &WalletStats, show_header: bool) {
+    let (label, d) = denom_symbol_decimals(app, denom_id);
+    if show_header {
+        println!("  {}[{}]{}", CYAN, denom_id, RESET);
+    }
 
     println!(
         "  {}Assets:{}        {} {} ({} notes)",
@@ -307,7 +385,7 @@ async fn draw_main_menu(app: &mut App) -> Result<()> {
     println!("{}  ─────────{}\n", CYAN, RESET);
 
     if app.server_connected {
-        draw_wallet_stats(app, &app.compute_stats());
+        draw_wallet_stats(app);
     } else {
         draw_wallet_stats_disconnected();
     }
@@ -667,35 +745,44 @@ async fn draw_notes(app: &mut App) -> Result<()> {
     println!("{}  NOTES (IOU Assets & Liabilities){}", BOLD, RESET);
     println!("{}  ─────────────────────────────{}\n", CYAN, RESET);
 
-    let d = decimals(app);
-    let label = asset_label(app);
-
-    let issued_total: u64 = app
-        .issued_notes
-        .iter()
-        .map(|n| n.amount.saturating_sub(n.redeemed))
-        .sum();
-    let received_total: u64 = app
-        .received_notes
-        .iter()
-        .map(|n| n.amount.saturating_sub(n.redeemed))
-        .sum();
+    // Totals are per denomination — never summed across denominations (N18).
+    let mut issued_totals: std::collections::BTreeMap<String, u64> = Default::default();
+    for n in &app.issued_notes {
+        *issued_totals.entry(n.denomination.clone()).or_default() +=
+            n.amount.saturating_sub(n.redeemed);
+    }
+    let mut received_totals: std::collections::BTreeMap<String, u64> = Default::default();
+    for n in &app.received_notes {
+        *received_totals.entry(n.denomination.clone()).or_default() +=
+            n.amount.saturating_sub(n.redeemed);
+    }
+    let fmt_totals = |totals: &std::collections::BTreeMap<String, u64>| {
+        if totals.is_empty() {
+            return "0".to_string();
+        }
+        totals
+            .iter()
+            .map(|(denom, total)| {
+                let (label, d) = denom_symbol_decimals(app, denom);
+                format!("{} {}", format_units(*total, d), label)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
 
     println!(
-        "  {}[1]{} Notes Issued ({} notes, {} {} total liabilities)",
+        "  {}[1]{} Notes Issued ({} notes, {} total liabilities)",
         CYAN,
         RESET,
         app.issued_notes.len(),
-        format_units(issued_total, d),
-        label
+        fmt_totals(&issued_totals)
     );
     println!(
-        "  {}[2]{} Notes Received ({} notes, {} {} total assets)\n",
+        "  {}[2]{} Notes Received ({} notes, {} total assets)\n",
         CYAN,
         RESET,
         app.received_notes.len(),
-        format_units(received_total, d),
-        label
+        fmt_totals(&received_totals)
     );
 
     println!("  {}[c]{} Create Note", CYAN, RESET);
@@ -709,9 +796,8 @@ async fn draw_notes(app: &mut App) -> Result<()> {
             if app.issued_notes.is_empty() {
                 println!("  {}None{}\n", GRAY, RESET);
             } else {
-                let d = decimals(app);
-                let label = asset_label(app);
                 for (i, note) in app.issued_notes.iter().enumerate() {
+                    let (label, d) = denom_symbol_decimals(app, &note.denomination);
                     let outstanding = note.amount.saturating_sub(note.redeemed);
                     println!(
                         "  [{}] → {} | {} {} ({} {} outstanding)",
@@ -732,9 +818,8 @@ async fn draw_notes(app: &mut App) -> Result<()> {
             if app.received_notes.is_empty() {
                 println!("  {}None{}\n", GRAY, RESET);
             } else {
-                let d = decimals(app);
-                let label = asset_label(app);
                 for (i, note) in app.received_notes.iter().enumerate() {
+                    let (label, d) = denom_symbol_decimals(app, &note.denomination);
                     let outstanding = note.amount.saturating_sub(note.redeemed);
                     println!(
                         "  [{}] ← {} | {} {} ({} {} outstanding)",
@@ -1054,7 +1139,19 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
         }
     };
 
-    let amount_str = read_input(&format!("Amount ({}): ", amount_label(app)));
+    // The denomination goes into the debt key the issuer signs (N18): it must be
+    // chosen explicitly, not left to the server's default.
+    let denomination = match select_denomination(app) {
+        Some(d) => d,
+        None => {
+            app.set_notification("Note creation cancelled".to_string(), false);
+            app.navigate_to(Screen::Notes);
+            return Ok(());
+        }
+    };
+    let (denom_symbol, _) = denom_symbol_decimals(app, &denomination);
+
+    let amount_str = read_input(&format!("Amount ({} raw units): ", denom_symbol));
     if amount_str.is_empty() {
         app.set_notification("Note creation cancelled".to_string(), false);
         app.navigate_to(Screen::Notes);
@@ -1069,19 +1166,25 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as u64;
 
-            let issuer_bytes = hex::decode(&issuer)?;
-            let recipient_bytes = hex::decode(&recipient)?;
+            let issuer_bytes: [u8; 33] = hex::decode(&issuer)?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("issuer pubkey must be 33 bytes"))?;
+            let recipient_bytes: [u8; 33] = hex::decode(&recipient)?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("recipient pubkey must be 33 bytes"))?;
 
-            let mut key_hash_input = Vec::new();
-            key_hash_input.extend_from_slice(&issuer_bytes);
-            key_hash_input.extend_from_slice(&recipient_bytes);
-
-            use blake2::{Blake2b, Digest};
-            use generic_array::typenum::U32;
-            let key_hash = Blake2b::<U32>::new()
-                .chain_update(&key_hash_input)
-                .finalize()
-                .to_vec();
+            // Denomination-derived debt key: blake2b256(issuer ‖ recipient) for ERG,
+            // blake2b256(issuer ‖ recipient ‖ tokenId) for token denominations —
+            // the same key the server and the on-chain contract derive (N18).
+            let denom_key = match basis_store::DenomKey::parse(&denomination) {
+                Ok(d) => d,
+                Err(e) => {
+                    app.set_notification(format!("Invalid denomination: {}", e), true);
+                    app.navigate_to(Screen::Notes);
+                    return Ok(());
+                }
+            };
+            let key_hash = denom_key.debt_key(&issuer_bytes, &recipient_bytes);
 
             // The note's signed message is bound to this tracker's NFT ID (issue #15 C3).
             let tracker_nft_id = match app.client.get_latest_tracker_box_id().await {
@@ -1127,7 +1230,7 @@ async fn draw_create_note(app: &mut App) -> Result<()> {
                                 signature: hex::encode(signature),
                                 tracker_nft_id,
 
-                                denomination: String::new(),
+                                denomination: denom_key.denomination_id(),
                             };
 
                             match app.client.create_note(request).await {
@@ -1188,6 +1291,7 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
                         amount: n.amount_collected,
                         redeemed: n.amount_redeemed,
                         _timestamp: n.timestamp,
+                        denomination: n.denomination,
                     })
                     .collect();
             }
@@ -1211,9 +1315,8 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
 
     // Display received notes list
     println!("  {}Your Received Notes:{}", BOLD, RESET);
-    let d = decimals(app);
-    let label = asset_label(app);
     for (i, note) in app.received_notes.iter().enumerate() {
+        let (label, d) = denom_symbol_decimals(app, &note.denomination);
         let outstanding = note.amount.saturating_sub(note.redeemed);
         println!(
             "  [{}] From: {}... | {} {} outstanding",
@@ -1245,6 +1348,8 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
     let issuer = selected_note.issuer.clone();
     let recipient = app.current_account.as_ref().unwrap().pubkey.clone();
     let outstanding = selected_note.amount.saturating_sub(selected_note.redeemed);
+    let selected_denom = selected_note.denomination.clone();
+    let selected_label = denom_label(app, &selected_denom);
 
     if outstanding == 0 {
         app.set_notification("Note is fully redeemed".to_string(), true);
@@ -1255,20 +1360,16 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
     // Show selected note details
     println!("\n  {}Selected Note:{}", BOLD, RESET);
     println!("  From: {}...", &issuer[..16]);
-    println!("  Amount: {} {}", selected_note.amount, amount_label(app));
-    println!(
-        "  Redeemed: {} {}",
-        selected_note.redeemed,
-        amount_label(app)
-    );
-    println!("  Outstanding: {} {}", outstanding, amount_label(app));
+    println!("  Denomination: {}", selected_denom);
+    println!("  Amount: {} {}", selected_note.amount, selected_label);
+    println!("  Redeemed: {} {}", selected_note.redeemed, selected_label);
+    println!("  Outstanding: {} {}", outstanding, selected_label);
     println!();
 
     // Ask for redemption amount
     let amount_str = read_input(&format!(
         "Amount to redeem (default: {} {}, Press Enter for full): ",
-        outstanding,
-        amount_label(app)
+        outstanding, selected_label
     ));
 
     let amount = if amount_str.is_empty() {
@@ -1292,8 +1393,13 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
         }
     };
 
-    // Fetch the full note (payment timestamp) from the server.
-    let note = match app.client.get_note(&issuer, &recipient).await {
+    // Fetch the full note (payment timestamp) from the server, scoped to the
+    // selected note's denomination (N18).
+    let note = match app
+        .client
+        .get_note_denominated(&issuer, &recipient, Some(&selected_denom))
+        .await
+    {
         Ok(Some(n)) => n,
         Ok(None) => {
             app.set_notification("Note not found".to_string(), true);
@@ -1308,11 +1414,11 @@ async fn draw_redeem_note(app: &mut App) -> Result<()> {
     };
 
     println!("\n  {}Building redemption via tracker...{}", CYAN, RESET);
-    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp, false).await {
+    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp, false, &selected_denom).await {
         Ok(tx_id) => {
             let short = &tx_id[..16.min(tx_id.len())];
             app.set_notification(
-                format!("Redeemed {} {}, tx {}", amount, amount_label(app), short),
+                format!("Redeemed {} {}, tx {}", amount, selected_label, short),
                 false,
             );
             let _ = app.refresh_data().await;
@@ -1341,6 +1447,7 @@ async fn tracker_assisted_redeem(
     amount: u64,
     timestamp: u64,
     emergency: bool,
+    denomination: &str,
 ) -> Result<String, String> {
     let issuer_pk: [u8; 33] = hex::decode(issuer)
         .map_err(|e| format!("issuer hex: {}", e))?
@@ -1351,24 +1458,21 @@ async fn tracker_assisted_redeem(
         .try_into()
         .map_err(|_| "recipient pubkey must be 33 bytes".to_string())?;
 
-    // Authoritative total debt from the tracker (must match context var #3 exactly).
-    // The note is fetched first so the proof is scoped to the note's own
-    // denomination (multi-denomination trackers resolve total debt per currency).
+    // The note is fetched scoped to its denomination (N18). The issuer
+    // signature covers the note's own cumulative total and timestamp — exactly
+    // what the stored issuer signature commits to; POST /redemption/build
+    // checks this against the committed on-chain state and refuses uncommitted
+    // notes (issue #15 S6), so the live-tree /tracker/proof figure is never
+    // consulted here.
     let note = app
         .client
-        .get_note(issuer, recipient)
+        .get_note_denominated(issuer, recipient, Some(denomination))
         .await
         .map_err(|e| format!("note lookup failed: {}", e))?;
-    let total_debt = app
-        .client
-        .get_tracker_proof(
-            issuer,
-            recipient,
-            note.as_ref().map(|n| n.denomination.as_str()),
-        )
-        .await
-        .map_err(|e| format!("tracker proof failed: {}", e))?
-        .total_debt;
+    let total_debt = note
+        .as_ref()
+        .map(|n| n.amount_collected)
+        .ok_or_else(|| "note not found".to_string())?;
 
     // The note's signed message is bound to this tracker's NFT ID (issue #15 C3); take it
     // from the stored note so it always matches what the server will verify.
@@ -1570,6 +1674,7 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
                         amount: n.amount_collected,
                         redeemed: n.amount_redeemed,
                         _timestamp: n.timestamp,
+                        denomination: n.denomination,
                     })
                     .collect();
             }
@@ -1593,9 +1698,8 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
 
     // Display received notes list
     println!("  {}Your Received Notes:{}", BOLD, RESET);
-    let d = decimals(app);
-    let label = asset_label(app);
     for (i, note) in app.received_notes.iter().enumerate() {
+        let (label, d) = denom_symbol_decimals(app, &note.denomination);
         let outstanding = note.amount.saturating_sub(note.redeemed);
         println!(
             "  [{}] From: {}... | {} {} outstanding",
@@ -1627,6 +1731,8 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
     let issuer = selected_note.issuer.clone();
     let recipient = app.current_account.as_ref().unwrap().pubkey.clone();
     let outstanding = selected_note.amount.saturating_sub(selected_note.redeemed);
+    let selected_denom = selected_note.denomination.clone();
+    let selected_label = denom_label(app, &selected_denom);
 
     if outstanding == 0 {
         app.set_notification("Note is fully redeemed".to_string(), true);
@@ -1637,20 +1743,16 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
     // Show selected note details
     println!("\n  {}Selected Note:{}", BOLD, RESET);
     println!("  From: {}...", &issuer[..16]);
-    println!("  Amount: {} {}", selected_note.amount, amount_label(app));
-    println!(
-        "  Redeemed: {} {}",
-        selected_note.redeemed,
-        amount_label(app)
-    );
-    println!("  Outstanding: {} {}", outstanding, amount_label(app));
+    println!("  Denomination: {}", selected_denom);
+    println!("  Amount: {} {}", selected_note.amount, selected_label);
+    println!("  Redeemed: {} {}", selected_note.redeemed, selected_label);
+    println!("  Outstanding: {} {}", outstanding, selected_label);
     println!();
 
     // Ask for redemption amount
     let amount_str = read_input(&format!(
         "Amount to redeem (default: {} {}, Press Enter for full): ",
-        outstanding,
-        amount_label(app)
+        outstanding, selected_label
     ));
 
     let amount = if amount_str.is_empty() {
@@ -1689,8 +1791,13 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
         return Ok(());
     }
 
-    // Fetch the full note (payment timestamp) from the server.
-    let note = match app.client.get_note(&issuer, &recipient).await {
+    // Fetch the full note (payment timestamp) from the server, scoped to the
+    // selected note's denomination (N18).
+    let note = match app
+        .client
+        .get_note_denominated(&issuer, &recipient, Some(&selected_denom))
+        .await
+    {
         Ok(Some(n)) => n,
         Ok(None) => {
             app.set_notification("Note not found".to_string(), true);
@@ -1708,15 +1815,13 @@ async fn draw_emergency_redeem(app: &mut App) -> Result<()> {
         "\n  {}Building emergency redemption via tracker...{}",
         CYAN, RESET
     );
-    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp, true).await {
+    match tracker_assisted_redeem(app, &issuer, &recipient, amount, note.timestamp, true, &selected_denom).await {
         Ok(tx_id) => {
             let short = &tx_id[..16.min(tx_id.len())];
             app.set_notification(
                 format!(
                     "Emergency redeemed {} {}, tx {}",
-                    amount,
-                    amount_label(app),
-                    short
+                    amount, selected_label, short
                 ),
                 false,
             );
@@ -1759,18 +1864,27 @@ async fn draw_create_reserve(app: &mut App) -> Result<()> {
         return Ok(());
     }
 
-    let token_mode = is_token_mode(app);
-    let (token_amount, token_id) = if token_mode {
-        let token_amount_str = read_input("Token amount to lock (raw units, Press Enter for 0): ");
-        let token_amount = token_amount_str.parse::<u64>().unwrap_or(0);
-        let token_id = app
-            .reserve_token_config
-            .as_ref()
-            .and_then(|c| c.reserve_token_id.clone())
-            .unwrap_or_default();
-        (token_amount, token_id)
-    } else {
-        (0, String::new())
+    // Pick the reserve's denomination from the tracker's full served set (N18):
+    // ERG reserves lock nanoERG; token reserves lock raw units of the chosen
+    // token (the ERG amount above then covers the box's min value).
+    let denomination = match select_denomination(app) {
+        Some(d) => d,
+        None => {
+            app.set_notification("Reserve creation cancelled".to_string(), false);
+            app.navigate_to(Screen::Reserves);
+            return Ok(());
+        }
+    };
+    let (token_amount, token_id) = match denomination.strip_prefix("token:") {
+        Some(id) => {
+            let symbol = denom_label(app, &denomination);
+            let token_amount_str = read_input(&format!(
+                "Token amount to lock ({} raw units, Press Enter for 0): ",
+                symbol
+            ));
+            (token_amount_str.parse::<u64>().unwrap_or(0), id.to_string())
+        }
+        None => (0, String::new()),
     };
 
     if nft_id.len() == 64 {
@@ -2421,9 +2535,17 @@ async fn draw_acceptance_policy(app: &mut App) -> Result<()> {
 
                     if app.server_connected {
                         let recipient = app.current_account.as_ref().unwrap().pubkey.clone();
+                        let denomination = token_config(app)
+                            .and_then(|c| c.reserve_token_id.as_deref())
+                            .map(|id| format!("token:{}", id));
                         match app
                             .client
-                            .check_acceptance(&pubkey, total_debt, Some(&recipient))
+                            .check_acceptance(
+                                &pubkey,
+                                total_debt,
+                                Some(&recipient),
+                                denomination.as_deref(),
+                            )
                             .await
                         {
                             Ok(result) => {

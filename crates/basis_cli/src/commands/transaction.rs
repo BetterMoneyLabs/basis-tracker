@@ -458,6 +458,20 @@ async fn build_redemption_tx(
             Some(&denomination.denomination_id()),
         )
         .await?;
+    // /tracker/proof proves against the tracker's LIVE local tree, which may include
+    // notes not yet committed on-chain. This path assembles the transaction locally
+    // against the on-chain tracker box, so refuse to build while the two diverge: the
+    // resulting transaction would be invalid against the committed box
+    // (issue #15 S6 / N18).
+    let committed_digest = tracker_box_r5_digest(&tracker_box_details)?;
+    if !committed_digest.eq_ignore_ascii_case(&tracker_proof.tracker_state_digest) {
+        return Err(anyhow::anyhow!(
+            "tracker has state not yet committed on-chain (live digest {} != tracker box R5 {}); \
+             wait for the next tracker box update before generating an offline redemption",
+            tracker_proof.tracker_state_digest,
+            committed_digest
+        ));
+    }
     let total_debt = tracker_proof.total_debt;
     let tracker_lookup_proof = hex::decode(&tracker_proof.proof)
         .map_err(|e| anyhow::anyhow!("Invalid tracker proof hex: {}", e))?;
@@ -881,18 +895,12 @@ pub async fn execute_local_redemption(
         }
     }
 
-    // The issuer signature (context var #2) covers the tracker's committed total debt and the
-    // note's timestamp: the issuer signs it when it is the current account, otherwise the
-    // stored note's signature is reused if it covers exactly that message.
-    progress!("🔍 Fetching tracker proof for total debt...");
-    let tracker_proof = client
-        .get_tracker_proof(
-            issuer_pubkey,
-            recipient_pubkey,
-            Some(&denom.denomination_id()),
-        )
-        .await?;
-    let total_debt = tracker_proof.total_debt;
+    // The issuer signature (context var #2) covers the note's own cumulative total and
+    // timestamp — exactly what the stored issuer signature commits to, verified locally
+    // below. The tracker build (POST /redemption/build) checks this against the committed
+    // on-chain state and refuses notes that are not committed yet (issue #15 S6), so the
+    // live-tree /tracker/proof figure is never consulted here (N18).
+    let total_debt = note.amount_collected;
 
     progress!("🔑 Resolving the issuer's redemption signature...");
     let issuer_pk: [u8; 33] = hex::decode(issuer_pubkey)
@@ -1403,6 +1411,23 @@ fn build_savl_tree_from_digest(digest_hex: &str) -> Vec<u8> {
     r5_bytes
 }
 
+/// Extract the 33-byte AVL root digest from the tracker box's R5 register
+/// (serialized Coll[Byte]: 0x0e || VLQ length || bytes).
+fn tracker_box_r5_digest(tracker_box: &crate::api::ErgoBoxDetails) -> Result<String> {
+    let r5 = tracker_box
+        .additional_registers
+        .get("R5")
+        .ok_or_else(|| anyhow::anyhow!("tracker box {} has no R5 register", tracker_box.box_id))?;
+    let bytes = hex::decode(r5).map_err(|e| anyhow::anyhow!("tracker box R5 hex: {}", e))?;
+    match bytes.as_slice() {
+        [0x0e, len, rest @ ..] if *len as usize == rest.len() => Ok(hex::encode(rest)),
+        _ => Err(anyhow::anyhow!(
+            "unexpected tracker box R5 serialization: {}",
+            r5
+        )),
+    }
+}
+
 // Helper function to convert public key to a P2PK address using ergo-lib
 fn pubkey_to_address(pubkey_hex: &str) -> Result<String> {
     use ergo_lib::ergo_chain_types::EcPoint;
@@ -1544,6 +1569,47 @@ mod tests {
         // A different token (or empty = ERG reserve) is not this denomination.
         let other = "b8".repeat(32);
         assert!(!denom_matches_reserve(&other, &token_denom()));
+    }
+
+    // ------------------------------------------------------------------
+    // N18: committed-state guard for the offline redemption path
+    // ------------------------------------------------------------------
+
+    fn box_with_r5(r5: Option<String>) -> crate::api::ErgoBoxDetails {
+        let mut regs = std::collections::HashMap::new();
+        if let Some(v) = r5 {
+            regs.insert("R5".to_string(), v);
+        }
+        crate::api::ErgoBoxDetails {
+            box_id: "00".repeat(32),
+            value: 0,
+            ergo_tree: String::new(),
+            assets: vec![],
+            additional_registers: regs,
+            creation_height: 0,
+            transaction_id: String::new(),
+            index: 0,
+        }
+    }
+
+    #[test]
+    fn tracker_box_r5_digest_decodes_serialized_coll_bytes() {
+        let digest = "ab".repeat(33);
+        // 0x0e (Coll[Byte]) || VLQ length 33 (0x21) || 33 digest bytes.
+        let r5 = format!("0e21{}", digest);
+        assert_eq!(tracker_box_r5_digest(&box_with_r5(Some(r5))).unwrap(), digest);
+    }
+
+    #[test]
+    fn tracker_box_r5_digest_rejects_missing_or_malformed_r5() {
+        // No R5 register at all.
+        assert!(tracker_box_r5_digest(&box_with_r5(None)).is_err());
+        // Wrong type prefix.
+        assert!(tracker_box_r5_digest(&box_with_r5(Some("0621".to_string() + &"ab".repeat(33)))).is_err());
+        // Declared length does not match the payload.
+        assert!(tracker_box_r5_digest(&box_with_r5(Some("0e20".to_string() + &"ab".repeat(33)))).is_err());
+        // Not hex.
+        assert!(tracker_box_r5_digest(&box_with_r5(Some("zz".to_string()))).is_err());
     }
 
     #[test]

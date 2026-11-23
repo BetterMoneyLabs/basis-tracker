@@ -427,8 +427,14 @@ recipient's P2PK ergoTree, and their total must cover the fee (plus the recipien
 min-ERG box value for token reserves).
 
 **Reserve selection:** smallest sufficient reserve that is unspent (`/utxo/byId`) and
-whose on-chain R5 digest equals the tracker's local reserve-tree digest. A mismatch
-means local state is stale and the reserve is skipped.
+whose on-chain R5 digest equals the tracker's local reserve-tree digest. A digest
+mismatch means the local mirror has diverged from the chain; the build then attempts
+a one-time **lazy repair** (`crates/basis_server/src/reserve_lineage.rs`, issue #15
+review N14): it walks the reserve lineage backwards from the diverged box over the
+extra-indexed node, extracts each redemption generation's op from the spending
+proof's context extension, and re-applies them to the mirror — but only if the staged
+tree reproduces the on-chain R5 (otherwise nothing is mutated and the build errors).
+After a successful repair, selection is retried once.
 
 **`new_already_redeemed`:** computed from the **reserve-tree lookup** (previous
 cumulative value for this reserve, `0` for a first redemption) plus the requested
@@ -497,9 +503,11 @@ otherwise `400 Bad Request`. The caller-supplied `issuer_pubkey` / `recipient_pu
    not from the note record — the two diverge for fresh reserves or repaired state.
 
 If the sync fails, the tx is already on-chain: the error is logged and the response
-still returns the tx id; state must then be repaired manually (see below). A submit
-that skips this sync leaves the reserve tree stale, and the next `/redemption/build`
-will find no reserve whose on-chain R5 matches the local digest.
+still returns the tx id. A submit that skips this sync leaves the reserve tree stale;
+the next `/redemption/build` detects the R5 mismatch and repairs the mirror lazily
+from confirmed chain spends (see the reserve-selection section above, issue #15
+review N14), failing the build only if the lineage walk cannot reproduce the on-chain
+digest.
 
 ### POST /redeem/complete (manual completion / repair)
 

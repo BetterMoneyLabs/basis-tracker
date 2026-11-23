@@ -1491,13 +1491,14 @@ impl TrackerClient {
         issuer_pubkey: &str,
         total_debt: u64,
         recipient_pubkey: Option<&str>,
+        denomination: Option<&str>,
     ) -> Result<CheckAcceptanceResponse> {
         let request = CheckAcceptanceRequest {
             issuer_pubkey: issuer_pubkey.to_string(),
             total_debt,
             recipient_pubkey: recipient_pubkey.map(|s| s.to_string()),
 
-            denomination: String::new(),
+            denomination: canonical_denom_param(denomination)?.unwrap_or_default(),
         };
 
         let url = format!("{}/acceptance/check", self.base_url);
