@@ -58,10 +58,15 @@ pub struct ServerConfig {
     #[serde(default = "default_reserve_creation_max_token_amount")]
     pub reserve_creation_max_token_amount: u64,
     /// Maximum `/redemption/build` calls per (issuer, recipient) pair per hour.
-    /// Bounds the fee cost a self-redeeming user can impose on the tracker
-    /// wallet (the tracker pays the fee inputs). Default: 60.
+    /// Counted only for builds that pass all validation (issue #15 review N17).
+    /// Default: 60.
     #[serde(default = "default_redemption_build_max_per_pair_per_hour")]
     pub redemption_build_max_per_pair_per_hour: u32,
+    /// Maximum `/redemption/build` calls per issuer per hour, across all recipients.
+    /// This is the rotation-proof cap: fresh recipient keys reset the per-pair budget
+    /// but never this one (issue #15 review N17). Default: 240.
+    #[serde(default = "default_redemption_build_max_per_issuer_per_hour")]
+    pub redemption_build_max_per_issuer_per_hour: u32,
 }
 
 fn default_reserve_creation_max_erg_nano() -> u64 {
@@ -74,6 +79,10 @@ fn default_reserve_creation_max_token_amount() -> u64 {
 
 fn default_redemption_build_max_per_pair_per_hour() -> u32 {
     60
+}
+
+fn default_redemption_build_max_per_issuer_per_hour() -> u32 {
+    240
 }
 
 /// Authentication configuration.
@@ -883,6 +892,8 @@ mod tests {
                 reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
                 redemption_build_max_per_pair_per_hour:
                     default_redemption_build_max_per_pair_per_hour(),
+                redemption_build_max_per_issuer_per_hour:
+                    default_redemption_build_max_per_issuer_per_hour(),
             },
             ergo: ErgoConfig {
                 scanner: NodeConfig {
@@ -893,6 +904,7 @@ mod tests {
                     node_url: "http://localhost:9053".to_string(),
                     scan_name: None,
                     api_key: Some("test".to_string()),
+                    ..Default::default()
                 },
                 wallet: WalletNodeConfig::default(),
                 basis_reserve_contract_p2s: "test".to_string(),
@@ -973,6 +985,8 @@ mod tests {
                 reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
                 redemption_build_max_per_pair_per_hour:
                     default_redemption_build_max_per_pair_per_hour(),
+                redemption_build_max_per_issuer_per_hour:
+                    default_redemption_build_max_per_issuer_per_hour(),
             },
             ergo: ErgoConfig {
                 scanner: NodeConfig {
@@ -983,6 +997,7 @@ mod tests {
                     node_url: "http://localhost:9053".to_string(),
                     scan_name: None,
                     api_key: Some("test".to_string()),
+                    ..Default::default()
                 },
                 wallet: WalletNodeConfig::default(),
                 basis_reserve_contract_p2s: "test".to_string(),
@@ -1102,6 +1117,8 @@ mod tests {
                 reserve_creation_max_token_amount: default_reserve_creation_max_token_amount(),
                 redemption_build_max_per_pair_per_hour:
                     default_redemption_build_max_per_pair_per_hour(),
+                redemption_build_max_per_issuer_per_hour:
+                    default_redemption_build_max_per_issuer_per_hour(),
             },
             ergo: ErgoConfig {
                 scanner: NodeConfig::default(),
@@ -1157,28 +1174,22 @@ mod tests {
         }
     }
 
-    /// Follow-up review N11: a reserve address that is not the compiled contract (here the
-    /// pre-multi-token token script still shipped in demos/specs, which reads ERG debt as
-    /// token debt) must be refused, while the same contract under a testnet prefix is fine.
+    /// Follow-up review N11: a reserve address that is not the compiled contract (here the ERG
+    /// contract configured as the token contract, or a non-address) must be refused, while the
+    /// same contract under a testnet prefix is fine.
     #[test]
     fn validate_startup_refuses_stale_reserve_contract_address() {
-        const PREVIOUS_TOKEN_P2S_PREFIX: &str = "EUNip3sG";
-
         let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
-        let previous_token_p2s = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../specs/ergo/token_reserve.md"
-        ))
-        .ok()
-        .and_then(|doc| {
-            doc.split(|c: char| !c.is_ascii_alphanumeric())
-                .find(|w| w.starts_with(PREVIOUS_TOKEN_P2S_PREFIX))
-                .map(str::to_string)
-        });
         config.ergo.basis_token_reserve_contract_p2s =
-            previous_token_p2s.unwrap_or_else(|| "not-an-address".to_string());
+            basis_store::contract_compiler::get_basis_reserve_contract_p2s().unwrap();
         let err = config.validate_startup().unwrap_err();
         assert!(err.contains("basis_token_reserve_contract_p2s"), "{}", err);
+
+        let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
+        config.ergo.basis_reserve_contract_p2s =
+            basis_store::contract_compiler::get_basis_token_reserve_contract_p2s().unwrap();
+        let err = config.validate_startup().unwrap_err();
+        assert!(err.contains("basis_reserve_contract_p2s"), "{}", err);
 
         let mut config = startup_test_config("127.0.0.1", AuthConfig::default());
         config.ergo.basis_reserve_contract_p2s = "test".to_string();
@@ -1240,8 +1251,10 @@ mod tests {
         let config = startup_test_config("0.0.0.0", AuthConfig::default());
         assert!(config.validate_startup().is_err());
 
-        let mut auth = AuthConfig::default();
-        auth.allow_anonymous_non_loopback = true;
+        let auth = AuthConfig {
+            allow_anonymous_non_loopback: true,
+            ..Default::default()
+        };
         let config = startup_test_config("0.0.0.0", auth);
         assert!(config.validate_startup().is_ok());
     }

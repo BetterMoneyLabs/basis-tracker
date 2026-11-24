@@ -656,7 +656,7 @@ mod tests {
             println!(
                 "Vector {}: Proof verified successfully. Root digest: {}",
                 vector.id,
-                hex::encode(&root_digest)
+                hex::encode(root_digest)
             );
         }
     }

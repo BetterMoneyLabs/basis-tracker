@@ -94,19 +94,12 @@ mod cors_tests {
                         );
                         let _ = response_tx.send(result);
                     }
-                    TrackerCommand::InitiateRedemption {
-                        request,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.initiate_redemption(&request);
-                        let _ = response_tx.send(result);
-                    }
                     TrackerCommand::CompleteRedemption {
                         issuer_pubkey,
                         recipient_pubkey,
                         redeemed_amount,
                         new_already_redeemed,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         let result = redemption_manager.complete_redemption(
@@ -126,7 +119,7 @@ mod cors_tests {
                     TrackerCommand::GenerateProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // For testing purposes, return a mock proof
@@ -149,7 +142,7 @@ mod cors_tests {
                     TrackerCommand::GetTrackerLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // Mock tracker lookup proof
@@ -163,7 +156,7 @@ mod cors_tests {
                     TrackerCommand::GetCommittedTrackerLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // Mock committed tracker lookup proof
@@ -177,7 +170,7 @@ mod cors_tests {
                     TrackerCommand::GetReserveLookupProof {
                         issuer_pubkey: _,
                         recipient_pubkey: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // Mock reserve lookup proof
@@ -193,7 +186,7 @@ mod cors_tests {
                         recipient_pubkey: _,
                         timestamp: _,
                         new_already_redeemed: _,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         // Mock reserve insert proof
@@ -209,7 +202,7 @@ mod cors_tests {
                     TrackerCommand::GetConfirmation {
                         issuer_pubkey,
                         recipient_pubkey,
-                        denomination,
+                        denomination: _,
                         response_tx,
                     } => {
                         let result = Ok(redemption_manager.tracker.get_confirmation(
@@ -221,6 +214,10 @@ mod cors_tests {
                     }
                     TrackerCommand::GetAllConfirmations { response_tx } => {
                         let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
+                    }
+                    TrackerCommand::PrepareTrackerUpdate { response_tx } => {
+                        let result = redemption_manager.tracker.prepare_tracker_update();
+                        let _ = response_tx.send(result);
                     }
                     TrackerCommand::MarkNotesPending {
                         digest,
@@ -271,6 +268,23 @@ mod cors_tests {
                             .reconcile_with_confirmed_digest(&digest, &box_id, height);
                         let _ = response_tx.send(result);
                     }
+                    TrackerCommand::ApplyChainReserveOps {
+                        issuer_pubkey,
+                        denomination,
+                        ops,
+                        sync_point,
+                        expected_digest,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.apply_chain_reserve_ops(
+                            &issuer_pubkey,
+                            &denomination,
+                            &ops,
+                            sync_point,
+                            expected_digest,
+                        );
+                        let _ = response_tx.send(result);
+                    }
                     TrackerCommand::ExchangeNotes { .. } => {}
                     TrackerCommand::ListStagedExchanges { response_tx } => {
                         let result = redemption_manager.tracker.list_staged_exchanges();
@@ -313,6 +327,7 @@ mod cors_tests {
                 reserve_creation_max_erg_nano: 10_000_000_000,
                 reserve_creation_max_token_amount: 1_000_000_000,
                 redemption_build_max_per_pair_per_hour: 60,
+                redemption_build_max_per_issuer_per_hour: 240,
             },
             ergo: basis_server::config::ErgoConfig {
                 scanner: basis_store::ergo_scanner::NodeConfig {
@@ -389,7 +404,6 @@ mod cors_tests {
             .route("/events", get(get_events))
             .route("/events/paginated", get(get_events_paginated))
             .route("/notes", post(create_note))
-            .route("/redeem", post(initiate_redemption))
             .route("/redeem/complete", post(complete_redemption))
             .route("/proof/redemption", get(get_redemption_proof))
             // Most specific parameterized routes first
@@ -611,7 +625,7 @@ mod cors_tests {
             ("/", Method::GET),
             ("/events", Method::GET),
             ("/notes", Method::POST),
-            ("/redeem", Method::POST),
+            ("/redeem/complete", Method::POST),
             ("/proof", Method::GET),
         ];
 

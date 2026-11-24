@@ -28,9 +28,9 @@ pub struct RedemptionRequest {
     pub current_height: u64,
     /// Recipient's address for the redemption output
     pub recipient_address: String,
-    /// Change address for transaction outputs (derived from the tracker pubkey if not
-    /// specified). Deprecated on server-built transactions: where the tracker builds the
-    /// transaction (`/redemption/build`) change always returns to the tracker.
+    /// Change address for transaction outputs. On server-built transactions
+    /// (`/redemption/build`) the redeemer funds the fee inputs, so change returns to the
+    /// redeemer: the caller-supplied change address, or the recipient address by default.
     pub change_address: String,
     /// Issuer's 65-byte Schnorr signature (130 hex chars)
     pub issuer_signature: String,
@@ -258,7 +258,7 @@ After the unsigned redemption transaction is built:
 5. **Reserve Existence**: A matching reserve must exist for the issuer
 6. **Sufficient Collateral**: Reserve must have sufficient collateral to cover redemption
 7. **Tracker Box Validity**: Tracker box must exist and NFT ID must match reserve's R6
-8. **Acceptance Policy Compliance**: For normal (non-emergency) redemptions, the tracker simulates the post-redemption collateralization state and rejects the request (HTTP 400) if it would newly violate another debt holder's acceptance policy (`failed_policy_violation`), or — when the reserve is already distressed (all other holders already violated) — if the redeemer does not hold the issuer's oldest outstanding note (`failed_not_oldest_note`). The check runs after the reserve lookup and before the tracker signature is issued, in `POST /redeem`, `POST /redemption/build`, `POST /redemption/prepare`, and `POST /tracker/signature`. Emergency redemptions bypass the tracker and are not policy-checked. See `specs/redemption_acceptance_policy.md` for the full design.
+8. **Acceptance Policy Compliance**: For normal (non-emergency) redemptions, the tracker simulates the post-redemption collateralization state and rejects the request (HTTP 400) if it would newly violate another debt holder's acceptance policy (`failed_policy_violation`), or — when the reserve is already distressed (all other holders already violated) — if the redeemer does not hold the issuer's oldest outstanding note (`failed_not_oldest_note`). The check runs after the reserve lookup and before the tracker signature is issued, in `POST /redemption/build`, `POST /redemption/prepare`, and `POST /tracker/signature`. Emergency redemptions bypass the tracker and are not policy-checked. See `specs/redemption_acceptance_policy.md` for the full design.
 
 ### Post-Redemption Validation
 1. **State Consistency**: Reserve's AVL tree must be properly updated
@@ -285,47 +285,9 @@ After the unsigned redemption transaction is built:
 
 ## API Endpoints
 
-### POST /redeem
-Initiates a redemption process for an IOU note. The tracker signature in the response covers the
-**stored** note's `amount_collected`/`timestamp`/`tracker_nft_id`; request `amount`/`timestamp`
-values are ignored for signing.
-
-**Request Body:**
-```json
-{
-  "issuer_pubkey": "hex_encoded_public_key",
-  "recipient_pubkey": "hex_encoded_public_key",
-  "total_debt": 5000000000,
-  "emergency": false
-}
-```
-
-**Response:**
-- Success: `200 OK` with redemption details
-- Failure: `400 Bad Request` or `500 Internal Server Error` with error message
-- `404 Not Found`: no stored note for the (issuer, recipient) pair
-- `409 Conflict`: the issuer has more than one tracked reserve — the endpoint fails closed
-  rather than risk a signature being replayed against a different reserve (per-reserve replay)
-
-**Success Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "redemption_id": "unique_redemption_identifier",
-    "total_debt": 5000000000,
-    "already_redeemed": 0,
-    "redeem_amount": 500000000,
-    "tracker_lookup_proof": "hex_encoded_proof",
-    "reserve_insert_proof": "hex_encoded_proof",
-    "tracker_signature": "hex_encoded_signature",
-    "reserve_signature": "hex_encoded_signature",
-    "is_first_redemption": true,
-    "transaction_pending": true
-  },
-  "error": null
-}
-```
+`POST /redeem` was removed (issue #15 review N7): it only prepared a transaction for the
+removed `--server-sign` client path. Redemptions go through `POST /redemption/build` +
+`POST /redemption/submit`; `POST /redeem/complete` remains as an Admin-only repair hatch.
 
 ### POST /redemption/prepare
 Prepare a complete redemption with real AVL proofs and tracker signatures from Ergo node.
@@ -445,22 +407,34 @@ before the signature is issued. `emergency: true` requests are not policy-checke
 
 ## Tracker-Assisted 2-Phase Endpoints (`/redemption/build`, `/redemption/submit`)
 
-In this flow the tracker builds the unsigned transaction and signs the fee input(s)
-locally (using the configured `tracker_secret_key`); the client (CLI/TUI/cold signer)
-adds the reserve input's `proveDlog(recipient)` over the identical `bytes_to_sign` and
-returns the fully-signed transaction for broadcast. Neither end reorders the reserve
-input's context extension — the build emits it in the node's canonical (Scala index)
-order, and the client splices the proof into that exact transaction.
+In this flow the tracker builds the unsigned transaction around **caller-supplied fee
+inputs** (`fee_box_ids`): the redeemer funds the miner fee (and, for token reserves, the
+recipient's min-ERG box) with their own P2PK boxes, so a build costs the tracker nothing
+and cannot drain the tracker wallet (issue #15 review N17). The tracker signs nothing in
+the transaction — the client (CLI/TUI/cold signer) signs every input (the reserve input's
+`proveDlog(recipient)` and the fee inputs, all under the recipient key) over the identical
+`bytes_to_sign` and returns the fully-signed transaction for broadcast. Neither end
+reorders the reserve input's context extension — the build emits it in the node's
+canonical (Scala index) order, and the client splices the proof into that exact
+transaction.
 
 ### POST /redemption/build
 
 Builds the unsigned redemption transaction, generates all AVL proofs, computes the
-tracker Schnorr signature (context var `#6`), selects the reserve and fee boxes, and
-signs the fee input(s).
+tracker Schnorr signature (context var `#6`), and selects the reserve box. The client
+names the fee boxes; each must be unspent (`/utxo/byId`), token-free, and carry the
+recipient's P2PK ergoTree, and their total must cover the fee (plus the recipient's
+min-ERG box value for token reserves).
 
 **Reserve selection:** smallest sufficient reserve that is unspent (`/utxo/byId`) and
-whose on-chain R5 digest equals the tracker's local reserve-tree digest. A mismatch
-means local state is stale and the reserve is skipped.
+whose on-chain R5 digest equals the tracker's local reserve-tree digest. A digest
+mismatch means the local mirror has diverged from the chain; the build then attempts
+a one-time **lazy repair** (`crates/basis_server/src/reserve_lineage.rs`, issue #15
+review N14): it walks the reserve lineage backwards from the diverged box over the
+extra-indexed node, extracts each redemption generation's op from the spending
+proof's context extension, and re-applies them to the mirror — but only if the staged
+tree reproduces the on-chain R5 (otherwise nothing is mutated and the build errors).
+After a successful repair, selection is retried once.
 
 **`new_already_redeemed`:** computed from the **reserve-tree lookup** (previous
 cumulative value for this reserve, `0` for a first redemption) plus the requested
@@ -472,7 +446,6 @@ tree entry; the on-chain contract only sees the spent reserve's tree.
 ```json
 {
   "unsigned_tx": { "...": "node-canonical unsigned tx (extension in Scala order)" },
-  "partial_tx": { "...": "fee-signed tx; reserve input proof empty" },
   "input_box_binaries": ["sigma-serialized boxes, tx-input order"],
   "data_box_binaries": ["tracker box"],
   "headers": ["last 10 block headers for PreHeader/ErgoStateContext"],
@@ -487,10 +460,14 @@ tree entry; the on-chain contract only sees the spent reserve's tree.
 note's `amount_collected`/`timestamp`/`tracker_nft_id`; request `amount`/`timestamp` values are
 ignored for signing. The endpoint returns `404 Not Found` when there is no stored note for the
 (issuer, recipient) pair, `409 Conflict` when the issuer has more than one tracked reserve
-(fail-closed against per-reserve replay), and `429 Too Many Requests` when the per-(issuer,
-recipient) rate limit is exceeded — `server.redemption_build_max_per_pair_per_hour`, default 60
-per hour over a rolling window (the tracker funds the fee inputs, so unbounded building would
-drain its wallet).
+(fail-closed against per-reserve replay), and `429 Too Many Requests` when a rate limit is
+exceeded — `server.redemption_build_max_per_pair_per_hour` (default 60/hour per
+(issuer, recipient) pair) and `server.redemption_build_max_per_issuer_per_hour` (default
+240/hour per issuer, which makes recipient-key rotation useless to an abuser), both over a
+rolling window. Only builds that pass every validation step consume quota, so junk builds
+cannot lock a victim out; the pending-redemption registry additionally caps entries per
+issuer (64) and evicts the oldest entry when globally full rather than rejecting everyone
+with 503 (issue #15 review N17).
 
 ### POST /redemption/submit
 
@@ -526,9 +503,11 @@ otherwise `400 Bad Request`. The caller-supplied `issuer_pubkey` / `recipient_pu
    not from the note record — the two diverge for fresh reserves or repaired state.
 
 If the sync fails, the tx is already on-chain: the error is logged and the response
-still returns the tx id; state must then be repaired manually (see below). A submit
-that skips this sync leaves the reserve tree stale, and the next `/redemption/build`
-will find no reserve whose on-chain R5 matches the local digest.
+still returns the tx id. A submit that skips this sync leaves the reserve tree stale;
+the next `/redemption/build` detects the R5 mismatch and repairs the mirror lazily
+from confirmed chain spends (see the reserve-selection section above, issue #15
+review N14), failing the build only if the lineage walk cannot reproduce the on-chain
+digest.
 
 ### POST /redeem/complete (manual completion / repair)
 

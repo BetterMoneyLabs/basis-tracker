@@ -82,6 +82,7 @@ impl MockContractValidator {
     /// 7. Redemption amount verification (0 < redeemed <= totalDebt - alreadyRedeemed)
     /// 8. AVL tree update verification (reserve tree properly updated)
     /// 9. Receiver signature verification (proveDlog)
+    #[allow(clippy::too_many_arguments)]
     pub fn validate_redemption(
         owner_pubkey: &PubKey,
         receiver_pubkey: &PubKey,
@@ -272,11 +273,8 @@ mod tests {
         let issuer_sig = generate_redemption_signature(&alice_secret, &alice_pubkey, &message);
         let tracker_sig = generate_redemption_signature(&tracker_secret, &tracker_pubkey, &message);
 
-        println!("Issuer signature (65 bytes): {}", hex::encode(&issuer_sig));
-        println!(
-            "Tracker signature (65 bytes): {}",
-            hex::encode(&tracker_sig)
-        );
+        println!("Issuer signature (65 bytes): {}", hex::encode(issuer_sig));
+        println!("Tracker signature (65 bytes): {}", hex::encode(tracker_sig));
 
         // Verify signatures independently
         assert!(
@@ -321,9 +319,9 @@ mod tests {
             current_height: 1000,
             recipient_address: "9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73".to_string(),
             change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
-            issuer_signature: hex::encode(&issuer_sig),
+            issuer_signature: hex::encode(issuer_sig),
             emergency: false,
-            tracker_signature: Some(hex::encode(&tracker_sig)),
+            tracker_signature: Some(hex::encode(tracker_sig)),
             reserve_box_value: total_debt + 1000000, // Reserve must cover debt + fee
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
@@ -755,9 +753,9 @@ mod tests {
             current_height: 1000,
             recipient_address: "9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73".to_string(),
             change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
-            issuer_signature: hex::encode(&issuer_sig),
+            issuer_signature: hex::encode(issuer_sig),
             emergency: false,
-            tracker_signature: Some(hex::encode(&tracker_sig)),
+            tracker_signature: Some(hex::encode(tracker_sig)),
             reserve_box_value: total_debt + 1000000, // Reserve must cover debt + fee
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
@@ -1095,9 +1093,9 @@ mod tests {
             current_height: 1000,
             recipient_address: "9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73".to_string(),
             change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
-            issuer_signature: hex::encode(&first_issuer_sig),
+            issuer_signature: hex::encode(first_issuer_sig),
             emergency: false,
-            tracker_signature: Some(hex::encode(&first_tracker_sig)),
+            tracker_signature: Some(hex::encode(first_tracker_sig)),
             reserve_box_value,
             fee_input_box_ids: Vec::new(),
             fee_input_total_value: 0,
@@ -1212,9 +1210,9 @@ mod tests {
             current_height: 1000,
             recipient_address: "9hnupHc2udAoa7SV2UrWAba3N7pu9tR4RX662wv2iFa9gMn1E73".to_string(),
             change_address: "9hNQcqi72NB5u5Tw6tbfCGbEKByguR7njvcyZXnXPLvV3Do1DiJ".to_string(),
-            issuer_signature: hex::encode(&second_issuer_sig),
+            issuer_signature: hex::encode(second_issuer_sig),
             emergency: false,
-            tracker_signature: Some(hex::encode(&second_tracker_sig)),
+            tracker_signature: Some(hex::encode(second_tracker_sig)),
             reserve_box_value: reserve_box_value - redeem_amount,
             fee_input_box_ids: vec!["test_fee_input".to_string()],
             fee_input_total_value: 1_000_000,

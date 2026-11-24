@@ -159,7 +159,7 @@ $ basis-cli reserve status --json
 - `reserve create --json` → the reserve-creation payload
   (`{nft_id, owner_pubkey, amount, payload: {requests, fee, change_address}}`).
 - `reserve collateralization --json` → `{issuer_pubkey, ratio, status}`.
-- `note redeem --json` → `{amount, server_sign, redemption_id?, proof_available?, tx_id?}`.
+- `note redeem --json` → `{amount, tx_id?}`.
 - `transaction generate-redemption --json` → `{tx_id}` with `--local-sign`,
   otherwise `{transaction, issuer_pubkey, ..., output_file?}` (the unsigned
   transaction plus build metadata).

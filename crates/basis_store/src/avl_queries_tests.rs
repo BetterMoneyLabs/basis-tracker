@@ -210,6 +210,31 @@ fn test_update_already_redeemed_creates_tree_for_unknown_issuer() {
     );
 }
 
+#[test]
+fn test_fresh_pair_reserve_state_digest_matches_onchain_empty_r5() {
+    // Issue #15 review N9: /reserves/create sets R5 to the tracker mirror's
+    // reserve-tree digest. For a fresh (issuer, denomination) pair that digest
+    // is the empty tree, and serialized as a SAvlTree register it must equal
+    // the constant fresh reserves were always created with — otherwise the
+    // scanner's empty-R5 admission check and the on-chain contract diverge.
+    let manager = TrackerStateManager::new_with_temp_storage();
+    let (_, issuer) = generate_keypair();
+
+    let digest = manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg);
+    assert_eq!(
+        hex::encode(&digest),
+        "4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900",
+        "fresh pair must yield the empty AVL+ tree digest"
+    );
+    let r5 = hex::encode(basis_offchain::ergo_tx::build_savl_tree_from_digest(
+        &hex::encode(&digest),
+    ));
+    assert_eq!(
+        r5, "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000",
+        "fresh pair R5 must equal the historical empty-tree register value"
+    );
+}
+
 // ============================================================================
 // generate_reserve_insert_proof
 // ============================================================================
@@ -510,5 +535,202 @@ fn test_decode_ergo_long_register_rejects_negative_values() {
         crate::ergo_scanner::decode_ergo_long_register(Some(&s)),
         0,
         "a negative Long must decode to 0, not wrap to u64::MAX"
+    );
+}
+
+// ============================================================================
+// apply_chain_reserve_ops (issue #15 review N14)
+// ============================================================================
+
+fn chain_op(recipient: [u8; 33], timestamp: u64, delta: u64) -> crate::ChainReserveOp {
+    crate::ChainReserveOp {
+        recipient_pubkey: recipient,
+        timestamp,
+        redeemed_delta: delta,
+    }
+}
+
+/// A walk that stopped at a generation matching the mirror (SyncPoint::Mirror) applies the
+/// collected ops on top of the journaled state; the result must equal the digest of a mirror
+/// that was advanced through the API path for the same redemptions.
+#[test]
+fn test_apply_chain_reserve_ops_mirror_matches_incremental_path() {
+    let (mut synced, _, issuer, recipient) = manager_with_note(10_000);
+    let (mut diverged, _, _, _) = manager_with_note(10_000);
+    // update_already_redeemed does not require a stored note, so both managers can be driven
+    // with the first manager's keys directly.
+
+    // Chain generation 1 on both: redeem 1000 at ts 100.
+    for m in [&mut synced, &mut diverged] {
+        m.update_already_redeemed(&issuer, &recipient, &crate::DenomKey::Erg, 100, 1_000)
+            .unwrap();
+    }
+    // Chain generation 2 happens only on the synced mirror: another 500 (cumulative 1500).
+    synced
+        .update_already_redeemed(&issuer, &recipient, &crate::DenomKey::Erg, 100, 1_500)
+        .unwrap();
+    let chain_digest: [u8; 33] = synced
+        .reserve_state_digest(&issuer, &crate::DenomKey::Erg)
+        .try_into()
+        .unwrap();
+
+    // Repair the diverged mirror from the chain op (delta = 1500 - 1000 = 500).
+    diverged
+        .apply_chain_reserve_ops(
+            &issuer,
+            &crate::DenomKey::Erg,
+            &[chain_op(recipient, 100, 500)],
+            crate::ReserveSyncPoint::Mirror,
+            chain_digest,
+        )
+        .expect("mirror-mode chain sync must verify against the on-chain digest");
+
+    assert_eq!(
+        diverged.reserve_state_digest(&issuer, &crate::DenomKey::Erg),
+        chain_digest,
+        "repaired mirror must equal the chain state"
+    );
+    assert_eq!(
+        diverged
+            .get_already_redeemed(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap(),
+        1_500
+    );
+}
+
+/// A phantom optimistic update (a submitted redemption that never confirmed) is dropped by a
+/// Genesis repair: the pair's state is rebuilt from the confirmed ops alone.
+#[test]
+fn test_apply_chain_reserve_ops_genesis_drops_phantom() {
+    let (mut reference, _, issuer, recipient) = manager_with_note(10_000);
+    let (_, phantom_recipient) = generate_keypair();
+
+    // Chain truth: one redemption of 1000 at ts 100.
+    reference
+        .update_already_redeemed(&issuer, &recipient, &crate::DenomKey::Erg, 100, 1_000)
+        .unwrap();
+    let chain_digest: [u8; 33] = reference
+        .reserve_state_digest(&issuer, &crate::DenomKey::Erg)
+        .try_into()
+        .unwrap();
+
+    let (mut diverged, _, _, _) = manager_with_note(10_000);
+    // Same real op plus a phantom one that never confirmed.
+    diverged
+        .update_already_redeemed(&issuer, &recipient, &crate::DenomKey::Erg, 100, 1_000)
+        .unwrap();
+    diverged
+        .update_already_redeemed(
+            &issuer,
+            &phantom_recipient,
+            &crate::DenomKey::Erg,
+            900,
+            7_777,
+        )
+        .unwrap();
+    assert_ne!(
+        diverged.reserve_state_digest(&issuer, &crate::DenomKey::Erg),
+        chain_digest,
+        "the phantom op must diverge the mirror"
+    );
+
+    diverged
+        .apply_chain_reserve_ops(
+            &issuer,
+            &crate::DenomKey::Erg,
+            &[chain_op(recipient, 100, 1_000)],
+            crate::ReserveSyncPoint::Genesis,
+            chain_digest,
+        )
+        .expect("genesis repair must verify against the on-chain digest");
+
+    assert_eq!(
+        diverged.reserve_state_digest(&issuer, &crate::DenomKey::Erg),
+        chain_digest
+    );
+    assert_eq!(
+        diverged
+            .get_already_redeemed(&issuer, &phantom_recipient, &crate::DenomKey::Erg)
+            .unwrap(),
+        0,
+        "the phantom entry must be gone from the tree"
+    );
+}
+
+/// A staged repair that does not reproduce the expected on-chain digest must leave both the
+/// live tree and the journal untouched.
+#[test]
+fn test_apply_chain_reserve_ops_wrong_digest_leaves_state_untouched() {
+    let (mut manager, _, issuer, recipient) = manager_with_note(10_000);
+    manager
+        .update_already_redeemed(&issuer, &recipient, &crate::DenomKey::Erg, 100, 1_000)
+        .unwrap();
+    let before = manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg);
+
+    let result = manager.apply_chain_reserve_ops(
+        &issuer,
+        &crate::DenomKey::Erg,
+        &[chain_op(recipient, 100, 500)],
+        crate::ReserveSyncPoint::Mirror,
+        [0xee; 33],
+    );
+    assert!(result.is_err(), "a digest mismatch must abort the repair");
+    assert_eq!(
+        manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg),
+        before,
+        "a failed repair must not touch the live tree"
+    );
+    assert_eq!(
+        manager
+            .get_already_redeemed(&issuer, &recipient, &crate::DenomKey::Erg)
+            .unwrap(),
+        1_000
+    );
+}
+
+/// Chain-observed redemptions may reference notes the tracker never stored (a creditor
+/// broadcasting directly, an emergency redemption). The v2 journal embeds the recipient, so
+/// the repaired state must survive a restart without a note lookup.
+#[test]
+fn test_apply_chain_reserve_ops_survive_restart_without_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, issuer) = generate_keypair();
+    let (_, recipient) = generate_keypair();
+
+    // Chain truth: one redemption of 2000 at ts 200, computed on a reference manager
+    // (update_already_redeemed does not require the note to exist).
+    let mut reference = TrackerStateManager::new_with_temp_storage();
+    reference
+        .update_already_redeemed(&issuer, &recipient, &crate::DenomKey::Erg, 200, 2_000)
+        .unwrap();
+    let chain_digest: [u8; 33] = reference
+        .reserve_state_digest(&issuer, &crate::DenomKey::Erg)
+        .try_into()
+        .unwrap();
+
+    {
+        let mut manager = TrackerStateManager::new(dir.path());
+        manager
+            .apply_chain_reserve_ops(
+                &issuer,
+                &crate::DenomKey::Erg,
+                &[chain_op(recipient, 200, 2_000)],
+                crate::ReserveSyncPoint::Genesis,
+                chain_digest,
+            )
+            .unwrap();
+        assert_eq!(
+            manager.reserve_state_digest(&issuer, &crate::DenomKey::Erg),
+            chain_digest
+        );
+    }
+
+    // Reopen: the journal must replay to the same digest even though no note exists for the
+    // (issuer, recipient) pair in the note store.
+    let reopened = TrackerStateManager::new(dir.path());
+    assert_eq!(
+        reopened.reserve_state_digest(&issuer, &crate::DenomKey::Erg),
+        chain_digest,
+        "chain-observed ops must replay after a restart without a stored note"
     );
 }

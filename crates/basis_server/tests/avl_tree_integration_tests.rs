@@ -1,14 +1,13 @@
 #[cfg(test)]
 mod avl_tree_integration_tests {
     use basis_store::{IouNote, NoteKey, PubKey, TrackerStateManager};
-    use secp256k1;
 
     /// Helper function to generate a test public key
     fn generate_test_pubkey(seed: u8) -> PubKey {
         let mut key = [0u8; 33];
         key[0] = 0x02; // Compressed public key prefix
-        for i in 1..33 {
-            key[i] = seed * (i as u8 + 1);
+        for (i, byte) in key.iter_mut().enumerate().skip(1) {
+            *byte = seed * (i as u8 + 1);
         }
         key
     }
@@ -59,7 +58,7 @@ mod avl_tree_integration_tests {
 
         // Check that the AVL tree root digest has been updated
         let initial_state = tracker.get_state();
-        let initial_root = initial_state.avl_root_digest.clone();
+        let initial_root = initial_state.avl_root_digest;
         assert_ne!(
             initial_root, [0u8; 33],
             "Root digest should not be empty after adding note"
@@ -80,7 +79,7 @@ mod avl_tree_integration_tests {
         );
 
         let updated_state = tracker.get_state();
-        let updated_root = updated_state.avl_root_digest.clone();
+        let updated_root = updated_state.avl_root_digest;
         assert_ne!(
             updated_root, initial_root,
             "Root digest should change after adding second note"
@@ -153,12 +152,12 @@ mod avl_tree_integration_tests {
         let issuer_pubkey = issuer_pubkey_obj.serialize();
 
         // Add multiple notes with different recipients
-        let recipients = vec![
+        let recipients = [
             generate_test_pubkey(2),
             generate_test_pubkey(3),
             generate_test_pubkey(4),
         ];
-        let amounts = vec![1000, 2000, 3000];
+        let amounts = [1000, 2000, 3000];
 
         for (i, recipient_pubkey) in recipients.iter().enumerate() {
             let note = create_signed_note(
@@ -207,7 +206,7 @@ mod avl_tree_integration_tests {
 
         // Verify AVL tree state commitment has been updated
         let state = tracker.get_state();
-        let root_digest = state.avl_root_digest.clone();
+        let root_digest = state.avl_root_digest;
         assert_ne!(
             root_digest, [0u8; 33],
             "Root digest should not be empty after adding multiple notes"
@@ -221,7 +220,7 @@ mod avl_tree_integration_tests {
 
         // Initial state
         let initial_state = tracker.get_state();
-        let initial_root = initial_state.avl_root_digest.clone();
+        let initial_root = initial_state.avl_root_digest;
 
         // Generate test keys
         let issuer_secret_key = [4u8; 32]; // Use a different secret key for this test
@@ -237,14 +236,14 @@ mod avl_tree_integration_tests {
 
         tracker.add_note(&issuer_pubkey, &note1).unwrap();
         let state_after_first = tracker.get_state();
-        let root_after_first = state_after_first.avl_root_digest.clone();
+        let root_after_first = state_after_first.avl_root_digest;
 
         // Add second note
         let note2 = create_signed_note(generate_test_pubkey(3), 2000, 1000001, &issuer_secret_key);
 
         tracker.add_note(&issuer_pubkey, &note2).unwrap();
         let state_after_second = tracker.get_state();
-        let root_after_second = state_after_second.avl_root_digest.clone();
+        let root_after_second = state_after_second.avl_root_digest;
 
         // Verify all roots are different
         assert_ne!(
@@ -266,10 +265,6 @@ mod avl_tree_integration_tests {
         // This test would require a full tracker thread implementation
         // which is beyond the scope of simple integration tests
         // The focus is on testing the core AVL functionality which is done above
-        assert!(
-            true,
-            "Server channel integration requires running tracker thread"
-        );
     }
 
     #[tokio::test]

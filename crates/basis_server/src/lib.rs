@@ -8,6 +8,7 @@ pub mod config;
 pub mod models;
 pub mod redemption_build;
 pub mod reserve_api;
+pub mod reserve_lineage;
 pub mod store;
 pub mod tracker_box_updater;
 
@@ -72,7 +73,9 @@ impl std::fmt::Debug for ExchangeAcceptanceCheck {
 
 // Commands that can be sent to the tracker thread
 #[derive(Debug)]
-#[allow(clippy::type_complexity)]
+// Commands cross an mpsc channel one at a time, so the widest variant's size
+// is not a hot-path cost; boxing every payload would only add churn.
+#[allow(clippy::type_complexity, clippy::large_enum_variant)]
 pub enum TrackerCommand {
     AddNote {
         issuer_pubkey: basis_store::PubKey,
@@ -109,8 +112,10 @@ pub enum TrackerCommand {
         >,
     },
     /// Atomic cross-denomination debt exchange (triage/novation,
-    /// specs/ergo/multi_collateral_reserves.md §10). All four signatures were
-    /// verified by the API layer; the store re-verifies them before mutating.
+    /// specs/ergo/multi_collateral_reserves.md §10). Carries absolute
+    /// post-totals; the store derives the amounts and re-verifies all four
+    /// signatures before mutating (the domain-separated exchange message is
+    /// reconstructed with the current totals as pre-totals, N10).
     ///
     /// `acceptance_check` is evaluated by the store against the pre-mutation
     /// state, atomically with the mutation (finding #8): evaluating it in the
@@ -121,14 +126,14 @@ pub enum TrackerCommand {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
         from_denomination: basis_store::DenomKey,
-        from_amount: u64,
+        from_new_total: u64,
         to_denomination: basis_store::DenomKey,
-        to_amount: u64,
+        to_new_total: u64,
         timestamp: u64,
         issuer_from_signature: basis_store::Signature,
-        recipient_from_signature: basis_store::Signature,
         issuer_to_signature: basis_store::Signature,
-        recipient_to_signature: basis_store::Signature,
+        issuer_exchange_signature: basis_store::Signature,
+        recipient_exchange_signature: basis_store::Signature,
         /// Box id of the issuer's canonical from-denomination reserve at
         /// request time; stored on the staged exchange so phase 2 can verify
         /// the reserve was not drained while the to-edge increase was staged
@@ -163,12 +168,6 @@ pub enum TrackerCommand {
             Result<Vec<([u8; 32], basis_store::PendingExchangeRecord)>, basis_store::NoteError>,
         >,
     },
-    InitiateRedemption {
-        request: basis_store::RedemptionRequest,
-        response_tx: tokio::sync::oneshot::Sender<
-            Result<basis_store::RedemptionData, basis_store::RedemptionError>,
-        >,
-    },
     CompleteRedemption {
         issuer_pubkey: basis_store::PubKey,
         recipient_pubkey: basis_store::PubKey,
@@ -178,6 +177,17 @@ pub enum TrackerCommand {
         /// Falls back to the note's cumulative redeemed amount when `None`.
         new_already_redeemed: Option<u64>,
         response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::RedemptionError>>,
+    },
+    /// Apply chain-observed redemption ops to a reserve tree, staged and verified against
+    /// the on-chain R5 digest (issue #15 review N14). Sent by the `/redemption/build`
+    /// repair path when the tracker's reserve mirror has diverged from the chain.
+    ApplyChainReserveOps {
+        issuer_pubkey: basis_store::PubKey,
+        denomination: basis_store::DenomKey,
+        ops: Vec<basis_store::ChainReserveOp>,
+        sync_point: basis_store::ReserveSyncPoint,
+        expected_digest: [u8; 33],
+        response_tx: tokio::sync::oneshot::Sender<Result<(), basis_store::NoteError>>,
     },
     GenerateProof {
         issuer_pubkey: basis_store::PubKey,
@@ -252,6 +262,12 @@ pub enum TrackerCommand {
         tx_id: String,
         submitted_height: u64,
         response_tx: tokio::sync::oneshot::Sender<Result<usize, basis_store::NoteError>>,
+    },
+    /// Pin the current live tree as the content of the next tracker box
+    /// update and return its digest, in one tracker-thread step (issue #15
+    /// follow-up N2). The updater submits exactly the returned digest.
+    PrepareTrackerUpdate {
+        response_tx: tokio::sync::oneshot::Sender<Result<[u8; 33], basis_store::NoteError>>,
     },
     /// Promote all pending notes to confirmed after an update tx confirms.
     /// `digest` is the AVL root committed by the confirming tracker box.

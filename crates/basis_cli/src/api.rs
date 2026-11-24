@@ -145,66 +145,6 @@ pub struct KeyStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedeemRequest {
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    /// Reserve box ID (optional - will be looked up if not provided)
-    #[serde(default)]
-    pub reserve_box_id: String,
-    /// Tracker box ID (optional - fetched by server)
-    #[serde(default)]
-    pub tracker_box_id: String,
-    /// Tracker NFT ID from reserve box R6 register (optional - fetched by server)
-    #[serde(default)]
-    pub tracker_nft_id: String,
-    /// Current blockchain height (optional - fetched by server)
-    #[serde(default)]
-    pub current_height: u64,
-    /// Recipient address for redemption output (optional - derived from recipient_pubkey if not provided)
-    #[serde(default)]
-    pub recipient_address: String,
-    /// Change address for transaction outputs (optional - server will derive from tracker pubkey if not provided)
-    #[serde(default)]
-    pub change_address: String,
-    /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    pub issuer_signature: String,
-    /// Whether this is an emergency redemption
-    #[serde(default)]
-    pub emergency: bool,
-    /// Tracker's Schnorr signature (optional - server will generate if not provided)
-    #[serde(default)]
-    pub tracker_signature: Option<String>,
-    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
-    #[serde(default)]
-    pub denomination: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RedeemResponse {
-    pub redemption_id: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    pub proof_available: bool,
-    pub transaction_pending: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompleteRedemptionRequest {
-    pub redemption_id: String,
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub redeemed_amount: u64,
-    /// Cumulative reserve-tree already_redeemed after this redemption.
-    #[serde(default)]
-    pub new_already_redeemed: Option<u64>,
-    /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
-    #[serde(default)]
-    pub denomination: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateReserveRequest {
     pub nft_id: String,
     pub owner_pubkey: String,
@@ -234,6 +174,18 @@ pub struct ReservePaymentRequest {
     pub value: u64,
     pub assets: Vec<Asset>,
     pub registers: std::collections::HashMap<String, String>,
+}
+
+/// Reserve AVL tree state digest returned by `GET /reserves/state-digest`:
+/// the tracker's reserve tree for an (issuer, denomination) pair, both as the
+/// raw 33-byte root digest and as the serialized SAvlTree value a reserve
+/// (re)creation must carry in R5 (issue #15 review N9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveStateDigestResponse {
+    pub issuer_pubkey: String,
+    pub denomination: String,
+    pub reserve_state_digest: String,
+    pub reserve_r5: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -534,6 +486,12 @@ fn send_pinned_deployment(
 /// asked the tracker for ([`crate::verify::verify_reserve_payload`]). Returns the
 /// transaction id.
 ///
+/// The node pays whatever the payload says, so the payload is first checked to be
+/// exactly the reserve `request` asked the tracker for (including R5 = `expected_r5`,
+/// the tracker's reserve-tree state digest from `GET /reserves/state-digest`, the
+/// owner's change address and a bounded fee,
+/// [`crate::verify::verify_reserve_payload`]).
+///
 /// The tracker only admits a reserve root box whose creating transaction spends a P2PK
 /// input of the R4 owner key (see `specs/ergo/reserve_admission.md`), so this function
 /// guarantees one:
@@ -547,8 +505,9 @@ pub fn submit_reserve_to_node(
     node_api_key: Option<&str>,
     request: &CreateReserveRequest,
     payload: &ReserveCreationResponse,
+    expected_r5: &str,
 ) -> Result<String> {
-    crate::verify::verify_reserve_payload(request, payload, None)?;
+    crate::verify::verify_reserve_payload(request, payload, None, expected_r5)?;
 
     let payment_requests: Vec<NodePaymentRequest> = payload
         .requests
@@ -940,71 +899,6 @@ impl TrackerClient {
     }
 
     // Redemption
-    pub async fn initiate_redemption(&self, request: RedeemRequest) -> Result<RedeemResponse> {
-        let url = format!("{}/redeem", self.base_url);
-        let body = serde_json::to_value(request)?;
-        let response = match self.post(&url, &body)?.send_json(body) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!(
-                    "Failed to initiate redemption: {}",
-                    error_text
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Request failed: {}", e));
-            }
-        };
-
-        if response.status() == 200 {
-            let api_response: ApiResponse<RedeemResponse> = response.into_json()?;
-            if api_response.success {
-                Ok(api_response.data.unwrap())
-            } else {
-                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
-            }
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to initiate redemption: {}",
-                error_text
-            ))
-        }
-    }
-
-    pub async fn complete_redemption(&self, request: CompleteRedemptionRequest) -> Result<()> {
-        let url = format!("{}/redeem/complete", self.base_url);
-        let body = serde_json::to_value(request)?;
-        let response = match self.post(&url, &body)?.send_json(body) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_text = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {}", code));
-                return Err(anyhow::anyhow!(
-                    "Failed to complete redemption: {}",
-                    error_text
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Request failed: {}", e));
-            }
-        };
-
-        if response.status() == 200 {
-            Ok(())
-        } else {
-            let error_text = response.into_string()?;
-            Err(anyhow::anyhow!(
-                "Failed to complete redemption: {}",
-                error_text
-            ))
-        }
-    }
-
     /// Request tracker signature for redemption
     /// Following the Basis protocol specification - POST /tracker/signature
     ///
@@ -1098,18 +992,20 @@ pub struct RedemptionBuildRequest {
     pub emergency: bool,
     #[serde(default)]
     pub tracker_box_id: Option<String>,
-    /// Deprecated: ignored by the tracker, which always pays change to its own wallet.
+    /// Address paying the redeemer's change output; defaults to the recipient address.
     #[serde(default)]
     pub change_address: Option<String>,
     /// Denomination of the note ("erg" or "token:<64-hex>"); default "erg".
     #[serde(default)]
     pub denomination: String,
+    /// Box ids funding the fee (and the token-recipient min-ERG box for token
+    /// reserves); every box must be a token-free P2PK box of the recipient (N17).
+    pub fee_box_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedemptionBuildResponse {
     pub unsigned_tx: serde_json::Value,
-    pub partial_tx: serde_json::Value,
     pub input_box_binaries: Vec<String>,
     pub data_box_binaries: Vec<String>,
     pub headers: Vec<ergo_lib::ergo_chain_types::Header>,
@@ -1131,6 +1027,9 @@ pub struct RedemptionBuildResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedemptionSubmitRequest {
     pub signed_tx: serde_json::Value,
+    /// The exact `unsigned_tx` value returned by `POST /redemption/build`; the server
+    /// binds the submit to the pending build entry it identifies (PR #16 B6).
+    pub unsigned_tx: serde_json::Value,
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub redeemed_amount: u64,
@@ -1356,11 +1255,14 @@ impl TrackerClient {
     /// Broadcast a fully-signed redemption transaction via the tracker. POST /redemption/submit.
     /// Returns the node-accepted transaction id.
     ///
-    /// `redeemed_amount` and `new_already_redeemed` let the tracker sync its local note and
-    /// reserve-tree state after a successful broadcast.
+    /// `unsigned_tx` must be the exact value returned by `/redemption/build`; it binds this
+    /// submit to the tracker's pending build entry. The wire `redeemed_amount` and
+    /// `new_already_redeemed` fields are ignored by the server (it syncs from the stored
+    /// build entry) and kept only for wire compatibility.
     pub async fn redemption_submit(
         &self,
         signed_tx: serde_json::Value,
+        unsigned_tx: serde_json::Value,
         issuer_pubkey: &str,
         recipient_pubkey: &str,
         redeemed_amount: u64,
@@ -1369,6 +1271,7 @@ impl TrackerClient {
         let url = format!("{}/redemption/submit", self.base_url);
         let request = RedemptionSubmitRequest {
             signed_tx,
+            unsigned_tx,
             issuer_pubkey: issuer_pubkey.to_string(),
             recipient_pubkey: recipient_pubkey.to_string(),
             redeemed_amount,
@@ -1466,6 +1369,35 @@ impl TrackerClient {
         }
     }
 
+    /// Fetch the tracker's reserve AVL tree state for an (issuer, denomination)
+    /// pair — the R5 value a reserve (re)creation must carry (issue #15 review
+    /// N9). Used to verify a `/reserves/create` payload before funding it.
+    pub async fn get_reserve_state_digest(
+        &self,
+        issuer_pubkey: &str,
+        denomination: &str,
+    ) -> Result<ReserveStateDigestResponse> {
+        let url = format!(
+            "{}/reserves/state-digest?issuer_pubkey={}&denomination={}",
+            self.base_url, issuer_pubkey, denomination
+        );
+        let response = self.get(&url)?.call()?;
+        if response.status() == 200 {
+            let api_response: ApiResponse<ReserveStateDigestResponse> = response.into_json()?;
+            if api_response.success {
+                Ok(api_response.data.unwrap())
+            } else {
+                Err(anyhow::anyhow!("API error: {:?}", api_response.error))
+            }
+        } else {
+            let error_text = response.into_string()?;
+            Err(anyhow::anyhow!(
+                "Failed to get reserve state digest: {}",
+                error_text
+            ))
+        }
+    }
+
     /// Fetch the tracker's reserve-collateral configuration (contract addresses plus
     /// the served-token table).
     pub async fn get_reserve_collateral_config(&self) -> Result<ReserveCollateralConfig> {
@@ -1559,13 +1491,14 @@ impl TrackerClient {
         issuer_pubkey: &str,
         total_debt: u64,
         recipient_pubkey: Option<&str>,
+        denomination: Option<&str>,
     ) -> Result<CheckAcceptanceResponse> {
         let request = CheckAcceptanceRequest {
             issuer_pubkey: issuer_pubkey.to_string(),
             total_debt,
             recipient_pubkey: recipient_pubkey.map(|s| s.to_string()),
 
-            denomination: String::new(),
+            denomination: canonical_denom_param(denomination)?.unwrap_or_default(),
         };
 
         let url = format!("{}/acceptance/check", self.base_url);

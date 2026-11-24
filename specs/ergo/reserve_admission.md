@@ -37,7 +37,11 @@ holds:
 
 1. **Refresh** — the box is the currently tracked box itself.
 2. **Root** — no reserve is tracked for its `(owner, denomination)`, the C4 setup
-   checks pass (`R7 == 0`, R5 is the empty AVL+ tree), **and the box's creating
+   checks pass (`R7 == 0`, R5 is the empty AVL+ tree — or, for a **rotation**
+   (issue #15 review N9), R5 equals the pending-rotation digest recorded by
+   `/reserves/create` for that `(owner, denomination)`, which carries the
+   redeemed-amount history forward from the refunded reserve so old redemption
+   vars cannot be replayed against the new box), **and the box's creating
    transaction (fetched via `GET /blockchain/transaction/byId/{txId}`) spends at least
    one input locked by the P2PK script of the R4 owner key** (ErgoTree
    `0008cd || owner_pubkey`, checked at any input position). Spending such an input
@@ -51,7 +55,9 @@ holds:
    verified successor needs no further validation — and no P2PK proof, since reserve
    actions (redemption, permissionless top-up) legitimately have no owner P2PK input.
 
-Anything else is **quarantined**: it never enters the tracker (so
+A box that fails rules 2–3 is not quarantined outright: admission falls back to the
+chain-history walk described in *History-aware admission* below, and only a box the
+walk cannot authenticate is **quarantined**: it never enters the tracker (so
 `resolve_issuer_reserve` never sees a duplicate) and a record (`box_id`, `owner`,
 `denomination`, `reason`, timestamp) is persisted in the `quarantined_reserves`
 partition and exposed via `GET /reserves/quarantined`. Quarantine is sticky: a box
@@ -100,17 +106,56 @@ Manual submission of the `/reserves/create` payload via `/wallet/payment/send` i
 safe when the wallet's boxes all belong to the owner key; otherwise the node may
 select inputs with no P2PK(owner) box and the tracker will quarantine the reserve.
 
-## Fresh-resync caveat
+## History-aware admission (issue #15 N19)
 
-The P2PK proof is required only for **root** admission. A tracked reserve that is
-spent forward is re-admitted through the successor rule, and the currently tracked box
-through the refresh rule, so day-to-day operation never re-checks the proof. But if
-the reserve database is wiped and the tracker re-scans from scratch, a reserve whose
-current box was created by a later action (top-up/redemption) has no P2PK input in
-*its* creating transaction and will be quarantined. Recovery: wipe to a height before
-the reserve's creation, or remove the quarantined record and let the lineage walk
-re-admit from a synced ancestor. Operators should treat the reserve DB as state worth
-backing up.
+The three rules above decide admission from local state plus the immediate creating
+transaction. That is not enough when local state is missing: on a fresh database
+(wipe, new deployment against an existing chain, a migration) a reserve whose current
+box was created by a top-up/redemption/refund-initiation fails root admission (its
+creating transaction has no P2PK input; R5/R7 may be legitimately set), and the
+8-generation successor bound quarantines legitimate reserves after long tracker
+downtime. Admission is therefore decidable from the **chain alone** via a history
+walk, `verify_authenticated_lineage`:
+
+- From the scanned box, walk creating transactions backwards, following only inputs
+  at the reserve contract address, until a generation whose creating transaction has
+  **no** contract-address input. That transaction is the deployment; the box it
+  created is the root.
+- The walk succeeds iff the root passes the same checks as live root admission:
+  R5 == empty reserve tree, R7 absent or 0, and the deployment spends a P2PK input of
+  the R4 owner key (registers are read from the indexed input JSON of the next
+  generation's creating transaction; `extraIndex` returns full box data for inputs).
+  Intermediate generations need no validation: the on-chain contract enforces
+  register continuity, so a verified chain to an authenticated root is the legitimate
+  reserve.
+
+The walk is used in two places:
+
+- **Untracked root candidates**: when the fast path (C4 + P2PK proof) fails, the walk
+  runs before quarantining. A grief dust box fast-fails: its creating transaction has
+  no contract input, so it is judged as a root and rejected exactly as before.
+- **Tracked reserves whose successor check fails** (including >8 missed generations):
+  the walk runs as a fallback, and the candidate is admitted only if the walk succeeds
+  **and** the currently tracked box is spent on-chain (`GET /blockchain/box/byId/{id}`
+  returning a `spentTransactionId`). The spent check keeps clone-sibling outputs
+  quarantined: a sibling of a live action's real successor has an authenticated chain
+  but the tracked box is unspent, so first-admitted-wins is preserved.
+
+The walk is bounded by `ergo.scanner.admission_walk_depth` (default **512**, one node
+GET per generation). Depth exhaustion and node errors are inconclusive: the box is
+**pending** (retried next cycle), never quarantined on incomplete data.
+
+A startup migration (`ReserveStorage::migrate_quarantine_v2`, versioned marker in the
+`quarantined_reserves` partition) drops all quarantine records written by the pre-N19
+rules, so previously bricked reserves are re-judged by the walk on the next scan.
+Re-quarantining grief boxes is cheap (one failed walk) and cannot be raced, because
+the walk depends only on chain data, not on local tracking state.
+
+**Remaining limitation — rotated reserves.** Roots with deliberately pre-filled R5
+(N9 rotations) still fail validation on a fresh sync by design: accepting
+"P2PK-proof is enough" would re-open the C4 fake-history vector. Their
+`pending_root_r5` records must be backed up, or recovery of a rotated reserve on a
+fresh database stays manual.
 
 ## Code map
 
@@ -120,11 +165,16 @@ backing up.
     lineage for successors, quarantine stickiness).
   - `p2pk_ergo_tree` / `has_owner_p2pk_input` — the `0008cd || pubkey` proof check.
   - `is_lineage_successor` — bounded backwards walk over `/blockchain/transaction/byId`.
+  - `verify_authenticated_lineage` — N19 history walk to an authenticated root
+    (bound: `NodeConfig::admission_walk_depth`).
+  - `is_box_spent_onchain` — `/blockchain/box/byId` spent check for the tracked box.
+  - `fetch_tx_inputs` / `TxInputInfo` — indexed transaction inputs incl. registers.
   - `decide_admission` — pure verdict function (unit-tested).
   - `ingest_scan_box` — parse + admit + track/persist + quarantine persistence.
   - `process_scan_boxes` — removal loop keeps boxes whose proof/lineage check is pending.
 - `crates/basis_store/src/persistence.rs` — `QuarantinedReserve`,
-  `quarantined_reserves` partition on `ReserveStorage`.
+  `quarantined_reserves` partition on `ReserveStorage`,
+  `migrate_quarantine_v2` (pre-N19 record cleanup, run at scanner startup).
 - `crates/basis_server/src/reserve_api.rs` — `GET /reserves/quarantined`.
 - `crates/basis_cli/src/api.rs` — `submit_reserve_to_node` and helpers
   (`select_deployment_boxes`, `deployment_change`, `create_predeployment_utxo`,

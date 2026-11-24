@@ -87,14 +87,16 @@ current account. If the upload fails, the local save still stands and the tool r
 an `isError` result reading `policy saved locally but upload failed: ...` — treat this
 as partial success, not a clean failure.
 
-`AcceptanceConfig` shape (see `crates/basis_core/src/acceptance.rs`):
+`AcceptanceConfig` shape (the default policy; see `crates/basis_core/src/acceptance.rs`):
 
 ```json
 {
   "default": "reject",
-  "root": "require_full_collateral",
+  "root": "default_policy",
   "predicates": [
-    {"type": "collateralization", "name": "require_full_collateral", "min_ratio": 1.0}
+    {"type": "collateralization", "name": "require_full_collateral", "min_ratio": 1.0},
+    {"type": "no_pending_refund", "name": "no_pending_refund"},
+    {"type": "all_of", "name": "default_policy", "predicates": ["require_full_collateral", "no_pending_refund"]}
   ]
 }
 ```

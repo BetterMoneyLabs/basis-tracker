@@ -28,6 +28,7 @@ mod tests {
             node_url: "http://test-node:9053".to_string(),
             scan_name: Some("Test Reserve Scanner".to_string()),
             api_key: None,
+            ..Default::default()
         };
 
         // Create reserve storage
@@ -299,6 +300,7 @@ mod tests {
             node_url: "http://test:9053".to_string(),
             scan_name: Some("Test Scanner".to_string()),
             api_key: None,
+            ..Default::default()
         };
 
         // Create reserve storage for the second test

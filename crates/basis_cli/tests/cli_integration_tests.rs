@@ -121,10 +121,6 @@ mod cli_tests {
         // - Should NOT return 404 Not Found
 
         // Current issue: The endpoint might be returning 404 instead of proper results
-        assert!(
-            true, // This test will always pass, but documents the expected behavior
-            "GET /notes/issuer/{{pubkey}} endpoint should return 200 OK with notes array, not 404"
-        );
     }
 
     #[test]

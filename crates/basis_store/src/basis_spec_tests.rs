@@ -27,7 +27,6 @@ mod tests {
 
     // ========== Test Constants (matching Scala BasisSpec) ==========
 
-    const BASIS_TOKEN_ID: &str = "4b2d8b7beb3eaac8234d9e61792d270898a43934d6a27275e4f3a044609c9f2a";
     const TRACKER_NFT: &str = "3c45f29a5165b030fdb5eaf5d81f8108f9d8f507b31487dd51f4ae08fe07cf4a";
 
     /// Tracker NFT ID bytes as used in the reserve box's R6 register (matches Scala BasisSpec).
@@ -36,9 +35,6 @@ mod tests {
         id.copy_from_slice(&hex::decode(TRACKER_NFT).unwrap());
         id
     }
-
-    const MIN_VALUE: u64 = 1_000_000_000; // 1 ERG
-    const FEE_VALUE: u64 = 1_000_000; // 0.001 ERG
 
     // Standard test timestamp (in seconds, Sept 2001 - clearly in the past)
     // Note: The add_note check compares timestamp (ms) against current_time (secs),
@@ -51,14 +47,6 @@ mod tests {
         let mut hasher = Blake2b::<U32>::new();
         hasher.update(data);
         hasher.finalize().into()
-    }
-
-    /// Create a debt record key: blake2b256(ownerKey || receiverKey)
-    fn debt_record_key(owner_key: &PubKey, receiver_key: &PubKey) -> [u8; 32] {
-        let mut input = [0u8; 66];
-        input[..33].copy_from_slice(owner_key);
-        input[33..].copy_from_slice(receiver_key);
-        blake2b256(&input)
     }
 
     /// Generate a random keypair

@@ -42,7 +42,7 @@ This document describes the integration tests for the acceptance policy feature.
 ### 5. Redemption-Time Policy Check Tests
 
 The acceptance policy is also enforced at redemption time (see
-`specs/redemption_acceptance_policy.md`) — in `POST /redeem`, `POST /redemption/build`,
+`specs/redemption_acceptance_policy.md`) — in `POST /redemption/build`,
 `POST /redemption/prepare`, and `POST /tracker/signature`. Coverage for that check lives
 outside `acceptance_api_integration_tests.rs`:
 
@@ -55,15 +55,8 @@ outside `acceptance_api_integration_tests.rs`:
   directions, corrupted/empty stored policy, composite `AllOf`/`Not` semantics,
   `NoPendingRefund` with a pending refund).
 - Handler-level tests in `crates/basis_server/tests/redemption_api_integration_tests.rs`:
-  - `test_redeem_rejected_when_would_violate_holder_policy` — `POST /redeem` returns
-    400 with failure id `failed_policy_violation`.
-  - `test_redeem_rejected_when_not_oldest_note` — `POST /redeem` returns 400 with
-    failure id `failed_not_oldest_note`, message contains the oldest note's timestamp.
-  - `test_redeem_skips_policy_check_when_enforcement_disabled` — with
-    `[redemption] enforce_acceptance_policy = false`, the same request that would
-    fail policy checks is accepted.
   - `test_build_redemption_rejected_when_would_violate_holder_policy` and
-    `test_build_redemption_rejected_when_not_oldest_note` — the same two
+    `test_build_redemption_rejected_when_not_oldest_note` — the two
     rejections through `POST /redemption/build`, using a mock Ergo node
     (`spawn_mock_node_with_reserve_box`) that reports the reserve box unspent
     with an R5 digest matching the tracker's reserve tree.
@@ -100,16 +93,25 @@ The `sign_policy_with_key()` helper generates valid Schnorr signatures using the
 
 ### Policy JSON Format
 
-Policies must use the correct JSON format with `type` fields:
+Policies must use the correct JSON format with `type` fields (shown: the default policy):
 ```json
 {
   "default": "reject",
-  "root": "require_full_collateral",
+  "root": "default_policy",
   "predicates": [
     {
       "name": "require_full_collateral",
       "type": "collateralization",
       "min_ratio": 1.0
+    },
+    {
+      "name": "no_pending_refund",
+      "type": "no_pending_refund"
+    },
+    {
+      "name": "default_policy",
+      "type": "all_of",
+      "predicates": ["require_full_collateral", "no_pending_refund"]
     }
   ]
 }

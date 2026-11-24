@@ -18,4 +18,6 @@ hex = "0.4"
 thiserror = { workspace = true }
 serde = { workspace = true }
 toml = "0.8"
+
+[dev-dependencies]
 serde_json = { workspace = true }

@@ -1,7 +1,6 @@
 //! Integration tests for redemption API endpoints
 //!
 //! This module tests the redemption-related HTTP endpoints:
-//! - POST /redeem: Initiate redemption
 //! - POST /redeem/complete: Complete redemption
 //! - GET /proof/redemption: Get redemption proof
 //! - POST /redemption/prepare: Prepare redemption data
@@ -20,12 +19,12 @@ mod redemption_api_tests {
     use axum::http::StatusCode;
     use basis_server::{
         api::{
-            check_acceptance, complete_redemption, get_redemption_proof, initiate_redemption,
-            prepare_redemption, request_tracker_signature,
+            check_acceptance, complete_redemption, get_redemption_proof, prepare_redemption,
+            request_tracker_signature,
         },
         models::{
-            CheckAcceptanceRequest, CompleteRedemptionRequest, RedeemRequest,
-            RedemptionPreparationRequest, TrackerSignatureRequest,
+            CheckAcceptanceRequest, CompleteRedemptionRequest, RedemptionPreparationRequest,
+            TrackerSignatureRequest,
         },
         redemption_build::{build_redemption, RedemptionBuildRequest},
         AppState, TrackerCommand,
@@ -130,13 +129,6 @@ mod redemption_api_tests {
                             &recipient_pubkey,
                             &denomination,
                         );
-                        let _ = response_tx.send(result);
-                    }
-                    TrackerCommand::InitiateRedemption {
-                        request,
-                        response_tx,
-                    } => {
-                        let result = redemption_manager.initiate_redemption(&request);
                         let _ = response_tx.send(result);
                     }
                     TrackerCommand::CompleteRedemption {
@@ -257,6 +249,10 @@ mod redemption_api_tests {
                     TrackerCommand::GetAllConfirmations { response_tx } => {
                         let _ = response_tx.send(redemption_manager.tracker.all_confirmations());
                     }
+                    TrackerCommand::PrepareTrackerUpdate { response_tx } => {
+                        let result = redemption_manager.tracker.prepare_tracker_update();
+                        let _ = response_tx.send(result);
+                    }
                     TrackerCommand::MarkNotesPending {
                         digest,
                         tx_id,
@@ -306,18 +302,35 @@ mod redemption_api_tests {
                             .reconcile_with_confirmed_digest(&digest, &box_id, height);
                         let _ = response_tx.send(result);
                     }
+                    TrackerCommand::ApplyChainReserveOps {
+                        issuer_pubkey,
+                        denomination,
+                        ops,
+                        sync_point,
+                        expected_digest,
+                        response_tx,
+                    } => {
+                        let result = redemption_manager.tracker.apply_chain_reserve_ops(
+                            &issuer_pubkey,
+                            &denomination,
+                            &ops,
+                            sync_point,
+                            expected_digest,
+                        );
+                        let _ = response_tx.send(result);
+                    }
                     TrackerCommand::ExchangeNotes {
                         issuer_pubkey,
                         recipient_pubkey,
                         from_denomination,
-                        from_amount,
+                        from_new_total,
                         to_denomination,
-                        to_amount,
+                        to_new_total,
                         timestamp,
                         issuer_from_signature,
-                        recipient_from_signature,
                         issuer_to_signature,
-                        recipient_to_signature,
+                        issuer_exchange_signature,
+                        recipient_exchange_signature,
                         from_reserve_box_id,
                         acceptance_check,
                         response_tx,
@@ -329,14 +342,14 @@ mod redemption_api_tests {
                             &issuer_pubkey,
                             &recipient_pubkey,
                             &from_denomination,
-                            from_amount,
+                            from_new_total,
                             &to_denomination,
-                            to_amount,
+                            to_new_total,
                             timestamp,
                             &issuer_from_signature,
-                            &recipient_from_signature,
                             &issuer_to_signature,
-                            &recipient_to_signature,
+                            &issuer_exchange_signature,
+                            &recipient_exchange_signature,
                             &from_reserve_box_id,
                             acceptance_check.map(|check| check.0),
                         );
@@ -383,6 +396,7 @@ mod redemption_api_tests {
                 reserve_creation_max_erg_nano: 10_000_000_000,
                 reserve_creation_max_token_amount: 1_000_000_000,
                 redemption_build_max_per_pair_per_hour: 60,
+                redemption_build_max_per_issuer_per_hour: 240,
             },
             ergo: basis_server::config::ErgoConfig {
                 scanner: basis_store::ergo_scanner::NodeConfig {
@@ -600,255 +614,6 @@ mod redemption_api_tests {
     }
 
     // ============================================================================
-    // POST /redeem tests
-    // ============================================================================
-
-    #[tokio::test]
-    async fn test_redeem_invalid_hex_pubkey() {
-        // Test that invalid hex encoding for recipient pubkey returns 400
-        let state = create_mock_app_state().await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "not-valid-hex!!!".to_string(),
-            amount: 1000,
-            timestamp: 1234567890,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
-        assert!(body.data.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_redeem_invalid_pubkey_length() {
-        // Test that wrong-length public key returns 400
-        let state = create_mock_app_state().await;
-
-        // 32 bytes instead of 33
-        let wrong_length = "0101010101010101010101010101010101010101010101010101010101010101";
-
-        let request = RedeemRequest {
-            issuer_pubkey: wrong_length.to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
-            amount: 1000,
-            timestamp: 1234567890,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        // The handler will try to find a reserve and fail, or the tracker thread will fail
-        // Either way, it should not succeed
-        let body = &response.1;
-        assert!(
-            !body.success || body.data.is_none(),
-            "Expected failure or no data, got: {:?}",
-            body
-        );
-    }
-
-    #[tokio::test]
-    async fn test_redeem_rejected_when_would_violate_holder_policy() {
-        // C=900, D=1000 (ratio 0.9), global min_ratio 0.85. Redeeming 400 moves the
-        // ratio to 500/600 = 0.833 < 0.85: newly violates the other holder's policy.
-        let state = create_mock_app_state_with_acceptance(collateral_acceptance(0.85)).await;
-
-        let (issuer_secret, issuer_pubkey) = generate_keypair();
-        let issuer_hex = hex::encode(issuer_pubkey);
-        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
-        let redeemer_hex = hex::encode(redeemer_pubkey);
-        let (_holder_secret, holder_pubkey) = generate_keypair();
-        let holder_hex = hex::encode(holder_pubkey);
-
-        add_test_note(
-            &state,
-            &issuer_secret,
-            &issuer_hex,
-            &redeemer_hex,
-            400,
-            1000,
-        )
-        .await;
-        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 600, 2000).await;
-        add_test_reserve(&state, &issuer_hex, 900).await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: issuer_hex,
-            recipient_pubkey: redeemer_hex,
-            amount: 400,
-            timestamp: 1000,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        assert_eq!(
-            response.0,
-            StatusCode::BAD_REQUEST,
-            "body: {:?}",
-            response.1
-        );
-        let body = &response.1;
-        assert!(!body.success);
-        let error = body.error.as_deref().unwrap_or("");
-        assert!(
-            error.contains("failed_policy_violation"),
-            "expected failed_policy_violation, got: {}",
-            error
-        );
-    }
-
-    #[tokio::test]
-    async fn test_redeem_rejected_when_not_oldest_note() {
-        // Deeply undercollateralized reserve: C=100, D=1000, min_ratio 1.0. Every
-        // holder's policy is already violated, so only the oldest note may redeem.
-        // The redeemer's note (ts 2000) is newer than the holder's (ts 1000).
-        let state = create_mock_app_state_with_acceptance(collateral_acceptance(1.0)).await;
-
-        let (issuer_secret, issuer_pubkey) = generate_keypair();
-        let issuer_hex = hex::encode(issuer_pubkey);
-        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
-        let redeemer_hex = hex::encode(redeemer_pubkey);
-        let (_holder_secret, holder_pubkey) = generate_keypair();
-        let holder_hex = hex::encode(holder_pubkey);
-
-        add_test_note(
-            &state,
-            &issuer_secret,
-            &issuer_hex,
-            &redeemer_hex,
-            400,
-            2000,
-        )
-        .await;
-        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 600, 1000).await;
-        add_test_reserve(&state, &issuer_hex, 100).await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: issuer_hex,
-            recipient_pubkey: redeemer_hex,
-            amount: 100,
-            timestamp: 2000,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        let error = body.error.as_deref().unwrap_or("");
-        assert!(
-            error.contains("failed_not_oldest_note"),
-            "expected failed_not_oldest_note, got: {}",
-            error
-        );
-        // The message carries the oldest note's timestamp so the client knows the
-        // queue position.
-        assert!(
-            error.contains("1000"),
-            "expected oldest timestamp in message, got: {}",
-            error
-        );
-    }
-
-    #[tokio::test]
-    async fn test_redeem_skips_policy_check_when_enforcement_disabled() {
-        // Same setup as test_redeem_rejected_when_would_violate_holder_policy
-        // (C=900, D=1000, global min_ratio 0.85, redeeming 400 newly violates the
-        // other holder's policy), but with [redemption]
-        // enforce_acceptance_policy = false the policy check is skipped entirely:
-        // the request must not fail with a policy failure id. (It fails later,
-        // at the blockchain-height fetch, since no node is available in tests.)
-        let state = create_mock_app_state_with_options(
-            collateral_acceptance(0.85),
-            false,
-            "http://localhost:9053",
-        )
-        .await;
-
-        let (issuer_secret, issuer_pubkey) = generate_keypair();
-        let issuer_hex = hex::encode(issuer_pubkey);
-        let (_redeemer_secret, redeemer_pubkey) = generate_keypair();
-        let redeemer_hex = hex::encode(redeemer_pubkey);
-        let (_holder_secret, holder_pubkey) = generate_keypair();
-        let holder_hex = hex::encode(holder_pubkey);
-
-        add_test_note(
-            &state,
-            &issuer_secret,
-            &issuer_hex,
-            &redeemer_hex,
-            400,
-            1000,
-        )
-        .await;
-        add_test_note(&state, &issuer_secret, &issuer_hex, &holder_hex, 600, 2000).await;
-        add_test_reserve(&state, &issuer_hex, 900).await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: issuer_hex,
-            recipient_pubkey: redeemer_hex,
-            amount: 400,
-            timestamp: 1000,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        let body = &response.1;
-        let error = body.error.as_deref().unwrap_or("");
-        assert!(
-            !error.contains("failed_policy_violation"),
-            "policy check should be skipped when enforcement is disabled, got: {}",
-            error
-        );
-        assert!(
-            !error.contains("failed_not_oldest_note"),
-            "policy check should be skipped when enforcement is disabled, got: {}",
-            error
-        );
-    }
-
-    // ============================================================================
     // POST /redemption/build acceptance-policy tests
     // ============================================================================
 
@@ -903,6 +668,7 @@ mod redemption_api_tests {
             change_address: None,
 
             denomination: String::new(),
+            fee_box_ids: vec![],
         };
 
         let response =
@@ -973,6 +739,7 @@ mod redemption_api_tests {
             change_address: None,
 
             denomination: String::new(),
+            fee_box_ids: vec![],
         };
 
         let response =
@@ -1089,76 +856,6 @@ mod redemption_api_tests {
             !data.acceptable,
             "1100 liabilities against 1000 collateral at min_ratio 1.0 should be rejected"
         );
-    }
-
-    #[tokio::test]
-    async fn test_redeem_note_not_found() {
-        // Test redemption for a note that doesn't exist in the tracker
-        let state = create_mock_app_state().await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
-            amount: 1000,
-            timestamp: 1234567890,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: false,
-
-            denomination: String::new(),
-        };
-
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        // Should fail because no reserve exists for this issuer
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let body = &response.1;
-        assert!(!body.success);
-        assert!(body.error.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_redeem_emergency_flag_structure() {
-        // Test that emergency redemption flag is accepted in request structure
-        let state = create_mock_app_state().await;
-
-        let request = RedeemRequest {
-            issuer_pubkey: "010101010101010101010101010101010101010101010101010101010101010101"
-                .to_string(),
-            recipient_pubkey: "020202020202020202020202020202020202020202020202020202020202020202"
-                .to_string(),
-            amount: 1000,
-            timestamp: 1234567890,
-            reserve_box_id: "".to_string(),
-            recipient_address: "".to_string(),
-            issuer_signature: "01".repeat(65),
-            emergency: true, // Emergency flag set
-
-            denomination: String::new(),
-        };
-
-        // This will fail at the reserve lookup stage (no reserve in DB),
-        // but the request structure with emergency=true should be accepted
-        let response =
-            initiate_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
-
-        // Should fail at reserve lookup, not at request parsing
-        let body = &response.1;
-        if !body.success {
-            let default_msg = "unknown".to_string();
-            let error_msg = body.error.as_ref().unwrap_or(&default_msg);
-            assert!(
-                error_msg.contains("reserve")
-                    || error_msg.contains("Reserve")
-                    || error_msg.contains("No matching reserve"),
-                "Expected reserve-related error, got: {}",
-                error_msg
-            );
-        }
     }
 
     // ============================================================================
@@ -1749,35 +1446,6 @@ mod redemption_api_tests {
     // ============================================================================
 
     #[tokio::test]
-    async fn test_redeem_request_deserialization() {
-        // Test that RedeemRequest deserializes correctly from JSON
-        let json = r#"{
-            "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
-            "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
-            "amount": 1000,
-            "timestamp": 1234567890,
-            "issuer_signature": "01"
-        }"#;
-
-        let request: RedeemRequest = serde_json::from_str(json).unwrap();
-
-        assert_eq!(
-            request.issuer_pubkey,
-            "010101010101010101010101010101010101010101010101010101010101010101"
-        );
-        assert_eq!(
-            request.recipient_pubkey,
-            "020202020202020202020202020202020202020202020202020202020202020202"
-        );
-        assert_eq!(request.amount, 1000);
-        assert_eq!(request.timestamp, 1234567890);
-        assert_eq!(request.reserve_box_id, ""); // Default
-        assert_eq!(request.recipient_address, ""); // Default
-        assert_eq!(request.emergency, false); // Default
-        assert_eq!(request.issuer_signature, "01");
-    }
-
-    #[tokio::test]
     async fn test_complete_redemption_request_deserialization() {
         // Test CompleteRedemptionRequest deserialization from JSON
         let json = r#"{
@@ -1824,7 +1492,7 @@ mod redemption_api_tests {
         );
         assert_eq!(request.total_debt, 10000);
         assert_eq!(request.timestamp, 1234567890);
-        assert_eq!(request.emergency, true);
+        assert!(request.emergency);
     }
 
     #[tokio::test]
@@ -1851,29 +1519,80 @@ mod redemption_api_tests {
         assert_eq!(request.timestamp, 1234567890);
     }
 
-    #[tokio::test]
-    async fn test_redeem_request_default_fields() {
-        // Test that serde default fields work correctly
-        let json = r#"{
-            "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
-            "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
-            "amount": 1000,
-            "timestamp": 1234567890,
-            "issuer_signature": "01"
-        }"#;
-
-        let request: RedeemRequest = serde_json::from_str(json).unwrap();
-
-        // Default values should be applied
-        assert_eq!(request.reserve_box_id, "");
-        assert_eq!(request.recipient_address, "");
-        assert_eq!(request.emergency, false);
-        assert_eq!(request.issuer_signature, "01");
-    }
-
     // ------------------------------------------------------------------
     // POST /notes/exchange: cross-denomination triage
     // ------------------------------------------------------------------
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// Build an N10 exchange request: both parties sign the domain-separated
+    /// exchange message (pre-totals bound to the current edge state), and the
+    /// issuer signs both edges' standard note messages at the new totals.
+    #[allow(clippy::too_many_arguments)]
+    fn exchange_request(
+        issuer_secret: &[u8; 32],
+        issuer_pubkey: &[u8; 33],
+        recipient_secret: &[u8; 32],
+        recipient_pubkey: &[u8; 33],
+        from_denom: &basis_store::DenomKey,
+        from_pre: u64,
+        from_post: u64,
+        to_denom: &basis_store::DenomKey,
+        to_pre: u64,
+        to_post: u64,
+        ts: u64,
+        nft: &[u8; 32],
+    ) -> basis_server::models::ExchangeNotesRequest {
+        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
+            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
+        };
+        let msg_from = basis_store::schnorr::signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denom,
+            from_post,
+            ts,
+            nft,
+        );
+        let msg_to = basis_store::schnorr::signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            to_denom,
+            to_post,
+            ts,
+            nft,
+        );
+        let msg_x = basis_store::schnorr::exchange_signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denom,
+            from_pre,
+            from_post,
+            to_denom,
+            to_pre,
+            to_post,
+            ts,
+            nft,
+        );
+        basis_server::models::ExchangeNotesRequest {
+            issuer_pubkey: hex::encode(issuer_pubkey),
+            recipient_pubkey: hex::encode(recipient_pubkey),
+            from_denomination: from_denom.denomination_id(),
+            from_new_total: from_post,
+            to_denomination: to_denom.denomination_id(),
+            to_new_total: to_post,
+            timestamp: ts,
+            issuer_exchange_signature: sign(issuer_secret, &msg_x, issuer_pubkey),
+            recipient_exchange_signature: sign(recipient_secret, &msg_x, recipient_pubkey),
+            issuer_from_signature: sign(issuer_secret, &msg_from, issuer_pubkey),
+            issuer_to_signature: sign(issuer_secret, &msg_to, issuer_pubkey),
+        }
+    }
 
     /// The exchange endpoint moves debt between two denominations of one
     /// (issuer, recipient) pair when both parties sign both edges
@@ -1902,7 +1621,6 @@ mod redemption_api_tests {
         // Add an ERG note (100) and a USE note (50) for the pair.
         let add_note = |denom: basis_store::DenomKey, amount: u64, ts: u64| {
             let state = state.clone();
-            let issuer_secret = issuer_secret;
             async move {
                 let note = basis_store::IouNote::create_and_sign(
                     recipient_pubkey,
@@ -1939,43 +1657,53 @@ mod redemption_api_tests {
         // to-edge increase.
         add_tracker_reserve(&state, &issuer_hex, 500_000_000).await;
 
-        // Exchange 30 ERG -> 90 USE at ts 2000. Both parties sign both edges' new
-        // messages: from-edge new total 70 ERG, to-edge new total 140 USE.
-        let ts = 2000u64;
+        // Exchange 30 ERG -> 90 USE: from-edge 100 -> 70, to-edge 50 -> 140.
+        // Both parties sign the domain-separated exchange message binding the
+        // current totals as pre-totals (N10); the issuer signs both edges' new
+        // note messages.
+        let ts = now_ms();
         let erg = basis_store::DenomKey::Erg;
         let tok = basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap());
-        let msg_from = basis_store::schnorr::signing_message(
+
+        // Creditor consent is required: the recipient's exchange signature
+        // replaced by the issuer's own is rejected and nothing moves.
+        let mut bad_request = exchange_request(
+            &issuer_secret,
             &issuer_pubkey,
+            &recipient_secret,
             &recipient_pubkey,
             &erg,
+            100,
             70,
-            ts,
-            &nft,
-        );
-        let msg_to = basis_store::schnorr::signing_message(
-            &issuer_pubkey,
-            &recipient_pubkey,
             &tok,
+            50,
             140,
             ts,
             &nft,
         );
-        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
-        };
-        let request = basis_server::models::ExchangeNotesRequest {
-            issuer_pubkey: issuer_hex.clone(),
-            recipient_pubkey: recipient_hex.clone(),
-            from_denomination: "erg".to_string(),
-            from_amount: 30,
-            to_denomination: format!("token:{}", token_id),
-            to_amount: 90,
-            timestamp: ts,
-            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
-            recipient_from_signature: sign(&recipient_secret, &msg_from, &recipient_pubkey),
-            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
-            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
-        };
+        bad_request.recipient_exchange_signature = bad_request.issuer_exchange_signature.clone();
+        let (status, body) = basis_server::api::exchange_notes(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(bad_request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.success);
+
+        let request = exchange_request(
+            &issuer_secret,
+            &issuer_pubkey,
+            &recipient_secret,
+            &recipient_pubkey,
+            &erg,
+            100,
+            70,
+            &tok,
+            50,
+            140,
+            ts,
+            &nft,
+        );
 
         let (status, body) = basis_server::api::exchange_notes(
             axum::extract::State(state.clone()),
@@ -2026,29 +1754,6 @@ mod redemption_api_tests {
         assert_eq!(pending[0].to_new_total, 140);
         assert_eq!(pending[0].to_amount, 90);
         assert_eq!(pending[0].cancel_reason, None);
-
-        // Creditor consent is required: reuse the same request with the recipient's
-        // from-edge signature replaced by an issuer-signed one.
-        let bad_request = basis_server::models::ExchangeNotesRequest {
-            issuer_pubkey: issuer_hex,
-            recipient_pubkey: recipient_hex,
-            from_denomination: "erg".to_string(),
-            from_amount: 10,
-            to_denomination: format!("token:{}", token_id),
-            to_amount: 10,
-            timestamp: ts + 1,
-            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
-            recipient_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey), // wrong signer
-            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
-            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
-        };
-        let (status, body) = basis_server::api::exchange_notes(
-            axum::extract::State(state),
-            axum::extract::Json(bad_request),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(!body.success);
     }
 
     // ============================================================================
@@ -2091,13 +1796,12 @@ mod redemption_api_tests {
         let (issuer_secret, issuer_pubkey) = generate_keypair();
         let (recipient_secret, recipient_pubkey) = generate_keypair();
         let issuer_hex = hex::encode(issuer_pubkey);
-        let recipient_hex = hex::encode(recipient_pubkey);
+        let _recipient_hex = hex::encode(recipient_pubkey);
         let nft = [0x42u8; 32];
         let tok = basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap());
 
         let add_note = |denom: basis_store::DenomKey, amount: u64, ts: u64| {
             let state = state.clone();
-            let issuer_secret = issuer_secret;
             async move {
                 let note = basis_store::IouNote::create_and_sign(
                     recipient_pubkey,
@@ -2129,40 +1833,22 @@ mod redemption_api_tests {
         // satisfy the token edge (finding #4 semantics, #8 wiring).
         add_tracker_reserve(&state, &issuer_hex, 10_000_000_000).await;
 
-        let ts = 2000u64;
+        let ts = now_ms();
         let erg = basis_store::DenomKey::Erg;
-        let msg_from = basis_store::schnorr::signing_message(
+        let request = exchange_request(
+            &issuer_secret,
             &issuer_pubkey,
+            &recipient_secret,
             &recipient_pubkey,
             &erg,
+            100,
             70,
-            ts,
-            &nft,
-        );
-        let msg_to = basis_store::schnorr::signing_message(
-            &issuer_pubkey,
-            &recipient_pubkey,
             &tok,
+            50,
             140,
             ts,
             &nft,
         );
-        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
-        };
-        let request = basis_server::models::ExchangeNotesRequest {
-            issuer_pubkey: issuer_hex.clone(),
-            recipient_pubkey: recipient_hex.clone(),
-            from_denomination: "erg".to_string(),
-            from_amount: 30,
-            to_denomination: format!("token:{}", token_id),
-            to_amount: 90,
-            timestamp: ts,
-            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
-            recipient_from_signature: sign(&recipient_secret, &msg_from, &recipient_pubkey),
-            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
-            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
-        };
 
         let (status, body) = basis_server::api::exchange_notes(
             axum::extract::State(state.clone()),
@@ -2201,13 +1887,12 @@ mod redemption_api_tests {
         let (issuer_secret, issuer_pubkey) = generate_keypair();
         let (recipient_secret, recipient_pubkey) = generate_keypair();
         let issuer_hex = hex::encode(issuer_pubkey);
-        let recipient_hex = hex::encode(recipient_pubkey);
+        let _recipient_hex = hex::encode(recipient_pubkey);
         let nft = [0x42u8; 32];
         let tok = basis_store::DenomKey::Token(hex::decode(token_id).unwrap().try_into().unwrap());
 
         let add_note = |denom: basis_store::DenomKey, amount: u64, ts: u64| {
             let state = state.clone();
-            let issuer_secret = issuer_secret;
             async move {
                 let note = basis_store::IouNote::create_and_sign(
                     recipient_pubkey,
@@ -2259,40 +1944,22 @@ mod redemption_api_tests {
         // phase 2 observes its box on-chain before applying the staged increase.
         add_tracker_reserve(&state, &issuer_hex, 500_000_000).await;
 
-        let ts = 2000u64;
+        let ts = now_ms();
         let erg = basis_store::DenomKey::Erg;
-        let msg_from = basis_store::schnorr::signing_message(
+        let request = exchange_request(
+            &issuer_secret,
             &issuer_pubkey,
+            &recipient_secret,
             &recipient_pubkey,
             &erg,
+            100,
             70,
-            ts,
-            &nft,
-        );
-        let msg_to = basis_store::schnorr::signing_message(
-            &issuer_pubkey,
-            &recipient_pubkey,
             &tok,
+            50,
             140,
             ts,
             &nft,
         );
-        let sign = |secret: &[u8; 32], msg: &[u8], pk: &[u8; 33]| {
-            hex::encode(basis_store::schnorr::schnorr_sign(msg, secret, pk).unwrap())
-        };
-        let request = basis_server::models::ExchangeNotesRequest {
-            issuer_pubkey: issuer_hex.clone(),
-            recipient_pubkey: recipient_hex.clone(),
-            from_denomination: "erg".to_string(),
-            from_amount: 30,
-            to_denomination: format!("token:{}", token_id),
-            to_amount: 90,
-            timestamp: ts,
-            issuer_from_signature: sign(&issuer_secret, &msg_from, &issuer_pubkey),
-            recipient_from_signature: sign(&recipient_secret, &msg_from, &recipient_pubkey),
-            issuer_to_signature: sign(&issuer_secret, &msg_to, &issuer_pubkey),
-            recipient_to_signature: sign(&recipient_secret, &msg_to, &recipient_pubkey),
-        };
 
         let (status, body) = basis_server::api::exchange_notes(
             axum::extract::State(state),
@@ -2303,5 +1970,330 @@ mod redemption_api_tests {
         let data = body.data.as_ref().expect("response data");
         assert_eq!(data.to_new_total, 140);
         assert_eq!(data.to_edge_status, "pending");
+    }
+
+    // ============================================================================
+    // N17: /redemption/build fee-input validation (redeemer-funded fees)
+    //
+    // The redeemer funds the miner fee with their own P2PK boxes; the tracker
+    // pays and signs nothing. The server must reject builds whose fee inputs
+    // are missing, duplicated, the reserve box itself, unknown/spent on-chain,
+    // token-bearing, not the recipient's P2PK, or too small.
+    // ============================================================================
+
+    /// A fee box the routing mock node should serve. By default it carries the
+    /// recipient's P2PK tree and no tokens (an honestly-funded fee input);
+    /// tests override `assets`/`foreign_tree` to exercise rejections.
+    struct FeeBox {
+        id: String,
+        value: u64,
+        assets: &'static str,
+        foreign_tree: Option<String>,
+    }
+
+    fn fee_box(id: &str, value: u64) -> FeeBox {
+        FeeBox {
+            id: id.to_string(),
+            value,
+            assets: "[]",
+            foreign_tree: None,
+        }
+    }
+
+    /// P2PK ErgoTree (hex) of a compressed public key (hex).
+    fn p2pk_tree(pubkey_hex: &str) -> String {
+        let address = basis_offchain::ergo_tx::pubkey_to_address(pubkey_hex).unwrap();
+        basis_offchain::ergo_tx::address_to_ergo_tree(&address).unwrap()
+    }
+
+    /// Mock Ergo node that routes by request path: serves `GET /info` (height)
+    /// and `GET /utxo/byId/{id}` from a per-id box map. Unknown paths and
+    /// unknown box ids get a 404 — the fee-validation tests never reach the
+    /// binary/header endpoints.
+    async fn spawn_routing_mock_node(boxes: Vec<(String, String)>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock node");
+        let addr = listener.local_addr().unwrap();
+        let boxes: std::sync::Arc<std::collections::HashMap<String, String>> =
+            std::sync::Arc::new(boxes.into_iter().collect());
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let boxes = boxes.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = match socket.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("");
+                    let (status, body) = if path == "/info" {
+                        ("200 OK", "{\"fullHeight\":1000}".to_string())
+                    } else if let Some(id) = path.strip_prefix("/utxo/byId/") {
+                        match boxes.get(id) {
+                            Some(b) => ("200 OK", b.clone()),
+                            None => ("404 Not Found", "{\"error\":\"not found\"}".to_string()),
+                        }
+                    } else {
+                        ("404 Not Found", "{\"error\":\"not found\"}".to_string())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    fn mock_box_json(box_id: &str, value: u64, ergo_tree: &str, assets: &str) -> String {
+        format!(
+            "{{\"boxId\":\"{box_id}\",\"value\":{value},\"ergoTree\":\"{ergo_tree}\",\"assets\":{assets},\"additionalRegisters\":{{}}}}"
+        )
+    }
+
+    /// Promote every local note to the committed on-chain state, the sequence
+    /// the tracker box updater runs (prepare -> mark pending -> confirm), so
+    /// the committed tracker lookup proof exists (issue #15 S6 gate).
+    async fn commit_pending_notes(state: &AppState) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::PrepareTrackerUpdate { response_tx: tx })
+            .await
+            .unwrap();
+        let digest = rx.await.unwrap().unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::MarkNotesPending {
+                digest,
+                tx_id: "test_update_tx".to_string(),
+                submitted_height: 1,
+                response_tx: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .tx
+            .send(TrackerCommand::ConfirmPendingNotes {
+                digest,
+                box_id: "tracker_box_test".to_string(),
+                height: 1,
+                response_tx: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+    }
+
+    /// State with one committed ERG note and one reserve, backed by a routing
+    /// mock node serving the reserve box plus the given fee boxes. Returns
+    /// (state, issuer hex, recipient hex, reserve box id).
+    async fn fee_build_state(fee_boxes: Vec<FeeBox>) -> (AppState, String, String, String) {
+        let (issuer_secret, issuer_pubkey) = generate_keypair();
+        let (_recipient_secret, recipient_pubkey) = generate_keypair();
+        let issuer_hex = hex::encode(issuer_pubkey);
+        let recipient_hex = hex::encode(recipient_pubkey);
+        let reserve_box_id = format!("box_{issuer_hex}");
+
+        let recipient_tree = p2pk_tree(&recipient_hex);
+        let reserve_json = format!(
+            "{{\"boxId\":\"{reserve_box_id}\",\"value\":10000000000,\"ergoTree\":\"00\",\"assets\":[],\"additionalRegisters\":{{\"R5\":\"{}\"}}}}",
+            reserve_r5_matching_tracker()
+        );
+        let mut boxes = vec![(reserve_box_id.clone(), reserve_json)];
+        for spec in fee_boxes {
+            let tree = spec.foreign_tree.unwrap_or_else(|| recipient_tree.clone());
+            boxes.push((
+                spec.id.clone(),
+                mock_box_json(&spec.id, spec.value, &tree, spec.assets),
+            ));
+        }
+        let node_url = spawn_routing_mock_node(boxes).await;
+        let state = create_mock_app_state_with_options(
+            basis_server::acceptance::config::AcceptanceConfig::empty(),
+            true,
+            &node_url,
+        )
+        .await;
+
+        add_test_note(
+            &state,
+            &issuer_secret,
+            &issuer_hex,
+            &recipient_hex,
+            1_000_000,
+            1000,
+        )
+        .await;
+        commit_pending_notes(&state).await;
+        add_test_reserve(&state, &issuer_hex, 10_000_000_000).await;
+        (state, issuer_hex, recipient_hex, reserve_box_id)
+    }
+
+    /// Emergency build request: skips the tracker-secret signing step and the
+    /// acceptance-policy check, so the test reaches fee-input validation with
+    /// no tracker secret configured.
+    fn fee_build_request(
+        issuer_hex: &str,
+        recipient_hex: &str,
+        fee_box_ids: Vec<String>,
+    ) -> RedemptionBuildRequest {
+        RedemptionBuildRequest {
+            issuer_pubkey: issuer_hex.to_string(),
+            recipient_pubkey: recipient_hex.to_string(),
+            amount: 1_000,
+            timestamp: 1000,
+            issuer_signature: "01".repeat(65),
+            emergency: true,
+            tracker_box_id: Some("aa".repeat(32)),
+            change_address: None,
+            denomination: String::new(),
+            fee_box_ids,
+        }
+    }
+
+    async fn assert_fee_rejection(state: AppState, request: RedemptionBuildRequest, needle: &str) {
+        let (status, body) =
+            build_redemption(axum::extract::State(state), axum::extract::Json(request)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {:?}", body);
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(error.contains(needle), "expected '{needle}' in: {error}");
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_empty_fee_box_ids() {
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![]),
+            "fee_box_ids must list at least one",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_reserve_box_as_fee_input() {
+        let (state, issuer_hex, recipient_hex, reserve_box_id) = fee_build_state(vec![]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![reserve_box_id]),
+            "must not include the reserve box",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_unknown_fee_box() {
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec!["ff".repeat(32)]),
+            "not an unspent chain box",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_token_bearing_fee_box() {
+        let spec = FeeBox {
+            assets: "[{\"tokenId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"amount\":1}]",
+            ..fee_box("ee".repeat(32).as_str(), 2_000_000)
+        };
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![id]),
+            "carries tokens",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_fee_box_not_owned_by_recipient() {
+        let (_, other_pubkey) = generate_keypair();
+        let spec = FeeBox {
+            foreign_tree: Some(p2pk_tree(&hex::encode(other_pubkey))),
+            ..fee_box("ee".repeat(32).as_str(), 2_000_000)
+        };
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![id]),
+            "not a P2PK box of the recipient",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_insufficient_fee_total() {
+        // Configured fee is 1_000_000 nanoERG; a 500_000 box cannot cover it.
+        let spec = fee_box("ee".repeat(32).as_str(), 500_000);
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![id]),
+            "fee boxes total",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_redemption_rejects_duplicate_fee_box_ids() {
+        let spec = fee_box("ee".repeat(32).as_str(), 2_000_000);
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        assert_fee_rejection(
+            state,
+            fee_build_request(&issuer_hex, &recipient_hex, vec![id.clone(), id]),
+            "duplicate fee box id",
+        )
+        .await;
+    }
+
+    /// A well-formed fee input passes validation; the build then fails later on
+    /// the deliberately unparseable test reserve contract address, proving the
+    /// request got past every fee-input check.
+    #[tokio::test]
+    async fn build_redemption_accepts_valid_fee_boxes() {
+        let spec = fee_box("ee".repeat(32).as_str(), 2_000_000);
+        let id = spec.id.clone();
+        let (state, issuer_hex, recipient_hex, _) = fee_build_state(vec![spec]).await;
+        let (status, body) = build_redemption(
+            axum::extract::State(state),
+            axum::extract::Json(fee_build_request(&issuer_hex, &recipient_hex, vec![id])),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "body: {:?}",
+            body
+        );
+        let error = body.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("reserve contract P2S"),
+            "expected to fail past fee validation, got: {error}"
+        );
     }
 }
