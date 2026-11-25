@@ -47,13 +47,15 @@ The server uses an actor-like pattern with a dedicated tracker thread that proce
 - `GET /notes/recipient/{pubkey}` - Get all notes received by a public key
 - `GET /notes/issuer/{issuer_pubkey}/recipient/{recipient_pubkey}` - Get specific note between two parties
 - `POST /notes/state` - Get the confirmation state of a single note (`confirmed` / `pending` / `local_only`) and whether it is currently redeemable
-- `POST /redeem` - Initiate redemption process
-- `POST /redeem/complete` - Complete redemption process (see the caveat below — this endpoint
-  advances local state from the request body and does **not** verify against the chain)
+- `POST /redeem/complete` - Admin-only repair hatch: complete redemption process (see the caveat below — this endpoint
+  advances local state from the request body and does **not** verify against the chain).
+  Normal clients never call it: `/redemption/submit` syncs local state after broadcast.
+  (`POST /redeem` was removed — issue #15 review N7.)
 - `POST /tracker/signature` - Request tracker signature for redemption (real Schnorr signature generation)
 - `POST /redemption/prepare` - Prepare redemption with all necessary data (real AVL proofs + tracker signature)
 - `POST /redemption/build` - Tracker-assisted redemption step 1: build the unsigned redemption
-  transaction and sign the fee inputs
+  transaction around caller-supplied, recipient-owned fee inputs (the tracker funds and signs
+  nothing in the transaction)
 - `POST /redemption/submit` - Tracker-assisted redemption step 2: broadcast a signed redemption
   transaction and sync local state
 - `GET /proof/redemption` - Get redemption-specific proof with tracker state digest
@@ -251,7 +253,10 @@ The server provides an endpoint to generate reserve creation payloads for Ergo n
       - `amount`: Always 1 for NFTs
     - `registers`: Map of register values
       - `R4`: Owner public key from request (GroupElement)
-      - `R5`: Initial AVL tree (empty tree for new reserve)
+      - `R5`: Initial AVL tree (empty tree for a fresh reserve; on a rotation the
+        carried-forward reserve-state digest for the (owner, denomination) pair, so the
+        redeemed-amount history survives the refund — issue #15 review N9. Clients can
+        fetch the expected value from `GET /reserves/state-digest`)
       - `R6`: Tracker NFT ID (bytes) - identifies which tracker server this reserve is linked to
   - `fee`: Transaction fee amount from configuration
   - `change_address`: Owner's P2PK address derived from the request's `owner_pubkey`
@@ -305,6 +310,10 @@ Key configuration includes:
   tokens); larger requests are rejected with HTTP 400.
 - **`server.redemption_build_max_per_pair_per_hour`**: per-(issuer, recipient) rate limit on
   `POST /redemption/build` (default 60/hour, rolling window); excess requests get HTTP 429.
+- **`server.redemption_build_max_per_issuer_per_hour`**: per-issuer rate limit on
+  `POST /redemption/build` (default 240/hour, rolling window); an abuser rotating fresh
+  recipient keys resets the pair bucket but never the issuer bucket. Only builds that pass
+  validation consume quota, so junk builds cannot lock a victim pair out (issue #15 review N17).
 - **Ergo node connection details**: `ergo.scanner.node_url` defaults to `http://127.0.0.1:9053`; point it at your Ergo node (with `extraIndex = true`) for real deployments. Wallet operations (`/wallet/*`, schnorr signing, broadcast) go to `ergo.wallet.node_url`, which falls back to the scanner node when unset.
 - Reserve contract P2S address
 - Tracker NFT ID (for tracker scanner registration and state commitment monitoring)

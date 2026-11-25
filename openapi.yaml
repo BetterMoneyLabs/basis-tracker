@@ -112,19 +112,20 @@ paths:
       description: >-
         Moves cumulative debt between two denominations of one (issuer, recipient)
         pair in two phases (issue #17). Phase 1, applied immediately: the
-        from-denomination edge decreases by from_amount. Phase 2, staged: the
-        to-denomination edge increases by to_amount, but only applies once the
+        from-denomination edge decreases to from_new_total. Phase 2, staged: the
+        to-denomination edge increases to to_new_total, but only applies once the
         from-edge decrease is committed on-chain AND the issuer's tracked
         from-denomination reserve box is verified unchanged (still unspent with
         an R5 digest matching the tracker's reserve tree). This prevents the
         creditor from redeeming the old from-edge note AND collecting the staged
-        to-edge increase. Both parties sign both edges' new states; the
-        recipient's signatures are the creditor consent required for a debt
-        decrease (S3 rule). The acceptance policy is evaluated in the target
-        denomination against the pre-mutation state, atomically with the
-        mutation. The request fails with 409 when the issuer has zero or
-        multiple tracked reserves in the from denomination. Track progress via
-        GET /exchanges/pending.
+        to-edge increase. Both parties sign a domain-separated exchange message
+        binding both edges' pre- and post-totals and a one-hour validity window
+        (issue #15 review N10); the recipient's signature is the creditor
+        consent required for a debt decrease (S3 rule). The acceptance policy is
+        evaluated in the target denomination against the pre-mutation state,
+        atomically with the mutation. The request fails with 409 when the issuer
+        has zero or multiple tracked reserves in the from denomination. Track
+        progress via GET /exchanges/pending.
       operationId: exchangeNotes
       tags:
         - Notes
@@ -500,6 +501,12 @@ paths:
         owner's wallet must hold the reserve NFT and enough ERG for the reserve
         value plus fee. The `nft_id` must not be the tracker's own NFT, and the
         amounts are bounded by `server.reserve_creation_max_*` config caps.
+        `/reserves/create` sets the reserve box's R5 register to the tracker's
+        reserve AVL tree digest for the (owner, denomination) pair — the empty
+        tree for a fresh pair, or the carried-forward redeemed-amount history
+        after a reserve rotation (issue #15 review N9; verify with
+        GET /reserves/state-digest). The scanner admits a root box with a
+        non-empty R5 only when it matches the digest this endpoint recorded.
         The tracker only tracks a reserve whose creating transaction spends a
         P2PK input of the R4 owner key (see specs/ergo/reserve_admission.md);
         `basis-cli reserve create --submit` guarantees that (pinning inputs, or
@@ -524,6 +531,53 @@ paths:
                 $ref: '#/components/schemas/ApiResponseReserveCreation'
         '400':
           description: Bad request - invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseError'
+
+  /reserves/state-digest:
+    get:
+      summary: Get reserve tree state digest
+      description: >-
+        Get the tracker's reserve AVL tree state for an (issuer, denomination)
+        pair: the 33-byte root digest and the serialized SAvlTree value that a
+        reserve (re)creation must carry in R5. For a fresh pair this is the
+        empty tree; after a reserve rotation it carries the redeemed-amount
+        history forward (issue #15 review N9). Clients use this to verify the
+        R5 register of a `/reserves/create` payload before signing it with
+        their own node.
+      operationId: getReserveStateDigest
+      tags:
+        - Reserves
+      parameters:
+        - name: issuer_pubkey
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Issuer (reserve owner) public key, hex-encoded 33 bytes
+        - name: denomination
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 'Denomination: "erg" (default) or "token:<64-hex>"'
+      responses:
+        '200':
+          description: Reserve state digest retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseReserveStateDigest'
+        '400':
+          description: Bad request - invalid public key or denomination
           content:
             application/json:
               schema:
@@ -620,39 +674,6 @@ paths:
                 $ref: '#/components/schemas/ApiResponseKeyStatus'
         '400':
           description: Bad request - invalid public key format
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseError'
-
-  /redeem:
-    post:
-      summary: Initiate redemption process
-      description: Initiate the redemption of an IOU note from a reserve.
-      operationId: initiateRedemption
-      tags:
-        - Redemption
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RedeemRequest'
-      responses:
-        '200':
-          description: Redemption initiated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponseRedeem'
-        '400':
-          description: Bad request - invalid input parameters
           content:
             application/json:
               schema:
@@ -1320,21 +1341,33 @@ components:
     ExchangeNotesRequest:
       type: object
       description: >-
-        Cross-denomination debt exchange request. All four signatures are over the
-        respective edge's standard 80-byte note message (debtKey ‖ totalDebt ‖
-        timestamp ‖ trackerNftId) at the NEW cumulative total and timestamp.
+        Cross-denomination debt exchange request (N10). Carries absolute
+        post-totals: the from-edge decreases to from_new_total and the to-edge
+        increases to to_new_total; the tracker derives the amounts from the
+        current edge state. Consent is the domain-separated exchange message —
+        blake2b256("basis-exchange-v1") ‖ fromKey ‖ fromPre ‖ fromPost ‖
+        toKey ‖ toPre ‖ toPost ‖ timestamp ‖ trackerNftId (168 bytes) —
+        signed by BOTH parties (issuer_exchange_signature,
+        recipient_exchange_signature). The tracker reconstructs it with the
+        current totals as the pre-totals, so an exchange held while either
+        edge moved fails verification, and a timestamp older than one hour is
+        rejected. issuer_from_signature / issuer_to_signature are the issuer's
+        signatures over each edge's standard 80-byte note message at its new
+        total; they become the stored notes' signatures. The issuer signs and
+        submits last, so the recipient never holds an issuer note signature
+        before the exchange is staged.
       required:
         - issuer_pubkey
         - recipient_pubkey
         - from_denomination
-        - from_amount
+        - from_new_total
         - to_denomination
-        - to_amount
+        - to_new_total
         - timestamp
+        - issuer_exchange_signature
+        - recipient_exchange_signature
         - issuer_from_signature
-        - recipient_from_signature
         - issuer_to_signature
-        - recipient_to_signature
       properties:
         issuer_pubkey:
           type: string
@@ -1348,34 +1381,36 @@ components:
           type: string
           description: Denomination of the edge being decreased ("erg" or "token:<64-hex>")
           example: "erg"
-        from_amount:
+        from_new_total:
           type: integer
           format: uint64
-          description: Amount by which the from-edge's cumulative debt decreases
+          description: Absolute from-edge cumulative total after the exchange (must be below the current total)
         to_denomination:
           type: string
           description: Denomination of the edge being increased
           example: "token:a55b8735ed1a99e46c2c89f8994aacdf4b1109bdcf682f1e5b34479c6e392669"
-        to_amount:
+        to_new_total:
           type: integer
           format: uint64
-          description: Amount by which the to-edge's cumulative debt increases
+          description: Absolute to-edge cumulative total after the exchange (must be above the current total)
         timestamp:
           type: integer
           format: uint64
-          description: New timestamp for both edges (must be newer than both current ones)
+          description: >-
+            New timestamp for both edges (must be newer than both current ones
+            and within the one-hour validity window)
+        issuer_exchange_signature:
+          type: string
+          description: Issuer signature over the domain-separated exchange message (hex, 130 chars)
+        recipient_exchange_signature:
+          type: string
+          description: Recipient signature over the same exchange message (creditor consent)
         issuer_from_signature:
           type: string
-          description: Issuer signature over the from-edge's new message (hex, 130 chars)
-        recipient_from_signature:
-          type: string
-          description: Recipient signature over the from-edge's new message (creditor consent)
+          description: Issuer signature over the from-edge's standard note message at from_new_total
         issuer_to_signature:
           type: string
-          description: Issuer signature over the to-edge's new message
-        recipient_to_signature:
-          type: string
-          description: Recipient signature over the to-edge's new message (creditor acceptance)
+          description: Issuer signature over the to-edge's standard note message at to_new_total
 
     ExchangeNotesResponse:
       type: object
@@ -2008,64 +2043,6 @@ components:
           example: 1000000000
 
     # Redemption Schemas
-    RedeemRequest:
-      type: object
-      description: Redemption request
-      required:
-        - issuer_pubkey
-        - recipient_pubkey
-        - amount
-        - timestamp
-        - issuer_signature
-      properties:
-        issuer_pubkey:
-          type: string
-          description: Hex-encoded issuer public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "010101010101010101010101010101010101010101010101010101010101010101"
-        recipient_pubkey:
-          type: string
-          description: Hex-encoded recipient public key (66 characters)
-          pattern: '^[0-9a-fA-F]{66}$'
-          example: "020202020202020202020202020202020202020202020202020202020202020202"
-        amount:
-          type: integer
-          format: uint64
-          description: Amount to redeem in nanoERG
-          example: 500000000
-        timestamp:
-          type: integer
-          format: uint64
-          description: Timestamp of the note being redeemed
-          example: 1234567890
-        reserve_box_id:
-          type: string
-          default: ""
-          description: Reserve box ID (optional - server will lookup if not provided)
-          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        recipient_address:
-          type: string
-          default: ""
-          description: Recipient address for redemption output (optional - server will derive from pubkey if not provided)
-          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
-        issuer_signature:
-          type: string
-          description: Hex-encoded Schnorr signature from issuer (130 characters = 65 bytes)
-          pattern: '^[0-9a-fA-F]{130}$'
-          example: "0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
-        emergency:
-          type: boolean
-          default: false
-          description: Whether this is an emergency redemption
-          example: false
-
-
-        denomination:
-          type: string
-          description: >-
-            Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
-            resolves to the pair's existing note's denomination when unambiguous, else "erg".
-          example: "erg"
     CompleteRedemptionRequest:
       type: object
       description: Request body for completing a redemption
@@ -2106,86 +2083,7 @@ components:
             Denomination of the note: "erg" or "token:<64-hex>". When omitted, the server
             resolves to the pair's existing note's denomination when unambiguous, else "erg".
           example: "erg"
-    RedeemResponse:
-      type: object
-      description: Redemption response
-      properties:
-        redemption_id:
-          type: string
-          description: Unique redemption identifier
-          example: "redeem_0101010101010101_0202020202020202"
-        amount:
-          type: integer
-          format: uint64
-          description: Amount being redeemed
-          example: 500000000
-        timestamp:
-          type: integer
-          format: uint64
-          description: Redemption timestamp
-          example: 1672531200
-        proof_available:
-          type: boolean
-          description: Whether proof is available
-          example: true
-        transaction_pending:
-          type: boolean
-          description: Whether redemption transaction is pending
-          example: false
-        transaction_data:
-          $ref: '#/components/schemas/TransactionData'
-        transaction_bytes:
-          type: string
-          nullable: true
-          description: Raw Ergo transaction JSON (hex encoded) that can be signed and submitted
-          example: "a1b2c3d4e5f6"
 
-    TransactionData:
-      type: object
-      description: Transaction data that can be submitted to an Ergo node
-      properties:
-        address:
-          type: string
-          description: Target address for the transaction
-          example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
-        value:
-          type: integer
-          format: uint64
-          description: Value in nanoERG
-          example: 500000000
-        registers:
-          type: object
-          additionalProperties:
-            type: string
-          description: Register values
-          example:
-            R4: "010101010101010101010101010101010101010101010101010101010101010101"
-        assets:
-          type: array
-          description: Assets to include in transaction
-          items:
-            $ref: '#/components/schemas/TokenData'
-        fee:
-          type: integer
-          format: uint64
-          description: Transaction fee
-          example: 1100000
-
-    TokenData:
-      type: object
-      description: Token/asset data for a transaction
-      properties:
-        token_id:
-          type: string
-          description: Hex-encoded token ID
-          example: "b1c2d3e4f5061728394051627384950617283940516273849506172839405162"
-        amount:
-          type: integer
-          format: uint64
-          description: Token amount in raw units
-          example: 1000000000
-
-    # Tracker Signature Schemas
     TrackerSignatureRequest:
       type: object
       description: Request for tracker signature on redemption
@@ -2254,7 +2152,6 @@ components:
           nullable: true
           description: Whether this was an emergency redemption
           example: false
-
     # Proof Schemas
     ProofResponse:
       type: object
@@ -2429,6 +2326,7 @@ components:
         - amount
         - timestamp
         - issuer_signature
+        - fee_box_ids
       properties:
         issuer_pubkey:
           type: string
@@ -2468,7 +2366,7 @@ components:
         change_address:
           type: string
           nullable: true
-          description: Deprecated and ignored. Change always goes to the owner of the tracker's selected fee box (falling back to the configured change address); a caller-supplied address is never used.
+          description: Address paying the redeemer's change output; defaults to the recipient address. Only redeemer funds flow through it.
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
 
 
@@ -2476,6 +2374,13 @@ components:
           type: string
           description: "Denomination of the debt: erg or token:<64-hex>."
           example: "erg"
+        fee_box_ids:
+          type: array
+          description: "Box ids funding the miner fee (and, for token reserves, the recipient's min-ERG box). Every box must be unspent, token-free, and carry the recipient's P2PK ergoTree; the client signs them with the recipient secret. The tracker funds nothing."
+          items:
+            type: string
+          minItems: 1
+          example: ["1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]
     RedemptionBuildResponse:
       type: object
       description: Response for a built redemption transaction
@@ -2483,9 +2388,6 @@ components:
         unsigned_tx:
           type: object
           description: Node-canonical unsigned transaction JSON
-        partial_tx:
-          type: object
-          description: Fee-signed transaction JSON (reserve input proof empty)
         input_box_binaries:
           type: array
           description: Sigma-serialized input boxes (hex), in transaction-input order
@@ -2529,11 +2431,11 @@ components:
         change_amount:
           type: integer
           format: uint64
-          description: Change amount returned to the tracker
+          description: Change amount returned to the redeemer
           example: 123900000
         change_address:
           type: string
-          description: Address receiving change (always derived from the tracker's own wallet)
+          description: Address receiving change (the request's change_address, else the recipient)
           example: "9fD5TqXvN8Z3k2LmP7wR4sY6uH1jC8bA0eG9iK3oM5nQ2xV"
         recipient_address:
           type: string
@@ -2559,6 +2461,7 @@ components:
       description: Request to submit a fully signed redemption transaction
       required:
         - signed_tx
+        - unsigned_tx
         - issuer_pubkey
         - recipient_pubkey
         - redeemed_amount
@@ -2567,23 +2470,30 @@ components:
         signed_tx:
           type: object
           description: Fully signed transaction JSON
+        unsigned_tx:
+          type: object
+          description: >-
+            The exact `unsigned_tx` value returned by `POST /redemption/build`. Its SHA-256
+            identifies the pending build entry this submit binds to; without a live entry the
+            submit is rejected with 409. The signed transaction must have the built
+            transaction's id (PR #16 B6).
         issuer_pubkey:
           type: string
-          description: Hex-encoded issuer public key
+          description: Deprecated and ignored; the issuer is taken from the pending build entry. Hex-encoded issuer public key
           example: "010101010101010101010101010101010101010101010101010101010101010101"
         recipient_pubkey:
           type: string
-          description: Hex-encoded recipient public key
+          description: Deprecated and ignored; see `issuer_pubkey`. Hex-encoded recipient public key
           example: "020202020202020202020202020202020202020202020202020202020202020202"
         redeemed_amount:
           type: integer
           format: uint64
-          description: Amount redeemed by this transaction in nanoERG
+          description: Deprecated and ignored; the amount is taken from the pending build entry
           example: 500000000
         new_already_redeemed:
           type: integer
           format: uint64
-          description: Cumulative reserve-tree already_redeemed value from the build response
+          description: Deprecated and ignored; the cumulative reserve-tree value is taken from the pending build entry
           example: 500000000
 
     RedemptionSubmitResponse:
@@ -3063,6 +2973,35 @@ components:
             data:
               $ref: '#/components/schemas/ReserveCreationResponse'
 
+    ReserveStateDigestResponse:
+      type: object
+      required:
+        - issuer_pubkey
+        - denomination
+        - reserve_state_digest
+        - reserve_r5
+      properties:
+        issuer_pubkey:
+          type: string
+          description: Issuer (reserve owner) public key, hex-encoded 33 bytes
+        denomination:
+          type: string
+          description: 'Canonical denomination id: "erg" or "token:<64-hex>"'
+        reserve_state_digest:
+          type: string
+          description: 33-byte AVL+ root digest (hex, 66 chars)
+        reserve_r5:
+          type: string
+          description: Serialized SAvlTree register value (hex) for the reserve box's R5
+
+    ApiResponseReserveStateDigest:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ReserveStateDigestResponse'
+
     ApiResponseEvents:
       allOf:
         - $ref: '#/components/schemas/ApiResponse'
@@ -3080,14 +3019,6 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/KeyStatusResponse'
-
-    ApiResponseRedeem:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/RedeemResponse'
 
     ApiResponseProof:
       allOf:

@@ -357,7 +357,12 @@ The C4 first-seen validation is unchanged: R4 must be a valid secp256k1 point, R
 equal the empty-tree constant with flags `0x03`, R6 must equal this tracker's own NFT,
 R7 must be zero. Because the edited token contract keeps the reserve-tree key
 derivation unchanged (§4.1), a token reserve's initial R5 is the **same** empty-tree
-constant as before — no new constant and no validation divergence.
+constant as before — no new constant and no validation divergence. The one exception
+is a **rotation** (issue #15 review N9): when the owner refunds and recreates a
+reserve, `/reserves/create` sets the new box's R5 to the carried-forward
+redemption-history digest for the (owner, denomination) pair (recorded as the
+pending-rotation digest, `GET /reserves/state-digest`), and the scanner accepts
+exactly that digest instead of the empty tree.
 
 ## 9. Redemption pipeline
 
@@ -396,20 +401,32 @@ New `POST /notes/exchange`:
 ```json
 {
   "issuer_pubkey": "…", "recipient_pubkey": "…",
-  "from_denomination": "token:e853…", "from_amount": 2500,
-  "to_denomination": "erg",           "to_amount": 100,
+  "from_denomination": "token:e853…", "from_new_total": 2500,
+  "to_denomination": "erg",           "to_new_total": 100,
   "timestamp": 1769400000000,
-  "issuer_signature": "…", "recipient_signature": "…"
+  "issuer_exchange_signature": "…", "recipient_exchange_signature": "…",
+  "issuer_from_signature": "…", "issuer_to_signature": "…"
 }
 ```
 
 Semantics:
 
-- **Both signatures required.** Decreasing an edge must never depend on the debtor's
-  signature alone — this is the S3 rule, already fixed, and triage reuses it.
-- Both signatures cover the **issuer's** edge decrease in `from_denomination` and the
-  **recipient's** consent to it, plus the edge increase in `to_denomination`, on the
-  80-byte message for each denomination's `debtKey`.
+- **Creditor consent is a domain-separated exchange message** (issue #15 review
+  N10): `blake2b256("basis-exchange-v1") ‖ fromKey ‖ fromPre ‖ fromPost ‖
+  toKey ‖ toPre ‖ toPost ‖ timestamp ‖ trackerNftId` (168 bytes), signed by
+  both parties. Decreasing an edge must never depend on the debtor's signature
+  alone — this is the S3 rule. The tracker reconstructs the message with the
+  **current** totals as the pre-totals, so a signed exchange held while either
+  edge moved no longer verifies, and a `timestamp` older than one hour is
+  rejected: a signed exchange cannot be stockpiled and replayed. The request
+  carries absolute post-totals (`from_new_total`, `to_new_total`), never
+  amounts, so the message binds the exact agreed state.
+- **The issuer signs and submits last.** The recipient hands over only its
+  exchange signature; the issuer's signatures over the edges' standard 80-byte
+  note messages (`issuer_from_signature`, `issuer_to_signature`) become the
+  stored notes' signatures, so the recipient never holds an issuer note
+  signature before the exchange is staged and cannot post the to-edge increase
+  as a standalone note instead of the exchange.
 - Amounts respect the B2 caps in both denominations.
 - **One AVL commit.** Both edges live in the single tracker tree → one `R5`
   publication, one atomic state change. This is the property that made

@@ -180,6 +180,63 @@ pub fn signing_message(
     message
 }
 
+/// Generate the domain-separated signing message for a cross-denomination
+/// exchange (issue #15 follow-up review, N10).
+///
+/// message = blake2b256("basis-exchange-v1")
+///         ‖ fromKey ‖ fromPre ‖ fromPost ‖ toKey ‖ toPre ‖ toPost ‖ timestamp ‖ trackerNftId
+///
+/// Where:
+/// - fromKey / toKey: the denomination-derived debt-tree keys (32 bytes each),
+///   binding the message to the (issuer, recipient, denomination) edges
+/// - fromPre / fromPost: the from-edge's absolute total before and after the
+///   exchange (8 bytes big-endian each)
+/// - toPre / toPost: same for the to-edge
+/// - timestamp: 8-byte big-endian; the tracker enforces a short validity
+///   window on it, so a held exchange expires
+/// - trackerNftId: 32-byte tracker NFT ID, same binding as note messages (C3)
+///
+/// Both parties sign this single message: the recipient's signature is the
+/// creditor consent for the from-edge decrease (S3), the issuer's is the
+/// debtor consent. Committing to both edges' pre- and post-totals means the
+/// exchange is only valid against the exact state it was negotiated on — an
+/// intervening payment on either edge invalidates it. The domain separator
+/// makes the message unusable as a standalone note message (which is 80 bytes
+/// and has no such prefix).
+///
+/// # Returns
+/// * 168 bytes: domain (32) ‖ fromKey (32) ‖ fromPre (8) ‖ fromPost (8)
+///   ‖ toKey (32) ‖ toPre (8) ‖ toPost (8) ‖ timestamp (8) ‖ trackerNftId (32)
+#[allow(clippy::too_many_arguments)]
+pub fn exchange_signing_message(
+    owner_key: &PubKey,
+    receiver_key: &PubKey,
+    from_denomination: &DenomKey,
+    from_pre_total: u64,
+    from_post_total: u64,
+    to_denomination: &DenomKey,
+    to_pre_total: u64,
+    to_post_total: u64,
+    timestamp: u64,
+    tracker_nft_id: &[u8; 32],
+) -> Vec<u8> {
+    let mut hasher = Blake2b::<U32>::new();
+    hasher.update(b"basis-exchange-v1");
+    let domain: [u8; 32] = hasher.finalize().into();
+
+    let mut message = Vec::with_capacity(168);
+    message.extend_from_slice(&domain);
+    message.extend_from_slice(&from_denomination.debt_key(owner_key, receiver_key));
+    message.extend_from_slice(&from_pre_total.to_be_bytes());
+    message.extend_from_slice(&from_post_total.to_be_bytes());
+    message.extend_from_slice(&to_denomination.debt_key(owner_key, receiver_key));
+    message.extend_from_slice(&to_pre_total.to_be_bytes());
+    message.extend_from_slice(&to_post_total.to_be_bytes());
+    message.extend_from_slice(&timestamp.to_be_bytes());
+    message.extend_from_slice(tracker_nft_id);
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +313,45 @@ mod tests {
             .len(),
             80
         );
+    }
+
+    #[test]
+    fn exchange_signing_message_is_168_bytes_and_domain_separated() {
+        let owner = [0x02u8; 33];
+        let receiver = [0x03u8; 33];
+        let nft = [0x42u8; 32];
+        let msg = exchange_signing_message(
+            &owner,
+            &receiver,
+            &DenomKey::Erg,
+            100,
+            70,
+            &DenomKey::Token([0xa5u8; 32]),
+            50,
+            90,
+            1000,
+            &nft,
+        );
+        assert_eq!(msg.len(), 168);
+        // The domain separator is the first 32 bytes and makes the message
+        // unusable as any 80-byte note message.
+        let mut hasher = Blake2b::<U32>::new();
+        hasher.update(b"basis-exchange-v1");
+        let domain: [u8; 32] = hasher.finalize().into();
+        assert_eq!(&msg[..32], &domain);
+        // Every bound field matters.
+        let mutated = exchange_signing_message(
+            &owner,
+            &receiver,
+            &DenomKey::Erg,
+            100,
+            71,
+            &DenomKey::Token([0xa5u8; 32]),
+            50,
+            90,
+            1000,
+            &nft,
+        );
+        assert_ne!(msg, mutated);
     }
 }

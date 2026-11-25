@@ -63,30 +63,44 @@ pub struct CreateNoteRequest {
 
 /// Cross-denomination debt exchange request (off-chain novation / triage).
 ///
-/// Moves `from_amount` of cumulative debt out of the (issuer, recipient,
-/// from_denomination) edge and `to_amount` into the (issuer, recipient,
-/// to_denomination) edge (specs/ergo/multi_collateral_reserves.md §10). All four
-/// signatures are over the respective edge's standard 80-byte note message at the
-/// NEW cumulative total and `timestamp`; the recipient's signatures are the
-/// creditor consent required by the S3 rule.
+/// Moves the (issuer, recipient, from_denomination) edge down to
+/// `from_new_total` and the (issuer, recipient, to_denomination) edge up to
+/// `to_new_total` (specs/ergo/multi_collateral_reserves.md §10).
+///
+/// Consent (issue #15 review N10): both parties sign a domain-separated
+/// exchange message — blake2b256("basis-exchange-v1") ‖ both edges' debt keys,
+/// pre- and post-totals ‖ timestamp ‖ tracker NFT id (168 bytes). The tracker
+/// reconstructs it with the CURRENT totals as the pre-totals, so an exchange
+/// signed against a moved edge fails verification, and a timestamp older than
+/// one hour is rejected. The issuer signs and submits last: the recipient
+/// hands over only its exchange signature, so the recipient never holds an
+/// issuer signature it could post as a standalone note before the exchange
+/// lands. `issuer_from_signature` / `issuer_to_signature` are the issuer's
+/// standard 80-byte note messages at the new totals; they become the stored
+/// notes' signatures (needed for later redemption).
 #[derive(Debug, Deserialize)]
 pub struct ExchangeNotesRequest {
     pub issuer_pubkey: String,
     pub recipient_pubkey: String,
     pub from_denomination: String,
-    pub from_amount: u64,
+    /// Absolute from-edge total after the exchange (must be below the current total).
+    pub from_new_total: u64,
     pub to_denomination: String,
-    pub to_amount: u64,
-    /// New timestamp for both edges; must be newer than both edges' current ones.
+    /// Absolute to-edge total after the exchange (must be above the current total).
+    pub to_new_total: u64,
+    /// New timestamp for both edges; must be newer than both edges' current
+    /// ones and within the one-hour validity window.
     pub timestamp: u64,
-    /// Issuer signature over the from-edge's new note message (hex, 65 bytes)
+    /// Issuer signature over the domain-separated exchange message (hex, 65 bytes)
+    pub issuer_exchange_signature: String,
+    /// Recipient signature over the same exchange message (creditor consent)
+    pub recipient_exchange_signature: String,
+    /// Issuer signature over the from-edge's standard note message at
+    /// `from_new_total` (hex, 65 bytes); becomes the from-edge note signature
     pub issuer_from_signature: String,
-    /// Recipient signature over the from-edge's new note message (creditor consent)
-    pub recipient_from_signature: String,
-    /// Issuer signature over the to-edge's new note message (hex, 65 bytes)
+    /// Issuer signature over the to-edge's standard note message at
+    /// `to_new_total` (hex, 65 bytes); becomes the staged to-edge note signature
     pub issuer_to_signature: String,
-    /// Recipient signature over the to-edge's new note message (creditor acceptance)
-    pub recipient_to_signature: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -247,30 +261,6 @@ pub struct KeyStatusDenomination {
     pub has_pending_refund: bool,
 }
 
-// Redemption request
-#[derive(Debug, Deserialize)]
-pub struct RedeemRequest {
-    pub issuer_pubkey: String,
-    pub recipient_pubkey: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    /// Reserve box ID (optional - will be looked up if not provided)
-    #[serde(default)]
-    pub reserve_box_id: String,
-    /// Recipient address for redemption output (optional - derived from recipient_pubkey if not provided)
-    #[serde(default)]
-    pub recipient_address: String,
-    /// Issuer's Schnorr signature (65 bytes, hex encoded = 130 chars)
-    pub issuer_signature: String,
-    /// Whether this is an emergency redemption
-    #[serde(default)]
-    pub emergency: bool,
-    /// Denomination of the debt ("erg" or "token:<64-hex>"); empty means default
-    /// resolution: the pair's existing note's denomination when unambiguous, else "erg".
-    #[serde(default)]
-    pub denomination: String,
-}
-
 // Redemption completion request
 #[derive(Debug, Deserialize)]
 pub struct CompleteRedemptionRequest {
@@ -286,43 +276,6 @@ pub struct CompleteRedemptionRequest {
     /// When omitted, the note's cumulative redeemed amount is used.
     #[serde(default)]
     pub new_already_redeemed: Option<u64>,
-}
-
-// Redemption response
-#[derive(Debug, Serialize)]
-pub struct RedeemResponse {
-    pub redemption_id: String,
-    pub amount: u64,
-    pub timestamp: u64,
-    pub proof_available: bool,
-    pub transaction_pending: bool,
-    /// Prepared transaction data that can be submitted to Ergo node
-    /// Contains all necessary fields for wallet payment API
-    pub transaction_data: Option<TransactionData>,
-    /// Raw Ergo transaction JSON (hex encoded) that can be signed and submitted
-    pub transaction_bytes: Option<String>,
-}
-
-// Transaction data that can be submitted to Ergo node
-#[derive(Debug, Serialize)]
-pub struct TransactionData {
-    /// Target address for the transaction
-    pub address: String,
-    /// Value in nanoERG
-    pub value: u64,
-    /// Register values
-    pub registers: std::collections::HashMap<String, String>,
-    /// Assets to include in transaction
-    pub assets: Vec<TokenData>,
-    /// Transaction fee
-    pub fee: u64,
-}
-
-// Token/Asset data for transaction
-#[derive(Debug, Serialize)]
-pub struct TokenData {
-    pub token_id: String,
-    pub amount: u64,
 }
 
 // Proof response
@@ -530,6 +483,21 @@ pub struct ReservePaymentRequest {
     pub value: u64,
     pub assets: Vec<Asset>,
     pub registers: std::collections::HashMap<String, String>,
+}
+
+/// Response for GET /reserves/state-digest: the tracker's reserve AVL tree
+/// state for an (issuer, denomination) pair — both the raw root digest and
+/// the serialized SAvlTree value a reserve (re)creation must carry in R5
+/// (issue #15 review N9: reserve rotation carries redeemed-amount history
+/// forward, so R5 is not always the empty tree).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReserveStateDigestResponse {
+    pub issuer_pubkey: String,
+    pub denomination: String,
+    /// 33-byte AVL+ root digest (hex, 66 chars).
+    pub reserve_state_digest: String,
+    /// Serialized SAvlTree register value (hex) for the reserve box's R5.
+    pub reserve_r5: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -354,14 +354,14 @@ async fn main() {
                     issuer_pubkey,
                     recipient_pubkey,
                     from_denomination,
-                    from_amount,
+                    from_new_total,
                     to_denomination,
-                    to_amount,
+                    to_new_total,
                     timestamp,
                     issuer_from_signature,
-                    recipient_from_signature,
                     issuer_to_signature,
-                    recipient_to_signature,
+                    issuer_exchange_signature,
+                    recipient_exchange_signature,
                     from_reserve_box_id,
                     acceptance_check,
                     response_tx,
@@ -372,14 +372,14 @@ async fn main() {
                         &issuer_pubkey,
                         &recipient_pubkey,
                         &from_denomination,
-                        from_amount,
+                        from_new_total,
                         &to_denomination,
-                        to_amount,
+                        to_new_total,
                         timestamp,
                         &issuer_from_signature,
-                        &recipient_from_signature,
                         &issuer_to_signature,
-                        &recipient_to_signature,
+                        &issuer_exchange_signature,
+                        &recipient_exchange_signature,
                         &from_reserve_box_id,
                         acceptance_check.map(|check| check.0),
                     );
@@ -428,13 +428,6 @@ async fn main() {
                     let result = redemption_manager
                         .tracker
                         .list_pending_exchanges(issuer_pubkey.as_ref(), recipient_pubkey.as_ref());
-                    let _ = response_tx.send(result);
-                }
-                TrackerCommand::InitiateRedemption {
-                    request,
-                    response_tx,
-                } => {
-                    let result = redemption_manager.initiate_redemption(&request);
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::CompleteRedemption {
@@ -547,6 +540,23 @@ async fn main() {
                         .reserve_state_digest(&issuer_pubkey, &denomination);
                     let _ = response_tx.send(digest);
                 }
+                TrackerCommand::ApplyChainReserveOps {
+                    issuer_pubkey,
+                    denomination,
+                    ops,
+                    sync_point,
+                    expected_digest,
+                    response_tx,
+                } => {
+                    let result = redemption_manager.tracker.apply_chain_reserve_ops(
+                        &issuer_pubkey,
+                        &denomination,
+                        &ops,
+                        sync_point,
+                        expected_digest,
+                    );
+                    let _ = response_tx.send(result);
+                }
                 TrackerCommand::GetConfirmation {
                     issuer_pubkey,
                     recipient_pubkey,
@@ -574,6 +584,10 @@ async fn main() {
                         &tx_id,
                         submitted_height,
                     );
+                    let _ = response_tx.send(result);
+                }
+                TrackerCommand::PrepareTrackerUpdate { response_tx } => {
+                    let result = redemption_manager.tracker.prepare_tracker_update();
                     let _ = response_tx.send(result);
                 }
                 TrackerCommand::ConfirmPendingNotes {
@@ -947,7 +961,9 @@ async fn main() {
             "/acceptance/policy/{pubkey}",
             get(get_policy_by_recipient).options(handle_options),
         )
-        .route("/redeem", post(initiate_redemption).options(handle_options))
+        // `POST /redeem` was removed (issue #15 review N7): it only prepared a
+        // transaction for the removed `--server-sign` client path. Redemptions go
+        // through `/redemption/build` + `/redemption/submit`.
         .route(
             "/redeem/complete",
             post(complete_redemption).options(handle_options),
@@ -991,6 +1007,7 @@ async fn main() {
         .route("/reserves/{box_id}", get(get_reserve_by_box_id))
         .route("/reserves/issuer/{pubkey}", get(get_reserves_by_issuer))
         .route("/reserves/quarantined", get(get_quarantined_reserves))
+        .route("/reserves/state-digest", get(get_reserve_state_digest))
         .route("/key-status/{pubkey}", get(get_key_status))
         .route("/tracker/latest-box-id", get(get_latest_tracker_box_id))
         .route(
@@ -1051,7 +1068,6 @@ async fn main() {
     tracing::debug!("  GET /events");
     tracing::debug!("  GET /events/paginated");
     tracing::debug!("  GET /key-status/{{pubkey}}");
-    tracing::debug!("  POST /redeem");
     tracing::debug!("  POST /acceptance/check");
     tracing::debug!("  POST /acceptance/policy");
     tracing::debug!("  GET /tracker/latest-box-id");

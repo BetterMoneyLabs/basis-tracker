@@ -1057,6 +1057,24 @@ mod tests {
     }
 
     #[test]
+    fn test_default_policy_rejects_pending_refund() {
+        // N16: the client-side default policy (TUI/MCP `default_collateral()`)
+        // must reject notes while the issuer's reserve has a pending refund —
+        // the collateral backing them is on its way out within the refund window.
+        let issuer = test_pubkey(ISSUER);
+        let env = |refund_pending| EvalEnv {
+            issuer_pubkey: &issuer,
+            refund_pending,
+            collateral: 10_000,
+            debt: 5_000,
+            holder_total_debt: 5_000,
+        };
+        let config = AcceptanceConfig::default_collateral();
+        assert!(eval_config(&config, &env(false)));
+        assert!(!eval_config(&config, &env(true)));
+    }
+
+    #[test]
     fn test_stored_stricter_policy_overrides_lenient_global() {
         // Global min_ratio 0.5 would allow the redemption (post ratio exactly
         // 0.5), but HOLDER_A stored a stricter 0.55 policy: 0.6 pre ok,

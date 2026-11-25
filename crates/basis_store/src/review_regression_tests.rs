@@ -3,7 +3,7 @@
 //! Each test asserts the correct behaviour, fails at `3df7ed9`, and is `#[ignore]`d with the
 //! finding id so the default test run stays green. Run them with
 //! `cargo test -p basis_store review_regression -- --ignored` and drop the `#[ignore]` once the
-//! finding is fixed.
+//! finding is fixed. The N2 tests below were un-ignored by the snapshot-based fix.
 
 use crate::{DenomKey, IouNote, PubKey, TrackerStateManager};
 use secp256k1::{Secp256k1, SecretKey};
@@ -69,7 +69,6 @@ fn assert_committed_proofs_work(
 /// timestamp, but the live (committed) tree has first-insertion shape. An ordinary repeat
 /// payment to an earlier creditor reorders the rebuild and breaks every committed proof.
 #[test]
-#[ignore = "follow-up review N2: committed tree rebuilt in the wrong insertion order"]
 fn committed_proofs_survive_a_repeat_payment() {
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer = keypair(1);
@@ -90,7 +89,6 @@ fn committed_proofs_survive_a_repeat_payment() {
 /// an existing note's (client clock skew, or one deliberately backdated self-note by any
 /// Write client).
 #[test]
-#[ignore = "follow-up review N2: committed tree rebuilt in the wrong insertion order"]
 fn committed_proofs_survive_a_backdated_new_note() {
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer = keypair(1);
@@ -108,7 +106,6 @@ fn committed_proofs_survive_a_backdated_new_note() {
 /// Pending becomes LocalOnly, `confirm_pending_notes` only promotes Pending notes, so the value
 /// the chain committed is never recorded and the rebuild no longer matches.
 #[test]
-#[ignore = "follow-up review N2: confirmation state loses values re-posted while pending"]
 fn committed_proofs_survive_a_note_updated_while_its_commit_is_pending() {
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer = keypair(1);
@@ -130,7 +127,6 @@ fn committed_proofs_survive_a_note_updated_while_its_commit_is_pending() {
 /// calls, then sends MarkNotesPending, which marks the CURRENT note values. A note posted in
 /// that window is recorded as committed although the submitted digest does not contain it.
 #[test]
-#[ignore = "follow-up review N2: mark_notes_pending ignores the digest it is given"]
 fn committed_proofs_survive_a_note_posted_while_the_update_is_built() {
     let mut tracker = TrackerStateManager::new_with_temp_storage();
     let issuer = keypair(1);
@@ -146,11 +142,10 @@ fn committed_proofs_survive_a_note_posted_while_the_update_is_built() {
 }
 
 /// Follow-up review N15: the JVM `AvlTree.insert` FAILS on an existing key, which is what the
-/// C1 fix in `basis.es` relies on (omitting var #7 forces `insert`). The vendored
-/// `ergo_avltree_rust` turns `Insert` into an upsert for the whole workspace, including
-/// sigma-rust's interpreter, so local reduction accepts a #7-less replay the node rejects.
+/// C1 fix in `basis.es` relies on (omitting var #7 forces `insert`). The workspace must use
+/// the unpatched crates.io `ergo_avltree_rust`, whose strict `Insert` matches the JVM;
+/// a vendored upsert patch would let local reduction accept a #7-less replay the node rejects.
 #[test]
-#[ignore = "follow-up review N15: vendored ergo_avltree_rust treats Insert as insert-or-update"]
 fn avl_insert_of_an_existing_key_fails_like_the_jvm() {
     use ergo_avltree_rust::operation::{KeyValue, Operation};
 
@@ -163,10 +158,9 @@ fn avl_insert_of_an_existing_key_fails_like_the_jvm() {
 
 /// Follow-up review N11: `EUNip3sG…` is `basis-token.es` as of `bb0cfbd`. It derives the debt
 /// key and signed message exactly like `basis.es`, so on the multi-token tracker an ERG note
-/// also redeems the same number of raw token units from such a reserve. The demos still
-/// create reserves at it and the specs still document it.
+/// also redeems the same number of raw token units from such a reserve. The demos and specs
+/// must not ship it.
 #[test]
-#[ignore = "follow-up review N11: previous token reserve script still shipped in demos/specs"]
 fn previous_token_reserve_script_is_not_shipped() {
     const PREVIOUS_TOKEN_P2S_PREFIX: &str = "EUNip3sG";
 
@@ -199,5 +193,66 @@ fn previous_token_reserve_script_is_not_shipped() {
     assert!(
         hits.is_empty(),
         "previous token reserve P2S still in: {hits:#?}"
+    );
+}
+
+/// Follow-up review N14: the reserve mirror only advanced via `update_already_redeemed`
+/// from the redemption API flow, so an optimistic update for a redemption that never
+/// confirmed (or a redemption confirmed outside the tracker) diverged the mirror from the
+/// on-chain R5 permanently. The repair applies chain-observed ops on top of a staged
+/// rebuild and must drop phantom entries to reproduce the on-chain digest.
+#[test]
+fn reserve_mirror_resyncs_from_chain_observed_ops() {
+    let issuer = keypair(1);
+    let (real, phantom) = (keypair(2).1, keypair(3).1);
+
+    // Chain truth: one confirmed redemption of 1000 at timestamp 100.
+    let mut reference = TrackerStateManager::new_with_temp_storage();
+    reference
+        .update_already_redeemed(&issuer.1, &real, &DenomKey::Erg, 100, 1_000)
+        .unwrap();
+    let chain_digest: [u8; 33] = reference
+        .reserve_state_digest(&issuer.1, &DenomKey::Erg)
+        .try_into()
+        .unwrap();
+
+    // The diverged mirror additionally journaled a phantom redemption that never confirmed.
+    let mut diverged = TrackerStateManager::new_with_temp_storage();
+    diverged
+        .update_already_redeemed(&issuer.1, &real, &DenomKey::Erg, 100, 1_000)
+        .unwrap();
+    diverged
+        .update_already_redeemed(&issuer.1, &phantom, &DenomKey::Erg, 900, 7_777)
+        .unwrap();
+    assert_ne!(
+        diverged.reserve_state_digest(&issuer.1, &DenomKey::Erg),
+        chain_digest
+    );
+
+    diverged
+        .apply_chain_reserve_ops(
+            &issuer.1,
+            &DenomKey::Erg,
+            &[crate::ChainReserveOp {
+                recipient_pubkey: real,
+                timestamp: 100,
+                redeemed_delta: 1_000,
+            }],
+            crate::ReserveSyncPoint::Genesis,
+            chain_digest,
+        )
+        .unwrap();
+
+    assert_eq!(
+        diverged.reserve_state_digest(&issuer.1, &DenomKey::Erg),
+        chain_digest,
+        "after the chain-observed repair the mirror must reproduce the on-chain R5"
+    );
+    assert_eq!(
+        diverged
+            .get_already_redeemed(&issuer.1, &phantom, &DenomKey::Erg)
+            .unwrap(),
+        0,
+        "the phantom entry must be gone"
     );
 }

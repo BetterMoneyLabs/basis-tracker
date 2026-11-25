@@ -12,7 +12,7 @@ use crate::{
         CompleteRedemptionRequest, CreateNoteRequest, CreateReserveRequest, ExchangeNotesRequest,
         ExchangeNotesResponse, KeyStatusDenomination, KeyStatusResponse, NoteConfirmationSummary,
         NoteStateRequest, NoteStateResponse, PendingExchangeView, PendingTxResponse, ProofResponse,
-        RedeemRequest, RedeemResponse, RedemptionPreparationRequest, RedemptionPreparationResponse,
+        RedemptionPreparationRequest, RedemptionPreparationResponse,
         ReserveCollateralConfigResponse, ReserveCreationResponse, ReservePaymentRequest,
         ReserveTokenConfigResponse, SerializableIouNote, ServedDenomination, ServedTokenInfo,
         TrackerEvent, TrackerSignatureRequest, TrackerSignatureResponse, TrackerStateResponse,
@@ -428,9 +428,12 @@ pub async fn create_note(
 /// Exchange debt between two denominations of one (issuer, recipient) pair
 /// (off-chain novation / triage, specs/ergo/multi_collateral_reserves.md §10).
 ///
-/// Both parties sign both edges' new states; the tracker never takes a view of the
-/// exchange rate — it is bilaterally agreed. Both edges live in the single tracker
-/// tree, so the exchange is one atomic state change committed in one R5 publication.
+/// Both parties sign the domain-separated exchange message binding both edges'
+/// pre- and post-totals and a one-hour validity window (issue #15 review N10);
+/// the issuer additionally signs each edge's standard note message at its new
+/// total. The tracker takes no view of the exchange rate — it is bilaterally
+/// agreed. Both edges live in the single tracker tree, so the exchange is one
+/// atomic state change committed in one R5 publication.
 #[axum::debug_handler]
 pub async fn exchange_notes(
     State(state): State<AppState>,
@@ -525,9 +528,11 @@ pub async fn exchange_notes(
         }
     };
 
-    // Decode the four signatures. The closure returns a plain message so the
-    // Err variant stays small (the full response tuple is built only on the
-    // error path).
+    // Decode the four signatures (N10): both parties' signatures over the
+    // domain-separated exchange message, plus the issuer's standard note
+    // signatures at each edge's new total. The closure returns a plain message
+    // so the Err variant stays small (the full response tuple is built only on
+    // the error path).
     let decode_sig = |name: &str, hex_str: &str| -> Result<Signature, String> {
         let bytes = hex::decode(hex_str).map_err(|_| format!("{} must be hex-encoded", name))?;
         bytes
@@ -540,81 +545,29 @@ pub async fn exchange_notes(
             Json(crate::models::error_response(msg)),
         )
     };
+    let issuer_exchange_signature = match decode_sig(
+        "issuer_exchange_signature",
+        &payload.issuer_exchange_signature,
+    ) {
+        Ok(s) => s,
+        Err(msg) => return bad_request(msg),
+    };
+    let recipient_exchange_signature = match decode_sig(
+        "recipient_exchange_signature",
+        &payload.recipient_exchange_signature,
+    ) {
+        Ok(s) => s,
+        Err(msg) => return bad_request(msg),
+    };
     let issuer_from_signature =
         match decode_sig("issuer_from_signature", &payload.issuer_from_signature) {
             Ok(s) => s,
             Err(msg) => return bad_request(msg),
         };
-    let recipient_from_signature = match decode_sig(
-        "recipient_from_signature",
-        &payload.recipient_from_signature,
-    ) {
-        Ok(s) => s,
-        Err(msg) => return bad_request(msg),
-    };
     let issuer_to_signature = match decode_sig("issuer_to_signature", &payload.issuer_to_signature)
     {
         Ok(s) => s,
         Err(msg) => return bad_request(msg),
-    };
-    let recipient_to_signature =
-        match decode_sig("recipient_to_signature", &payload.recipient_to_signature) {
-            Ok(s) => s,
-            Err(msg) => return bad_request(msg),
-        };
-
-    // The to-edge's new total (for the response and the acceptance re-evaluation).
-    let to_new_total = {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if state
-            .tx
-            .send(TrackerCommand::GetNoteByIssuerAndRecipient {
-                issuer_pubkey,
-                recipient_pubkey,
-                denomination: to_denomination,
-                response_tx: tx,
-            })
-            .await
-            .is_err()
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Tracker thread unavailable".to_string(),
-                )),
-            );
-        }
-        let existing = match rx.await {
-            Ok(Ok(note)) => note.map(|n| n.amount_collected).unwrap_or(0),
-            Ok(Err(e)) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(format!(
-                        "tracker error: {:?}",
-                        e
-                    ))),
-                );
-            }
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(
-                        "Tracker thread did not respond".to_string(),
-                    )),
-                );
-            }
-        };
-        match existing.checked_add(payload.to_amount) {
-            Some(t) => t,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(crate::models::error_response(
-                        "to_amount overflows the to-edge total".to_string(),
-                    )),
-                );
-            }
-        }
     };
 
     // Acceptance policy for the TARGET edge is evaluated inside the tracker
@@ -631,13 +584,10 @@ pub async fn exchange_notes(
             let predicate = std::sync::Arc::clone(predicate);
             Some(ExchangeAcceptanceCheck(Box::new(
                 move |view: basis_store::ExchangeAcceptanceView| -> Result<(), String> {
-                    let to_new_total = view
-                        .to_note
-                        .as_ref()
-                        .map(|n| n.amount_collected)
-                        .unwrap_or(0)
-                        .checked_add(payload.to_amount)
-                        .ok_or_else(|| "to_amount overflows the to-edge total".to_string())?;
+                    // The store rejects the exchange when `to_new_total` is not
+                    // above the current to-edge total, so this is the post
+                    // total the policy must admit.
+                    let to_new_total = payload.to_new_total;
                     let issuer_gross_debt = compute_issuer_gross_debt(
                         &view.issuer_notes,
                         &view.confirmations,
@@ -676,14 +626,14 @@ pub async fn exchange_notes(
             issuer_pubkey,
             recipient_pubkey,
             from_denomination,
-            from_amount: payload.from_amount,
+            from_new_total: payload.from_new_total,
             to_denomination,
-            to_amount: payload.to_amount,
+            to_new_total: payload.to_new_total,
             timestamp: payload.timestamp,
             issuer_from_signature,
-            recipient_from_signature,
             issuer_to_signature,
-            recipient_to_signature,
+            issuer_exchange_signature,
+            recipient_exchange_signature,
             from_reserve_box_id,
             acceptance_check,
             response_tx,
@@ -701,31 +651,15 @@ pub async fn exchange_notes(
 
     match response_rx.await {
         Ok(Ok(())) => {
-            let from_new_total = {
-                // from-edge new total: current minus from_amount (store validated it).
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = state
-                    .tx
-                    .send(TrackerCommand::GetNoteByIssuerAndRecipient {
-                        issuer_pubkey,
-                        recipient_pubkey,
-                        denomination: from_denomination,
-                        response_tx: tx,
-                    })
-                    .await;
-                match rx.await {
-                    Ok(Ok(Some(note))) => note.amount_collected,
-                    _ => 0,
-                }
-            };
             (
                 StatusCode::OK,
                 Json(crate::models::success_response(ExchangeNotesResponse {
                     exchanged: true,
                     from_denomination: from_denomination.denomination_id(),
                     to_denomination: to_denomination.denomination_id(),
-                    from_new_total,
-                    to_new_total,
+                    // The store validated the totals against the current state.
+                    from_new_total: payload.from_new_total,
+                    to_new_total: payload.to_new_total,
                     timestamp: payload.timestamp,
                     // Two-phase exchange (issue #17): only the from-edge
                     // decrease is applied now; the to-edge increase is staged
@@ -2386,603 +2320,6 @@ pub async fn get_key_status(
     )
 }
 
-// Initiate redemption process
-#[axum::debug_handler]
-pub async fn initiate_redemption(
-    State(state): State<AppState>,
-    Json(payload): Json<RedeemRequest>,
-) -> (StatusCode, Json<ApiResponse<RedeemResponse>>) {
-    tracing::debug!("Initiating redemption: {:?}", payload);
-
-    // Convert recipient public key to P2PK address
-    let recipient_address = {
-        // Convert the public key to a P2PK address
-        use ergo_lib::ergo_chain_types::EcPoint;
-        use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
-        use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-        use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
-
-        // Decode the hex public key
-        let pubkey_bytes = match hex::decode(&payload.recipient_pubkey) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                // If hex decoding fails, abort redemption
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(crate::models::error_response(
-                        "Invalid hex encoding for recipient public key".to_string(),
-                    )),
-                );
-            }
-        };
-
-        // Create an EcPoint from the public key bytes
-        match EcPoint::sigma_parse_bytes(&pubkey_bytes) {
-            Ok(ec_point) => {
-                // Create a P2PK address from the public key
-                let prove_dlog = ProveDlog::from(ec_point);
-                let address = Address::P2Pk(prove_dlog);
-                // Use mainnet prefix by default, could be configurable
-                let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-                encoder.address_to_str(&address)
-            }
-            Err(_) => {
-                // If conversion fails, abort redemption
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(crate::models::error_response(
-                        "Invalid public key format for recipient".to_string(),
-                    )),
-                );
-            }
-        }
-    };
-
-    // Resolve the note denomination: an explicit request value is validated against
-    // the served set; otherwise the pair's existing note's denomination is used when
-    // unambiguous, else ERG (specs/ergo/multi_collateral_reserves.md §9).
-    let denomination = {
-        let issuer_pk = match parse_pubkey(&payload.issuer_pubkey) {
-            Ok(pk) => pk,
-            Err(msg) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(crate::models::error_response(msg)),
-                );
-            }
-        };
-        let recipient_pk = match parse_pubkey(&payload.recipient_pubkey) {
-            Ok(pk) => pk,
-            Err(msg) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(crate::models::error_response(msg)),
-                );
-            }
-        };
-        match resolve_denomination(&state, &issuer_pk, &recipient_pk, &payload.denomination).await {
-            Ok(d) => d,
-            Err(msg) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(crate::models::error_response(format!(
-                        "invalid denomination: {}",
-                        msg
-                    ))),
-                );
-            }
-        }
-    };
-
-    // Find the reserve box ID and value for the issuer using normalized key matching
-    let (reserve_box_id, reserve_box_value, reserve_refund_initiation_height) = {
-        // Read reserves directly from database (not in-memory tracker) to avoid
-        // issues with scanner removing manually-inserted reserves
-        let scanner = state.ergo_scanner.lock().await;
-        let reserve_storage = scanner.reserve_storage();
-
-        // Get all reserves from database
-        let all_reserves = match reserve_storage.get_all_reserves() {
-            Ok(reserves) => reserves,
-            Err(e) => {
-                tracing::error!("Failed to read reserves from database: {:?}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(
-                        "Failed to read reserves from database".to_string(),
-                    )),
-                );
-            }
-        };
-
-        // Normalize the issuer public key
-        let normalized_issuer_key = basis_store::normalize_public_key(&payload.issuer_pubkey);
-
-        // Find ALL reserves owned by the issuer IN THE NOTE'S DENOMINATION
-        // (considering normalized key forms). A note redeems only against a reserve
-        // of its own denomination (specs/ergo/multi_collateral_reserves.md §6).
-        // Fail closed when there is more than one: cumulative redeemed debt is tracked
-        // per reserve box, so picking one of several silently would enable per-reserve
-        // replay (see specs/pr14_triage.md C3 remainder and PR #16 H2).
-        let mut matching_reserves: Vec<(String, u64, u64)> = Vec::new();
-        for reserve in &all_reserves {
-            if reserve.denomination().as_ref() != Some(&denomination) {
-                continue;
-            }
-            // Handle the case where the owner key might be double-encoded
-            // The database might store the hex string as ASCII characters, which are hex-encoded again
-            let actual_owner_key = {
-                // Try to decode the stored key as hex to get the original hex string
-                if let Ok(decoded_bytes) = hex::decode(&reserve.owner_pubkey) {
-                    // If successful, try to interpret as ASCII string
-                    if let Ok(decoded_string) = String::from_utf8(decoded_bytes) {
-                        // Check if this looks like a valid hex string (all valid hex chars)
-                        if decoded_string.chars().all(|c| c.is_ascii_hexdigit()) {
-                            decoded_string
-                        } else {
-                            // If not a valid hex string, use the original
-                            reserve.owner_pubkey.clone()
-                        }
-                    } else {
-                        // If not valid UTF-8, use the original
-                        reserve.owner_pubkey.clone()
-                    }
-                } else {
-                    // If hex decoding fails, use the original
-                    reserve.owner_pubkey.clone()
-                }
-            };
-
-            let normalized_actual_key = basis_store::normalize_public_key(&actual_owner_key);
-
-            // Since we now strip the 0x07 prefix when reading from registers,
-            // we only need to match normalized keys (handles any remaining edge cases)
-            if normalized_issuer_key == normalized_actual_key {
-                tracing::debug!(
-                    "Key match found! Reserve box ID: {}, value: {}",
-                    reserve.box_id,
-                    reserve.base_info.collateral_amount
-                );
-                matching_reserves.push((
-                    reserve.box_id.clone(),
-                    reserve.base_info.collateral_amount,
-                    reserve.base_info.refund_initiation_height,
-                ));
-            }
-        }
-
-        if matching_reserves.len() > 1 {
-            let mut ids: Vec<&str> = matching_reserves.iter().map(|r| r.0.as_str()).collect();
-            ids.sort();
-            return (
-                StatusCode::CONFLICT,
-                Json(crate::models::error_response(format!(
-                    "Issuer {} has {} tracked reserves ({}); refusing to pick one. \
-                     Redeem against a single-reserve issuer or resolve the ambiguity first.",
-                    payload.issuer_pubkey,
-                    matching_reserves.len(),
-                    ids.join(", ")
-                ))),
-            );
-        }
-
-        let found_reserve: Option<(String, u64, u64)> = matching_reserves.into_iter().next();
-
-        if found_reserve.is_none() {
-            tracing::warn!("No reserve found for issuer: {}", payload.issuer_pubkey);
-            tracing::debug!("Available reserves for debugging:");
-            for reserve in &all_reserves {
-                tracing::debug!(
-                    "  Reserve box: {}, owner key: {}, value: {}",
-                    reserve.box_id,
-                    reserve.owner_pubkey,
-                    reserve.base_info.collateral_amount
-                );
-            }
-
-            // Return a failed redemption response
-            let _response = crate::models::RedeemResponse {
-                redemption_id: "failed_no_matching_reserve".to_string(),
-                amount: payload.amount,
-                timestamp: payload.timestamp,
-                proof_available: false,
-                transaction_pending: false,
-                transaction_data: None,
-                transaction_bytes: None,
-            };
-
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(format!(
-                    "No matching reserve found for issuer: {}",
-                    payload.issuer_pubkey
-                ))),
-            );
-        }
-
-        found_reserve.unwrap()
-    };
-
-    // Acceptance-policy compliance check at redemption time: reject redemptions
-    // that would newly violate another debt holder's collateralization policy.
-    // Emergency redemptions bypass the tracker (contract path after the time
-    // lock) and are exempt from this check.
-    if state.config.redemption.enforce_acceptance_policy && !payload.emergency {
-        let issuer_pk: Option<PubKey> =
-            hex::decode(basis_store::normalize_public_key(&payload.issuer_pubkey))
-                .ok()
-                .and_then(|b| b.try_into().ok());
-        let recipient_pk: Option<PubKey> = hex::decode(&payload.recipient_pubkey)
-            .ok()
-            .and_then(|b| b.try_into().ok());
-
-        match (issuer_pk, recipient_pk) {
-            (Some(issuer_pk), Some(recipient_pk)) => {
-                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                if let Err(e) = state
-                    .tx
-                    .send(TrackerCommand::GetNotesByIssuer {
-                        issuer_pubkey: issuer_pk,
-                        response_tx,
-                    })
-                    .await
-                {
-                    tracing::error!("Failed to send to tracker thread: {:?}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(crate::models::error_response(
-                            "Tracker thread unavailable".to_string(),
-                        )),
-                    );
-                }
-
-                let notes = match response_rx.await {
-                    Ok(Ok(notes)) => notes,
-                    Ok(Err(e)) => {
-                        tracing::error!("Failed to get issuer notes for policy check: {:?}", e);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(crate::models::error_response(
-                                "Failed to retrieve notes for policy check".to_string(),
-                            )),
-                        );
-                    }
-                    Err(_) => {
-                        tracing::error!("Tracker thread response channel closed");
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(crate::models::error_response(
-                                "Internal server error".to_string(),
-                            )),
-                        );
-                    }
-                };
-
-                // The miner fee is paid by explicit fee inputs, not deducted from
-                // the reserve output, so the simulated post-redemption collateral
-                // only decreases by the redeemed amount (fee = 0 here).
-                if let Err(e) =
-                    crate::acceptance::redemption_check::check_redemption_policy_compliance(
-                        &issuer_pk,
-                        &recipient_pk,
-                        payload.amount,
-                        reserve_box_value,
-                        0,
-                        reserve_refund_initiation_height > 0,
-                        &notes,
-                        &denomination,
-                        &state.policy_storage,
-                        &state.config.acceptance,
-                    )
-                {
-                    use crate::acceptance::redemption_check::RedemptionPolicyError;
-                    let failure_id = match &e {
-                        RedemptionPolicyError::WouldViolatePolicy { .. } => {
-                            "failed_policy_violation"
-                        }
-                        RedemptionPolicyError::NotOldestNote { .. } => "failed_not_oldest_note",
-                    };
-                    tracing::warn!(
-                        "Redemption rejected by acceptance policy check ({}): {}",
-                        failure_id,
-                        e
-                    );
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(crate::models::error_response(format!(
-                            "{}: {}",
-                            failure_id, e
-                        ))),
-                    );
-                }
-            }
-            _ => {
-                tracing::warn!(
-                    "Skipping redemption policy check: could not decode issuer/recipient public keys"
-                );
-            }
-        }
-    }
-
-    // Fetch blockchain data from Ergo node
-    let (tracker_box_id, tracker_nft_id, current_height) = {
-        // Get tracker_storage reference first (before any awaits)
-        let tracker_nft_id_config = state.config.ergo.tracker_nft_id.clone();
-        let ergo_scanner_ref = state.ergo_scanner.clone();
-
-        // Get current blockchain height
-        let scanner_guard = ergo_scanner_ref.lock().await;
-        let current_height = match scanner_guard.get_current_height().await {
-            Ok(height) => height,
-            Err(e) => {
-                tracing::error!("Failed to get current blockchain height: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(format!(
-                        "Failed to get blockchain height: {}",
-                        e
-                    ))),
-                );
-            }
-        };
-        drop(scanner_guard); // Release lock early
-
-        // Get tracker box ID from the live shared tracker state.  The background
-        // updater refreshes this from the node every cycle, so it is always
-        // current; fall back to the confirmed snapshot if the primary id is empty.
-        let tracker_box_id = {
-            let shared = state.shared_tracker_state.lock().await;
-            shared
-                .get_tracker_box_id()
-                .or_else(|| shared.get_confirmed().box_id)
-        };
-        let tracker_box_id = match tracker_box_id {
-            Some(box_id) => {
-                tracing::debug!("Found latest tracker box: {}", box_id);
-                box_id
-            }
-            None => {
-                tracing::error!("No tracker box found in live state - cannot initiate redemption");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(
-                        "No tracker boxes found".to_string(),
-                    )),
-                );
-            }
-        };
-
-        // Get tracker NFT ID from configuration (R6 register value)
-        let tracker_nft_id = match tracker_nft_id_config {
-            Some(id) => id,
-            None => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(
-                        "Tracker NFT ID not configured".to_string(),
-                    )),
-                );
-            }
-        };
-
-        (tracker_box_id, tracker_nft_id, current_height)
-    };
-
-    // Get tracker signature for normal redemption (not needed for emergency).
-    //
-    // SECURITY (PR #16 H1): the signature covers the STORED note's
-    // (amount_collected, timestamp, tracker_nft_id), never `payload.amount` /
-    // `payload.timestamp`; an unknown (issuer, recipient) pair is refused with 404.
-    let tracker_signature_hex = if !payload.emergency {
-        match get_tracker_signature_for_redemption(
-            &state,
-            &payload.issuer_pubkey,
-            &payload.recipient_pubkey,
-            &denomination,
-            payload.emergency,
-        )
-        .await
-        {
-            Ok(sig) => Some(sig),
-            Err((status_code, error_resp)) => {
-                // Convert the error response to the correct type
-                return (
-                    status_code,
-                    Json(crate::models::error_response(format!(
-                        "Failed to get tracker signature: {:?}",
-                        error_resp.0.error
-                    ))),
-                );
-            }
-        }
-    } else {
-        None // Emergency redemption doesn't require tracker signature
-    };
-
-    // Get change address from configuration
-    let change_address = state.config.get_change_address().unwrap_or_else(|e| {
-        tracing::warn!("Failed to get change address from config: {}", e);
-        // Fallback: derive from tracker public key directly
-        recipient_address.clone() // Use recipient address as fallback (not ideal but safe)
-    });
-
-    // Create redemption request with blockchain data
-    //
-    // The reserve output must carry exactly the script of the reserve box being spent; derive
-    // it from the reserve's recorded contract address (the scanner stamps the per-slot address;
-    // ERG and token reserves live at different addresses). Fall back to the configured ERG
-    // address when the reserve is not tracked.
-    let reserve_contract_address = {
-        let tracker = state.reserve_tracker.lock().await;
-        tracker
-            .get_reserve(&reserve_box_id)
-            .ok()
-            .map(|r| r.base_info.contract_address.clone())
-            .filter(|s| !s.is_empty())
-    };
-    let reserve_contract_p2s_owned = reserve_contract_address
-        .unwrap_or_else(|| state.config.basis_reserve_contract_p2s().to_string());
-    let reserve_contract_p2s = reserve_contract_p2s_owned.as_str();
-    let reserve_ergo_tree =
-        match basis_offchain::ergo_tx::address_to_ergo_tree(reserve_contract_p2s) {
-            Ok(tree) => tree,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(format!(
-                        "Failed to derive reserve contract ergoTree: {}",
-                        e
-                    ))),
-                );
-            }
-        };
-
-    let redemption_request = basis_store::RedemptionRequest {
-        issuer_pubkey: payload.issuer_pubkey.clone(),
-        recipient_pubkey: payload.recipient_pubkey.clone(),
-        amount: payload.amount,
-        timestamp: payload.timestamp,
-        reserve_box_id: reserve_box_id.clone(), // Use the found reserve box ID
-        tracker_box_id,                         // Fetched from blockchain
-        tracker_nft_id,                         // From configuration (R6 register)
-        current_height,                         // Fetched from Ergo node
-        recipient_address: recipient_address.clone(), // Use derived address from public key
-        change_address,                         // From configuration or derived from tracker pubkey
-        issuer_signature: payload.issuer_signature.clone(),
-        emergency: payload.emergency,
-        tracker_signature: tracker_signature_hex,
-        reserve_box_value, // Actual reserve box value from blockchain
-        reserve_refund_initiation_height, // R7 refund height from blockchain
-        reserve_ergo_tree,
-        fee_input_box_ids: Vec::new(),
-        fee_input_total_value: 0,
-        denomination,
-    };
-
-    // Send command to tracker thread to initiate redemption
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    let cmd = TrackerCommand::InitiateRedemption {
-        request: redemption_request,
-        response_tx,
-    };
-
-    if let Err(e) = state.tx.send(cmd).await {
-        tracing::error!("Failed to send redemption command to tracker: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response(
-                "Failed to process redemption request".to_string(),
-            )),
-        );
-    }
-
-    // Wait for response from tracker thread
-    match response_rx.await {
-        Ok(Ok(redemption_data)) => {
-            // Get tracker NFT ID from configuration
-            let tracker_nft_id = match state.config.tracker_nft_bytes() {
-                Ok(bytes) => hex::encode(bytes),
-                Err(_) => {
-                    tracing::error!("Tracker NFT ID is not properly configured");
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(crate::models::error_response(
-                            "Tracker NFT ID is not properly configured".to_string(),
-                        )),
-                    );
-                }
-            };
-
-            // Create transaction data that can be submitted to Ergo node
-            // Use the transaction data that was prepared by the redemption manager
-            let transaction_data = Some(crate::models::TransactionData {
-                address: recipient_address, // Use address derived from recipient public key
-                value: 100000,              // Minimum ERG value for box (0.001 ERG)
-                registers: {
-                    let mut regs = std::collections::HashMap::new();
-                    // R4: Issuer's public key (GroupElement) - from the redemption request
-                    // R5: AVL proof for the note being redeemed (for reserve tree update)
-                    regs.insert("R4".to_string(), payload.issuer_pubkey.clone()); // Issuer pubkey
-                    regs.insert("R5".to_string(), hex::encode(&redemption_data.avl_proof)); // AVL proof
-                    regs
-                },
-                assets: vec![crate::models::TokenData {
-                    token_id: tracker_nft_id, // Use configured tracker NFT ID
-                    amount: 1,
-                }],
-                fee: redemption_data.estimated_fee, // Use actual estimated fee from redemption data
-            });
-
-            let response = RedeemResponse {
-                redemption_id: redemption_data.redemption_id,
-                amount: payload.amount,
-                timestamp: payload.timestamp,
-                proof_available: !redemption_data.avl_proof.is_empty(),
-                transaction_pending: true,
-                transaction_data,
-                transaction_bytes: Some(redemption_data.transaction_bytes),
-            };
-
-            tracing::info!(
-                "Redemption initiated successfully for {} -> {}: {}, transaction_data available",
-                payload.issuer_pubkey,
-                payload.recipient_pubkey,
-                response.redemption_id
-            );
-
-            (
-                StatusCode::OK,
-                Json(crate::models::success_response(response)),
-            )
-        }
-        Ok(Err(e)) => {
-            tracing::error!("Redemption failed: {:?}", e);
-            // Return a more specific error response based on the error type
-            let error_msg = format!("Redemption failed: {}", e);
-            let redemption_id = match e {
-                basis_store::RedemptionError::NoteNotFound => "failed_note_not_found".to_string(),
-                basis_store::RedemptionError::InvalidNoteSignature => {
-                    "failed_invalid_signature".to_string()
-                }
-                basis_store::RedemptionError::InsufficientCollateral(_, _) => {
-                    "failed_insufficient_collateral".to_string()
-                }
-                basis_store::RedemptionError::RedemptionTooEarly(_, _) => {
-                    "failed_too_early".to_string()
-                }
-                basis_store::RedemptionError::StorageError(_) => "failed_storage_error".to_string(),
-                _ => "failed_other_error".to_string(),
-            };
-
-            // Return a response with more specific failure information
-            let _failure_response = RedeemResponse {
-                redemption_id, // Use specific failure ID
-                amount: payload.amount,
-                timestamp: payload.timestamp,
-                proof_available: false,
-                transaction_pending: false,
-                transaction_data: None, // No transaction data available on failure
-                transaction_bytes: None,
-            };
-
-            (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(error_msg)),
-            )
-        }
-        Err(_) => {
-            tracing::error!("Failed to receive redemption response from tracker");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Failed to process redemption request".to_string(),
-                )),
-            )
-        }
-    }
-}
-
 // Complete redemption process by removing the note from tracker state
 #[axum::debug_handler]
 pub async fn complete_redemption(
@@ -4084,220 +3421,6 @@ pub async fn request_tracker_signature(
     )
 }
 
-/// Helper function to get tracker signature for redemption
-/// Used by the redemption flow to include tracker signature in the request
-///
-/// If tracker_secret_key is configured, signs locally. Otherwise, falls back to Ergo node API.
-///
-/// SECURITY (PR #16 H1): the signed message covers the STORED note's
-/// `(amount_collected, timestamp, tracker_nft_id)`. Caller-supplied amount/timestamp values are
-/// never signed, and an unknown (issuer, recipient) pair is refused with 404 — the tracker
-/// signature is the only gate on redemption, so it must attest stored debt only.
-async fn get_tracker_signature_for_redemption(
-    state: &AppState,
-    issuer_pubkey: &str,
-    recipient_pubkey: &str,
-    denomination: &basis_store::DenomKey,
-    _emergency: bool,
-) -> Result<String, (StatusCode, Json<ApiResponse<()>>)> {
-    // Decode public keys
-    let issuer_pubkey_bytes = hex::decode(issuer_pubkey).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(crate::models::error_response(
-                "Invalid issuer pubkey hex".to_string(),
-            )),
-        )
-    })?;
-
-    let recipient_pubkey_bytes = hex::decode(recipient_pubkey).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(crate::models::error_response(
-                "Invalid recipient pubkey hex".to_string(),
-            )),
-        )
-    })?;
-
-    // Get tracker public key from configuration
-    let tracker_pubkey_bytes = state
-        .config
-        .tracker_public_key_bytes()
-        .ok()
-        .flatten()
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Tracker public key not configured".to_string(),
-                )),
-            )
-        })?;
-
-    // Build signing message matching the deployed reserve contract:
-    // key || totalDebt || timestamp || trackerNftId (80 bytes), from the STORED note only.
-    // Note: We use the note's amount_collected (cumulative debt) not the redemption amount
-    // for the message. This matches the contract expectation that the message covers the
-    // full debt state.
-    let issuer_pubkey_array: basis_store::PubKey =
-        issuer_pubkey_bytes.try_into().map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "Invalid issuer pubkey length".to_string(),
-                )),
-            )
-        })?;
-    let recipient_pubkey_array: basis_store::PubKey =
-        recipient_pubkey_bytes.try_into().map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(crate::models::error_response(
-                    "Invalid recipient pubkey length".to_string(),
-                )),
-            )
-        })?;
-
-    // The note must exist in tracker storage; unknown pairs are refused (404) rather than
-    // signed with caller-chosen values.
-    let stored_note = {
-        let (note_tx, note_rx) = tokio::sync::oneshot::channel();
-        if state
-            .tx
-            .send(TrackerCommand::GetNoteByIssuerAndRecipient {
-                issuer_pubkey: issuer_pubkey_array,
-                recipient_pubkey: recipient_pubkey_array,
-                denomination: *denomination,
-                response_tx: note_tx,
-            })
-            .await
-            .is_err()
-        {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(
-                    "Tracker thread unavailable".to_string(),
-                )),
-            ));
-        }
-        match note_rx.await {
-            Ok(Ok(Some(note))) => note,
-            Ok(Ok(None)) => {
-                tracing::warn!(
-                    "refusing redemption signature: no stored note for issuer={} recipient={}",
-                    issuer_pubkey,
-                    recipient_pubkey
-                );
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(crate::models::error_response(
-                        "No note is recorded for this (issuer, recipient) pair. Submit the note \
-                         with POST /notes first; the tracker signs stored debt only."
-                            .to_string(),
-                    )),
-                ));
-            }
-            Ok(Err(e)) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(format!(
-                        "Note lookup failed: {:?}",
-                        e
-                    ))),
-                ));
-            }
-            Err(_) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(crate::models::error_response(
-                        "Tracker thread did not respond".to_string(),
-                    )),
-                ));
-            }
-        }
-    };
-
-    let message_to_sign_bytes = basis_store::schnorr::signing_message(
-        &issuer_pubkey_array,
-        &recipient_pubkey_array,
-        &stored_note.denomination,
-        stored_note.amount_collected,
-        stored_note.timestamp,
-        &stored_note.tracker_nft_id,
-    );
-
-    // Check if we have a tracker secret key for local signing
-    if let Some(tracker_secret) = state.config.tracker_secret_key_bytes() {
-        tracing::info!("Signing tracker signature locally using configured secret key");
-
-        // Sign locally using our schnorr implementation
-        let signature = basis_store::schnorr::schnorr_sign(
-            &message_to_sign_bytes,
-            &tracker_secret,
-            &tracker_pubkey_bytes,
-        )
-        .map_err(|e| {
-            tracing::error!("Failed to sign locally: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(format!(
-                    "Failed to sign locally: {:?}",
-                    e
-                ))),
-            )
-        })?;
-
-        let signature_hex = hex::encode(signature);
-        tracing::info!("Local tracker signature generated successfully");
-        return Ok(signature_hex);
-    }
-
-    // Fall back to Ergo node API if no local secret key is configured
-    tracing::info!("No tracker secret key configured, falling back to Ergo node API");
-
-    let message_to_sign = hex::encode(&message_to_sign_bytes);
-
-    // Convert tracker public key to P2PK address
-    use ergo_lib::ergo_chain_types::EcPoint;
-    use ergo_lib::ergotree_ir::chain::address::{Address, NetworkPrefix};
-    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
-
-    let tracker_ec_point = EcPoint::sigma_parse_bytes(&tracker_pubkey_bytes).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(crate::models::error_response(format!(
-                "Failed to parse tracker public key: {}",
-                e
-            ))),
-        )
-    })?;
-
-    let prove_dlog = ProveDlog::from(tracker_ec_point);
-    let tracker_address = Address::P2Pk(prove_dlog);
-    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-    let tracker_p2pk_address = encoder.address_to_str(&tracker_address);
-
-    // Schnorr signing uses the tracker wallet node ([ergo.wallet], falling back
-    // to the scanner node when unset).
-    let (wallet_node_url, wallet_api_key) = state.config.ergo_wallet_node();
-    let node_url = &wallet_node_url;
-    let api_key = wallet_api_key.as_deref();
-
-    // Call the Ergo node's schnorrSign API
-    call_schnorr_sign_api(node_url, api_key, &tracker_p2pk_address, &message_to_sign)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(crate::models::error_response(format!(
-                    "Failed to generate tracker signature: {}",
-                    e
-                ))),
-            )
-        })
-}
-
 // Prepare redemption with all necessary data
 // Following specs/server/redemption_state_spec.md - POST /redemption/prepare
 #[axum::debug_handler]
@@ -5332,12 +4455,69 @@ pub async fn create_reserve_payload(
     // R4: GroupElement (owner pubkey) - prefix 07 + 33-byte compressed pubkey
     let r4_value = format!("07{}", payload.owner_pubkey);
 
-    // R5: SAvlTree (empty AVL tree) - prefix 64 + 33-byte digest + flags + key_len + value_len
-    // Empty tree digest for PlasmaParameters(32, None) is 4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900
-    // Flags: 0x03 (insert + update allowed) for the insertOrUpdate reserve contract.
-    let empty_tree_hex =
-        "644ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900032000";
-    let r5_value = empty_tree_hex.to_string();
+    // R5: SAvlTree holding the tracker's reserve-tree state for this
+    // (owner, denomination) — prefix 64 + 33-byte digest + flags 0x03
+    // (insert + update allowed) + key_len + value_len. For a fresh pair this
+    // is the empty tree (digest 4ec61f48...0900); after a reserve rotation it
+    // carries the redeemed-amount history forward so old redemption vars
+    // cannot be replayed against the new reserve's tree (issue #15 review
+    // N9). The scanner admits a root box with a non-empty R5 only when it
+    // matches the digest recorded below.
+    let owner_pubkey: PubKey = owner_pubkey_bytes
+        .clone()
+        .try_into()
+        .expect("33 bytes validated above");
+    let (digest_tx, digest_rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(TrackerCommand::GetReserveStateDigest {
+            issuer_pubkey: owner_pubkey,
+            denomination: requested_denomination,
+            response_tx: digest_tx,
+        })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+    let reserve_digest = match digest_rx.await {
+        Ok(digest) => digest,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Tracker thread did not respond".to_string(),
+                )),
+            )
+        }
+    };
+    let r5_value = hex::encode(basis_offchain::ergo_tx::build_savl_tree_from_digest(
+        &hex::encode(&reserve_digest),
+    ));
+    // Record the expected root so the scanner admits this (and only this)
+    // non-empty-R5 root box once it appears on-chain. Fail closed: without
+    // the record a rotated reserve would be quarantined by admission control.
+    {
+        let scanner = state.ergo_scanner.lock().await;
+        if let Err(e) = scanner.reserve_storage().store_pending_root_r5(
+            &payload.owner_pubkey,
+            &requested_denomination.denomination_id(),
+            &r5_value,
+        ) {
+            tracing::error!("Failed to record pending reserve root: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Failed to record the reserve root digest".to_string(),
+                )),
+            );
+        }
+    }
 
     // R6: Coll[Byte] (tracker NFT ID) - prefix 0e + 2-byte length + 32-byte NFT ID
     let tracker_nft_id = config

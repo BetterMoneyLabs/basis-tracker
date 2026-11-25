@@ -26,6 +26,35 @@ pub fn signing_message(
     )
 }
 
+/// Generate the domain-separated exchange signing message (issue #15 review
+/// N10). See `basis_core::types::exchange_signing_message` for the format.
+#[allow(clippy::too_many_arguments)]
+pub fn exchange_signing_message(
+    owner_key: &PubKey,
+    receiver_key: &PubKey,
+    from_denomination: &crate::DenomKey,
+    from_pre_total: u64,
+    from_post_total: u64,
+    to_denomination: &crate::DenomKey,
+    to_pre_total: u64,
+    to_post_total: u64,
+    timestamp: u64,
+    tracker_nft_id: &[u8; 32],
+) -> Vec<u8> {
+    basis_core::types::exchange_signing_message(
+        owner_key,
+        receiver_key,
+        from_denomination,
+        from_pre_total,
+        from_post_total,
+        to_denomination,
+        to_pre_total,
+        to_post_total,
+        timestamp,
+        tracker_nft_id,
+    )
+}
+
 /// Validate that a public key is a valid compressed secp256k1 point
 pub fn validate_public_key(pubkey: &PubKey) -> Result<(), NoteError> {
     match basis_core::impls::validate_public_key(pubkey) {

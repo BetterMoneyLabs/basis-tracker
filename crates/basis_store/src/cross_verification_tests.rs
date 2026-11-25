@@ -91,7 +91,7 @@ mod tests {
         reserve_tracker.update_reserve(reserve_info).unwrap();
 
         // Create notes totaling 0.5 ERG debt (50% collateralization)
-        let notes = vec![
+        let notes = [
             IouNote::new(
                 [2u8; 33],
                 250000000,
@@ -125,7 +125,7 @@ mod tests {
         assert!(!should_alert, "Should not alert for 200% ratio");
 
         // Test with higher debt (should trigger alert)
-        let high_debt_notes = vec![
+        let high_debt_notes = [
             IouNote::new(
                 [2u8; 33],
                 800000000,

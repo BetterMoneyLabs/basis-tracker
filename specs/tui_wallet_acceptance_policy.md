@@ -22,7 +22,7 @@ This behavior is implemented in:
 ## Core Design Principles
 
 1. **Separate Configs**: TUI uses its own config file (`~/.basis/ui.toml`), independent from CLI config
-2. **Default Policy**: 100% collateralization required (reject unless fully collateralized)
+2. **Default Policy**: 100% collateralization required, and no pending refund on the issuer's reserve (reject unless fully collateralized by a reserve not being refunded)
 3. **Community Config**: Optional `community.toml` for manual trust-based policy replacement
 4. **Auto-Upload**: Policy automatically signed and uploaded to server on every change
 5. **Simple UX**: 1% increments for collateral, blacklist takes precedence, cached reserve data for testing
@@ -111,15 +111,25 @@ When no config exists, TUI auto-generates:
 ```toml
 [acceptance]
 default = "reject"
-root = "require_full_collateral"
+root = "default_policy"
 
 [[acceptance.predicates]]
 name = "require_full_collateral"
 type = "collateralization"
 min_ratio = 1.0  # 100%
+
+[[acceptance.predicates]]
+name = "no_pending_refund"
+type = "no_pending_refund"
+
+[[acceptance.predicates]]
+name = "default_policy"
+type = "all_of"
+predicates = ["require_full_collateral", "no_pending_refund"]
 ```
 
-**Behavior**: Reject all notes unless backed by 100% collateral.
+**Behavior**: Reject all notes unless backed by 100% collateral with no pending refund
+on the issuer's reserve.
 
 ## TUI Policy Screen
 

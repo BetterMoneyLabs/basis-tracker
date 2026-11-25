@@ -110,7 +110,7 @@ All endpoints return a standardized response envelope:
 ### Notes
 
 - `POST /notes` - Create a new IOU note (requires `tracker_nft_id`, which must match this tracker's configured NFT id — see "Signing Message Format" below; optional `denomination` field, `"erg"` or `"token:<64-hex>"`, defaulting to the pair's existing note's denomination when unambiguous, else ERG)
-- `POST /notes/exchange` - Exchange debt between two denominations of one (issuer, recipient) pair in two phases (issue #17): the from-edge decrease applies immediately, the to-edge increase is staged until the decrease is committed on-chain and the issuer's from-denomination reserve box is verified unchanged (both parties sign both edges' new states — the recipient's signatures are the creditor consent required for a debt decrease; requires exactly one tracked from-denomination reserve, else 409)
+- `POST /notes/exchange` - Exchange debt between two denominations of one (issuer, recipient) pair in two phases (issue #17): the from-edge decrease to `from_new_total` applies immediately, the to-edge increase to `to_new_total` is staged until the decrease is committed on-chain and the issuer's from-denomination reserve box is verified unchanged. Consent is a domain-separated exchange message — `blake2b256("basis-exchange-v1") ‖ fromKey ‖ fromPre ‖ fromPost ‖ toKey ‖ toPre ‖ toPost ‖ timestamp ‖ trackerNftId` (168 bytes) — signed by both parties (`issuer_exchange_signature`, `recipient_exchange_signature`); the tracker reconstructs it with the current totals as pre-totals, so an exchange held while either edge moved fails verification, and a timestamp older than one hour is rejected (issue #15 review N10). The issuer also signs each edge's standard note message at its new total (`issuer_from_signature`, `issuer_to_signature`) and should sign and submit last, so the recipient never holds an issuer note signature before the exchange lands. Requires exactly one tracked from-denomination reserve, else 409.
 - `GET /exchanges/pending` - List staged and cancelled two-phase exchange records (optional `issuer_pubkey` / `recipient_pubkey` query filters); staged records await the reserve verification, cancelled records carry the reason (the from-edge decrease stays applied)
 - `GET /notes` - Get all IOU notes with age and confirmation state
 - `GET /notes/issuer/{pubkey}` - Get all notes issued by a public key
@@ -124,9 +124,16 @@ All endpoints return a standardized response envelope:
 - `GET /reserves/{box_id}` - Get a specific reserve by box ID
 - `GET /reserves/issuer/{pubkey}` - Get reserves for an issuer
 - `GET /reserves/quarantined` - List reserve boxes rejected by admission control (issue #19): duplicates that do not descend from the tracked reserve for their (owner, denomination), roots that failed setup validation, or roots whose creating transaction spends no P2PK input of the R4 owner key. Quarantined boxes are never tracked.
+- `GET /reserves/state-digest?issuer_pubkey=<hex>&denomination=<erg|token:hex>` - Get the tracker's reserve AVL tree state for an (issuer, denomination) pair: the 33-byte root digest (`reserve_state_digest`) and the serialized SAvlTree value a reserve (re)creation must carry in R5 (`reserve_r5`). Empty tree for a fresh pair; carried-forward redeemed-amount history after a reserve rotation (issue #15 review N9).
 - `POST /reserves/create` - Build a reserve creation payment request
 
-`POST /reserves/create` only *builds* the payment request. To create the
+`POST /reserves/create` only *builds* the payment request. Its R5 register is
+set to the tracker's reserve-tree digest for the (owner, denomination) pair —
+the empty tree for a fresh pair, or the carried-forward redemption history
+after a rotation — and the scanner admits a root box with a non-empty R5 only
+when it matches the digest recorded by this endpoint (issue #15 review N9).
+Clients can fetch the expected value beforehand with
+`GET /reserves/state-digest`. To create the
 reserve on-chain, submit the returned `requests` array to your own Ergo
 node's wallet directly:
 
@@ -158,11 +165,10 @@ configured Ergo node wallet.
 
 ### Redemption
 
-- `POST /redeem` - Initiate redemption of an IOU note
-- `POST /redeem/complete` - Mark a redemption as completed locally (amounts are validated against the stored note state; a mismatch returns 400)
+- `POST /redemption/build` - Build an unsigned redemption transaction around caller-supplied fee inputs (the tracker proof is generated against the last on-chain-confirmed tracker state; returns 400 if the note is not yet in the confirmed state). The redeemer funds the fee: `fee_box_ids` must name unspent, token-free P2PK boxes of the recipient
+- `POST /redemption/submit` - Broadcast a fully-signed redemption transaction. The echoed `unsigned_tx` from `/redemption/build` binds the submit to the stored build entry (unknown/expired entries return 409; a signed tx that is not the built one returns 400), and tracker state is synced from the stored entry after broadcast
 - `POST /redemption/prepare` - Prepare a redemption (legacy tracker-signature + proof endpoint; the note must exist and the stored note's cumulative debt and timestamp are signed — the request's `timestamp` field is ignored)
-- `POST /redemption/build` - Build an unsigned redemption transaction and sign fee inputs (the tracker proof is generated against the last on-chain-confirmed tracker state; returns 400 if the note is not yet in the confirmed state)
-- `POST /redemption/submit` - Broadcast a fully-signed redemption transaction (note key and amounts are re-validated against stored state before broadcasting; a mismatch returns 400)
+- `POST /redeem/complete` - Admin-only repair hatch: mark a redemption as completed locally (amounts are validated against the stored note state; a mismatch returns 400). Normal clients never need it — `/redemption/submit` syncs state itself
 
 ### Proofs
 
@@ -303,20 +309,6 @@ curl -X POST http://localhost:3048/acceptance/check \
   }'
 ```
 
-### Initiate Redemption
-
-```bash
-curl -X POST http://localhost:3048/redeem \
-  -H "Content-Type: application/json" \
-  -d '{
-    "issuer_pubkey": "010101010101010101010101010101010101010101010101010101010101010101",
-    "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
-    "amount": 500000000,
-    "timestamp": 1234567890000,
-    "issuer_signature": "030303..."
-  }'
-```
-
 ### Build Redemption Transaction
 
 ```bash
@@ -327,13 +319,17 @@ curl -X POST http://localhost:3048/redemption/build \
     "recipient_pubkey": "020202020202020202020202020202020202020202020202020202020202020202",
     "amount": 500000000,
     "timestamp": 1234567890000,
-    "issuer_signature": "030303..."
+    "issuer_signature": "030303...",
+    "fee_box_ids": ["1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"]
   }'
 ```
 
-The request's optional `change_address` field is deprecated and ignored:
-change is always paid to the tracker's own wallet (derived from the selected
-fee input, falling back to the configured change address).
+The redeemer funds the transaction: `fee_box_ids` names the boxes paying the
+miner fee (and, for token reserves, the recipient's min-ERG box). Every box
+must be unspent, token-free, and carry the recipient's P2PK ergoTree; the
+client signs every input with the recipient secret. The tracker pays nothing
+and signs nothing in the transaction. The optional `change_address` names the
+redeemer's change output and defaults to the recipient address.
 
 The tracker AVL proof in the response is generated against the last
 on-chain-confirmed tracker state digest (not the live local tree), so it

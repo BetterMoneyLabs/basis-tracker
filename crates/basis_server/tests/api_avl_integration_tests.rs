@@ -1,14 +1,13 @@
 #[cfg(test)]
 mod api_avl_integration_tests {
     use basis_store::{IouNote, PubKey, TrackerStateManager};
-    use secp256k1;
 
     /// Helper to generate a test public key
     fn generate_test_pubkey(seed: u8) -> PubKey {
         let mut key = [0u8; 33];
         key[0] = 0x02; // Compressed public key prefix
-        for i in 1..33 {
-            key[i] = seed * (i as u8 + 1);
+        for (i, byte) in key.iter_mut().enumerate().skip(1) {
+            *byte = seed * (i as u8 + 1);
         }
         key
     }
@@ -38,7 +37,7 @@ mod api_avl_integration_tests {
 
         // Verify initial state
         let initial_state = tracker.get_state();
-        let initial_root = initial_state.avl_root_digest.clone();
+        let initial_root = initial_state.avl_root_digest;
 
         // Generate test data
         let issuer_secret_key = [1u8; 32]; // Use a fixed secret key for testing
@@ -62,7 +61,7 @@ mod api_avl_integration_tests {
         assert!(result.is_ok(), "Should be able to add note");
 
         let updated_state = tracker.get_state();
-        let updated_root = updated_state.avl_root_digest.clone();
+        let updated_root = updated_state.avl_root_digest;
 
         // Verify that the AVL tree root has changed
         assert_ne!(
@@ -83,7 +82,7 @@ mod api_avl_integration_tests {
 
         // Initial state
         let initial_state = tracker.get_state();
-        let initial_root = initial_state.avl_root_digest.clone();
+        let initial_root = initial_state.avl_root_digest;
 
         // Generate test data
         let issuer_secret_key = [2u8; 32]; // Use a different secret key for this test
@@ -106,7 +105,7 @@ mod api_avl_integration_tests {
             assert!(result.is_ok(), "Should be able to add note {}", i);
 
             let current_state = tracker.get_state();
-            let current_root = current_state.avl_root_digest.clone();
+            let current_root = current_state.avl_root_digest;
 
             // Verify root changes with each note
             assert_ne!(
@@ -124,7 +123,7 @@ mod api_avl_integration_tests {
 
         // Final state should be different from initial
         let final_state = tracker.get_state();
-        let final_root = final_state.avl_root_digest.clone();
+        let final_root = final_state.avl_root_digest;
         assert_ne!(
             initial_root, final_root,
             "Final root should differ from initial after adding notes"
@@ -182,7 +181,7 @@ mod api_avl_integration_tests {
 
         // Verify AVL tree state is non-empty
         let state = tracker.get_state();
-        let root = state.avl_root_digest.clone();
+        let root = state.avl_root_digest;
         assert_ne!(
             root, [0u8; 33],
             "Root should not be empty after note storage"
@@ -195,7 +194,7 @@ mod api_avl_integration_tests {
 
         // Start with empty state
         let empty_state = tracker.get_state();
-        let empty_root = empty_state.avl_root_digest.clone();
+        let empty_root = empty_state.avl_root_digest;
 
         // Generate test keys
         let issuer_secret_key = [4u8; 32]; // Use a different secret key for this test
@@ -211,7 +210,7 @@ mod api_avl_integration_tests {
 
         tracker.add_note(&issuer_pubkey, &note1).unwrap();
         let state_after_add = tracker.get_state();
-        let root_after_add = state_after_add.avl_root_digest.clone();
+        let root_after_add = state_after_add.avl_root_digest;
 
         // Update the same note
         let note2 = create_signed_note(
@@ -223,7 +222,7 @@ mod api_avl_integration_tests {
 
         tracker.add_note(&issuer_pubkey, &note2).unwrap(); // add_note actually updates
         let state_after_update = tracker.get_state();
-        let root_after_update = state_after_update.avl_root_digest.clone();
+        let root_after_update = state_after_update.avl_root_digest;
 
         // Verify all states are different
         assert_ne!(
@@ -296,7 +295,7 @@ mod api_avl_integration_tests {
 
         // Verify initial state is properly initialized
         let initial_state = tracker.get_state();
-        let initial_root = initial_state.avl_root_digest.clone();
+        let initial_root = initial_state.avl_root_digest;
 
         // Initial root should be the empty tree root (not all zeros in practice)
         // For an empty AVL tree, this could be a specific empty tree digest

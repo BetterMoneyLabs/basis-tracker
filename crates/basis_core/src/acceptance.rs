@@ -46,15 +46,32 @@ impl AcceptanceConfig {
         toml::to_string(self)
     }
 
-    /// Create default policy requiring 100% collateralization
+    /// Create default policy requiring 100% collateralization and no pending refund
+    /// on the issuer's reserve (issue #15 review N16: a reserve whose owner has
+    /// initiated an unilateral refund must not back new notes — the collateral is
+    /// on its way out within the refund window).
     pub fn default_collateral() -> Self {
         Self {
             default: DefaultPolicy::Reject,
-            root: Some("require_full_collateral".to_string()),
-            predicates: vec![PredicateConfig::Collateralization {
-                name: "require_full_collateral".to_string(),
-                min_ratio: 1.0,
-            }],
+            root: Some("default_policy".to_string()),
+            predicates: vec![
+                // Keep Collateralization at index 0: the TUI overwrites
+                // `predicates[0]` when the user sets a collateral percentage.
+                PredicateConfig::Collateralization {
+                    name: "require_full_collateral".to_string(),
+                    min_ratio: 1.0,
+                },
+                PredicateConfig::NoPendingRefund {
+                    name: "no_pending_refund".to_string(),
+                },
+                PredicateConfig::AllOf {
+                    name: "default_policy".to_string(),
+                    predicates: vec![
+                        "require_full_collateral".to_string(),
+                        "no_pending_refund".to_string(),
+                    ],
+                },
+            ],
         }
     }
 }
@@ -185,14 +202,33 @@ mod tests {
     fn test_default_collateral() {
         let config = AcceptanceConfig::default_collateral();
         assert_eq!(config.default, DefaultPolicy::Reject);
-        assert_eq!(config.root, Some("require_full_collateral".to_string()));
-        assert_eq!(config.predicates.len(), 1);
+        assert_eq!(config.root, Some("default_policy".to_string()));
+        assert_eq!(config.predicates.len(), 3);
         match &config.predicates[0] {
             PredicateConfig::Collateralization { name, min_ratio } => {
                 assert_eq!(name, "require_full_collateral");
                 assert!((min_ratio - 1.0).abs() < f64::EPSILON);
             }
             _ => panic!("Expected Collateralization config"),
+        }
+        match &config.predicates[1] {
+            PredicateConfig::NoPendingRefund { name } => {
+                assert_eq!(name, "no_pending_refund");
+            }
+            _ => panic!("Expected NoPendingRefund config"),
+        }
+        match &config.predicates[2] {
+            PredicateConfig::AllOf { name, predicates } => {
+                assert_eq!(name, "default_policy");
+                assert_eq!(
+                    predicates,
+                    &vec![
+                        "require_full_collateral".to_string(),
+                        "no_pending_refund".to_string()
+                    ]
+                );
+            }
+            _ => panic!("Expected AllOf config"),
         }
     }
 

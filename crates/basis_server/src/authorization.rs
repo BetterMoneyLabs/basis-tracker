@@ -68,7 +68,6 @@ fn required_role(path: &str, method: &str) -> ClientRole {
             "/reserves/create"
             | "/acceptance/policy"
             | "/notes"
-            | "/redeem"
             | "/redemption/prepare"
             | "/redemption/build"
             | "/redemption/submit"
@@ -133,7 +132,8 @@ mod tests {
         assert_eq!(required_role("/", "GET"), ClientRole::Read);
         assert_eq!(required_role("/notes", "GET"), ClientRole::Read);
         assert_eq!(required_role("/notes", "POST"), ClientRole::Write);
-        assert_eq!(required_role("/redeem", "POST"), ClientRole::Write);
+        // The route was removed (issue #15 review N7); unknown POSTs default to Admin.
+        assert_eq!(required_role("/redeem", "POST"), ClientRole::Admin);
         assert_eq!(required_role("/redeem/complete", "POST"), ClientRole::Admin);
         // The route was removed (PR #16 B4); unknown POSTs default to Admin.
         assert_eq!(required_role("/reserves/submit", "POST"), ClientRole::Admin);

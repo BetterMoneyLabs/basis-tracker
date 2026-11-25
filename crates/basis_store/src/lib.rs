@@ -172,6 +172,47 @@ impl Default for NoteConfirmation {
 /// Note key (32 bytes) used to index confirmation records.
 pub type NoteKeyBytes = [u8; 32];
 
+/// Snapshot of the tracker AVL tree behind one root digest: every
+/// (key, totalDebt) pair in first-insertion order.
+///
+/// AVL+ tree shape depends on the order keys were first inserted, so the
+/// tree behind a digest can only be reproduced from this ordered content.
+/// The tracker box updater pins a snapshot when it submits an update
+/// transaction; once that transaction confirms, the snapshot becomes the
+/// committed state redemption proofs are generated from. Persisted so
+/// committed proofs survive a restart (issue #15 follow-up N2).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TreeSnapshot {
+    /// AVL root digest of the tree this snapshot was taken from.
+    #[serde(with = "serde_digest_33")]
+    pub digest: [u8; 33],
+    /// Every (key, totalDebt) pair in the tree, in first-insertion order.
+    pub entries: Vec<(NoteKeyBytes, u64)>,
+}
+
+/// Hex codec for the 33-byte digest (serde's array impls stop at 32).
+mod serde_digest_33 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(digest: &[u8; 33], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(digest))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 33], D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("tracker digest must be 33 bytes"))
+    }
+}
+
+/// How many recent live-tree snapshots are kept for digest lookup (N2).
+/// The updater marks notes pending right after submitting, so the digest it
+/// needs is always among the last few; the pinned pending/committed
+/// snapshots are held separately and never evicted.
+const MAX_RECENT_TREE_SNAPSHOTS: usize = 8;
+
 /// Reserve information for a public key
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReserveInfo {
@@ -280,6 +321,37 @@ impl NoteKey {
     pub fn from_bytes(bytes: &[u8; 32]) -> Self {
         Self { key_hash: *bytes }
     }
+}
+
+/// A redemption operation observed on-chain in a reserve lineage (issue #15 review N14).
+///
+/// Extracted from a confirmed spend of a reserve box: the receiver key and timestamp come
+/// from the spending transaction's context extension (vars #1 and #4), and `redeemed_delta`
+/// is the collateral decrease between the spent box and its successor. The mirror applies it
+/// read-modify-write: the new cumulative value is the tree's current already_redeemed for the
+/// key plus `redeemed_delta`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainReserveOp {
+    /// Recipient (creditor) public key. The reserve tree key is
+    /// blake2b256(issuer ‖ recipient) — without the token id, matching both reserve
+    /// contracts (`basis.es` and `basis-token.es` both use `reserveKey`).
+    pub recipient_pubkey: PubKey,
+    /// Note timestamp from the spending transaction's extension var #4.
+    pub timestamp: u64,
+    /// Collateral decrease in this redemption generation (nanoERG or token units).
+    pub redeemed_delta: u64,
+}
+
+/// Where a reserve lineage walk found a state consistent with the local mirror
+/// (issue #15 review N14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveSyncPoint {
+    /// A generation's R5 equals the current mirror digest: apply the collected ops on top
+    /// of the pair's replayed journal state.
+    Mirror,
+    /// The walk reached the lineage root (empty tree) without matching the mirror: replace
+    /// the pair's state wholesale, dropping phantom optimistic updates that never confirmed.
+    Genesis,
 }
 
 /// Status information for a public key
@@ -462,6 +534,11 @@ enum StagedExchangeDecision {
 pub type ExchangeAcceptanceCheckFn =
     Box<dyn FnOnce(ExchangeAcceptanceView) -> Result<(), String> + Send>;
 
+/// Validity window for a signed exchange (issue #15 review N10): the exchange
+/// timestamp must be at most this far in the past. A held exchange expires
+/// instead of staying replayable against edges that moved since it was signed.
+const EXCHANGE_VALIDITY_WINDOW_MS: u64 = 60 * 60 * 1000;
+
 /// Tracker state manager with persistent AVL tree
 pub struct TrackerStateManager {
     avl_state: basis_trees::BasisAvlTree,
@@ -495,6 +572,23 @@ pub struct TrackerStateManager {
     /// tracker box (issue #15 S6). `None` until an update confirms or the updater
     /// observes a matching on-chain digest after restart.
     confirmed_digest: Option<[u8; 33]>,
+    /// First-insertion order of the keys in the live tracker tree. AVL+ tree
+    /// shape depends on it; persisted so a restart rebuilds the same shape
+    /// (and therefore the same digest) as the tree the updater committed
+    /// (issue #15 follow-up N2).
+    insertion_order: Vec<NoteKeyBytes>,
+    /// Set member of `insertion_order` for O(1) first-insert checks.
+    known_tree_keys: std::collections::HashSet<NoteKeyBytes>,
+    /// Recent live-tree snapshots (newest last, capped). Lets
+    /// `mark_notes_pending` honor a digest that was read before concurrent
+    /// note posts moved the live tree on (N2 updater race).
+    recent_snapshots: std::collections::VecDeque<TreeSnapshot>,
+    /// Snapshot pinned for the in-flight tracker update transaction.
+    /// In-memory only: pending state does not survive a restart.
+    pending_snapshot: Option<TreeSnapshot>,
+    /// Snapshot behind the latest confirmed on-chain digest. Persisted;
+    /// committed redemption proofs are generated from this exact tree.
+    committed_snapshot: Option<TreeSnapshot>,
     /// Set when a canonical tree rebuild failed after storage was committed
     /// (issue #20): the live tree is then stale relative to storage, and
     /// `update_state` retries the rebuild before refreshing the committed
@@ -549,6 +643,23 @@ impl TrackerStateManager {
         // Per-issuer reserve AVL trees start empty; they are populated as redemptions complete.
         let reserve_avl_states = std::collections::HashMap::new();
 
+        // N2: the persisted first-insertion order and committed tree snapshot
+        // let the rebuild below reproduce the exact tree shape (and digest)
+        // the updater committed on-chain.
+        let insertion_order = storage.load_tracker_insertion_order().unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to load tracker insertion order, starting empty: {:?}",
+                e
+            );
+            Vec::new()
+        });
+        let known_tree_keys = insertion_order.iter().copied().collect();
+        let committed_snapshot = storage.load_committed_snapshot().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load committed tree snapshot: {:?}", e);
+            None
+        });
+        let confirmed_digest = committed_snapshot.as_ref().map(|s| s.digest);
+
         // Rebuild AVL tree from all stored notes to ensure consistency after restart
         let mut manager = Self {
             avl_state,
@@ -560,7 +671,12 @@ impl TrackerStateManager {
             storage,
             reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
-            confirmed_digest: None,
+            confirmed_digest,
+            insertion_order,
+            known_tree_keys,
+            recent_snapshots: std::collections::VecDeque::new(),
+            pending_snapshot: None,
+            committed_snapshot,
             tree_dirty: false,
             #[cfg(test)]
             fail_tree_rebuild: false,
@@ -587,11 +703,15 @@ impl TrackerStateManager {
     /// Rebuild the AVL tree from all notes stored in the database.
     /// This is critical after server restart to ensure the AVL tree matches
     /// the on-chain commitment. AVL trees are insertion-order sensitive,
-    /// so notes must be inserted in chronological order (by timestamp).
+    /// so notes are replayed in the persisted first-insertion order.
     pub fn rebuild_avl_tree(&mut self) -> Result<(), NoteError> {
         tracing::info!("Rebuilding AVL tree from stored notes...");
 
-        Self::populate_tree_from_storage(&self.storage, &mut self.avl_state)?;
+        let mut fresh = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to create fresh AVL tree: {:?}", e))
+        })?;
+        self.populate_tree_from_storage(&mut fresh)?;
+        self.avl_state = fresh;
 
         self.update_state();
         let root_digest = self.current_state.avl_root_digest;
@@ -603,30 +723,66 @@ impl TrackerStateManager {
         Ok(())
     }
 
-    /// Apply all stored notes to `tree` in canonical (timestamp-sorted) order.
-    /// Shared by `rebuild_avl_tree` (in-place, at startup) and
-    /// `rebuild_tree_canonically` (into a fresh tree, swapped in on success).
+    /// Apply all stored notes to `tree`, replaying the persisted
+    /// first-insertion order so the rebuilt tree has the same shape — and
+    /// therefore the same digest — as the live tree the updater committed
+    /// (issue #15 follow-up N2). Keys without a recorded position (a database
+    /// that predates insertion-order persistence) are appended in timestamp
+    /// order, the pre-fix rebuild order, and their positions are recorded.
     fn populate_tree_from_storage(
-        storage: &persistence::NoteStorage,
+        &mut self,
         tree: &mut basis_trees::BasisAvlTree,
     ) -> Result<(), NoteError> {
-        let mut notes_with_issuer = storage
+        let notes_with_issuer = self
+            .storage
             .get_all_notes_with_issuer()
             .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
 
-        // AVL tree structure depends on insertion order, so notes must be
-        // inserted in the canonical chronological order every rebuild uses.
-        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
+        let mut by_key: std::collections::HashMap<NoteKeyBytes, (u64, u64)> = notes_with_issuer
+            .iter()
+            .map(|(issuer, note)| {
+                (
+                    Self::confirmation_key(issuer, &note.recipient_pubkey, &note.denomination),
+                    (note.amount_collected, note.timestamp),
+                )
+            })
+            .collect();
 
-        for (issuer_pubkey, note) in &notes_with_issuer {
-            let key =
-                NoteKey::from_assets(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
-            let key_bytes = key.to_bytes();
-            let value_bytes = note.amount_collected.to_be_bytes().to_vec();
+        let insertion_order = self.insertion_order.clone();
+        for key in &insertion_order {
+            if let Some((value, _)) = by_key.remove(key) {
+                tree.update(key.to_vec(), value.to_be_bytes().to_vec())
+                    .map_err(|e| {
+                        NoteError::StorageError(format!(
+                            "AVL tree update failed during rebuild: {:?}",
+                            e
+                        ))
+                    })?;
+            }
+        }
 
-            tree.update(key_bytes, value_bytes).map_err(|e| {
-                NoteError::StorageError(format!("AVL tree update failed during rebuild: {:?}", e))
-            })?;
+        if !by_key.is_empty() {
+            let mut remaining: Vec<(NoteKeyBytes, (u64, u64))> = by_key.into_iter().collect();
+            remaining.sort_by_key(|(_, (_, timestamp))| *timestamp);
+            for (key, (value, _)) in &remaining {
+                tree.update(key.to_vec(), value.to_be_bytes().to_vec())
+                    .map_err(|e| {
+                        NoteError::StorageError(format!(
+                            "AVL tree update failed during rebuild: {:?}",
+                            e
+                        ))
+                    })?;
+            }
+            for (key, _) in &remaining {
+                self.known_tree_keys.insert(*key);
+                self.insertion_order.push(*key);
+            }
+            if let Err(e) = self
+                .storage
+                .store_tracker_insertion_order(&self.insertion_order)
+            {
+                tracing::error!("Failed to persist tracker insertion order: {:?}", e);
+            }
         }
         Ok(())
     }
@@ -711,6 +867,11 @@ impl TrackerStateManager {
         // Per-issuer reserve AVL trees start empty in test instances.
         let reserve_avl_states = std::collections::HashMap::new();
 
+        let insertion_order = storage.load_tracker_insertion_order().unwrap_or_default();
+        let known_tree_keys = insertion_order.iter().copied().collect();
+        let committed_snapshot = storage.load_committed_snapshot().ok().flatten();
+        let confirmed_digest = committed_snapshot.as_ref().map(|s| s.digest);
+
         tracing::debug!("TrackerStateManager created successfully");
         let mut manager = Self {
             avl_state,
@@ -722,7 +883,12 @@ impl TrackerStateManager {
             storage,
             reserve_avl_states,
             confirmations: std::collections::HashMap::new(),
-            confirmed_digest: None,
+            confirmed_digest,
+            insertion_order,
+            known_tree_keys,
+            recent_snapshots: std::collections::VecDeque::new(),
+            pending_snapshot: None,
+            committed_snapshot,
             tree_dirty: false,
             #[cfg(test)]
             fail_tree_rebuild: false,
@@ -845,6 +1011,9 @@ impl TrackerStateManager {
         // (The reverse order committed debt the tracker had no record of —
         // issue #20 follow-up.)
         self.storage.store_note(issuer_pubkey, &note_to_store)?;
+        let mut key32 = [0u8; 32];
+        key32.copy_from_slice(&key_bytes);
+        self.record_key_insertion(&key32);
         if let Err(e) = self.avl_state.update(key_bytes.clone(), value_bytes) {
             self.tree_dirty = true;
             tracing::error!(
@@ -859,8 +1028,6 @@ impl TrackerStateManager {
         // new local value versus the confirmed/pending values. The local
         // value has just changed, so the note is only Confirmed/Pending
         // if the new value matches what is already on-chain / in-flight.
-        let mut key32 = [0u8; 32];
-        key32.copy_from_slice(&key_bytes);
         self.recompute_confirmation_status(&key32, note.amount_collected);
 
         Ok(())
@@ -963,33 +1130,35 @@ impl TrackerStateManager {
         self.confirmations.clone()
     }
 
-    /// Mark every note whose local value differs from its confirmed value as
-    /// `Pending`, recording the value that the in-flight update transaction will
-    /// commit. Returns the number of notes transitioned to `Pending`.
+    /// Mark every note in the tree snapshot behind `digest` whose snapshotted
+    /// value differs from its confirmed value as `Pending`, recording the
+    /// value the in-flight update transaction will commit. The snapshot — not
+    /// the current note values — decides what is marked: the update commits
+    /// exactly that tree, however many notes were posted since the digest was
+    /// read (issue #15 follow-up N2). Returns the number of notes transitioned
+    /// to `Pending`.
     pub fn mark_notes_pending(
         &mut self,
         digest: [u8; 33],
         tx_id: &str,
         submitted_height: u64,
     ) -> Result<usize, NoteError> {
-        let _ = (digest, submitted_height);
-        let notes = self.storage.get_all_notes_with_issuer()?;
+        let _ = submitted_height;
+        let snapshot = self.snapshot_for_digest(&digest)?;
+        self.pending_snapshot = Some(snapshot.clone());
         let mut count = 0usize;
 
-        for (issuer_pubkey, note) in &notes {
-            let key =
-                Self::confirmation_key(issuer_pubkey, &note.recipient_pubkey, &note.denomination);
-            let local_value = note.amount_collected;
+        for (key, value) in &snapshot.entries {
             let entry = self
                 .confirmations
-                .entry(key)
+                .entry(*key)
                 .or_insert_with(NoteConfirmation::local_only);
 
-            if Some(local_value) != entry.confirmed_total_debt {
-                entry.pending_total_debt = Some(local_value);
+            if Some(*value) != entry.confirmed_total_debt {
+                entry.pending_total_debt = Some(*value);
                 entry.pending_tx_id = Some(tx_id.to_string());
                 entry.status = NoteConfirmationStatus::Pending;
-                let _ = self.storage.store_confirmation(&key, entry);
+                let _ = self.storage.store_confirmation(key, entry);
                 count += 1;
             }
         }
@@ -1003,40 +1172,59 @@ impl TrackerStateManager {
         Ok(count)
     }
 
-    /// Promote every `Pending` note to `Confirmed`, copying the pending value to
-    /// the confirmed value and recording the confirming box metadata. `digest` is
-    /// the AVL root committed by the confirming tracker box; it becomes the
-    /// committed state that redemption proofs are generated against. Returns the
-    /// number of notes transitioned to `Confirmed`.
+    /// Promote the tree snapshot behind `digest` to the committed state:
+    /// every note in the snapshot gets its snapshotted value as the confirmed
+    /// value, and the snapshot becomes what committed redemption proofs are
+    /// generated from (persisted, so proofs survive a restart). A note whose
+    /// local value moved past the snapshotted value while the update was in
+    /// flight keeps the snapshotted value as confirmed and drops back to
+    /// `LocalOnly` (N2). Returns the number of notes in the confirmed tree.
     pub fn confirm_pending_notes(
         &mut self,
         digest: [u8; 33],
         box_id: &str,
         height: u64,
     ) -> Result<usize, NoteError> {
+        let snapshot = self.snapshot_for_digest(&digest)?;
         self.confirmed_digest = Some(digest);
-        let keys: Vec<NoteKeyBytes> = self.confirmations.keys().copied().collect();
+        if let Err(e) = self.storage.store_committed_snapshot(&snapshot) {
+            tracing::error!("Failed to persist committed tree snapshot: {:?}", e);
+        }
+        self.committed_snapshot = Some(snapshot.clone());
+        if self.pending_snapshot.as_ref().map(|p| p.digest) == Some(digest) {
+            self.pending_snapshot = None;
+        }
+
+        let local_values: std::collections::HashMap<NoteKeyBytes, u64> = self
+            .storage
+            .get_all_notes_with_issuer()?
+            .iter()
+            .map(|(issuer, note)| {
+                (
+                    Self::confirmation_key(issuer, &note.recipient_pubkey, &note.denomination),
+                    note.amount_collected,
+                )
+            })
+            .collect();
+
         let mut count = 0usize;
-
-        for key in keys {
-            let should_confirm = self
+        for (key, value) in &snapshot.entries {
+            let entry = self
                 .confirmations
-                .get(&key)
-                .map(|c| c.status == NoteConfirmationStatus::Pending)
-                .unwrap_or(false);
-
-            if should_confirm {
-                if let Some(entry) = self.confirmations.get_mut(&key) {
-                    entry.confirmed_total_debt = entry.pending_total_debt;
-                    entry.pending_total_debt = None;
-                    entry.pending_tx_id = None;
-                    entry.confirmed_box_id = Some(box_id.to_string());
-                    entry.confirmed_height = Some(height);
-                    entry.status = NoteConfirmationStatus::Confirmed;
-                    let _ = self.storage.store_confirmation(&key, entry);
-                    count += 1;
-                }
-            }
+                .entry(*key)
+                .or_insert_with(NoteConfirmation::local_only);
+            entry.confirmed_total_debt = Some(*value);
+            entry.pending_total_debt = None;
+            entry.pending_tx_id = None;
+            entry.confirmed_box_id = Some(box_id.to_string());
+            entry.confirmed_height = Some(height);
+            entry.status = if local_values.get(key) == Some(value) {
+                NoteConfirmationStatus::Confirmed
+            } else {
+                NoteConfirmationStatus::LocalOnly
+            };
+            let _ = self.storage.store_confirmation(key, entry);
+            count += 1;
         }
 
         tracing::info!(
@@ -1053,6 +1241,7 @@ impl TrackerStateManager {
     /// the status from the local value versus the confirmed value. Returns the
     /// number of notes reverted.
     pub fn revert_pending_notes(&mut self) -> Result<usize, NoteError> {
+        self.pending_snapshot = None;
         let notes = self.storage.get_all_notes_with_issuer()?;
         let mut count = 0usize;
 
@@ -1102,6 +1291,16 @@ impl TrackerStateManager {
         if confirmed_digest != &self.current_state.avl_root_digest {
             return Ok(0);
         }
+
+        // The live tree IS the committed tree: pin it as the snapshot that
+        // committed redemption proofs are generated from (N2). This is also
+        // the path that recovers committed proofs when an update confirmed
+        // while the tracker was offline.
+        let snapshot = self.capture_live_snapshot();
+        if let Err(e) = self.storage.store_committed_snapshot(&snapshot) {
+            tracing::error!("Failed to persist committed tree snapshot: {:?}", e);
+        }
+        self.committed_snapshot = Some(snapshot);
 
         let notes = self.storage.get_all_notes_with_issuer()?;
         let mut count = 0usize;
@@ -1216,6 +1415,9 @@ impl TrackerStateManager {
         // and sets the dirty flag so the tree is rebuilt before the next
         // digest update.
         self.storage.store_note(issuer_pubkey, &note_to_store)?;
+        let mut key32 = [0u8; 32];
+        key32.copy_from_slice(&key_bytes);
+        self.record_key_insertion(&key32);
         if let Err(e) = self.avl_state.update(key_bytes, value_bytes) {
             self.tree_dirty = true;
             tracing::error!(
@@ -1229,9 +1431,10 @@ impl TrackerStateManager {
     }
 
     /// Atomically move debt between two denominations of the same (issuer, recipient)
-    /// pair: decrease the `from` edge by `from_amount` and increase the `to` edge by
-    /// `to_amount`. This is the off-chain novation used for cross-denomination
-    /// exchange (specs/ergo/multi_collateral_reserves.md §10).
+    /// pair: decrease the `from` edge to `from_new_total` and increase the `to`
+    /// edge to `to_new_total` (specs/ergo/multi_collateral_reserves.md §10). The
+    /// amounts moved are derived: `from_amount = current − from_new_total` and
+    /// `to_amount = to_new_total − current`.
     ///
     /// TWO-PHASE (issue #17, `specs/ergo/exchange_atomicity.md`): only the
     /// from-edge decrease is applied here. The to-edge increase is STAGED in the
@@ -1242,10 +1445,19 @@ impl TrackerStateManager {
     /// Applying both edges at once would let a creditor redeem the old from-edge
     /// total with a pre-built transaction AND collect the to-edge increase.
     ///
-    /// SECURITY: decreasing an edge is the S3 operation — it is only permitted here
-    /// because the creditor consented, proven by the recipient's signature over the
-    /// from-edge's new message. All four signatures (issuer and recipient over each
-    /// edge's 80-byte message) are verified BEFORE any state changes.
+    /// SECURITY (S3 + issue #15 review N10): decreasing an edge is only
+    /// permitted with the creditor's consent. Consent is a domain-separated
+    /// exchange message — blake2b256("basis-exchange-v1") ‖ both edges' debt
+    /// keys, pre- and post-totals ‖ timestamp ‖ tracker NFT id — signed by BOTH
+    /// parties. The tracker reconstructs the message with the CURRENT totals as
+    /// the pre-totals, so a signed exchange held while either edge moved no
+    /// longer verifies, and a timestamp older than EXCHANGE_VALIDITY_WINDOW_MS
+    /// is rejected outright. The message is not a valid 80-byte note message,
+    /// so no part of an exchange can be replayed as a standalone note.
+    /// `issuer_from_signature` / `issuer_to_signature` are the issuer's
+    /// signatures over each edge's standard note message at its new total; they
+    /// become the stored notes' signatures (needed for later redemption).
+    /// All four signatures are verified BEFORE any state changes.
     ///
     /// ATOMICITY (issue #20): the staged record, the decreased from-edge note and
     /// its confirmation record are committed in one fjall batch — they land
@@ -1257,24 +1469,19 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
         from_denomination: &DenomKey,
-        from_amount: u64,
+        from_new_total: u64,
         to_denomination: &DenomKey,
-        to_amount: u64,
+        to_new_total: u64,
         timestamp: u64,
         issuer_from_signature: &Signature,
-        recipient_from_signature: &Signature,
         issuer_to_signature: &Signature,
-        recipient_to_signature: &Signature,
+        issuer_exchange_signature: &Signature,
+        recipient_exchange_signature: &Signature,
         from_reserve_box_id: &str,
     ) -> Result<(), NoteError> {
         if from_denomination == to_denomination {
             return Err(NoteError::InvalidExchange(
                 "from and to denominations must differ".to_string(),
-            ));
-        }
-        if from_amount == 0 || to_amount == 0 {
-            return Err(NoteError::InvalidExchange(
-                "exchange amounts must be positive".to_string(),
             ));
         }
 
@@ -1284,6 +1491,15 @@ impl TrackerStateManager {
             .as_millis() as u64;
         if timestamp > current_time {
             return Err(NoteError::FutureTimestamp);
+        }
+        // N10: a signed exchange expires. Without a window a creditor could hold
+        // a fully-signed exchange indefinitely and submit it whenever the edges
+        // happen to drift back to the signed pre-totals.
+        if current_time.saturating_sub(timestamp) > EXCHANGE_VALIDITY_WINDOW_MS {
+            return Err(NoteError::InvalidExchange(format!(
+                "exchange timestamp {} is older than the {} ms validity window",
+                timestamp, EXCHANGE_VALIDITY_WINDOW_MS
+            )));
         }
 
         // Only one staged exchange may be in flight per (issuer, recipient)
@@ -1307,10 +1523,20 @@ impl TrackerStateManager {
         let to_note_opt =
             self.get_note_optional(issuer_pubkey, recipient_pubkey, to_denomination)?;
 
-        let from_new_total = from_note
+        // The request carries absolute post-totals; the amounts moved are
+        // derived from the CURRENT edge state. Because the exchange message
+        // below is reconstructed with these same current totals as pre-totals,
+        // an exchange signed against any other state fails verification (N10).
+        let from_amount = from_note
             .amount_collected
-            .checked_sub(from_amount)
-            .ok_or(NoteError::AmountOverflow)?;
+            .checked_sub(from_new_total)
+            .filter(|amount| *amount > 0)
+            .ok_or_else(|| {
+                NoteError::InvalidExchange(format!(
+                    "from_new_total ({}) must be below the current from-edge total ({})",
+                    from_new_total, from_note.amount_collected
+                ))
+            })?;
         // The edge cannot drop below what was already redeemed from it.
         if from_new_total < from_note.amount_redeemed {
             return Err(NoteError::InvalidExchange(format!(
@@ -1319,10 +1545,16 @@ impl TrackerStateManager {
             )));
         }
         let to_base_collected = to_note_opt.as_ref().map(|n| n.amount_collected);
-        let to_new_total = to_base_collected
-            .unwrap_or(0)
-            .checked_add(to_amount)
-            .ok_or(NoteError::AmountOverflow)?;
+        let to_amount = to_new_total
+            .checked_sub(to_base_collected.unwrap_or(0))
+            .filter(|amount| *amount > 0)
+            .ok_or_else(|| {
+                NoteError::InvalidExchange(format!(
+                    "to_new_total ({}) must be above the current to-edge total ({})",
+                    to_new_total,
+                    to_base_collected.unwrap_or(0)
+                ))
+            })?;
 
         // The exchange must move both edges forward in time.
         if timestamp <= from_note.timestamp
@@ -1353,7 +1585,12 @@ impl TrackerStateManager {
             }
         }
 
-        // Verify all four signatures BEFORE mutating anything.
+        // Verify all four signatures BEFORE mutating anything (N10):
+        // - the issuer's standard note-message signatures at each edge's new
+        //   total (they become the stored notes' signatures);
+        // - both parties' signatures over the domain-separated exchange
+        //   message, reconstructed with the CURRENT totals as pre-totals, so
+        //   the consent is bound to the exact state being exchanged.
         let msg_from = schnorr::signing_message(
             issuer_pubkey,
             recipient_pubkey,
@@ -1370,12 +1607,28 @@ impl TrackerStateManager {
             timestamp,
             &tracker_nft_id,
         );
+        let msg_exchange = schnorr::exchange_signing_message(
+            issuer_pubkey,
+            recipient_pubkey,
+            from_denomination,
+            from_note.amount_collected,
+            from_new_total,
+            to_denomination,
+            to_base_collected.unwrap_or(0),
+            to_new_total,
+            timestamp,
+            &tracker_nft_id,
+        );
         let verifier = SchnorrVerifier;
         for (sig, msg, key) in [
             (issuer_from_signature, &msg_from, issuer_pubkey),
-            (recipient_from_signature, &msg_from, recipient_pubkey),
             (issuer_to_signature, &msg_to, issuer_pubkey),
-            (recipient_to_signature, &msg_to, recipient_pubkey),
+            (issuer_exchange_signature, &msg_exchange, issuer_pubkey),
+            (
+                recipient_exchange_signature,
+                &msg_exchange,
+                recipient_pubkey,
+            ),
         ] {
             if verifier.verify_signature(sig, msg, key).is_err() {
                 return Err(NoteError::InvalidSignature);
@@ -1433,27 +1686,23 @@ impl TrackerStateManager {
             .insert(from_key.key_hash, new_confirmation);
 
         tracing::info!(
-            "Exchange staged: from-edge {} decreased {} -> {}; to-edge {} increase to {} applies after the decrease is confirmed (issue #17)",
+            "Exchange staged: from-edge {} decreased {} -> {} (−{}); to-edge {} increase {} -> {} (+{}) applies after the decrease is confirmed (issue #17)",
             from_denomination.denomination_id(),
             from_note.amount_collected,
             from_new_total,
+            from_amount,
             to_denomination.denomination_id(),
-            to_new_total
+            to_base_collected.unwrap_or(0),
+            to_new_total,
+            to_amount
         );
 
-        // The exchange moves the from-edge's note timestamp forward, which can
-        // reorder it relative to other notes in the timestamp-sorted rebuild
-        // (`rebuild_avl_tree` after a restart, and the committed-tree rebuild
-        // behind lookup proofs). AVL+ digests depend on first-insertion order,
-        // so without this the live tree's shape would no longer be reproducible
-        // and every subsequent committed lookup proof would fail its digest
-        // check until a restart. Recreate the live tree in the canonical
-        // (timestamp-sorted) order so the shape stays reproducible; the digest
-        // change is committed by the next tracker box update as usual.
-        //
-        // Storage is already committed and consistent at this point, so a
-        // rebuild failure is not fatal: the previous (valid) tree stays in
-        // place and the rebuild is retried before the next digest update.
+        // Recreate the live tree from storage in the persisted first-insertion
+        // order (N2). The shape — and therefore the digest — is unchanged by the
+        // exchange's timestamp move; this re-syncs values with storage after the
+        // atomic exchange commit. A rebuild failure is not fatal: the previous
+        // (valid) tree stays in place and the rebuild is retried before the next
+        // digest update (issue #20).
         if let Err(e) = self.rebuild_tree_canonically() {
             tracing::error!(
                 "Exchange committed but the live tree rebuild failed; retrying before the next digest update (issue #20): {:?}",
@@ -1464,8 +1713,8 @@ impl TrackerStateManager {
         Ok(())
     }
 
-    /// Recreate the live AVL tree from storage in the canonical
-    /// timestamp-sorted insertion order, replacing the current tree shape.
+    /// Recreate the live AVL tree from storage in the persisted
+    /// first-insertion order (N2), replacing the current tree.
     ///
     /// The new tree is built separately and swapped in only on success
     /// (issue #20): on failure the previous, still-valid tree stays in place
@@ -1482,7 +1731,7 @@ impl TrackerStateManager {
         let mut fresh = basis_trees::BasisAvlTree::new().map_err(|e| {
             NoteError::StorageError(format!("Failed to create fresh AVL tree: {:?}", e))
         })?;
-        match Self::populate_tree_from_storage(&self.storage, &mut fresh) {
+        match self.populate_tree_from_storage(&mut fresh) {
             Ok(()) => {
                 self.avl_state = fresh;
                 self.tree_dirty = false;
@@ -1537,14 +1786,14 @@ impl TrackerStateManager {
         issuer_pubkey: &PubKey,
         recipient_pubkey: &PubKey,
         from_denomination: &DenomKey,
-        from_amount: u64,
+        from_new_total: u64,
         to_denomination: &DenomKey,
-        to_amount: u64,
+        to_new_total: u64,
         timestamp: u64,
         issuer_from_signature: &Signature,
-        recipient_from_signature: &Signature,
         issuer_to_signature: &Signature,
-        recipient_to_signature: &Signature,
+        issuer_exchange_signature: &Signature,
+        recipient_exchange_signature: &Signature,
         from_reserve_box_id: &str,
         acceptance_check: Option<ExchangeAcceptanceCheckFn>,
     ) -> Result<(), NoteError> {
@@ -1566,14 +1815,14 @@ impl TrackerStateManager {
             issuer_pubkey,
             recipient_pubkey,
             from_denomination,
-            from_amount,
+            from_new_total,
             to_denomination,
-            to_amount,
+            to_new_total,
             timestamp,
             issuer_from_signature,
-            recipient_from_signature,
             issuer_to_signature,
-            recipient_to_signature,
+            issuer_exchange_signature,
+            recipient_exchange_signature,
             from_reserve_box_id,
         )
     }
@@ -1780,6 +2029,7 @@ impl TrackerStateManager {
             key,
         )?;
         self.confirmations.insert(to_key.key_hash, new_confirmation);
+        self.record_key_insertion(&to_key.key_hash);
 
         tracing::info!(
             "Staged exchange applied: to-edge {} increased to {} after the from-edge decrease was confirmed (issue #17)",
@@ -1787,11 +2037,11 @@ impl TrackerStateManager {
             to_note.amount_collected
         );
 
-        // Same canonical rebuild as `exchange_debt`: the to-edge note's
-        // timestamp moved forward, so recreate the live tree in the order every
-        // rebuild uses to keep its shape reproducible (see the comment there).
-        // Storage is already consistent; a rebuild failure keeps the previous
-        // valid tree and is retried before the next digest update (issue #20).
+        // Recreate the live tree from storage in the persisted first-insertion
+        // order, which reproduces the current shape (N2), so this is a value
+        // re-sync, not a shape change. Storage is already consistent; a rebuild
+        // failure keeps the previous valid tree and is retried before the next
+        // digest update (issue #20).
         if let Err(e) = self.rebuild_tree_canonically() {
             tracing::error!(
                 "Staged exchange applied but the live tree rebuild failed; retrying before the next digest update (issue #20): {:?}",
@@ -2037,41 +2287,54 @@ impl TrackerStateManager {
             )
         })?;
 
-        // Rebuild the committed tree from every note's confirmed value, in
-        // chronological order by note timestamp (same ordering as
-        // `rebuild_avl_tree`). Notes without a confirmed value are not part of
-        // the committed state.
-        let mut notes_with_issuer = self
-            .storage
-            .get_all_notes_with_issuer()
-            .map_err(|e| NoteError::StorageError(format!("Failed to get all notes: {:?}", e)))?;
-        notes_with_issuer.sort_by_key(|(_, note)| note.timestamp);
+        // Prove against the pinned snapshot of the committed tree (N2): the
+        // exact (key, value) content in first-insertion order, captured when
+        // the update was submitted and promoted on confirmation. Rebuilding
+        // from per-note confirmed values in timestamp order does NOT reproduce
+        // the on-chain tree — AVL+ shape depends on first-insertion order, so
+        // a repeat payment or a backdated note silently broke every proof.
+        let snapshot = self.committed_snapshot.clone().ok_or_else(|| {
+            NoteError::StorageError(
+                "No committed tracker tree snapshot known yet; wait for the tracker box updater"
+                    .to_string(),
+            )
+        })?;
+        if snapshot.digest != confirmed_digest {
+            return Err(NoteError::StorageError(format!(
+                "Committed tree digest mismatch: snapshot {} != confirmed on-chain {}",
+                hex::encode(snapshot.digest),
+                hex::encode(confirmed_digest)
+            )));
+        }
+        // The confirmation record and the snapshot must agree on this note's
+        // committed value; otherwise local metadata is inconsistent with the
+        // chain and the proof would fail on-chain anyway.
+        let committed_value = snapshot
+            .entries
+            .iter()
+            .find(|(k, _)| k.as_slice() == key_bytes.as_slice())
+            .map(|(_, v)| *v);
+        if committed_value != Some(confirmed_total_debt) {
+            return Err(NoteError::StorageError(format!(
+                "Committed tree snapshot does not contain {} -> {} with the confirmed value",
+                hex::encode(issuer_pubkey),
+                hex::encode(recipient_pubkey)
+            )));
+        }
 
         let mut committed_tree = basis_trees::BasisAvlTree::new().map_err(|e| {
             NoteError::StorageError(format!("Failed to create committed AVL tree: {:?}", e))
         })?;
-        for (issuer, note) in &notes_with_issuer {
-            let note_key =
-                Self::confirmation_key(issuer, &note.recipient_pubkey, &note.denomination);
-            let confirmed_value = self
-                .confirmations
-                .get(&note_key)
-                .and_then(|c| c.confirmed_total_debt);
-            if let Some(value) = confirmed_value {
-                committed_tree
-                    .update(note_key.to_vec(), value.to_be_bytes().to_vec())
-                    .map_err(|e| {
-                        NoteError::StorageError(format!(
-                            "Committed AVL tree rebuild failed: {:?}",
-                            e
-                        ))
-                    })?;
-            }
+        for (key, value) in &snapshot.entries {
+            committed_tree
+                .update(key.to_vec(), value.to_be_bytes().to_vec())
+                .map_err(|e| {
+                    NoteError::StorageError(format!("Committed AVL tree rebuild failed: {:?}", e))
+                })?;
         }
 
-        // The rebuilt committed tree must reproduce the confirmed on-chain digest;
-        // otherwise local confirmation metadata is inconsistent with the chain and
-        // generating a proof would produce something that fails on-chain anyway.
+        // The replayed snapshot must reproduce the confirmed on-chain digest;
+        // this can only fail if the persisted snapshot was corrupted.
         let rebuilt_digest = committed_tree.root_digest();
         if rebuilt_digest != confirmed_digest {
             return Err(NoteError::StorageError(format!(
@@ -2362,24 +2625,32 @@ impl TrackerStateManager {
 
         tracing::info!("Replaying {} reserve AVL journal entries...", updates.len());
 
-        for (issuer_pubkey, note_key, denomination, timestamp, already_redeemed) in updates {
-            // Reconstruct recipient pubkey from the note key. The note key is the
-            // denomination-derived debt key, so we look up the stored note to obtain
-            // the recipient pubkey.
-            let note = match self.storage.get_note_by_key(&note_key)? {
-                Some(note) => note,
+        for (issuer_pubkey, note_key, denomination, timestamp, already_redeemed, recipient) in
+            updates
+        {
+            // The recipient pubkey is embedded in v2 journal entries (issue #15 review N14:
+            // chain-observed redemptions may reference notes the tracker never stored). Legacy
+            // entries recover it from the stored note via the denomination-derived note key.
+            let recipient_pubkey = match recipient {
+                Some(pk) => pk,
                 None => {
-                    tracing::warn!(
-                        "Reserve AVL journal references unknown note key {}; skipping",
-                        hex::encode(note_key.to_bytes())
-                    );
-                    continue;
+                    let note = match self.storage.get_note_by_key(&note_key)? {
+                        Some(note) => note,
+                        None => {
+                            tracing::warn!(
+                                "Reserve AVL journal references unknown note key {}; skipping",
+                                hex::encode(note_key.to_bytes())
+                            );
+                            continue;
+                        }
+                    };
+                    note.recipient_pubkey
                 }
             };
 
             if let Err(e) = self.apply_reserve_avl_update(
                 &issuer_pubkey,
-                &note.recipient_pubkey,
+                &recipient_pubkey,
                 &denomination,
                 timestamp,
                 already_redeemed,
@@ -2423,6 +2694,126 @@ impl TrackerStateManager {
             timestamp,
             already_redeemed,
         )
+    }
+
+    /// Rebuild the reserve AVL tree for one (issuer, denomination) pair from the persisted
+    /// journal, using the same entry-resolution rules as startup replay (embedded recipient
+    /// for v2 entries, note lookup for legacy ones, unknown keys skipped).
+    fn replay_reserve_journal_for(
+        &self,
+        issuer_pubkey: &PubKey,
+        denomination: &DenomKey,
+    ) -> Result<basis_trees::BasisAvlTree, NoteError> {
+        let mut tree = basis_trees::BasisAvlTree::new().map_err(|e| {
+            NoteError::StorageError(format!("Failed to create reserve AVL tree: {:?}", e))
+        })?;
+        for (issuer, note_key, denom, timestamp, already_redeemed, recipient) in self
+            .storage
+            .iter_reserve_avl_updates()
+            .map_err(|e| NoteError::StorageError(format!("Failed to read journal: {:?}", e)))?
+        {
+            if &issuer != issuer_pubkey || &denom != denomination {
+                continue;
+            }
+            let recipient_pubkey = match recipient {
+                Some(pk) => pk,
+                None => match self.storage.get_note_by_key(&note_key)? {
+                    Some(note) => note.recipient_pubkey,
+                    None => continue,
+                },
+            };
+            let key = NoteKey::from_keys(&issuer, &recipient_pubkey);
+            let mut value_bytes = Vec::with_capacity(16);
+            value_bytes.extend_from_slice(&timestamp.to_be_bytes());
+            value_bytes.extend_from_slice(&already_redeemed.to_be_bytes());
+            tree.update(key.to_bytes(), value_bytes).map_err(|e| {
+                NoteError::StorageError(format!("Reserve AVL journal replay failed: {}", e))
+            })?;
+        }
+        Ok(tree)
+    }
+
+    /// Apply chain-observed redemption ops to the (issuer, denomination) reserve tree,
+    /// staged and verified against the on-chain R5 digest before anything is swapped in
+    /// (issue #15 review N14: re-sync the reserve-tree mirror from confirmed chain spends).
+    ///
+    /// The staged tree starts from the pair's replayed journal (`Mirror`) or from the empty
+    /// tree (`Genesis`, dropping phantom optimistic updates that never confirmed). Each op is
+    /// applied read-modify-write — new already_redeemed = current + `redeemed_delta` — which
+    /// reproduces the on-chain cumulative values as long as the sync point is correct. The
+    /// live tree and journal are only touched after the staged root digest equals
+    /// `expected_digest`.
+    pub fn apply_chain_reserve_ops(
+        &mut self,
+        issuer_pubkey: &PubKey,
+        denomination: &DenomKey,
+        ops: &[ChainReserveOp],
+        sync_point: ReserveSyncPoint,
+        expected_digest: [u8; 33],
+    ) -> Result<(), NoteError> {
+        let mut staged = match sync_point {
+            ReserveSyncPoint::Genesis => basis_trees::BasisAvlTree::new().map_err(|e| {
+                NoteError::StorageError(format!("Failed to create reserve AVL tree: {:?}", e))
+            })?,
+            ReserveSyncPoint::Mirror => {
+                self.replay_reserve_journal_for(issuer_pubkey, denomination)?
+            }
+        };
+
+        let mut journal_entries: Vec<(PubKey, u64, u64)> = Vec::with_capacity(ops.len());
+        for op in ops {
+            let key = NoteKey::from_keys(issuer_pubkey, &op.recipient_pubkey);
+            let current = match staged.get(&key.to_bytes()) {
+                Some(value) if value.len() == 16 => {
+                    u64::from_be_bytes(value[8..16].try_into().unwrap())
+                }
+                Some(_) => {
+                    return Err(NoteError::StorageError(
+                        "Malformed reserve tree value during chain sync".to_string(),
+                    ))
+                }
+                None => 0,
+            };
+            let new_redeemed = current.checked_add(op.redeemed_delta).ok_or_else(|| {
+                NoteError::StorageError("Chain redemption amount overflow".to_string())
+            })?;
+            let mut value_bytes = Vec::with_capacity(16);
+            value_bytes.extend_from_slice(&op.timestamp.to_be_bytes());
+            value_bytes.extend_from_slice(&new_redeemed.to_be_bytes());
+            staged.update(key.to_bytes(), value_bytes).map_err(|e| {
+                NoteError::StorageError(format!("Reserve AVL chain sync failed: {}", e))
+            })?;
+            journal_entries.push((op.recipient_pubkey, op.timestamp, new_redeemed));
+        }
+
+        if staged.root_digest() != expected_digest {
+            return Err(NoteError::StorageError(format!(
+                "Chain sync of reserve tree for issuer {} did not reproduce the on-chain \
+                 digest (staged {:?}, expected {:?}); local state left unchanged",
+                hex::encode(issuer_pubkey),
+                staged.root_digest(),
+                expected_digest
+            )));
+        }
+
+        // Verified: make it persistent state. Genesis replaces the pair's journal so
+        // phantom entries do not survive a restart; both modes then append the new ops.
+        if sync_point == ReserveSyncPoint::Genesis {
+            self.storage
+                .remove_reserve_avl_journal_entries_for(issuer_pubkey, denomination)?;
+        }
+        for (recipient, timestamp, already_redeemed) in &journal_entries {
+            self.storage.append_reserve_avl_update(
+                issuer_pubkey,
+                recipient,
+                denomination,
+                *timestamp,
+                *already_redeemed,
+            )?;
+        }
+        self.reserve_avl_states
+            .insert((*issuer_pubkey, *denomination), staged);
+        Ok(())
     }
 
     /// Generate proof for a specific note
@@ -2521,6 +2912,87 @@ impl TrackerStateManager {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
+
+        // N2: cache a snapshot of the tree behind every new digest, so
+        // `mark_notes_pending` can honor a digest that was read before
+        // concurrent note posts moved the live tree on.
+        let digest = self.current_state.avl_root_digest;
+        if self.recent_snapshots.back().map(|s| s.digest) != Some(digest) {
+            let snapshot = self.capture_live_snapshot();
+            self.recent_snapshots.push_back(snapshot);
+            while self.recent_snapshots.len() > MAX_RECENT_TREE_SNAPSHOTS {
+                self.recent_snapshots.pop_front();
+            }
+        }
+    }
+
+    /// Record the first insertion of a tracker tree key and persist the
+    /// insertion order, so rebuilds replay the same tree shape (N2).
+    fn record_key_insertion(&mut self, key: &NoteKeyBytes) {
+        if self.known_tree_keys.insert(*key) {
+            self.insertion_order.push(*key);
+            if let Err(e) = self
+                .storage
+                .store_tracker_insertion_order(&self.insertion_order)
+            {
+                tracing::error!("Failed to persist tracker insertion order: {:?}", e);
+            }
+        }
+    }
+
+    /// Snapshot the live tree: every (key, totalDebt) in first-insertion
+    /// order, tagged with the current root digest.
+    fn capture_live_snapshot(&self) -> TreeSnapshot {
+        let mut entries = Vec::with_capacity(self.insertion_order.len());
+        for key in &self.insertion_order {
+            if let Some(value_bytes) = self.avl_state.get(key) {
+                if value_bytes.len() == 8 {
+                    let mut arr = [0u8; 8];
+                    arr.copy_from_slice(&value_bytes);
+                    entries.push((*key, u64::from_be_bytes(arr)));
+                }
+            }
+        }
+        TreeSnapshot {
+            digest: self.current_state.avl_root_digest,
+            entries,
+        }
+    }
+
+    /// Find the tree snapshot behind `digest`: the pinned in-flight update,
+    /// the recent live-tree cache, or the live tree itself when it still
+    /// matches. Errors when the digest is unknown or stale — the caller's
+    /// transaction would commit a tree we can no longer reconstruct.
+    fn snapshot_for_digest(&mut self, digest: &[u8; 33]) -> Result<TreeSnapshot, NoteError> {
+        if let Some(pending) = &self.pending_snapshot {
+            if &pending.digest == digest {
+                return Ok(pending.clone());
+            }
+        }
+        if let Some(snapshot) = self.recent_snapshots.iter().find(|s| &s.digest == digest) {
+            return Ok(snapshot.clone());
+        }
+        if &self.current_state.avl_root_digest == digest {
+            return Ok(self.capture_live_snapshot());
+        }
+        Err(NoteError::StorageError(format!(
+            "No tree snapshot for digest {}: the live tree has moved on",
+            hex::encode(digest)
+        )))
+    }
+
+    /// Pin the current live tree as the content of the next tracker box
+    /// update and return its digest. The updater calls this immediately
+    /// before building and submitting the update transaction, so the
+    /// submitted digest and the snapshot `mark_notes_pending` /
+    /// `confirm_pending_notes` later use come from one tracker-thread step
+    /// (issue #15 follow-up N2).
+    pub fn prepare_tracker_update(&mut self) -> Result<[u8; 33], NoteError> {
+        self.update_state();
+        let snapshot = self.capture_live_snapshot();
+        let digest = snapshot.digest;
+        self.pending_snapshot = Some(snapshot);
+        Ok(digest)
     }
 
     /// Get the current tracker state

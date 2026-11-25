@@ -168,10 +168,13 @@ See the "Fifth Redemption Test" section in
 
 A second off-chain signing topology shifts more work to the tracker: the tracker's
 `POST /redemption/build` endpoint builds the unsigned transaction (reserve-input
-extension already in Scala order), signs the **fee input(s)** itself with the
-configured `tracker_secret_key`, and returns the partial transaction plus all signing
-material (input/data box binaries, last 10 headers). The client only adds the reserve
-input's `proveDlog(recipient)` over the same `bytes_to_sign` and posts the fully-signed
+extension already in Scala order) around **caller-supplied fee inputs** — the redeemer
+funds the miner fee (and, for token reserves, the recipient's min-ERG box) with their
+own P2PK boxes, so the tracker pays and signs nothing in the transaction (issue #15
+review N17). The build returns the unsigned transaction plus all signing material
+(input/data box binaries, last 10 headers). The client signs every input — the reserve
+input's `proveDlog(recipient)` and the fee inputs, all under the recipient key — over
+the same `bytes_to_sign` and posts the fully-signed
 transaction to `POST /redemption/submit`, which broadcasts it and syncs the tracker's
 note/reserve-tree state (see
 [redemption_state_spec.md](../server/redemption_state_spec.md#tracker-assisted-2-phase-endpoints-redemptionbuild-redemptionsubmit)).
@@ -186,9 +189,37 @@ in [redemption_execution_report.md](../redemption_execution_report.md)).
 | Party | Produces in this variant |
 |-------|--------------------------|
 | Issuer (client) | issuer Schnorr signature over the 80-byte message (build request) |
-| Tracker server | unsigned tx, all AVL proofs, tracker Schnorr signature (`#6`), **fee-input `proveDlog`**, broadcast, state sync |
-| Receiver (client) | `proveDlog(receiver)` over `bytes_to_sign` spliced into the reserve input |
+| Tracker server | unsigned tx, all AVL proofs, tracker Schnorr signature (`#6`), broadcast, state sync |
+| Receiver (client) | fee input boxes, `proveDlog(receiver)` over `bytes_to_sign` for the reserve input **and every fee input** |
 | Ergo node | validates only; does not sign |
+
+## Client-Side Verification (`basis_cli::verify`)
+
+The CLI and TUI never sign or fund tracker-produced payloads unchecked (issue #15
+review N6); `crates/basis_cli/src/verify.rs` gates both flows:
+
+- **`verify_reserve_payload`** — before the owner's wallet funds a `/reserves/create`
+  payload: exactly one request, the reserve contract compiled into the client for the
+  denomination, the requested value and assets (NFT first, collateral token second),
+  R4 = the owner key, R5 = the tracker's reserve-state digest for the
+  (owner, denomination) pair (the empty tree for a fresh pair, the carried-forward
+  redemption history after a rotation — `GET /reserves/state-digest`, N9), R6 = the
+  expected tracker NFT id, R7 absent or 0, change address = the owner's P2PK, and
+  `fee ≤ MAX_RESERVE_CREATION_FEE` (0.1 ERG). The last two stop a dishonest tracker
+  from diverting the owner's change or burning the wallet on fees.
+- **`verify_reserve_input`** — redemption input 0 is the issuer's reserve box under
+  the compiled contract with the issuer's R4 (the client signs it with the creditor's
+  key, so it must not be some other box whose script reduces to `proveDlog(creditor)`).
+- **`verify_redemption_tx`** — before the creditor signs a `/redemption/build` result:
+  the input/data boxes hash to the ids in the unsigned tx; input 0 is the reserve;
+  every other input is one of the client-declared `fee_box_ids`, token-free and locked
+  by the recipient's own P2PK; context var #0 redeems exactly `amount` into output 0;
+  an output pays the recipient at least `amount`; every output pays the reserve
+  contract, the recipient (payment or change), or the miner-fee contract capped at
+  `MAX_REDEMPTION_FEE` (0.01 ERG); and ERG is conserved exactly (no value burned).
+- **`redemption_issuer_signature`** — context var #2 is always the stored note's
+  signature (verified locally against the 80-byte redemption message), never a fresh
+  signature over tracker-supplied totals.
 
 ## References
 

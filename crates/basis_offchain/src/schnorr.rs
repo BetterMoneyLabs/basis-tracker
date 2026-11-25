@@ -69,6 +69,43 @@ pub fn validate_signature_format(signature: &Signature) -> Result<(), NoteError>
     }
 }
 
+/// Schnorr signature implementation following chaincash-rs approach
+pub fn schnorr_sign(
+    message: &[u8],
+    secret_key: &secp256k1::SecretKey,
+    issuer_pubkey: &PubKey,
+) -> Result<Signature, NoteError> {
+    let verifier = SchnorrVerifier;
+    let secret_key_bytes = secret_key.secret_bytes();
+    match verifier.sign_message(message, &secret_key_bytes, issuer_pubkey) {
+        Ok(signature) => Ok(signature),
+        Err(basis_core::traits::CryptoError::InvalidSignature) => Err(NoteError::InvalidSignature),
+        Err(basis_core::traits::CryptoError::InvalidPublicKey) => Err(NoteError::InvalidSignature),
+        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => {
+            Err(NoteError::InvalidSignature)
+        }
+        Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
+    }
+}
+
+/// Schnorr signature verification following chaincash-rs approach
+pub fn schnorr_verify(
+    signature: &Signature,
+    message: &[u8],
+    issuer_pubkey: &PubKey,
+) -> Result<(), NoteError> {
+    let verifier = SchnorrVerifier;
+    match verifier.verify_signature(signature, message, issuer_pubkey) {
+        Ok(()) => Ok(()),
+        Err(basis_core::traits::CryptoError::InvalidSignature) => Err(NoteError::InvalidSignature),
+        Err(basis_core::traits::CryptoError::InvalidPublicKey) => Err(NoteError::InvalidSignature),
+        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => {
+            Err(NoteError::InvalidSignature)
+        }
+        Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,42 +244,5 @@ mod tests {
 
         // Validate the generated public key
         assert!(validate_public_key(&pubkey).is_ok());
-    }
-}
-
-/// Schnorr signature implementation following chaincash-rs approach
-pub fn schnorr_sign(
-    message: &[u8],
-    secret_key: &secp256k1::SecretKey,
-    issuer_pubkey: &PubKey,
-) -> Result<Signature, NoteError> {
-    let verifier = SchnorrVerifier;
-    let secret_key_bytes = secret_key.secret_bytes();
-    match verifier.sign_message(message, &secret_key_bytes, issuer_pubkey) {
-        Ok(signature) => Ok(signature),
-        Err(basis_core::traits::CryptoError::InvalidSignature) => Err(NoteError::InvalidSignature),
-        Err(basis_core::traits::CryptoError::InvalidPublicKey) => Err(NoteError::InvalidSignature),
-        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => {
-            Err(NoteError::InvalidSignature)
-        }
-        Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
-    }
-}
-
-/// Schnorr signature verification following chaincash-rs approach
-pub fn schnorr_verify(
-    signature: &Signature,
-    message: &[u8],
-    issuer_pubkey: &PubKey,
-) -> Result<(), NoteError> {
-    let verifier = SchnorrVerifier;
-    match verifier.verify_signature(signature, message, issuer_pubkey) {
-        Ok(()) => Ok(()),
-        Err(basis_core::traits::CryptoError::InvalidSignature) => Err(NoteError::InvalidSignature),
-        Err(basis_core::traits::CryptoError::InvalidPublicKey) => Err(NoteError::InvalidSignature),
-        Err(basis_core::traits::CryptoError::InvalidSignatureFormat) => {
-            Err(NoteError::InvalidSignature)
-        }
-        Err(basis_core::traits::CryptoError::InternalError(_)) => Err(NoteError::InvalidSignature),
     }
 }

@@ -16,8 +16,15 @@ use std::path::Path;
 const NOTE_VALUE_LEN: usize = 220;
 
 /// Fixed-width reserve journal value length: timestamp(8) ‖ already_redeemed(8) ‖
-/// denomination(33) = 49 bytes.
+/// denomination(33) = 49 bytes (legacy format, without the recipient key).
 const JOURNAL_VALUE_LEN: usize = 49;
+
+/// Current reserve journal value length: timestamp(8) ‖ already_redeemed(8) ‖
+/// denomination(33) ‖ recipient_pubkey(33) = 82 bytes. The recipient was added so
+/// chain-observed redemptions (issue #15 review N14) replay after a restart even
+/// when the corresponding note is not in the note store; legacy 49-byte entries
+/// are still accepted and fall back to note lookup on replay.
+const JOURNAL_VALUE_LEN_V2: usize = 82;
 
 /// Database storage for IOU notes with extra indices for efficient querying
 ///
@@ -33,6 +40,10 @@ pub struct NoteStorage {
     confirmations_partition: fjall::Partition,
     reserve_avl_journal_partition: fjall::Partition,
     pending_exchanges_partition: fjall::Partition,
+    /// Tracker-tree metadata: the persisted first-insertion order of tree keys
+    /// and the committed tree snapshot behind the confirmed on-chain digest
+    /// (issue #15 follow-up N2).
+    tracker_meta_partition: fjall::Partition,
     /// Test-only fault-injection hook: while set, the atomic exchange commit
     /// methods return an error without writing anything (issue #20 tests).
     #[cfg(test)]
@@ -66,12 +77,26 @@ pub struct QuarantinedReserve {
     pub quarantined_at: u64,
 }
 
+/// One reserve AVL journal entry: (issuer_pubkey, note_key, denomination,
+/// timestamp, already_redeemed, recipient_pubkey).
+pub type ReserveAvlUpdate = (PubKey, NoteKey, DenomKey, u64, u64, Option<PubKey>);
+
 /// Database storage for reserve information
 #[derive(Clone)]
 pub struct ReserveStorage {
     partition: fjall::Partition,
     quarantine_partition: fjall::Partition,
+    pending_root_partition: fjall::Partition,
 }
+
+/// Marker key in the quarantine partition holding the schema version of the
+/// records there. Box ids are hex, so the underscored name cannot collide
+/// with a record key.
+const QUARANTINE_SCHEMA_VERSION_KEY: &[u8] = b"__quarantine_schema_version__";
+
+/// Current quarantine record schema. v1 was written by the pre-N19 admission
+/// rules and is dropped by [`ReserveStorage::migrate_quarantine_v2`].
+const QUARANTINE_SCHEMA_VERSION: u8 = 2;
 
 /// Database storage for tracker information
 #[derive(Clone)]
@@ -238,6 +263,12 @@ impl NoteStorage {
                 ))
             })?;
 
+        let tracker_meta_partition = keyspace
+            .open_partition("tracker_meta", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open tracker meta partition: {}", e))
+            })?;
+
         Ok(Self {
             keyspace,
             notes_partition,
@@ -246,6 +277,7 @@ impl NoteStorage {
             confirmations_partition,
             reserve_avl_journal_partition,
             pending_exchanges_partition,
+            tracker_meta_partition,
             #[cfg(test)]
             fail_exchange_commits: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -425,7 +457,7 @@ impl NoteStorage {
             batch.insert(&self.issuer_index, issuer_pubkey, value);
         }
         if let Some(value) = recipient_index_value {
-            batch.insert(&self.recipient_index, &note.recipient_pubkey, value);
+            batch.insert(&self.recipient_index, note.recipient_pubkey, value);
         }
         batch
             .commit()
@@ -512,6 +544,67 @@ impl NoteStorage {
             results.push((key_bytes, confirmation));
         }
         Ok(results)
+    }
+
+    /// Persist the first-insertion order of the tracker tree keys. AVL+ tree
+    /// shape depends on it, so a restart must replay this exact order to
+    /// reproduce the committed digest (issue #15 follow-up N2).
+    pub fn store_tracker_insertion_order(&self, order: &[[u8; 32]]) -> Result<(), NoteError> {
+        let value = serde_json::to_vec(order).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize insertion order: {}", e))
+        })?;
+        self.tracker_meta_partition
+            .insert("tracker_insertion_order", &value)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store insertion order: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// Load the persisted tracker tree insertion order (empty for databases
+    /// that predate it).
+    pub fn load_tracker_insertion_order(&self) -> Result<Vec<[u8; 32]>, NoteError> {
+        match self.tracker_meta_partition.get("tracker_insertion_order") {
+            Ok(Some(value)) => serde_json::from_slice(&value).map_err(|e| {
+                NoteError::StorageError(format!("Failed to parse insertion order: {}", e))
+            }),
+            Ok(None) => Ok(Vec::new()),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to load insertion order: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Persist the snapshot of the tree behind the latest confirmed on-chain
+    /// digest, so committed redemption proofs survive a restart (N2).
+    pub fn store_committed_snapshot(
+        &self,
+        snapshot: &crate::TreeSnapshot,
+    ) -> Result<(), NoteError> {
+        let value = serde_json::to_vec(snapshot).map_err(|e| {
+            NoteError::StorageError(format!("Failed to serialize committed snapshot: {}", e))
+        })?;
+        self.tracker_meta_partition
+            .insert("committed_tree_snapshot", &value)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store committed snapshot: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// Load the persisted committed tree snapshot, if any.
+    pub fn load_committed_snapshot(&self) -> Result<Option<crate::TreeSnapshot>, NoteError> {
+        match self.tracker_meta_partition.get("committed_tree_snapshot") {
+            Ok(Some(value)) => serde_json::from_slice(&value).map(Some).map_err(|e| {
+                NoteError::StorageError(format!("Failed to parse committed snapshot: {}", e))
+            }),
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to load committed snapshot: {}",
+                e
+            ))),
+        }
     }
 
     /// Persist a staged (pending) cross-denomination exchange record, keyed by
@@ -639,13 +732,13 @@ impl NoteStorage {
         let mut batch = self.keyspace.batch();
         batch.insert(
             &self.pending_exchanges_partition,
-            &from_key.key_hash,
+            from_key.key_hash,
             staged_value,
         );
         batch.insert(&self.notes_partition, from_key.to_bytes(), note_value);
         batch.insert(
             &self.confirmations_partition,
-            &from_key.key_hash,
+            from_key.key_hash,
             confirmation_value,
         );
         batch
@@ -695,11 +788,11 @@ impl NoteStorage {
             batch.insert(&self.issuer_index, issuer_pubkey, value);
         }
         if let Some(value) = recipient_index_value {
-            batch.insert(&self.recipient_index, &to_note.recipient_pubkey, value);
+            batch.insert(&self.recipient_index, to_note.recipient_pubkey, value);
         }
         batch.insert(
             &self.confirmations_partition,
-            &to_key.key_hash,
+            to_key.key_hash,
             confirmation_value,
         );
         batch.remove(&self.pending_exchanges_partition, staged_key);
@@ -1139,10 +1232,11 @@ impl NoteStorage {
         key.extend_from_slice(issuer_pubkey);
         key.extend_from_slice(&note_key.to_bytes());
 
-        let mut value = Vec::with_capacity(JOURNAL_VALUE_LEN);
+        let mut value = Vec::with_capacity(JOURNAL_VALUE_LEN_V2);
         value.extend_from_slice(&timestamp.to_be_bytes());
         value.extend_from_slice(&already_redeemed.to_be_bytes());
         value.extend_from_slice(&denomination.encode33());
+        value.extend_from_slice(recipient_pubkey);
 
         self.reserve_avl_journal_partition
             .insert(&key, &value)
@@ -1158,11 +1252,10 @@ impl NoteStorage {
 
     /// Iterate the reserve AVL journal in operation order.
     ///
-    /// Returns a vector of (issuer_pubkey, note_key, denomination, timestamp,
-    /// already_redeemed) tuples.
-    pub fn iter_reserve_avl_updates(
-        &self,
-    ) -> Result<Vec<(PubKey, NoteKey, DenomKey, u64, u64)>, NoteError> {
+    /// `recipient_pubkey` is `Some` for v2 entries (which embed it) and `None`
+    /// for legacy 49-byte entries, where the caller must recover the recipient
+    /// from the note store.
+    pub fn iter_reserve_avl_updates(&self) -> Result<Vec<ReserveAvlUpdate>, NoteError> {
         let mut updates = Vec::new();
 
         for item in self.reserve_avl_journal_partition.iter() {
@@ -1170,7 +1263,9 @@ impl NoteStorage {
                 NoteError::StorageError(format!("Failed to iterate reserve AVL journal: {}", e))
             })?;
 
-            if key.len() != 16 + 33 + 32 || value.len() != JOURNAL_VALUE_LEN {
+            if key.len() != 16 + 33 + 32
+                || (value.len() != JOURNAL_VALUE_LEN && value.len() != JOURNAL_VALUE_LEN_V2)
+            {
                 tracing::warn!(
                     "Skipping malformed reserve AVL journal entry: key_len={}, value_len={}",
                     key.len(),
@@ -1194,6 +1289,15 @@ impl NoteStorage {
                         e
                     ))
                 })?;
+            let recipient_pubkey: Option<PubKey> = if value.len() == JOURNAL_VALUE_LEN_V2 {
+                Some(value[49..82].try_into().map_err(|_| {
+                    NoteError::StorageError(
+                        "Invalid recipient pubkey in reserve AVL journal".to_string(),
+                    )
+                })?)
+            } else {
+                None
+            };
 
             updates.push((
                 issuer_pubkey,
@@ -1201,10 +1305,53 @@ impl NoteStorage {
                 denomination,
                 timestamp,
                 already_redeemed,
+                recipient_pubkey,
             ));
         }
 
         Ok(updates)
+    }
+
+    /// Remove all reserve AVL journal entries for an (issuer, denomination) pair.
+    /// Used when the pair's tree is rebuilt from chain-observed redemptions
+    /// (issue #15 review N14): the confirmed op list replaces the journal, so
+    /// phantom optimistic updates (never confirmed on-chain) do not survive a restart.
+    pub fn remove_reserve_avl_journal_entries_for(
+        &self,
+        issuer_pubkey: &PubKey,
+        denomination: &DenomKey,
+    ) -> Result<usize, NoteError> {
+        let denom_bytes = denomination.encode33();
+        let mut matching: Vec<Vec<u8>> = Vec::new();
+
+        for item in self.reserve_avl_journal_partition.iter() {
+            let (key, value) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate reserve AVL journal: {}", e))
+            })?;
+            if key.len() != 16 + 33 + 32
+                || (value.len() != JOURNAL_VALUE_LEN && value.len() != JOURNAL_VALUE_LEN_V2)
+            {
+                continue;
+            }
+            if &key[16..49] == issuer_pubkey.as_slice() && &value[16..49] == denom_bytes.as_slice()
+            {
+                matching.push(key.to_vec());
+            }
+        }
+
+        let removed = matching.len();
+        for key in matching {
+            self.reserve_avl_journal_partition
+                .remove(&key)
+                .map_err(|e| {
+                    NoteError::StorageError(format!(
+                        "Failed to remove reserve AVL journal entry: {}",
+                        e
+                    ))
+                })?;
+        }
+
+        Ok(removed)
     }
 }
 
@@ -1225,9 +1372,16 @@ impl ReserveStorage {
                 NoteError::StorageError(format!("Failed to open quarantine partition: {}", e))
             })?;
 
+        let pending_root_partition = keyspace
+            .open_partition("pending_reserve_roots", PartitionCreateOptions::default())
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to open pending-root partition: {}", e))
+            })?;
+
         Ok(Self {
             partition,
             quarantine_partition,
+            pending_root_partition,
         })
     }
 
@@ -1291,6 +1445,113 @@ impl ReserveStorage {
         Ok(())
     }
 
+    /// Record the expected R5 register value for the next reserve root of an
+    /// (owner, denomination) pair (issue #15 review N9).
+    ///
+    /// `/reserves/create` sets R5 to the tracker's reserve-tree digest for the pair,
+    /// carrying redeemed amounts forward across a reserve rotation; the scanner admits
+    /// a root box with a non-empty R5 only when it matches a digest recorded here.
+    pub fn store_pending_root_r5(
+        &self,
+        owner_pubkey: &str,
+        denomination: &str,
+        r5_register_hex: &str,
+    ) -> Result<(), NoteError> {
+        let key = pending_root_key(owner_pubkey, denomination);
+        self.pending_root_partition
+            .insert(key, r5_register_hex.as_bytes())
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to store pending reserve root: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// The expected R5 register value for the next reserve root of the pair, if recorded.
+    pub fn get_pending_root_r5(
+        &self,
+        owner_pubkey: &str,
+        denomination: &str,
+    ) -> Result<Option<String>, NoteError> {
+        match self
+            .pending_root_partition
+            .get(pending_root_key(owner_pubkey, denomination))
+        {
+            Ok(Some(bytes)) => String::from_utf8(bytes.to_vec()).map(Some).map_err(|e| {
+                NoteError::StorageError(format!("Invalid pending reserve root value: {}", e))
+            }),
+            Ok(None) => Ok(None),
+            Err(e) => Err(NoteError::StorageError(format!(
+                "Failed to read pending reserve root: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Consume the pending-root record once the matching reserve root was admitted.
+    pub fn remove_pending_root_r5(
+        &self,
+        owner_pubkey: &str,
+        denomination: &str,
+    ) -> Result<(), NoteError> {
+        self.pending_root_partition
+            .remove(pending_root_key(owner_pubkey, denomination))
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to remove pending reserve root: {}", e))
+            })?;
+        Ok(())
+    }
+
+    /// Remove every quarantined reserve record. Returns the number removed.
+    pub fn clear_quarantined(&self) -> Result<usize, NoteError> {
+        let mut keys = Vec::new();
+        for item in self.quarantine_partition.iter() {
+            let (key, _value) = item.map_err(|e| {
+                NoteError::StorageError(format!("Failed to iterate quarantine partition: {}", e))
+            })?;
+            if key.as_ref() == QUARANTINE_SCHEMA_VERSION_KEY {
+                continue;
+            }
+            keys.push(key.to_vec());
+        }
+
+        let removed = keys.len();
+        for key in keys {
+            self.quarantine_partition.remove(&key).map_err(|e| {
+                NoteError::StorageError(format!("Failed to remove quarantined reserve: {}", e))
+            })?;
+        }
+        Ok(removed)
+    }
+
+    /// One-time migration for the quarantine records written by the pre-N19
+    /// admission rules. Those records were written by checks that had no
+    /// history-aware fallback, so some of them quarantined legitimate reserves
+    /// (e.g. a reserve whose C4/P2PK proof failed transiently). The N19 walk
+    /// re-evaluates every candidate box on sight, so the old records are simply
+    /// dropped and the boxes are re-judged on the next scan. Returns the number
+    /// of records cleared (0 when the migration already ran).
+    pub fn migrate_quarantine_v2(&self) -> Result<usize, NoteError> {
+        let current = self
+            .quarantine_partition
+            .get(QUARANTINE_SCHEMA_VERSION_KEY)
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to read quarantine schema version: {}", e))
+            })?
+            .and_then(|v| v.as_ref().first().copied())
+            .unwrap_or(0);
+        if current >= QUARANTINE_SCHEMA_VERSION {
+            return Ok(0);
+        }
+
+        let cleared = self.clear_quarantined()?;
+        self.quarantine_partition
+            .insert(QUARANTINE_SCHEMA_VERSION_KEY, [QUARANTINE_SCHEMA_VERSION])
+            .map_err(|e| {
+                NoteError::StorageError(format!("Failed to write quarantine schema version: {}", e))
+            })?;
+        Ok(cleared)
+    }
+
     /// Persist a quarantined reserve box (issue #19).
     pub fn store_quarantined(&self, record: &QuarantinedReserve) -> Result<(), NoteError> {
         let value = serde_json::to_vec(record).map_err(|e| {
@@ -1332,9 +1593,12 @@ impl ReserveStorage {
         let mut records = Vec::new();
 
         for item in self.quarantine_partition.iter() {
-            let (_key_bytes, value_bytes) = item.map_err(|e| {
+            let (key_bytes, value_bytes) = item.map_err(|e| {
                 NoteError::StorageError(format!("Failed to iterate quarantine partition: {}", e))
             })?;
+            if key_bytes.as_ref() == QUARANTINE_SCHEMA_VERSION_KEY {
+                continue;
+            }
 
             let record: QuarantinedReserve = serde_json::from_slice(&value_bytes).map_err(|e| {
                 NoteError::StorageError(format!("Failed to deserialize quarantined reserve: {}", e))
@@ -1345,6 +1609,16 @@ impl ReserveStorage {
 
         Ok(records)
     }
+}
+
+/// Storage key for a pending reserve root: lowercase owner key + denomination id.
+fn pending_root_key(owner_pubkey: &str, denomination: &str) -> Vec<u8> {
+    format!(
+        "{}:{}",
+        owner_pubkey.to_ascii_lowercase(),
+        denomination.to_lowercase()
+    )
+    .into_bytes()
 }
 
 impl TrackerStorage {
@@ -1578,5 +1852,65 @@ impl AcceptancePolicyStorage {
             }
         }
         Ok(policies)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_storage(tag: &str) -> (std::path::PathBuf, ReserveStorage) {
+        let dir = std::env::temp_dir().join(format!(
+            "basis_persistence_test_{}_{}_{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let storage = ReserveStorage::open(&dir).expect("storage opens");
+        (dir, storage)
+    }
+
+    fn record(box_id: &str) -> QuarantinedReserve {
+        QuarantinedReserve {
+            box_id: box_id.to_string(),
+            owner_pubkey: "02".to_string() + &"11".repeat(32),
+            denomination: "ERG".to_string(),
+            reason: "test record".to_string(),
+            quarantined_at: 0,
+        }
+    }
+
+    #[test]
+    fn quarantine_migration_clears_once_and_skips_marker() {
+        let (_dir, storage) = temp_storage("quarantine_migration");
+        storage
+            .store_quarantined(&record(&"aa".repeat(32)))
+            .unwrap();
+        storage
+            .store_quarantined(&record(&"bb".repeat(32)))
+            .unwrap();
+        assert_eq!(storage.get_all_quarantined().unwrap().len(), 2);
+
+        // First run clears the pre-N19 records and stamps the marker.
+        assert_eq!(storage.migrate_quarantine_v2().unwrap(), 2);
+        assert!(storage.get_all_quarantined().unwrap().is_empty());
+
+        // Idempotent: the marker suppresses further clears, and the marker key
+        // itself never leaks into the record listing.
+        assert_eq!(storage.migrate_quarantine_v2().unwrap(), 0);
+        assert!(storage.get_all_quarantined().unwrap().is_empty());
+
+        // Records written after the migration survive later runs.
+        storage
+            .store_quarantined(&record(&"cc".repeat(32)))
+            .unwrap();
+        assert_eq!(storage.migrate_quarantine_v2().unwrap(), 0);
+        let remaining = storage.get_all_quarantined().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].box_id, "cc".repeat(32));
     }
 }

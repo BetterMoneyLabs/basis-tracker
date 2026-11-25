@@ -170,8 +170,7 @@ pub fn generate_performance_test_data(num_notes: usize) -> Vec<IouNote> {
     let mut notes = Vec::with_capacity(num_notes);
     let keypairs = generate_test_keypairs(num_notes);
 
-    for i in 0..num_notes {
-        let (issuer_secret, _) = &keypairs[i];
+    for (i, (issuer_secret, _)) in keypairs.iter().enumerate() {
         let (_, recipient_pubkey) = generate_test_keypair();
 
         let note = IouNote::create_and_sign(

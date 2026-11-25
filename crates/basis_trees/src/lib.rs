@@ -72,6 +72,5 @@ mod tests {
     #[test]
     fn test_module_structure() {
         // Basic test to verify module compiles correctly
-        assert!(true, "Module structure should be valid");
     }
 }

@@ -257,3 +257,113 @@ pub struct SerializableReserveInfo {
     pub collateralization_ratio: f64,
     pub refund_initiation_height: u64,
 }
+
+/// Query parameters for GET /reserves/state-digest.
+#[derive(Debug, serde::Deserialize)]
+pub struct ReserveStateDigestQuery {
+    /// Issuer (reserve owner) public key, hex-encoded 33 bytes.
+    pub issuer_pubkey: String,
+    /// Denomination: "erg" or "token:<64-hex>"; defaults to "erg".
+    #[serde(default)]
+    pub denomination: String,
+}
+
+/// Get the tracker's reserve AVL tree state for an (issuer, denomination)
+/// pair: the 33-byte root digest and the serialized SAvlTree value that a
+/// reserve (re)creation must carry in R5 (issue #15 review N9).
+///
+/// Clients use this to verify the R5 register of a `/reserves/create` payload
+/// before signing it with their own node.
+#[axum::debug_handler]
+pub async fn get_reserve_state_digest(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<ReserveStateDigestQuery>,
+) -> (
+    StatusCode,
+    Json<ApiResponse<crate::models::ReserveStateDigestResponse>>,
+) {
+    let issuer_pubkey_bytes = match hex::decode(&params.issuer_pubkey) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be hex-encoded".to_string(),
+                )),
+            )
+        }
+    };
+    let issuer_pubkey: basis_store::PubKey = match issuer_pubkey_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::models::error_response(
+                    "issuer_pubkey must be 33 bytes".to_string(),
+                )),
+            )
+        }
+    };
+
+    let denomination = if params.denomination.trim().is_empty() {
+        basis_store::DenomKey::Erg
+    } else {
+        match state.config.parse_served_denomination(&params.denomination) {
+            Ok(d) => d,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(crate::models::error_response(format!(
+                        "invalid denomination: {}",
+                        msg
+                    ))),
+                )
+            }
+        }
+    };
+
+    let (digest_tx, digest_rx) = tokio::sync::oneshot::channel();
+    if state
+        .tx
+        .send(crate::TrackerCommand::GetReserveStateDigest {
+            issuer_pubkey,
+            denomination,
+            response_tx: digest_tx,
+        })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(crate::models::error_response(
+                "Tracker thread unavailable".to_string(),
+            )),
+        );
+    }
+    let digest = match digest_rx.await {
+        Ok(digest) => digest,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::models::error_response(
+                    "Tracker thread did not respond".to_string(),
+                )),
+            )
+        }
+    };
+
+    let reserve_r5 = hex::encode(basis_offchain::ergo_tx::build_savl_tree_from_digest(
+        &hex::encode(&digest),
+    ));
+    (
+        StatusCode::OK,
+        Json(success_response(
+            crate::models::ReserveStateDigestResponse {
+                issuer_pubkey: params.issuer_pubkey,
+                denomination: denomination.denomination_id(),
+                reserve_state_digest: hex::encode(digest),
+                reserve_r5,
+            },
+        )),
+    )
+}

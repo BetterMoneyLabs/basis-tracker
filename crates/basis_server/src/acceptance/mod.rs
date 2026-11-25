@@ -931,7 +931,7 @@ mod tests {
             total_debt: 100,
             reserve_tracker: Some(tracker),
             issuer_gross_debt: Some(100),
-            denomination: token_denom.clone(),
+            denomination: token_denom,
         };
         assert!(
             !pred.acceptable(&token_ctx),

@@ -137,10 +137,5 @@ mod api_tests {
         // 3. Error handling in basis_server/src/api.rs lines 202-225
         //    - Invalid hex encoding: returns 400 Bad Request
         //    - Wrong byte length: returns 400 Bad Request
-
-        assert!(
-            true,
-            "notes/issuer endpoint should return 200 with empty array when no notes exist"
-        );
     }
 }

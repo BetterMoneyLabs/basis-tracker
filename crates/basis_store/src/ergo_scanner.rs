@@ -89,6 +89,13 @@ fn p2pk_ergo_tree(pubkey_hex: &str) -> String {
 /// several reserve actions (top-up of a top-up, etc.).
 const LINEAGE_WALK_DEPTH: usize = 8;
 
+/// Default bound for the admission history walk (issue #15 N19): generations
+/// walked backwards from an untracked reserve box to its deployment when
+/// authenticating it from the chain alone. One node request per generation,
+/// only for boxes failing the fast admission paths; configurable via
+/// `ergo.scanner.admission_walk_depth`.
+pub const DEFAULT_ADMISSION_WALK_DEPTH: usize = 512;
+
 /// Admission decision for a parsed reserve box (issue #19).
 ///
 /// Only one box per (owner, denomination) lineage is ever tracked: a
@@ -130,31 +137,30 @@ pub enum ScanBoxIngest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdmissionVerdict {
     Admit,
-    Quarantine,
     Retry,
+    /// The fast proof failed; try authenticating the box's lineage from the
+    /// chain (issue #15 N19) before deciding between admit and quarantine.
+    Authenticate,
 }
 
 /// Decide whether a parsed box may be tracked.
 ///
-/// - `tracked`: a reserve for the same (owner, denomination) is already tracked.
-/// - `proof`: for a root, whether the creating transaction spends a P2PK input
-///   of the R4 owner key; for a non-root, whether the box verifiably spends the
-///   tracked box (possibly across missed generations). `None` when the node
-///   could not be queried.
-/// - `setup_ok`: the C4 setup checks (R7 == 0, empty R5 tree) pass.
-fn decide_admission(tracked: bool, proof: Option<bool>, setup_ok: bool) -> AdmissionVerdict {
-    if !tracked {
-        // Root candidate: only C4-clean boxes with an owner-key P2PK input in
-        // the creating transaction may open a lineage (issue #19).
-        return match proof {
-            Some(true) if setup_ok => AdmissionVerdict::Admit,
-            Some(_) => AdmissionVerdict::Quarantine,
-            None => AdmissionVerdict::Retry,
-        };
-    }
+/// `proof` is the fast admission proof for the box:
+/// - for an untracked (owner, denomination) pair, `Some(true)` only when the
+///   C4 setup checks pass AND the creating transaction spends a P2PK input of
+///   the R4 owner key;
+/// - for a tracked pair, whether the box verifiably descends from the tracked
+///   box (possibly across missed generations).
+///
+/// `None` when the node could not be queried. A failed proof does not
+/// quarantine by itself: a legitimate reserve with on-chain history fails
+/// both fast paths on a fresh database (N19), so the caller runs the
+/// chain-history walk on `Authenticate` and only quarantines when that also
+/// fails.
+fn decide_admission(proof: Option<bool>) -> AdmissionVerdict {
     match proof {
         Some(true) => AdmissionVerdict::Admit,
-        Some(false) => AdmissionVerdict::Quarantine,
+        Some(false) => AdmissionVerdict::Authenticate,
         None => AdmissionVerdict::Retry,
     }
 }
@@ -244,6 +250,15 @@ pub struct NodeConfig {
     pub scan_name: Option<String>,
     /// API key for Ergo node authentication
     pub api_key: Option<String>,
+    /// Maximum generations walked backwards when authenticating a reserve
+    /// box's lineage from the chain (issue #15 N19). One node request per
+    /// generation, only for boxes that fail the fast admission paths.
+    #[serde(default = "default_admission_walk_depth")]
+    pub admission_walk_depth: usize,
+}
+
+fn default_admission_walk_depth() -> usize {
+    DEFAULT_ADMISSION_WALK_DEPTH
 }
 
 /// Inner state for scanner that requires synchronization
@@ -331,6 +346,17 @@ impl ServerState {
         let reserve_storage = ReserveStorage::open(&reserve_storage_path).map_err(|e| {
             ScannerError::StoreError(format!("Failed to open reserve storage: {:?}", e))
         })?;
+
+        // Drop quarantine records written by the pre-N19 admission rules; the
+        // history-aware walk re-judges every candidate box on the next scan.
+        match reserve_storage.migrate_quarantine_v2() {
+            Ok(cleared) if cleared > 0 => info!(
+                "Cleared {} pre-N19 quarantined reserve records; they will be re-evaluated by history-aware admission",
+                cleared
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("Failed to run quarantine migration: {:?}", e),
+        }
 
         // Create reserve tracker and load existing reserves from database
         let reserve_tracker = ReserveTracker::new();
@@ -815,6 +841,49 @@ impl ServerState {
         Ok(reserve_info)
     }
 
+    /// Whether the box's R5 matches the pending rotation digest `/reserves/create`
+    /// recorded for this (owner, denomination) — see [`Self::root_setup_violation`].
+    fn pending_root_matches(&self, scan_box: &ScanBox, reserve_info: &ExtendedReserveInfo) -> bool {
+        let Some(r5) = scan_box.additional_registers.get("R5") else {
+            return false;
+        };
+        let denomination = reserve_info
+            .denomination()
+            .map(|d| d.denomination_id())
+            .unwrap_or_else(|| "erg".to_string());
+        match self
+            .reserve_storage
+            .get_pending_root_r5(&reserve_info.owner_pubkey, &denomination)
+        {
+            Ok(Some(expected)) => r5.eq_ignore_ascii_case(&expected),
+            Ok(None) => false,
+            Err(e) => {
+                warn!(
+                    "Failed to read pending reserve root for {}: {:?}",
+                    reserve_info.owner_pubkey, e
+                );
+                false
+            }
+        }
+    }
+
+    /// Consume the pending rotation record for the pair, if one was recorded.
+    fn consume_pending_root(&self, reserve_info: &ExtendedReserveInfo) {
+        let denomination = reserve_info
+            .denomination()
+            .map(|d| d.denomination_id())
+            .unwrap_or_else(|| "erg".to_string());
+        if let Err(e) = self
+            .reserve_storage
+            .remove_pending_root_r5(&reserve_info.owner_pubkey, &denomination)
+        {
+            warn!(
+                "Failed to consume pending reserve root for {}: {:?}",
+                reserve_info.owner_pubkey, e
+            );
+        }
+    }
+
     /// C4 setup checks for a root candidate (the first box of an
     /// (owner, denomination) lineage). Returns the violation reason, or `None`
     /// when the box is a cleanly created reserve.
@@ -824,7 +893,14 @@ impl ServerState {
     /// creditors from ever redeeming, so neither must be counted as collateral.
     /// These checks must NOT run on successor boxes: a redemption legitimately
     /// leaves R5 non-empty and refund initiation legitimately sets R7.
+    ///
+    /// N9 (reserve rotation): a root MAY carry a non-empty R5 when it equals the
+    /// digest recorded by `/reserves/create` for this (owner, denomination),
+    /// which carries the redeemed-amount history forward from the refunded
+    /// reserve. Without that, a creditor could replay old redemption vars
+    /// against a rotated reserve's empty tree and be paid twice.
     fn root_setup_violation(
+        &self,
         scan_box: &ScanBox,
         reserve_info: &ExtendedReserveInfo,
     ) -> Option<String> {
@@ -837,6 +913,7 @@ impl ServerState {
         let empty_tree_register = empty_reserve_tree_register();
         match scan_box.additional_registers.get("R5") {
             Some(r5) if r5.eq_ignore_ascii_case(&empty_tree_register) => None,
+            _ if self.pending_root_matches(scan_box, reserve_info) => None,
             other => Some(format!(
                 "Reserve box {} created with a non-empty AVL tree (R5 = {:?})",
                 reserve_info.box_id, other
@@ -844,12 +921,10 @@ impl ServerState {
         }
     }
 
-    /// Fetch the inputs of a transaction as `(box_id, address, creating_tx_id,
-    /// ergo_tree)` tuples via `GET /blockchain/transaction/byId/{txId}`.
-    async fn fetch_tx_inputs(
-        &self,
-        tx_id: &str,
-    ) -> Result<Vec<(String, String, String, String)>, ScannerError> {
+    /// Fetch the inputs of a transaction via
+    /// `GET /blockchain/transaction/byId/{txId}` (extraIndex returns the full
+    /// indexed box for each input, including registers).
+    async fn fetch_tx_inputs(&self, tx_id: &str) -> Result<Vec<TxInputInfo>, ScannerError> {
         let url = format!(
             "{}/blockchain/transaction/byId/{}",
             self.config.node_url, tx_id
@@ -898,7 +973,22 @@ impl ServerState {
                     .and_then(|t| t.as_str())
                     .unwrap_or_default()
                     .to_string();
-                Some((box_id, address, creating_tx, ergo_tree))
+                let registers = input
+                    .get("additionalRegisters")
+                    .and_then(|r| r.as_object())
+                    .map(|obj| {
+                        obj.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(TxInputInfo {
+                    box_id,
+                    address,
+                    creating_tx_id: creating_tx,
+                    ergo_tree,
+                    registers,
+                })
             })
             .collect())
     }
@@ -921,16 +1011,13 @@ impl ServerState {
             let inputs = self.fetch_tx_inputs(&tx_id).await?;
             if inputs
                 .iter()
-                .any(|(box_id, _, _, _)| normalized_box_id(box_id) == known_box_id)
+                .any(|i| normalized_box_id(&i.box_id) == known_box_id)
             {
                 return Ok(true);
             }
             // Follow the reserve-contract input (the previous generation), if any.
-            match inputs
-                .into_iter()
-                .find(|(_, address, _, _)| address == contract_address)
-            {
-                Some((_, _, parent_tx, _)) if !parent_tx.is_empty() => tx_id = parent_tx,
+            match inputs.into_iter().find(|i| i.address == contract_address) {
+                Some(parent) if !parent.creating_tx_id.is_empty() => tx_id = parent.creating_tx_id,
                 _ => return Ok(false),
             }
         }
@@ -951,7 +1038,108 @@ impl ServerState {
         let inputs = self.fetch_tx_inputs(&scan_box.transaction_id).await?;
         Ok(inputs
             .iter()
-            .any(|(_, _, _, tree)| tree.eq_ignore_ascii_case(&expected)))
+            .any(|i| i.ergo_tree.eq_ignore_ascii_case(&expected)))
+    }
+
+    /// Whether a box is spent on-chain, via `GET /blockchain/box/byId/{boxId}`:
+    /// the extra-indexed node returns spent boxes with a `spentTransactionId`.
+    async fn is_box_spent_onchain(&self, box_id: &str) -> Result<bool, ScannerError> {
+        let url = format!("{}/blockchain/box/byId/{}", self.config.node_url, box_id);
+        let response = self
+            .request_builder(reqwest::Method::GET, &url)
+            .send()
+            .await
+            .map_err(|e| {
+                ScannerError::HttpError(format!("Failed to fetch box {}: {}", box_id, e))
+            })?;
+        if !response.status().is_success() {
+            return Err(ScannerError::NodeError(format!(
+                "Node returned status {} for box {}",
+                response.status(),
+                box_id
+            )));
+        }
+        let box_json: serde_json::Value =
+            crate::http::read_json_capped(response).await.map_err(|e| {
+                ScannerError::JsonError(format!("Failed to parse box {}: {}", box_id, e))
+            })?;
+        Ok(box_json
+            .get("spentTransactionId")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| !s.is_empty()))
+    }
+
+    /// Authenticate `scan_box`'s lineage from the chain alone (issue #15 N19):
+    /// walk creating transactions backwards, following only inputs at the
+    /// reserve contract address, until the deployment transaction (the one with
+    /// no contract-address input). The box created by that transaction is the
+    /// root; the walk succeeds iff the root passes the same checks as live root
+    /// admission — R5 is the empty reserve tree, R7 is 0, and the deployment
+    /// spends a P2PK input of the R4 owner key. Intermediate generations need
+    /// no validation: the on-chain contract enforces register continuity
+    /// (`contract/basis.es`), so anything sitting at the contract address with
+    /// a verified chain to an authenticated root is the legitimate reserve.
+    ///
+    /// Returns `Ok(false)` when the chain ends at a root failing those checks
+    /// or there is no contract lineage (a grief box: its own creating
+    /// transaction is the deployment and the caller's fast path already judged
+    /// it). `Err` covers node errors and walk-depth exhaustion, so callers can
+    /// retry instead of quarantining on inconclusive data.
+    async fn verify_authenticated_lineage(
+        &self,
+        scan_box: &ScanBox,
+        reserve_info: &ExtendedReserveInfo,
+        contract_address: &str,
+    ) -> Result<bool, ScannerError> {
+        let empty_r5 = empty_reserve_tree_register();
+        let expected_p2pk = p2pk_ergo_tree(&reserve_info.owner_pubkey);
+        let mut inputs = self.fetch_tx_inputs(&scan_box.transaction_id).await?;
+
+        for _ in 0..self.config.admission_walk_depth {
+            // The previous generation is the input at the reserve contract address.
+            let (parent_tx_id, parent_registers) =
+                match inputs.iter().find(|i| i.address == contract_address) {
+                    Some(p) if p.creating_tx_id.is_empty() => {
+                        return Err(ScannerError::NodeError(format!(
+                            "lineage walk: node returned no creating transaction for box {}",
+                            p.box_id
+                        )));
+                    }
+                    Some(p) => (p.creating_tx_id.clone(), p.registers.clone()),
+                    None => {
+                        // The scanned box's own creating transaction has no contract
+                        // input: it is a root, not a successor — nothing the walk can
+                        // authenticate (the fast root path already judged it).
+                        return Ok(false);
+                    }
+                };
+            let parent_tx_inputs = self.fetch_tx_inputs(&parent_tx_id).await?;
+            if !parent_tx_inputs
+                .iter()
+                .any(|i| i.address == contract_address)
+            {
+                // The parent is the root box: validate it as at live root admission.
+                let r5_ok = parent_registers
+                    .get("R5")
+                    .is_some_and(|r5| r5.eq_ignore_ascii_case(&empty_r5));
+                // R7 (refund initiation height) absent or serialized Long 0.
+                let r7_ok = match parent_registers.get("R7") {
+                    None => true,
+                    Some(r7) => r7.eq_ignore_ascii_case("0500"),
+                };
+                let p2pk_ok = parent_tx_inputs
+                    .iter()
+                    .any(|i| i.ergo_tree.eq_ignore_ascii_case(&expected_p2pk));
+                return Ok(r5_ok && r7_ok && p2pk_ok);
+            }
+            inputs = parent_tx_inputs;
+        }
+
+        Err(ScannerError::NodeError(format!(
+            "admission lineage walk exceeded {} generations without reaching the reserve root; \
+             raise ergo.scanner.admission_walk_depth",
+            self.config.admission_walk_depth
+        )))
     }
 
     /// Admission control for a parsed reserve box (issue #19).
@@ -1003,33 +1191,68 @@ impl ServerState {
 
         match tracked {
             None => {
-                // Root candidate: cheap C4 setup checks first, then the P2PK
-                // ownership proof (requires a node call).
-                if let Some(violation) = Self::root_setup_violation(scan_box, reserve_info) {
-                    return ReserveAdmission::Quarantined { reason: violation };
-                }
-                let proof = match self
-                    .has_owner_p2pk_input(scan_box, &reserve_info.owner_pubkey)
-                    .await
-                {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        warn!(
-                            "P2PK ownership check for reserve root {} failed ({}); retrying next cycle",
-                            box_id, e
-                        );
-                        None
+                // Root candidate fast path: cheap C4 setup checks first, then
+                // the P2PK ownership proof (requires a node call). A box that
+                // fails here is NOT quarantined yet: a legitimate reserve with
+                // on-chain history fails both checks on a fresh database
+                // (issue #15 N19), so admission falls through to the
+                // chain-history walk before deciding.
+                let setup_violation = self.root_setup_violation(scan_box, reserve_info);
+                let proof = if setup_violation.is_some() {
+                    Some(false)
+                } else {
+                    match self
+                        .has_owner_p2pk_input(scan_box, &reserve_info.owner_pubkey)
+                        .await
+                    {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            warn!(
+                                "P2PK ownership check for reserve root {} failed ({}); retrying next cycle",
+                                box_id, e
+                            );
+                            None
+                        }
                     }
                 };
-                match decide_admission(false, proof, true) {
-                    AdmissionVerdict::Admit => ReserveAdmission::Admitted,
-                    AdmissionVerdict::Quarantine => ReserveAdmission::Quarantined {
-                        reason: format!(
-                            "reserve root {} for owner {} was created by a transaction spending no P2PK input of the R4 key; \
-                             R4 is not authenticated on-chain, so this is likely a dust-box blocking attempt (issue #19)",
-                            box_id, reserve_info.owner_pubkey
-                        ),
-                    },
+                match decide_admission(proof) {
+                    AdmissionVerdict::Admit => {
+                        // Consume the pending rotation record so a second root
+                        // carrying the same R5 cannot be admitted later (N9).
+                        self.consume_pending_root(reserve_info);
+                        ReserveAdmission::Admitted
+                    }
+                    AdmissionVerdict::Authenticate => {
+                        match self
+                            .verify_authenticated_lineage(scan_box, reserve_info, contract_address)
+                            .await
+                        {
+                            Ok(true) => ReserveAdmission::Admitted,
+                            Ok(false) => {
+                                let cause = match &setup_violation {
+                                    Some(v) => v.clone(),
+                                    None => format!(
+                                        "reserve box {} for owner {} has no fast ownership proof: its creating transaction spends no P2PK input of the R4 key",
+                                        box_id, reserve_info.owner_pubkey
+                                    ),
+                                };
+                                ReserveAdmission::Quarantined {
+                                    reason: format!(
+                                        "{}; and the box does not descend from an authenticated root either, \
+                                         so R4 is not authenticated on-chain — likely a dust-box blocking attempt (issue #19, N19)",
+                                        cause
+                                    ),
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Lineage authentication for reserve box {} failed ({}); retrying next cycle",
+                                    box_id, e
+                                );
+                                ReserveAdmission::Retry
+                            }
+                        }
+                    }
                     AdmissionVerdict::Retry => ReserveAdmission::Retry,
                 }
             }
@@ -1047,20 +1270,69 @@ impl ServerState {
                         None
                     }
                 };
-                match decide_admission(true, lineage, false) {
+                match decide_admission(lineage) {
                     AdmissionVerdict::Admit => ReserveAdmission::Admitted,
-                    AdmissionVerdict::Quarantine => ReserveAdmission::Quarantined {
-                        reason: format!(
-                            "duplicate reserve box {} for owner {} in denomination {} does not spend the tracked box {}; \
-                             R4 is not authenticated on-chain, so this is likely a dust-box blocking attempt (issue #19)",
-                            box_id,
-                            reserve_info.owner_pubkey,
-                            denomination
-                                .map(|d| d.denomination_id())
-                                .unwrap_or_else(|| "unknown".to_string()),
-                            tracked.box_id
-                        ),
-                    },
+                    AdmissionVerdict::Authenticate => {
+                        // N19 fallback: the successor check is bounded to
+                        // LINEAGE_WALK_DEPTH generations, so a deeper gap (long
+                        // tracker downtime) needs chain authentication. A
+                        // verified tip may replace the tracked box only when
+                        // that box is spent on-chain; if it is still unspent,
+                        // the candidate is a clone sibling output and must stay
+                        // quarantined.
+                        match self
+                            .verify_authenticated_lineage(
+                                scan_box,
+                                reserve_info,
+                                contract_address,
+                            )
+                            .await
+                        {
+                            Ok(true) => match self.is_box_spent_onchain(&tracked.box_id).await {
+                                Ok(true) => ReserveAdmission::Admitted,
+                                Ok(false) => ReserveAdmission::Quarantined {
+                                    reason: format!(
+                                        "reserve box {} for owner {} in denomination {} descends from the authenticated root, \
+                                         but the tracked box {} is still unspent; a sibling output at the reserve contract \
+                                         address is not the chain tip (issue #19, N19)",
+                                        box_id,
+                                        reserve_info.owner_pubkey,
+                                        denomination
+                                            .map(|d| d.denomination_id())
+                                            .unwrap_or_else(|| "unknown".to_string()),
+                                        tracked.box_id
+                                    ),
+                                },
+                                Err(e) => {
+                                    warn!(
+                                        "Spent check for tracked reserve box {} failed ({}); retrying next cycle",
+                                        tracked.box_id, e
+                                    );
+                                    ReserveAdmission::Retry
+                                }
+                            },
+                            Ok(false) => ReserveAdmission::Quarantined {
+                                reason: format!(
+                                    "duplicate reserve box {} for owner {} in denomination {} does not spend the tracked box {} \
+                                     and does not descend from the authenticated root; R4 is not authenticated on-chain, so this \
+                                     is likely a dust-box blocking attempt (issue #19, N19)",
+                                    box_id,
+                                    reserve_info.owner_pubkey,
+                                    denomination
+                                        .map(|d| d.denomination_id())
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    tracked.box_id
+                                ),
+                            },
+                            Err(e) => {
+                                warn!(
+                                    "Lineage authentication for reserve box {} failed ({}); retrying next cycle",
+                                    box_id, e
+                                );
+                                ReserveAdmission::Retry
+                            }
+                        }
+                    }
                     AdmissionVerdict::Retry => ReserveAdmission::Retry,
                 }
             }
@@ -1290,6 +1562,19 @@ pub struct ScanBox {
     pub assets: Vec<BoxAsset>,
 }
 
+/// One input of a transaction fetched from the extra-indexed node
+/// (`/blockchain/transaction/byId`): the spent box with its registers.
+#[derive(Debug, Clone)]
+struct TxInputInfo {
+    box_id: String,
+    address: String,
+    /// Transaction that created this input's box (empty when unknown).
+    creating_tx_id: String,
+    ergo_tree: String,
+    /// Register id ("R4", "R5", ...) → serialized value hex.
+    registers: std::collections::HashMap<String, String>,
+}
+
 /// Asset in an Ergo box
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxAsset {
@@ -1336,6 +1621,7 @@ impl Default for NodeConfig {
             node_url: "http://localhost:9053".to_string(), // Local Ergo node
             scan_name: Some("Basis Reserve Scanner".to_string()),
             api_key: None,
+            admission_walk_depth: DEFAULT_ADMISSION_WALK_DEPTH,
         }
     }
 }
@@ -1740,8 +2026,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_scan_boxes_removes_absent_reserves_on_clean_scan() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         // Mock node returns one valid reserve box. A pre-existing stored reserve
         // that is absent from the scan should be removed because the snapshot is
         // fully parseable and therefore authoritative.
@@ -1923,8 +2207,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_scan_boxes_removes_spent_reserve_despite_garbage_box() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         // Mock node returning one valid reserve box and one malformed box
         // (missing R4). The malformed box is quarantined individually: it is
         // skipped with a warning, but it must NOT block removal of a tracked
@@ -2327,13 +2609,18 @@ mod tests {
     }
 
     fn c4_test_state(config: NodeConfig) -> ServerState {
+        // Nanos alone can collide between threads on coarse clocks; the counter makes the
+        // directory unique even then, so one test's remove_dir_all can never delete another
+        // test's storage out from under fjall.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let data_dir = std::env::temp_dir().join(format!(
-            "basis_scanner_c4_test_{}_{}",
+            "basis_scanner_c4_test_{}_{}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
-            std::process::id()
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&data_dir);
         ServerState::new(config, &data_dir).expect("Failed to create server state")
@@ -2367,7 +2654,17 @@ mod tests {
         scan_box
             .additional_registers
             .insert("R7".to_string(), "0502".to_string());
-        let state = c4_test_state(NodeConfig::default());
+        // Creating tx with no contract-address input: the box is its own root,
+        // and the pending-refund root is not authenticated, so the lineage walk
+        // deterministically returns "not authenticated" rather than a node error.
+        let txs = HashMap::from([(
+            scan_box.transaction_id.clone(),
+            tx_json(
+                &scan_box.transaction_id,
+                &[(&"33".repeat(32), "some_address", &"44".repeat(32), "00")],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
         let info = state
             .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
             .expect("structurally valid box parses");
@@ -2391,7 +2688,98 @@ mod tests {
             "64ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff032000"
                 .to_string(),
         );
-        let state = c4_test_state(NodeConfig::default());
+        let txs = HashMap::from([(
+            scan_box.transaction_id.clone(),
+            tx_json(
+                &scan_box.transaction_id,
+                &[(&"33".repeat(32), "some_address", &"44".repeat(32), "00")],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("structurally valid box parses");
+        match state.admit_reserve_box(&scan_box, &info, "test_p2s").await {
+            ReserveAdmission::Quarantined { reason } => {
+                assert!(
+                    reason.contains("non-empty AVL tree"),
+                    "unexpected reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admission_admits_rotated_root_with_pending_r5() {
+        // N9 (reserve rotation): /reserves/create sets R5 to the tracker's
+        // reserve-tree digest for the pair and records it; the scanner admits a
+        // root carrying that non-empty R5 and consumes the record.
+        let rotated_r5 = format!("64{}032000", "11".repeat(33));
+        let mut scan_box = c4_test_box();
+        scan_box
+            .additional_registers
+            .insert("R5".to_string(), rotated_r5.clone());
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let owner_tree = p2pk_ergo_tree(owner);
+        let txs = HashMap::from([(
+            scan_box.transaction_id.clone(),
+            tx_json(
+                &scan_box.transaction_id,
+                &[(
+                    &"33".repeat(32),
+                    "some_address",
+                    &"44".repeat(32),
+                    &owner_tree,
+                )],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+        state
+            .reserve_storage
+            .store_pending_root_r5(owner, "erg", &rotated_r5)
+            .unwrap();
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        assert_eq!(
+            state.admit_reserve_box(&scan_box, &info, "test_p2s").await,
+            ReserveAdmission::Admitted
+        );
+        assert_eq!(
+            state
+                .reserve_storage
+                .get_pending_root_r5(owner, "erg")
+                .unwrap(),
+            None,
+            "the pending record must be consumed once the matching root is admitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admission_quarantines_root_with_mismatched_pending_r5() {
+        // A recorded pending root authorizes only that exact R5: a root box
+        // carrying a different non-empty tree is still quarantined (N9).
+        let recorded_r5 = format!("64{}032000", "11".repeat(33));
+        let other_r5 = format!("64{}032000", "22".repeat(33));
+        let mut scan_box = c4_test_box();
+        scan_box
+            .additional_registers
+            .insert("R5".to_string(), other_r5);
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let txs = HashMap::from([(
+            scan_box.transaction_id.clone(),
+            tx_json(
+                &scan_box.transaction_id,
+                &[(&"33".repeat(32), "some_address", &"44".repeat(32), "00")],
+            ),
+        )]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+        state
+            .reserve_storage
+            .store_pending_root_r5(owner, "erg", &recorded_r5)
+            .unwrap();
         let info = state
             .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
             .expect("structurally valid box parses");
@@ -2502,30 +2890,15 @@ mod tests {
     #[test]
     fn test_decide_admission_matrix() {
         // Root candidates: only C4-clean boxes whose creating tx spends a P2PK
-        // input of the R4 key may open a lineage (issue #19).
+        // input of the R4 key may open a lineage (issue #19). With a tracked
+        // reserve, only verified successors are admitted. Either failed proof
+        // goes to the chain-history walk (N19), not straight to quarantine.
+        assert_eq!(decide_admission(Some(true)), AdmissionVerdict::Admit);
         assert_eq!(
-            decide_admission(false, Some(true), true),
-            AdmissionVerdict::Admit
+            decide_admission(Some(false)),
+            AdmissionVerdict::Authenticate
         );
-        assert_eq!(
-            decide_admission(false, Some(true), false),
-            AdmissionVerdict::Quarantine
-        );
-        assert_eq!(
-            decide_admission(false, Some(false), true),
-            AdmissionVerdict::Quarantine
-        );
-        assert_eq!(decide_admission(false, None, true), AdmissionVerdict::Retry);
-        // With a tracked reserve: only verified successors are admitted.
-        assert_eq!(
-            decide_admission(true, Some(true), false),
-            AdmissionVerdict::Admit
-        );
-        assert_eq!(
-            decide_admission(true, Some(false), false),
-            AdmissionVerdict::Quarantine
-        );
-        assert_eq!(decide_admission(true, None, false), AdmissionVerdict::Retry);
+        assert_eq!(decide_admission(None), AdmissionVerdict::Retry);
     }
 
     #[test]
@@ -2588,6 +2961,17 @@ mod tests {
         boxes_body: String,
         txs: std::sync::Arc<HashMap<String, String>>,
     ) -> std::net::SocketAddr {
+        spawn_mock_node_full(boxes_body, txs, std::sync::Arc::new(HashMap::new())).await
+    }
+
+    /// `spawn_mock_node` plus `GET /blockchain/box/byId/{boxId}` answered from
+    /// `boxes_by_id` (404 when the box is unknown), for the N19 on-chain spent
+    /// check.
+    async fn spawn_mock_node_full(
+        boxes_body: String,
+        txs: std::sync::Arc<HashMap<String, String>>,
+        boxes_by_id: std::sync::Arc<HashMap<String, String>>,
+    ) -> std::net::SocketAddr {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2600,6 +2984,7 @@ mod tests {
                 };
                 let boxes_body = boxes_body.clone();
                 let txs = txs.clone();
+                let boxes_by_id = boxes_by_id.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 8192];
                     let n = match socket.read(&mut buf).await {
@@ -2614,7 +2999,13 @@ mod tests {
                             Some(body) => ("200 OK", body.clone()),
                             None => ("404 Not Found", "{}".to_string()),
                         },
-                        None => ("200 OK", boxes_body),
+                        None => match path.strip_prefix("/blockchain/box/byId/") {
+                            Some(box_id) => match boxes_by_id.get(box_id) {
+                                Some(body) => ("200 OK", body.clone()),
+                                None => ("404 Not Found", "{}".to_string()),
+                            },
+                            None => ("200 OK", boxes_body),
+                        },
                     };
                     let response = format!(
                         "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -2659,12 +3050,30 @@ mod tests {
     }
 
     fn tx_json(tx_id: &str, inputs: &[(&str, &str, &str, &str)]) -> String {
-        let inputs_json = inputs
+        let inputs: Vec<(&str, &str, &str, &str, &str)> = inputs
             .iter()
             .map(|(box_id, address, creating_tx, ergo_tree)| {
+                (*box_id, *address, *creating_tx, *ergo_tree, "")
+            })
+            .collect();
+        tx_json_reg(tx_id, &inputs)
+    }
+
+    /// `tx_json` whose inputs may carry `additionalRegisters` (the N19 walk
+    /// reads the root box's R5/R7 from the indexed input JSON). The fifth
+    /// tuple element is the registers JSON object text, "" for none.
+    fn tx_json_reg(tx_id: &str, inputs: &[(&str, &str, &str, &str, &str)]) -> String {
+        let inputs_json = inputs
+            .iter()
+            .map(|(box_id, address, creating_tx, ergo_tree, registers)| {
+                let registers_json = if registers.is_empty() {
+                    String::new()
+                } else {
+                    format!(",\"additionalRegisters\":{}", registers)
+                };
                 format!(
-                    "{{\"boxId\":\"{}\",\"address\":\"{}\",\"transactionId\":\"{}\",\"ergoTree\":\"{}\"}}",
-                    box_id, address, creating_tx, ergo_tree
+                    "{{\"boxId\":\"{}\",\"address\":\"{}\",\"transactionId\":\"{}\",\"ergoTree\":\"{}\"{}}}",
+                    box_id, address, creating_tx, ergo_tree, registers_json
                 )
             })
             .collect::<Vec<_>>()
@@ -2957,5 +3366,465 @@ mod tests {
             .resolve_issuer_reserve(owner, &crate::DenomKey::Erg)
             .expect("issuer must keep working");
         assert_eq!(resolved.box_id, tracked_box);
+    }
+
+    /// Transactions implementing a tip -> mid -> root reserve history for the
+    /// N19 history-walk tests. The root (created by `root_tx`) is
+    /// authenticated when `root_funding_tree` is the owner's P2PK tree: its
+    /// indexed input entry carries the empty-tree R5 and no R7, and `root_tx`
+    /// spends the funding input. `tip_tx` is the creating transaction of the
+    /// scanned tip box.
+    fn authenticated_history_txs(
+        tip_tx: &str,
+        mid_box: &str,
+        mid_tx: &str,
+        root_box: &str,
+        root_tx: &str,
+        root_funding_tree: &str,
+    ) -> HashMap<String, String> {
+        let root_registers = format!("{{\"R5\":\"{}\"}}", empty_reserve_tree_register());
+        HashMap::from([
+            (
+                tip_tx.to_string(),
+                tx_json(tip_tx, &[(mid_box, "test_p2s", mid_tx, "00")]),
+            ),
+            (
+                mid_tx.to_string(),
+                tx_json_reg(
+                    mid_tx,
+                    &[(root_box, "test_p2s", root_tx, "00", &root_registers)],
+                ),
+            ),
+            (
+                root_tx.to_string(),
+                tx_json(
+                    root_tx,
+                    &[(
+                        &"88".repeat(32),
+                        "some_address",
+                        &"99".repeat(32),
+                        root_funding_tree,
+                    )],
+                ),
+            ),
+        ])
+    }
+
+    #[tokio::test]
+    async fn test_admission_admits_tip_with_authenticated_history() {
+        // N19 core case: fresh database, the scanned box is a later generation
+        // of a reserve whose root was never seen locally. The walk reaches the
+        // authenticated deployment (empty R5, no R7, owner P2PK input) and
+        // admits the box despite the failed fast root checks.
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let owner_tree = p2pk_ergo_tree(owner);
+        let tip_box = "aa".repeat(32);
+        let tip_tx = "bb".repeat(32);
+        let txs = authenticated_history_txs(
+            &tip_tx,
+            &"66".repeat(32),
+            &"77".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+            &owner_tree,
+        );
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = tip_box;
+        scan_box.transaction_id = tip_tx;
+        // A redemption tip legitimately carries a non-empty R5.
+        scan_box.additional_registers.insert(
+            "R5".to_string(),
+            "64aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa032000"
+                .to_string(),
+        );
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        assert_eq!(
+            state.admit_reserve_box(&scan_box, &info, "test_p2s").await,
+            ReserveAdmission::Admitted
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admission_quarantines_history_with_unauthenticated_root() {
+        // The history is well-formed but the deployment transaction spends no
+        // P2PK input of the R4 key: the root is not authenticated, so the tip
+        // is quarantined.
+        let tip_box = "aa".repeat(32);
+        let tip_tx = "bb".repeat(32);
+        let txs = authenticated_history_txs(
+            &tip_tx,
+            &"66".repeat(32),
+            &"77".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+            "00",
+        );
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = tip_box;
+        scan_box.transaction_id = tip_tx;
+        scan_box.additional_registers.insert(
+            "R5".to_string(),
+            "64aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa032000"
+                .to_string(),
+        );
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        match state.admit_reserve_box(&scan_box, &info, "test_p2s").await {
+            ReserveAdmission::Quarantined { reason } => {
+                assert!(
+                    reason.contains("non-empty AVL tree")
+                        && reason.contains("does not descend from an authenticated root"),
+                    "unexpected reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admission_quarantines_grief_box_with_fake_history() {
+        // A grief box whose fabricator built a fake lineage ending at a bad
+        // root (pre-filled R5): root validation fails and the box is
+        // quarantined.
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let owner_tree = p2pk_ergo_tree(owner);
+        let tip_box = "aa".repeat(32);
+        let tip_tx = "bb".repeat(32);
+        let fake_root_box = "44".repeat(32);
+        let fake_root_tx = "55".repeat(32);
+        let prefilled_r5 = format!("{{\"R5\":\"64{}032000\"}}", "ab".repeat(33));
+        let txs = HashMap::from([
+            (
+                tip_tx.clone(),
+                tx_json_reg(
+                    &tip_tx,
+                    &[(
+                        &fake_root_box,
+                        "test_p2s",
+                        &fake_root_tx,
+                        "00",
+                        &prefilled_r5,
+                    )],
+                ),
+            ),
+            (
+                fake_root_tx.clone(),
+                tx_json(
+                    &fake_root_tx,
+                    &[(
+                        &"88".repeat(32),
+                        "some_address",
+                        &"99".repeat(32),
+                        &owner_tree,
+                    )],
+                ),
+            ),
+        ]);
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = tip_box;
+        scan_box.transaction_id = tip_tx;
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        match state.admit_reserve_box(&scan_box, &info, "test_p2s").await {
+            ReserveAdmission::Quarantined { reason } => {
+                assert!(
+                    reason.contains("no P2PK input")
+                        && reason.contains("does not descend from an authenticated root"),
+                    "unexpected reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admission_admits_pending_refund_tip_with_authenticated_history() {
+        // N19 pending-refund sub-case: the current box carries R7 != 0 (refund
+        // initiated on-chain), which fails root admission, but the history
+        // walk authenticates it.
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let owner_tree = p2pk_ergo_tree(owner);
+        let tip_box = "aa".repeat(32);
+        let tip_tx = "bb".repeat(32);
+        let txs = authenticated_history_txs(
+            &tip_tx,
+            &"66".repeat(32),
+            &"77".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+            &owner_tree,
+        );
+        let state = mock_state(spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await);
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = tip_box;
+        scan_box.transaction_id = tip_tx;
+        scan_box.additional_registers.insert(
+            "R5".to_string(),
+            "64aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa032000"
+                .to_string(),
+        );
+        scan_box
+            .additional_registers
+            .insert("R7".to_string(), "0502".to_string());
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        assert_eq!(
+            state.admit_reserve_box(&scan_box, &info, "test_p2s").await,
+            ReserveAdmission::Admitted
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admission_admits_distant_tip_when_tracked_box_spent() {
+        // Long tracker downtime: the candidate is more than LINEAGE_WALK_DEPTH
+        // generations away from the tracked box (here: a disjoint chain), the
+        // history walk authenticates it, and the tracked box is spent
+        // on-chain, so the tip replaces it.
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let owner_tree = p2pk_ergo_tree(owner);
+        let tracked_box = "11".repeat(32);
+        let tip_box = "aa".repeat(32);
+        let tip_tx = "bb".repeat(32);
+        let txs = authenticated_history_txs(
+            &tip_tx,
+            &"66".repeat(32),
+            &"77".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+            &owner_tree,
+        );
+        let boxes_by_id = HashMap::from([(
+            tracked_box.clone(),
+            format!(
+                "{{\"boxId\":\"{}\",\"spentTransactionId\":\"{}\"}}",
+                tracked_box,
+                "ef".repeat(32)
+            ),
+        )]);
+        let state = mock_state(
+            spawn_mock_node_full(
+                "[]".to_string(),
+                std::sync::Arc::new(txs),
+                std::sync::Arc::new(boxes_by_id),
+            )
+            .await,
+        );
+        insert_tracked_reserve(&state, &tracked_box, owner);
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = tip_box.clone();
+        scan_box.transaction_id = tip_tx;
+        let tagged = TaggedScanBox {
+            scan_box,
+            kind: ReserveContractKind::Erg,
+            contract_address: "test_p2s".to_string(),
+        };
+        assert_eq!(
+            state.ingest_scan_box(&tagged).await,
+            ScanBoxIngest::Tracked(tip_box)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admission_quarantines_clone_sibling_when_tracked_box_unspent() {
+        // Clone sibling: the candidate descends from the authenticated root
+        // but the tracked box is still unspent on-chain, so the candidate is
+        // not the chain tip and must be quarantined (first-admitted-wins).
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let owner_tree = p2pk_ergo_tree(owner);
+        let tracked_box = "11".repeat(32);
+        let tip_box = "aa".repeat(32);
+        let tip_tx = "bb".repeat(32);
+        let txs = authenticated_history_txs(
+            &tip_tx,
+            &"66".repeat(32),
+            &"77".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+            &owner_tree,
+        );
+        let boxes_by_id = HashMap::from([(
+            tracked_box.clone(),
+            format!(
+                "{{\"boxId\":\"{}\",\"spentTransactionId\":null}}",
+                tracked_box
+            ),
+        )]);
+        let state = mock_state(
+            spawn_mock_node_full(
+                "[]".to_string(),
+                std::sync::Arc::new(txs),
+                std::sync::Arc::new(boxes_by_id),
+            )
+            .await,
+        );
+        insert_tracked_reserve(&state, &tracked_box, owner);
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = tip_box.clone();
+        scan_box.transaction_id = tip_tx;
+        let tagged = TaggedScanBox {
+            scan_box,
+            kind: ReserveContractKind::Erg,
+            contract_address: "test_p2s".to_string(),
+        };
+        assert_eq!(
+            state.ingest_scan_box(&tagged).await,
+            ScanBoxIngest::Rejected(tip_box.clone())
+        );
+        let record = state
+            .reserve_storage
+            .get_quarantined(&tip_box)
+            .unwrap()
+            .expect("quarantine record persisted");
+        assert!(
+            record.reason.contains("still unspent"),
+            "unexpected reason: {}",
+            record.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admission_retries_when_walk_depth_exceeded() {
+        // Walk-depth exhaustion is inconclusive: Retry (pending), never
+        // quarantine.
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let owner_tree = p2pk_ergo_tree(owner);
+        let tip_box = "aa".repeat(32);
+        let tip_tx = "bb".repeat(32);
+        let txs = authenticated_history_txs(
+            &tip_tx,
+            &"66".repeat(32),
+            &"77".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+            &owner_tree,
+        );
+        let addr = spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await;
+        let state = c4_test_state(NodeConfig {
+            node_url: format!("http://{}", addr),
+            reserve_contract_p2s: Some("test_p2s".to_string()),
+            admission_walk_depth: 1,
+            ..Default::default()
+        });
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = tip_box;
+        scan_box.transaction_id = tip_tx;
+        scan_box.additional_registers.insert(
+            "R5".to_string(),
+            "64aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa032000"
+                .to_string(),
+        );
+        let info = state
+            .parse_reserve_box(&scan_box, ReserveContractKind::Erg, "test_p2s")
+            .expect("valid box parses");
+        assert!(
+            matches!(
+                state.admit_reserve_box(&scan_box, &info, "test_p2s").await,
+                ReserveAdmission::Retry
+            ),
+            "walk-depth exhaustion must retry, not quarantine"
+        );
+        assert!(
+            state
+                .reserve_storage
+                .get_quarantined(&scan_box.box_id)
+                .unwrap()
+                .is_none(),
+            "no quarantine record may be written for an inconclusive walk"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_migration_readmits_box() {
+        // A box quarantined by the pre-N19 rules is un-quarantined by the
+        // startup migration and re-judged by the history-aware walk: with an
+        // authenticated chain it is now admitted.
+        let owner = &VALID_PREFIXED_PUBKEY[2..];
+        let owner_tree = p2pk_ergo_tree(owner);
+        let tip_box = "aa".repeat(32);
+        let tip_tx = "bb".repeat(32);
+        let txs = authenticated_history_txs(
+            &tip_tx,
+            &"66".repeat(32),
+            &"77".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+            &owner_tree,
+        );
+        let addr = spawn_mock_node("[]".to_string(), std::sync::Arc::new(txs)).await;
+
+        let data_dir = std::env::temp_dir().join(format!(
+            "basis_scanner_migration_test_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        {
+            let storage =
+                ReserveStorage::open(data_dir.join("reserves")).expect("pre-seed storage opens");
+            storage
+                .store_quarantined(&QuarantinedReserve {
+                    box_id: tip_box.clone(),
+                    owner_pubkey: owner.to_string(),
+                    denomination: "ERG".to_string(),
+                    reason: "quarantined by pre-N19 admission rules".to_string(),
+                    quarantined_at: 0,
+                })
+                .unwrap();
+            assert_eq!(storage.get_all_quarantined().unwrap().len(), 1);
+        }
+
+        let config = NodeConfig {
+            node_url: format!("http://{}", addr),
+            reserve_contract_p2s: Some("test_p2s".to_string()),
+            ..Default::default()
+        };
+        let state = ServerState::new(config, &data_dir).expect("Failed to create server state");
+        assert!(
+            state
+                .reserve_storage
+                .get_all_quarantined()
+                .unwrap()
+                .is_empty(),
+            "the startup migration must clear pre-N19 quarantine records"
+        );
+
+        let mut scan_box = c4_test_box();
+        scan_box.box_id = tip_box.clone();
+        scan_box.transaction_id = tip_tx;
+        scan_box.additional_registers.insert(
+            "R5".to_string(),
+            "64aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa032000"
+                .to_string(),
+        );
+        let tagged = TaggedScanBox {
+            scan_box,
+            kind: ReserveContractKind::Erg,
+            contract_address: "test_p2s".to_string(),
+        };
+        assert_eq!(
+            state.ingest_scan_box(&tagged).await,
+            ScanBoxIngest::Tracked(tip_box)
+        );
     }
 }

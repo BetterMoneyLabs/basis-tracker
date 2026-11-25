@@ -16,8 +16,6 @@ violate** the acceptance policy of any other debt holder of the same reserve
 (`check_redemption_policy_compliance`) and is enforced by all redemption flows
 that can produce a tracker signature:
 
-- Legacy `POST /redeem` (`crates/basis_server/src/api.rs`, `initiate_redemption`):
-  after the reserve lookup, before the tracker signature is issued.
 - Split flow `POST /redemption/build` (`crates/basis_server/src/redemption_build.rs`,
   `build_redemption_inner`): after a reserve with sufficient collateral is selected,
   before the unsigned transaction is built.
