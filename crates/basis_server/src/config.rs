@@ -772,9 +772,9 @@ impl AppConfig {
     /// Infer the active network prefix from `ergo.basis_reserve_contract_p2s` (defaults to Mainnet).
     pub fn configured_network_prefix(&self) -> NetworkPrefix {
         basis_offchain::ergo_tx::detect_address_network_prefix(
-          &self.ergo.basis_reserve_contract_p2s),
-            )
-            .unwrap_or(NetworkPrefix::Mainnet)
+          &self.ergo.basis_reserve_contract_p2s,
+        )
+        .unwrap_or(NetworkPrefix::Mainnet)
     }
 
     /// Get the tracker secret key bytes (if configured)
