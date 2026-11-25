@@ -515,8 +515,10 @@ mod tests {
             "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304";
         let fee_tree = ErgoTree::sigma_parse_bytes(&hex::decode(fee_tree_hex).unwrap()).unwrap();
         let fee_addr = Address::recreate_from_ergo_tree(&fee_tree).unwrap();
-        let p2s_mainnet = AddressEncoder::encode_address_as_string(NetworkPrefix::Mainnet, &fee_addr);
-        let p2s_testnet = AddressEncoder::encode_address_as_string(NetworkPrefix::Testnet, &fee_addr);
+        let p2s_mainnet =
+                AddressEncoder::encode_address_as_string(NetworkPrefix::Mainnet, &fee_addr);
+        let p2s_testnet =
+                AddressEncoder::encode_address_as_string(NetworkPrefix::Testnet, &fee_addr);
         assert_ne!(p2s_mainnet, p2s_testnet);
         assert_eq!(address_to_ergo_tree(&p2s_mainnet).unwrap(), fee_tree_hex);
         assert_eq!(address_to_ergo_tree(&p2s_testnet).unwrap(), fee_tree_hex);
@@ -532,14 +534,18 @@ mod tests {
         // 2. P2PK key encoded for both Mainnet and Testnet.
         let pubkey = "0377709166937fcdc08bf7e841b31684e2377f489914c97ef7148de14d9c6e1f83";
         let expected_p2pk_tree = format!("0008cd{}", pubkey);
-        let p2pk_mainnet =
-            pubkey_to_address_for_network(pubkey, NetworkPrefix::Mainnet).unwrap();
-        let p2pk_testnet =
-            pubkey_to_address_for_network(pubkey, NetworkPrefix::Testnet).unwrap();
+        let p2pk_mainnet = pubkey_to_address_for_network(pubkey, NetworkPrefix::Mainnet).unwrap();
+        let p2pk_testnet = pubkey_to_address_for_network(pubkey, NetworkPrefix::Testnet).unwrap();
         assert!(p2pk_mainnet.starts_with('9'));
         assert!(p2pk_testnet.starts_with('3'));
-        assert_eq!(address_to_ergo_tree(&p2pk_mainnet).unwrap(), expected_p2pk_tree);
-        assert_eq!(address_to_ergo_tree(&p2pk_testnet).unwrap(), expected_p2pk_tree);
+        assert_eq!(
+                address_to_ergo_tree(&p2pk_mainnet).unwrap(),
+            expected_p2pk_tree
+        );
+        assert_eq!(
+                address_to_ergo_tree(&p2pk_testnet).unwrap(),
+            expected_p2pk_tree
+        );
         assert_eq!(
             ergo_tree_to_p2pk_address_for_network(&expected_p2pk_tree, NetworkPrefix::Testnet)
                 .unwrap(),
