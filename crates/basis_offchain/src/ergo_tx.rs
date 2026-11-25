@@ -516,9 +516,9 @@ mod tests {
         let fee_tree = ErgoTree::sigma_parse_bytes(&hex::decode(fee_tree_hex).unwrap()).unwrap();
         let fee_addr = Address::recreate_from_ergo_tree(&fee_tree).unwrap();
         let p2s_mainnet =
-                AddressEncoder::encode_address_as_string(NetworkPrefix::Mainnet, &fee_addr);
+            AddressEncoder::encode_address_as_string(NetworkPrefix::Mainnet, &fee_addr);
         let p2s_testnet =
-                AddressEncoder::encode_address_as_string(NetworkPrefix::Testnet, &fee_addr);
+            AddressEncoder::encode_address_as_string(NetworkPrefix::Testnet, &fee_addr);
         assert_ne!(p2s_mainnet, p2s_testnet);
         assert_eq!(address_to_ergo_tree(&p2s_mainnet).unwrap(), fee_tree_hex);
         assert_eq!(address_to_ergo_tree(&p2s_testnet).unwrap(), fee_tree_hex);
@@ -539,11 +539,11 @@ mod tests {
         assert!(p2pk_mainnet.starts_with('9'));
         assert!(p2pk_testnet.starts_with('3'));
         assert_eq!(
-                address_to_ergo_tree(&p2pk_mainnet).unwrap(),
+            address_to_ergo_tree(&p2pk_mainnet).unwrap(),
             expected_p2pk_tree
         );
         assert_eq!(
-                address_to_ergo_tree(&p2pk_testnet).unwrap(),
+            address_to_ergo_tree(&p2pk_testnet).unwrap(),
             expected_p2pk_tree
         );
         assert_eq!(
