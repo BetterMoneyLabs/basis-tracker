@@ -39,9 +39,8 @@ use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
 use basis_offchain::ergo_tx::{
     address_to_ergo_tree, build_savl_tree_from_digest, decode_box_id,
-    pubkey_to_address_for_network,
-    reorder_reserve_extension_scala, serialize_coll_bytes, serialize_ergo_byte,
-    serialize_ergo_long,
+    pubkey_to_address_for_network, reorder_reserve_extension_scala, serialize_coll_bytes,
+    serialize_ergo_byte, serialize_ergo_long,
 };
 
 use crate::models::{error_response, success_response, ApiResponse};
@@ -969,7 +968,7 @@ async fn build_redemption_inner(
         }
     };
 
- let network_prefix = state.config.configured_network_prefix();
+    let network_prefix = state.config.configured_network_prefix();
     let recipient_address =
         match pubkey_to_address_for_network(&payload.recipient_pubkey, network_prefix) {
             Ok(a) => a,
