@@ -4580,8 +4580,15 @@ pub async fn create_reserve_payload(
     // The change address must be the OWNER's P2PK address: the owner submits this payload to
     // their own node's /wallet/payment/send, so change (and the funding inputs) belong to the
     // owner's wallet. Deriving it from `owner_pubkey` (ErgoTree `0008cd<pubkey>` -> P2PK) also
-    // proves the key is a valid curve point.
-    let change_address = match basis_offchain::ergo_tx::pubkey_to_address(&payload.owner_pubkey) {
+    // proves the key is a valid curve point. Match the network prefix of the reserve contract
+    // address so testnet deployments produce a testnet changeAddress.
+    let net_prefix =
+        basis_offchain::ergo_tx::detect_address_network_prefix(&payment_request.address)
+            .unwrap_or(ergo_lib::ergotree_ir::chain::address::NetworkPrefix::Mainnet);
+    let change_address = match basis_offchain::ergo_tx::pubkey_to_address_for_network(
+        &payload.owner_pubkey,
+        net_prefix,
+    ) {
         Ok(address) => address,
         Err(e) => {
             return (

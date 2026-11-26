@@ -826,13 +826,12 @@ impl RedemptionTransactionBuilder {
     }
 }
 
-/// Convert an Ergo address (P2PK or P2S) to its hex-encoded ergoTree bytes.
+/// Convert an Ergo address (P2PK or P2S, mainnet or testnet) to its hex-encoded ergoTree bytes.
 fn address_to_ergo_tree(address_str: &str) -> Result<String, TransactionBuilderError> {
-    use ergo_lib::ergotree_ir::chain::address::{AddressEncoder, NetworkPrefix};
+    use ergo_lib::ergotree_ir::chain::address::AddressEncoder;
     use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
 
-    let encoder = AddressEncoder::new(NetworkPrefix::Mainnet);
-    let address = encoder.parse_address_from_str(address_str).map_err(|e| {
+    let address = AddressEncoder::unchecked_parse_address_from_str(address_str).map_err(|e| {
         TransactionBuilderError::Configuration(format!("Invalid address '{}': {}", address_str, e))
     })?;
     let tree = address.script().map_err(|e| {
